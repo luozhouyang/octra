@@ -18,6 +18,7 @@ use octra_api_gateway::{
 };
 use octra_config::OctraConfig;
 use octra_gateway_runtime::GatewayRuntime;
+use octra_plugin_runtime::{PluginRegistry, PluginRuntime};
 use octra_storage::Storage;
 use tower::ServiceExt;
 
@@ -60,6 +61,7 @@ async fn mock_echo(State(state): State<MockState>, request: Request<Body>) -> Re
         "xfh": header("x-forwarded-host"),
         "xfp": header("x-forwarded-proto"),
         "request_id": header("x-request-id"),
+        "plugin_header": header("x-plugin"),
         "connection": header("connection"),
     });
     Response::builder()
@@ -92,27 +94,39 @@ struct Gateway {
     control: Router,
     storage: Arc<Storage>,
     runtime: Arc<GatewayRuntime>,
+    plugins: Arc<PluginRuntime>,
 }
 
 async fn gateway() -> Gateway {
+    gateway_with_config(OctraConfig::default()).await
+}
+
+async fn gateway_with_config(config: OctraConfig) -> Gateway {
+    let config = Arc::new(config);
     let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
     let runtime = Arc::new(GatewayRuntime::bootstrap(storage.clone()).await.unwrap());
-    let metrics = Arc::new(ApiMetrics::default());
-    let data = ApiDataState::with_metrics(
-        runtime.clone(),
-        Arc::new(OctraConfig::default()),
-        metrics.clone(),
+    let mut registry = PluginRegistry::new();
+    octra_plugin_builtin::register(&mut registry);
+    let plugins = Arc::new(
+        PluginRuntime::bootstrap(storage.clone(), Arc::new(registry))
+            .await
+            .unwrap(),
     );
-    let control = control_router(ApiControlState::with_metrics(
+    let metrics = Arc::new(ApiMetrics::default());
+    let data =
+        ApiDataState::with_plugins(runtime.clone(), config, metrics.clone(), plugins.clone());
+    let control = control_router(ApiControlState::with_plugins(
         storage.clone(),
         runtime.clone(),
         metrics,
+        plugins.clone(),
     ));
     Gateway {
         router: data_plane_router(data),
         control,
         storage,
         runtime,
+        plugins,
     }
 }
 
@@ -130,6 +144,7 @@ async fn send(router: Router, request: Request<Body>) -> ResponseParts {
 impl Gateway {
     async fn reload(&self) {
         self.runtime.reload().await.unwrap();
+        self.plugins.reload().await.unwrap();
     }
 
     async fn send(&self, request: Request<Body>) -> ResponseParts {
@@ -623,4 +638,344 @@ async fn control_plane_crud_validation_and_key_issuance() {
         ));
     let (status, _, _) = send(data, req).await;
     assert_eq!(status, StatusCode::CREATED);
+}
+
+async fn create_plugin_config(
+    storage: &Storage,
+    plugin_name: &str,
+    scope: octra_plugin_api::Scope,
+    scope_id: Option<&str>,
+    config: serde_json::Value,
+) {
+    let plugin = storage
+        .get_plugin_by_name(plugin_name)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("plugin '{plugin_name}' was not seeded"));
+    storage
+        .create_plugin_config(&plugin.id, scope, scope_id, true, &config.to_string())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cors_preflight_short_circuits_before_auth() {
+    let (addr, _calls) = spawn_mock("a").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-cors",
+        &format!("http://{addr}"),
+        true,
+        "/api",
+        false,
+    )
+    .await;
+    create_plugin_config(
+        &gateway.storage,
+        "cors",
+        octra_plugin_api::Scope::Global,
+        None,
+        serde_json::json!({"allow_origins": ["https://app.test"]}),
+    )
+    .await;
+    gateway.reload().await;
+
+    let mut preflight = request("OPTIONS", "/api/items");
+    preflight
+        .headers_mut()
+        .insert(header::ORIGIN, header_default("https://app.test"));
+    preflight
+        .headers_mut()
+        .insert("access-control-request-method", header_default("GET"));
+    preflight.headers_mut().insert(
+        "access-control-request-headers",
+        header_default("authorization"),
+    );
+
+    let (status, headers, _) = gateway.send(preflight).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        headers.get("access-control-allow-origin").unwrap(),
+        "https://app.test"
+    );
+    assert!(
+        headers
+            .get("access-control-allow-methods")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("GET")
+    );
+    assert_eq!(
+        headers.get("access-control-allow-headers").unwrap(),
+        "authorization"
+    );
+    assert!(
+        headers
+            .get("vary")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("origin")
+    );
+
+    // Authentication is still enforced for real requests.
+    let (status, _, _) = gateway.send(get("/api/items")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn header_rewrite_plugin_applies_to_request_and_response() {
+    let (addr, _calls) = spawn_mock("a").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-headers",
+        &format!("http://{addr}"),
+        false,
+        "/api",
+        false,
+    )
+    .await;
+    create_plugin_config(
+        &gateway.storage,
+        "header-rewrite",
+        octra_plugin_api::Scope::Global,
+        None,
+        serde_json::json!({
+            "request": {"set": {"x-plugin": "global"}},
+            "response": {"set": {"x-plugin-response": "rewritten"}}
+        }),
+    )
+    .await;
+    gateway.reload().await;
+
+    let (status, headers, json) = gateway.send(get("/api/items")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["plugin_header"], "global");
+    assert_eq!(headers.get("x-plugin-response").unwrap(), "rewritten");
+}
+
+#[tokio::test]
+async fn route_scoped_plugin_overrides_global_config() {
+    let (addr, _calls) = spawn_mock("a").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-scope",
+        &format!("http://{addr}"),
+        false,
+        "/api",
+        false,
+    )
+    .await;
+    create_plugin_config(
+        &gateway.storage,
+        "header-rewrite",
+        octra_plugin_api::Scope::Global,
+        None,
+        serde_json::json!({"request": {"set": {"x-plugin": "global"}}}),
+    )
+    .await;
+    create_plugin_config(
+        &gateway.storage,
+        "header-rewrite",
+        octra_plugin_api::Scope::Route,
+        Some("svc-scope-route"),
+        serde_json::json!({"request": {"set": {"x-plugin": "route"}}}),
+    )
+    .await;
+    gateway.reload().await;
+
+    let (status, _, json) = gateway.send(get("/api/items")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["plugin_header"], "route");
+}
+
+#[tokio::test]
+async fn rate_limit_plugin_rejects_after_burst() {
+    let (addr, _calls) = spawn_mock("a").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-rate",
+        &format!("http://{addr}"),
+        false,
+        "/api",
+        false,
+    )
+    .await;
+    create_plugin_config(
+        &gateway.storage,
+        "rate-limit",
+        octra_plugin_api::Scope::Global,
+        None,
+        serde_json::json!({"requests_per_second": 1, "burst": 1, "key": "global"}),
+    )
+    .await;
+    gateway.reload().await;
+
+    let (first, _, _) = gateway.send(get("/api/items")).await;
+    assert_eq!(first, StatusCode::CREATED);
+    let (second, headers, json) = gateway.send(get("/api/items")).await;
+    assert_eq!(second, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(json["error"]["code"], "rate_limited");
+    assert!(headers.get(header::RETRY_AFTER).is_some());
+}
+
+#[tokio::test]
+async fn plugin_configs_crud_via_control_plane() {
+    let gateway = gateway().await;
+
+    let list = Request::builder()
+        .uri("/api/v1/plugins")
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, json) = gateway.send_control(list).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|plugin| plugin["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"cors"));
+    assert!(names.contains(&"rate-limit"));
+
+    let create = Request::builder()
+        .method("POST")
+        .uri("/api/v1/plugins/plg_request-id/configs")
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"scope":"global","config":{}}"#))
+        .unwrap();
+    let (status, _, json) = gateway.send_control(create).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["scope"], "global");
+    let config_id = json["id"].as_str().unwrap().to_string();
+
+    let update = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/v1/plugin-configs/{config_id}"))
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"enabled":false}"#))
+        .unwrap();
+    let (status, _, json) = gateway.send_control(update).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["enabled"], false);
+
+    let delete = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/v1/plugin-configs/{config_id}"))
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = gateway.send_control(delete).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn plugin_config_rejects_unknown_scope_target() {
+    let gateway = gateway().await;
+    let create = Request::builder()
+        .method("POST")
+        .uri("/api/v1/plugins/plg_cors/configs")
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"scope":"service","scope_id":"missing","config":{}}"#,
+        ))
+        .unwrap();
+    let (status, _, json) = gateway.send_control(create).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn retries_replay_idempotent_request_body() {
+    let (addr, calls) = spawn_mock("live").await;
+    let gateway = gateway().await;
+    let service = gateway
+        .storage
+        .create_service(&CreateService {
+            id: Some("svc-retry".into()),
+            name: "svc-retry".into(),
+            require_auth: Some(false),
+            retries: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let upstream = gateway
+        .storage
+        .create_upstream(&CreateUpstream {
+            id: Some("retry-up".into()),
+            service_id: service.id.clone(),
+            name: "pool".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for (id, url) in [
+        ("retry-dead", "http://127.0.0.1:1".to_string()),
+        ("retry-live", format!("http://{addr}")),
+    ] {
+        gateway
+            .storage
+            .create_target(&CreateTarget {
+                id: Some(id.into()),
+                upstream_id: upstream.id.clone(),
+                url,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    gateway
+        .storage
+        .create_route(&CreateRoute {
+            id: Some("retry-route".into()),
+            service_id: service.id,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    for _ in 0..6 {
+        let mut req = request("PUT", "/items");
+        *req.body_mut() = Body::from("replay-me");
+        let (status, _, json) = gateway.send(req).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(json["body"], "replay-me");
+    }
+    assert_eq!(calls.lock().unwrap().len(), 6);
+}
+
+#[tokio::test]
+async fn rejects_body_over_max_body_bytes() {
+    let mut config = OctraConfig::default();
+    config.gateway.max_body_bytes = 8;
+    let gateway = gateway_with_config(config).await;
+    seed_service(
+        &gateway.storage,
+        "svc-limit",
+        "http://127.0.0.1:1",
+        false,
+        "/api",
+        false,
+    )
+    .await;
+    gateway.reload().await;
+
+    let mut req = request("POST", "/api/items");
+    req.headers_mut()
+        .insert(header::CONTENT_LENGTH, header_default("9"));
+    *req.body_mut() = Body::from("012345678");
+    let (status, _, json) = gateway.send(req).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(json["error"]["code"], "payload_too_large");
 }

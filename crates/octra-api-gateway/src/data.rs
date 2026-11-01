@@ -6,22 +6,30 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
 use chrono::Utc;
 use http_body::Body as _;
+use http_body_util::BodyExt as _;
+use octra_api_core::{Route, Service};
 use octra_data_plane::{
     HEADER_REQUEST_ID, apply_forwarded_headers, error_response, new_request_id,
     sanitize_request_headers, sanitize_response_headers,
 };
+use octra_gateway_runtime::balancer::Endpoint;
 use octra_gateway_runtime::{
-    CompiledRoute, CompiledService, CredentialEntry, MatchInput, RuntimeSnapshot, TargetPool,
-    normalize_host, strip_matched_prefix,
+    CompiledRoute, CompiledService, CredentialEntry, MatchInput, RuntimeSnapshot, normalize_host,
+    strip_matched_prefix,
 };
+use octra_plugin_api::{
+    BodyContext, ErrorContext, LogContext, PluginError, RequestContext, ResponseContext,
+    UpstreamRequestContext,
+};
+use octra_plugin_runtime::PluginChain;
 
 use crate::ApiDataState;
 
@@ -33,23 +41,23 @@ pub async fn proxy(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: Request,
 ) -> Response {
-    let method = request.method().clone();
-    let path = request.uri().path().to_string();
-    let host = request
-        .headers()
+    let started = Instant::now();
+    let (mut parts, body) = request.into_parts();
+    let method = parts.method.clone();
+    let path = parts.uri.path().to_string();
+    let host = parts
+        .headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let headers = request.headers().clone();
-
-    let started = Instant::now();
-    let snapshot = state.runtime.snapshot().await;
-
-    let request_id = headers
+    let request_id = parts
+        .headers
         .get(HEADER_REQUEST_ID)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(new_request_id);
+
+    let snapshot = state.runtime.snapshot().await;
 
     let matched = snapshot
         .matcher
@@ -57,7 +65,7 @@ pub async fn proxy(
             host: host.as_deref(),
             path: &path,
             method: method.as_str(),
-            headers: &headers,
+            headers: &parts.headers,
         })
         .map(|(route, service)| Dispatch {
             route: route.clone(),
@@ -81,92 +89,316 @@ pub async fn proxy(
 
     let route_id = &dispatch.route.route.id;
     let service_id = &dispatch.service.service.id;
+    let route = &dispatch.route.route;
+    let service = &dispatch.service.service;
 
-    let consumer = match authenticate(&snapshot, &headers) {
-        Some(entry) => Some(entry.consumer_id.clone()),
-        None if dispatch.service.limits.require_auth => {
-            let response = unauthorized();
+    // Authentication runs before the plugin chain so consumer-scoped plugins
+    // can be selected, but rejection is deferred until `on_request` has run:
+    // CORS preflight must be answered without credentials.
+    let credential = authenticate(&snapshot, &parts.headers);
+    let consumer_id = credential.as_ref().map(|entry| entry.consumer_id.clone());
+    let chain = state
+        .plugins
+        .chain_for(route_id, service_id, consumer_id.as_deref());
+    let subject = LogSubject {
+        request_id: &request_id,
+        method: &method,
+        path: &path,
+        route,
+        service,
+        consumer: consumer_id.as_deref(),
+    };
+
+    let mut request_cx = RequestContext {
+        request_id: &request_id,
+        method: &parts.method,
+        uri: &mut parts.uri,
+        headers: &mut parts.headers,
+        client_ip: Some(peer.ip()),
+        consumer_id: consumer_id.as_deref(),
+        credential_id: credential.as_ref().map(|entry| entry.id.as_str()),
+        route,
+        service,
+    };
+    match chain.on_request(&mut request_cx).await {
+        Ok(None) => {}
+        Ok(Some(response)) => {
             let elapsed = started.elapsed();
             state.metrics.record(response.status().as_u16(), elapsed, 0);
-            tracing::info!(
-                %method,
-                %path,
-                status = response.status().as_u16(),
-                route = %route_id,
-                service = %service_id,
-                request_id = %request_id,
-                "api gateway: unauthorized"
-            );
-            return with_request_id(response, &request_id);
+            return complete(
+                &chain,
+                &subject,
+                Finish {
+                    latency: elapsed,
+                    target: None,
+                    error: None,
+                },
+                response,
+            )
+            .await;
         }
-        None => None,
-    };
+        Err(error) => {
+            return failed_plugin(&state, &subject, started, error);
+        }
+    }
+
+    if dispatch.service.limits.require_auth && credential.is_none() {
+        let response = unauthorized();
+        let elapsed = started.elapsed();
+        state.metrics.record(response.status().as_u16(), elapsed, 0);
+        return complete(
+            &chain,
+            &subject,
+            Finish {
+                latency: elapsed,
+                target: None,
+                error: None,
+            },
+            response,
+        )
+        .await;
+    }
 
     let Some(pool) = snapshot.pool_for_service(service_id.as_str()).cloned() else {
         let response = bad_gateway("no upstream configured for service");
         let elapsed = started.elapsed();
         state.metrics.record_upstream_error();
         state.metrics.record(response.status().as_u16(), elapsed, 0);
-        tracing::warn!(
-            %method,
-            %path,
-            route = %route_id,
-            service = %service_id,
-            request_id = %request_id,
-            "api gateway: service has no upstream"
-        );
-        return with_request_id(response, &request_id);
+        return complete(
+            &chain,
+            &subject,
+            Finish {
+                latency: elapsed,
+                target: None,
+                error: Some("service has no upstream".to_string()),
+            },
+            response,
+        )
+        .await;
     };
 
+    let mut attempts = pool.ordered_attempts();
+    let retry_limit = 1 + usize::try_from(dispatch.service.limits.retries).unwrap_or(usize::MAX);
+    attempts.truncate(attempts.len().min(retry_limit));
+    // Only idempotent requests are retried, and only across distinct targets.
+    if !is_idempotent(method.as_str()) {
+        attempts.truncate(1);
+    }
+
+    let Some(target_url) = attempts.first().map(|endpoint| endpoint.url.clone()) else {
+        let response = bad_gateway("no eligible upstream target");
+        let elapsed = started.elapsed();
+        state.metrics.record_upstream_error();
+        state.metrics.record(response.status().as_u16(), elapsed, 0);
+        return complete(
+            &chain,
+            &subject,
+            Finish {
+                latency: elapsed,
+                target: None,
+                error: Some("no eligible upstream target".to_string()),
+            },
+            response,
+        )
+        .await;
+    };
+
+    let mut upstream_cx = UpstreamRequestContext {
+        request_id: &request_id,
+        method: &parts.method,
+        uri: &mut parts.uri,
+        headers: &mut parts.headers,
+        consumer_id: consumer_id.as_deref(),
+        route,
+        service,
+        target_url: &target_url,
+    };
+    match chain.on_upstream_request(&mut upstream_cx).await {
+        Ok(None) => {}
+        Ok(Some(response)) => {
+            let elapsed = started.elapsed();
+            state.metrics.record(response.status().as_u16(), elapsed, 0);
+            return complete(
+                &chain,
+                &subject,
+                Finish {
+                    latency: elapsed,
+                    target: Some(target_url),
+                    error: None,
+                },
+                response,
+            )
+            .await;
+        }
+        Err(error) => {
+            return failed_plugin(&state, &subject, started, error);
+        }
+    }
+
+    let request_headers = parts.headers.clone();
+    let original_uri = parts.uri.clone();
     let context = ForwardContext {
         client_addr: Some(peer),
         host: host.as_deref(),
-        scheme: forwarded_scheme(&headers),
+        scheme: forwarded_scheme(&request_headers),
         request_id: &request_id,
     };
 
-    let outcome = forward(&state, &pool, &dispatch, request, context).await;
+    let max_body = state.config.gateway.max_body_bytes;
+    let declared_length = parts
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    if declared_length.is_some_and(|length| length > max_body) {
+        let response = payload_too_large();
+        let elapsed = started.elapsed();
+        state.metrics.record(response.status().as_u16(), elapsed, 0);
+        return complete(
+            &chain,
+            &subject,
+            Finish {
+                latency: elapsed,
+                target: None,
+                error: None,
+            },
+            response,
+        )
+        .await;
+    }
+
+    // Retries need the body more than once, so those requests are buffered
+    // within the configured limit. Single-attempt requests stay streaming and
+    // are bounded by a limited body.
+    let payload = if attempts.len() > 1 {
+        match axum::body::to_bytes(body, max_body).await {
+            Ok(bytes) => RequestBody::Buffered(bytes),
+            Err(_) => {
+                let response = payload_too_large();
+                let elapsed = started.elapsed();
+                state.metrics.record(response.status().as_u16(), elapsed, 0);
+                return complete(
+                    &chain,
+                    &subject,
+                    Finish {
+                        latency: elapsed,
+                        target: None,
+                        error: None,
+                    },
+                    response,
+                )
+                .await;
+            }
+        }
+    } else {
+        RequestBody::Stream(Body::new(http_body_util::Limited::new(body, max_body)))
+    };
+
+    let outcome = forward(&state, attempts, &dispatch, parts, payload, context).await;
     let elapsed = started.elapsed();
 
     match outcome {
         Ok(response) => {
             let status = response.status().as_u16();
             state.metrics.record(status, elapsed, 0);
-            tracing::info!(
-                %method,
-                %path,
-                status,
-                latency_ms = elapsed.as_millis() as u64,
-                route = %route_id,
-                service = %service_id,
-                target = %response_target(&response),
-                consumer = consumer.as_deref().unwrap_or("-"),
-                request_id = %request_id,
-                "api gateway request"
+
+            let (mut response_parts, response_body) = response.into_parts();
+            let target = response_target(&response_parts);
+            let response_action = {
+                let mut response_cx = ResponseContext {
+                    request_id: &request_id,
+                    request_headers: &request_headers,
+                    status: &mut response_parts.status,
+                    headers: &mut response_parts.headers,
+                    consumer_id: consumer_id.as_deref(),
+                    route,
+                    service,
+                    target_url: &target,
+                };
+                chain.on_response(&mut response_cx).await
+            };
+            match response_action {
+                Ok(None) => {}
+                Ok(Some(replacement)) => {
+                    let elapsed = started.elapsed();
+                    state
+                        .metrics
+                        .record(replacement.status().as_u16(), elapsed, 0);
+                    return complete(
+                        &chain,
+                        &subject,
+                        Finish {
+                            latency: elapsed,
+                            target: Some(target),
+                            error: None,
+                        },
+                        replacement,
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    return failed_plugin(&state, &subject, started, error);
+                }
+            }
+
+            let filtered = filter_response_body(
+                chain.clone(),
+                OwnedBodyContext {
+                    request_id: request_id.clone(),
+                    route: route.clone(),
+                    service: service.clone(),
+                    target_url: target.clone(),
+                },
+                response_body,
             );
-            with_request_id(response, &request_id)
+            let response = Response::from_parts(response_parts, filtered);
+            complete(
+                &chain,
+                &subject,
+                Finish {
+                    latency: elapsed,
+                    target: Some(target),
+                    error: None,
+                },
+                response,
+            )
+            .await
         }
         Err(failure) => {
             state.metrics.record_upstream_error();
-            let response = failure.response();
+            let elapsed = started.elapsed();
+            let fallback = failure.response();
             state
                 .metrics
-                .record(response.status().as_u16(), elapsed, failure.retries);
-            tracing::warn!(
-                %method,
-                %path,
-                status = response.status().as_u16(),
-                latency_ms = elapsed.as_millis() as u64,
-                route = %route_id,
-                service = %service_id,
-                target = %failure.target,
-                attempts = failure.retries + 1,
-                consumer = consumer.as_deref().unwrap_or("-"),
-                request_id = %request_id,
-                error = %failure.message,
-                "api gateway upstream failed"
-            );
-            with_request_id(response, &request_id)
+                .record(fallback.status().as_u16(), elapsed, failure.retries);
+
+            let mut error_cx = ErrorContext {
+                request_id: &request_id,
+                method: &method,
+                uri: &original_uri,
+                headers: &request_headers,
+                consumer_id: consumer_id.as_deref(),
+                route,
+                service,
+                target_url: &failure.target,
+                error: &failure.message,
+            };
+            let response = match chain.on_error(&mut error_cx).await {
+                Ok(Some(response)) => response,
+                Ok(None) => fallback,
+                Err(error) => plugin_failure(error),
+            };
+            complete(
+                &chain,
+                &subject,
+                Finish {
+                    latency: elapsed,
+                    target: Some(failure.target),
+                    error: Some(failure.message),
+                },
+                response,
+            )
+            .await
         }
     }
 }
@@ -182,6 +414,165 @@ struct ForwardContext<'a> {
     host: Option<&'a str>,
     scheme: &'a str,
     request_id: &'a str,
+}
+
+struct Finish {
+    latency: Duration,
+    target: Option<String>,
+    error: Option<String>,
+}
+
+struct LogSubject<'a> {
+    request_id: &'a str,
+    method: &'a Method,
+    path: &'a str,
+    route: &'a Route,
+    service: &'a Service,
+    consumer: Option<&'a str>,
+}
+
+struct OwnedBodyContext {
+    request_id: String,
+    route: Route,
+    service: Service,
+    target_url: String,
+}
+
+async fn complete(
+    chain: &PluginChain,
+    subject: &LogSubject<'_>,
+    finish: Finish,
+    response: Response,
+) -> Response {
+    let LogSubject {
+        request_id,
+        method,
+        path,
+        route,
+        service,
+        consumer,
+    } = *subject;
+    let status = response.status().as_u16();
+    let log_cx = LogContext {
+        request_id,
+        method,
+        path,
+        status,
+        latency: finish.latency,
+        consumer_id: consumer,
+        route,
+        service,
+        target_url: finish.target.as_deref(),
+        error: finish.error.as_deref(),
+    };
+    chain.on_log(&log_cx).await;
+
+    if let Some(error) = finish.error.as_deref() {
+        tracing::warn!(
+            %method,
+            %path,
+            status,
+            latency_ms = finish.latency.as_millis() as u64,
+            route = %route.id,
+            service = %service.id,
+            target = finish.target.as_deref().unwrap_or("-"),
+            consumer = consumer.unwrap_or("-"),
+            request_id = %request_id,
+            error,
+            "api gateway upstream failed"
+        );
+    } else {
+        tracing::info!(
+            %method,
+            %path,
+            status,
+            latency_ms = finish.latency.as_millis() as u64,
+            route = %route.id,
+            service = %service.id,
+            target = finish.target.as_deref().unwrap_or("-"),
+            consumer = consumer.unwrap_or("-"),
+            request_id = %request_id,
+            "api gateway request"
+        );
+    }
+
+    with_request_id(response, request_id)
+}
+
+fn plugin_failure(error: PluginError) -> Response {
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "plugin_error",
+        &error.message,
+    )
+}
+
+fn failed_plugin(
+    state: &ApiDataState,
+    subject: &LogSubject<'_>,
+    started: Instant,
+    error: PluginError,
+) -> Response {
+    let LogSubject {
+        request_id,
+        method,
+        path,
+        route,
+        service,
+        consumer: _,
+    } = *subject;
+    let response = plugin_failure(error);
+    let elapsed = started.elapsed();
+    state.metrics.record(response.status().as_u16(), elapsed, 0);
+    tracing::warn!(
+        %method,
+        %path,
+        status = response.status().as_u16(),
+        latency_ms = elapsed.as_millis() as u64,
+        route = %route.id,
+        service = %service.id,
+        request_id = %request_id,
+        "api gateway plugin failed"
+    );
+    with_request_id(response, request_id)
+}
+
+fn filter_response_body(chain: Arc<PluginChain>, cx: OwnedBodyContext, body: Body) -> Body {
+    let stream =
+        futures_util::stream::unfold((body, chain, cx), |(mut body, chain, cx)| async move {
+            loop {
+                let frame = match body.frame().await {
+                    Some(Ok(frame)) => frame,
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "api gateway: upstream response body failed");
+                        return None;
+                    }
+                    None => return None,
+                };
+                let Ok(chunk) = frame.into_data() else {
+                    continue;
+                };
+                let body_cx = BodyContext {
+                    request_id: &cx.request_id,
+                    route: &cx.route,
+                    service: &cx.service,
+                    target_url: &cx.target_url,
+                };
+                let next: Result<bytes::Bytes, axum::Error> =
+                    match chain.on_response_body(&body_cx, chunk).await {
+                        Ok(next) => Ok(next),
+                        Err(error) => {
+                            tracing::warn!(
+                                plugin_error = %error,
+                                "api gateway: response body plugin failed"
+                            );
+                            Err(axum::Error::new(error))
+                        }
+                    };
+                return Some((next, (body, chain, cx)));
+            }
+        });
+    Body::from_stream(stream)
 }
 
 fn with_request_id(mut response: Response, request_id: &str) -> Response {
@@ -215,6 +606,19 @@ fn unauthorized() -> Response {
 
 fn bad_gateway(message: &str) -> Response {
     json_error(StatusCode::BAD_GATEWAY, "upstream_unavailable", message)
+}
+
+fn payload_too_large() -> Response {
+    json_error(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "payload_too_large",
+        "request body exceeds gateway.max_body_bytes",
+    )
+}
+
+enum RequestBody {
+    Buffered(bytes::Bytes),
+    Stream(Body),
 }
 
 /// Resolves an API key from `Authorization: Bearer` or `X-API-Key`.
@@ -268,9 +672,9 @@ impl UpstreamFailure {
     }
 }
 
-fn response_target(response: &Response) -> String {
-    response
-        .extensions()
+fn response_target(parts: &axum::http::response::Parts) -> String {
+    parts
+        .extensions
         .get::<UpstreamTarget>()
         .map(|target| target.0.clone())
         .unwrap_or_default()
@@ -284,18 +688,13 @@ type Chunk = Result<bytes::Bytes, axum::Error>;
 
 async fn forward(
     state: &ApiDataState,
-    pool: &Arc<TargetPool>,
+    attempts: Vec<Arc<Endpoint>>,
     dispatch: &Dispatch,
-    request: Request,
+    parts: axum::http::request::Parts,
+    mut payload: RequestBody,
     context: ForwardContext<'_>,
 ) -> Result<Response, UpstreamFailure> {
     let limits = dispatch.service.limits;
-
-    let ordered = pool.ordered_attempts();
-    let max_attempts = ordered
-        .len()
-        .min(1 + usize::try_from(limits.retries).unwrap_or(usize::MAX));
-    let attempts: Vec<_> = ordered.into_iter().take(max_attempts).collect();
 
     if attempts.is_empty() {
         return Err(UpstreamFailure {
@@ -307,26 +706,26 @@ async fn forward(
         });
     }
 
-    let method = request.method().clone();
-    let path_and_query = request
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str().to_string());
-    let base_headers = request.headers().clone();
-    let body_stream = ChunkStream {
-        body: request.into_body(),
-        finished: false,
-    };
+    let method = parts.method.clone();
+    let path_and_query = parts.uri.path_and_query().map(|pq| pq.as_str().to_string());
+    let base_headers = parts.headers.clone();
 
-    // Only idempotent requests are retried, and only across distinct targets.
-    let attempts = if is_idempotent(method.as_str()) {
-        attempts
-    } else {
-        attempts.into_iter().take(1).collect()
-    };
     let total_attempts = attempts.len();
     let mut last_error: Option<String> = None;
-    let mut body_stream: Option<ChunkStream> = Some(body_stream);
+
+    // reqwest exposes `connect_timeout` only on the client builder. Services
+    // that override the gateway-wide value get a dedicated client; all others
+    // reuse the shared, pooled one.
+    let default_connect_timeout = Duration::from_secs(state.config.gateway.connect_timeout_secs);
+    let client = if limits.connect_timeout == default_connect_timeout {
+        state.client.clone()
+    } else {
+        reqwest::Client::builder()
+            .connect_timeout(limits.connect_timeout)
+            .timeout(limits.request_timeout)
+            .build()
+            .unwrap_or_else(|_| state.client.clone())
+    };
 
     for (index, endpoint) in attempts.iter().enumerate() {
         let is_last = index + 1 == total_attempts;
@@ -358,21 +757,21 @@ async fn forward(
             }
         };
 
-        // The client body can only be streamed once, so earlier attempts send
-        // an empty body and the final attempt carries the real one.
-        let payload = if is_last {
-            body_stream
-                .take()
-                .map_or(Chunks::Empty, ChunkStream::chunk_stream)
-        } else {
-            Chunks::Empty
+        let upstream_body = match &mut payload {
+            RequestBody::Buffered(bytes) => reqwest::Body::from(bytes.clone()),
+            RequestBody::Stream(_) if !is_last => reqwest::Body::from(Vec::new()),
+            RequestBody::Stream(body) => {
+                let body = std::mem::replace(body, Body::empty());
+                reqwest::Body::wrap_stream(ChunkStream {
+                    body,
+                    finished: false,
+                })
+            }
         };
-        let upstream_body = reqwest::Body::wrap_stream(payload);
 
         let request_method =
             reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
-        let builder = state
-            .client
+        let builder = client
             .request(request_method, upstream_url)
             .timeout(limits.request_timeout)
             .headers(forward_headers)
@@ -424,24 +823,13 @@ async fn forward(
     })
 }
 
-/// Streams request chunks for the single attempt that carries the body.
+/// Streams request chunks for the attempt that carries the body.
 struct ChunkStream {
     body: Body,
     finished: bool,
 }
 
-impl ChunkStream {
-    fn chunk_stream(self) -> Chunks {
-        Chunks::Body(self)
-    }
-}
-
-enum Chunks {
-    Body(ChunkStream),
-    Empty,
-}
-
-impl futures_util::Stream for Chunks {
+impl futures_util::Stream for ChunkStream {
     type Item = Chunk;
 
     fn poll_next(
@@ -449,12 +837,10 @@ impl futures_util::Stream for Chunks {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         loop {
-            let frame = match &mut *self {
-                Self::Empty => return std::task::Poll::Ready(None),
-                Self::Body(stream) if stream.finished => return std::task::Poll::Ready(None),
-                Self::Body(stream) => std::pin::Pin::new(&mut stream.body).poll_frame(cx),
-            };
-
+            if self.finished {
+                return std::task::Poll::Ready(None);
+            }
+            let frame = std::pin::Pin::new(&mut self.body).poll_frame(cx);
             match frame {
                 std::task::Poll::Ready(Some(Ok(frame))) => {
                     // Trailers are not forwarded, so keep polling.
@@ -463,15 +849,11 @@ impl futures_util::Stream for Chunks {
                     }
                 }
                 std::task::Poll::Ready(Some(Err(err))) => {
-                    if let Self::Body(stream) = &mut *self {
-                        stream.finished = true;
-                    }
+                    self.finished = true;
                     return std::task::Poll::Ready(Some(Err(err)));
                 }
                 std::task::Poll::Ready(None) => {
-                    if let Self::Body(stream) = &mut *self {
-                        stream.finished = true;
-                    }
+                    self.finished = true;
                     return std::task::Poll::Ready(None);
                 }
                 std::task::Poll::Pending => return std::task::Poll::Pending,
