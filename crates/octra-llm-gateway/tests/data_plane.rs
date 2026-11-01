@@ -7,6 +7,9 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use common::*;
+use octra_api_core::{CreateConsumer, CreatePolicy, UpdatePolicy};
+use octra_llm_gateway::keys::hash_key;
+use octra_storage::LlmVirtualKeyInput;
 use serde_json::json;
 
 fn openai_upstream_text(request: Captured) -> axum::response::Response {
@@ -745,4 +748,130 @@ async fn oversized_bodies_are_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn consumer_policies_restrict_models_and_providers() {
+    let (harness, _upstream) = openai_harness().await;
+    let consumer = harness
+        .storage
+        .create_consumer(&CreateConsumer {
+            name: "policy-team".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    harness
+        .storage
+        .llm_create_virtual_key(&LlmVirtualKeyInput {
+            name: "policy-key".into(),
+            key_prefix: "octra-policy".into(),
+            key_hash: hash_key("octra-policy-key-0001"),
+            consumer_id: Some(consumer.id.clone()),
+            enabled: true,
+            expires_at: None,
+            permissions_json: "{}".into(),
+        })
+        .await
+        .unwrap();
+    harness.runtime.reload().await.unwrap();
+    let auth = [("authorization", "Bearer octra-policy-key-0001")];
+
+    // Without a policy the consumer keeps access.
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &auth,
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    // A policy that names other models defaults the request to deny.
+    let policy = harness
+        .storage
+        .create_policy(&CreatePolicy {
+            name: "restrict-model".into(),
+            consumer_id: Some(consumer.id.clone()),
+            document: Some(json!({"allowed_models": ["other-model"]})),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    harness.runtime.reload().await.unwrap();
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &auth,
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["type"], "permission_error");
+
+    // The model listing reflects the same restriction.
+    let (status, _, body) = send(
+        harness.data_router(),
+        axum::http::Method::GET,
+        "/v1/models",
+        &auth,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(body["data"].as_array().unwrap().is_empty());
+
+    // Allow the model but name a provider the route cannot reach.
+    harness
+        .storage
+        .update_policy(
+            &policy.id,
+            &UpdatePolicy {
+                document: Some(json!({
+                    "allowed_models": ["octra-default"],
+                    "allowed_providers": ["missing-provider"]
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    harness.runtime.reload().await.unwrap();
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &auth,
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+
+    // Provider names are accepted as well as ids.
+    harness
+        .storage
+        .update_policy(
+            &policy.id,
+            &UpdatePolicy {
+                document: Some(json!({
+                    "allowed_models": ["octra-default"],
+                    "allowed_providers": ["openai-mock"]
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    harness.runtime.reload().await.unwrap();
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &auth,
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
 }
