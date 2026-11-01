@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -11,10 +12,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use http_body_util::BodyExt;
 use octra_api_core::{
-    CreateApiCredential, CreateConsumer, CreateRoute, CreateService, CreateTarget, CreateUpstream,
+    CreateApiCredential, CreateConsumer, CreatePolicy, CreateRoute, CreateService, CreateTarget,
+    CreateUpstream, UpdatePolicy,
 };
 use octra_api_gateway::{
-    ApiControlState, ApiDataState, ApiMetrics, control_router, data_plane_router,
+    ApiControlState, ApiDataState, ApiMetrics, AuditState, control_router, data_plane_router,
+    record_control_audit,
 };
 use octra_config::OctraConfig;
 use octra_gateway_runtime::GatewayRuntime;
@@ -114,12 +117,19 @@ async fn gateway_with_config(config: OctraConfig) -> Gateway {
     );
     let metrics = Arc::new(ApiMetrics::default());
     let data =
-        ApiDataState::with_plugins(runtime.clone(), config, metrics.clone(), plugins.clone());
+        ApiDataState::with_plugins(runtime.clone(), config, metrics.clone(), plugins.clone())
+            .with_storage(storage.clone());
     let control = control_router(ApiControlState::with_plugins(
         storage.clone(),
         runtime.clone(),
         metrics,
         plugins.clone(),
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        AuditState {
+            storage: storage.clone(),
+        },
+        record_control_audit,
     ));
     Gateway {
         router: data_plane_router(data),
@@ -978,4 +988,331 @@ async fn rejects_body_over_max_body_bytes() {
     let (status, _, json) = gateway.send(req).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(json["error"]["code"], "payload_too_large");
+}
+
+#[tokio::test]
+async fn falls_back_to_the_next_upstream_with_eligible_targets() {
+    let (addr, _calls) = spawn_mock("live").await;
+    let gateway = gateway().await;
+    let service = gateway
+        .storage
+        .create_service(&CreateService {
+            id: Some("svc-fallback".into()),
+            name: "svc-fallback".into(),
+            require_auth: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let primary = gateway
+        .storage
+        .create_upstream(&CreateUpstream {
+            id: Some("primary".into()),
+            service_id: service.id.clone(),
+            name: "primary".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    gateway
+        .storage
+        .create_target(&CreateTarget {
+            id: Some("primary-target".into()),
+            upstream_id: primary.id,
+            url: "http://127.0.0.1:1".into(),
+            enabled: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let secondary = gateway
+        .storage
+        .create_upstream(&CreateUpstream {
+            id: Some("secondary".into()),
+            service_id: service.id.clone(),
+            name: "secondary".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    gateway
+        .storage
+        .create_target(&CreateTarget {
+            id: Some("secondary-target".into()),
+            upstream_id: secondary.id,
+            url: format!("http://{addr}"),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    gateway
+        .storage
+        .create_route(&CreateRoute {
+            id: Some("fallback-route".into()),
+            service_id: service.id,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    let (status, _, json) = gateway.send(get("/")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["server"], "live");
+}
+
+#[tokio::test]
+async fn prometheus_metrics_are_exposed_on_the_control_plane() {
+    let gateway = gateway().await;
+    gateway.reload().await;
+    let _ = gateway.send(get("/missing")).await;
+
+    let request = Request::builder()
+        .uri("/api/v1/api/metrics/prometheus")
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .unwrap();
+    let response = gateway.control.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("octra_api_requests_total 1"));
+    assert!(text.contains(r#"octra_api_responses_total{class="4xx"} 1"#));
+}
+
+#[tokio::test]
+async fn consumer_policy_grants_routes_with_default_deny() {
+    let (addr, _calls) = spawn_mock("a").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-policy",
+        &format!("http://{addr}"),
+        true,
+        "/api",
+        false,
+    )
+    .await;
+    let consumer = gateway
+        .storage
+        .create_consumer(&CreateConsumer {
+            name: "team".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let key = "ok_policy-key";
+    gateway
+        .storage
+        .create_credential(
+            &CreateApiCredential {
+                consumer_id: consumer.id.clone(),
+                ..Default::default()
+            },
+            "ok_policy-",
+            &octra_gateway_runtime::hash_api_key(key),
+        )
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    let authorized = |uri: &str| {
+        let mut request = get(uri);
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            header_default(&format!("Bearer {key}")),
+        );
+        request
+    };
+
+    // Without a policy, the authenticated consumer is allowed.
+    assert_eq!(
+        gateway.send(authorized("/api/items")).await.0,
+        StatusCode::CREATED
+    );
+
+    let policy = gateway
+        .storage
+        .create_policy(&CreatePolicy {
+            name: "restrict".into(),
+            consumer_id: Some(consumer.id),
+            document: Some(serde_json::json!({"allowed_routes": ["another-route"]})),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    let (status, _, json) = gateway.send(authorized("/api/items")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json["error"]["code"], "forbidden");
+
+    gateway
+        .storage
+        .update_policy(
+            &policy.id,
+            &UpdatePolicy {
+                document: Some(serde_json::json!({"allowed_routes": ["svc-policy-route"]})),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    assert_eq!(
+        gateway.send(authorized("/api/items")).await.0,
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn policies_crud_via_control_plane() {
+    let gateway = gateway().await;
+
+    let create = Request::builder()
+        .method("POST")
+        .uri("/api/v1/policies")
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"name":"global","document":{"allowed_routes":["*"]}}"#,
+        ))
+        .unwrap();
+    let (status, _, json) = gateway.send_control(create).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["scope"], "global");
+    let policy_id = json["id"].as_str().unwrap().to_string();
+
+    let list = Request::builder()
+        .uri("/api/v1/policies")
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, json) = gateway.send_control(list).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json.as_array().unwrap().len(), 1);
+
+    let invalid = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/v1/policies/{policy_id}"))
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"document":{"allowed_routes":"*"}}"#))
+        .unwrap();
+    let (status, _, json) = gateway.send_control(invalid).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["code"], "bad_request");
+
+    let missing_consumer = Request::builder()
+        .method("POST")
+        .uri("/api/v1/policies")
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"name":"team","consumer_id":"missing"}"#))
+        .unwrap();
+    let (status, _, _) = gateway.send_control(missing_consumer).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let delete = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/v1/policies/{policy_id}"))
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = gateway.send_control(delete).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+async fn wait_for_request_logs(gateway: &Gateway) -> Vec<octra_storage::RequestLog> {
+    for _ in 0..50 {
+        let logs = gateway
+            .storage
+            .list_request_logs(10, None, None)
+            .await
+            .unwrap();
+        if !logs.is_empty() {
+            return logs;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Vec::new()
+}
+
+#[tokio::test]
+async fn request_logs_are_persisted_and_queryable() {
+    let (addr, _calls) = spawn_mock("a").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-logs",
+        &format!("http://{addr}"),
+        false,
+        "/api",
+        false,
+    )
+    .await;
+    gateway.reload().await;
+
+    let (status, _, _) = gateway.send(get("/api/items")).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let logs = wait_for_request_logs(&gateway).await;
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].method, "GET");
+    assert_eq!(logs[0].path, "/api/items");
+    assert_eq!(logs[0].status, 201);
+    assert_eq!(logs[0].route_id.as_deref(), Some("svc-logs-route"));
+    assert_eq!(logs[0].service_id.as_deref(), Some("svc-logs"));
+
+    let query = Request::builder()
+        .uri("/api/v1/system/logs?limit=10&route_id=svc-logs-route")
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, json) = gateway.send_control(query).await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = json.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["status"], 201);
+    assert_eq!(entries[0]["request_id"], logs[0].request_id);
+}
+
+#[tokio::test]
+async fn control_mutations_write_audit_rows() {
+    let gateway = gateway().await;
+    let create = Request::builder()
+        .method("POST")
+        .uri("/api/v1/services")
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"id":"audited","name":"audited"}"#))
+        .unwrap();
+    let (status, _, _) = gateway.send_control(create).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let mut rows = Vec::new();
+    for _ in 0..50 {
+        rows = gateway.storage.list_audit_logs(10).await.unwrap();
+        if !rows.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!rows.is_empty());
+    assert_eq!(rows[0].action, "control.post");
+    assert_eq!(rows[0].target.as_deref(), Some("/api/v1/services"));
+
+    let query = Request::builder()
+        .uri("/api/v1/audit-logs?limit=10")
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, json) = gateway.send_control(query).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!json.as_array().unwrap().is_empty());
 }
