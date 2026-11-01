@@ -38,6 +38,8 @@ pub enum ErrorKind {
     InvalidRequest,
     /// The virtual key is missing, unknown, disabled or expired.
     Unauthorized,
+    /// The authenticated consumer is not allowed to use this model or provider.
+    Forbidden,
     /// The requested virtual model has no enabled route.
     NotFound,
     /// A gateway-owned limit (body size) was exceeded.
@@ -105,6 +107,10 @@ impl GatewayError {
         Self::new(401, ErrorKind::Unauthorized, message)
     }
 
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(403, ErrorKind::Forbidden, message)
+    }
+
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(404, ErrorKind::NotFound, message)
     }
@@ -168,6 +174,7 @@ impl GatewayError {
         match self.kind {
             ErrorKind::InvalidRequest => "invalid_request",
             ErrorKind::Unauthorized => "unauthorized",
+            ErrorKind::Forbidden => "forbidden",
             ErrorKind::NotFound => "not_found",
             ErrorKind::PayloadTooLarge => "payload_too_large",
             ErrorKind::Upstream => "upstream",

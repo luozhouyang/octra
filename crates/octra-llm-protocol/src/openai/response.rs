@@ -297,6 +297,7 @@ pub fn error_type(kind: octra_llm_core::ErrorKind) -> &'static str {
     match kind {
         ErrorKind::InvalidRequest => "invalid_request_error",
         ErrorKind::Unauthorized => "authentication_error",
+        ErrorKind::Forbidden => "permission_error",
         ErrorKind::NotFound => "invalid_request_error",
         ErrorKind::PayloadTooLarge => "invalid_request_error",
         ErrorKind::Upstream => "upstream_error",

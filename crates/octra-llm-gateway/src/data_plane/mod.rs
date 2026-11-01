@@ -55,17 +55,21 @@ async fn messages(state: State<LlmDataState>, incoming: Incoming, body: RemoteBo
 async fn list_models(state: State<LlmDataState>, request: Incoming) -> LlmResponse {
     let state = state.0;
     let snapshot = state.runtime.snapshot().await;
-    match authorize(&snapshot, &request).await {
-        Ok(Some(key)) => touch(&state, &key.id).await,
-        Ok(None) => {}
+    let consumer_id = match authorize(&snapshot, &request).await {
+        Ok(Some(key)) => {
+            touch(&state, &key.id).await;
+            key.consumer_id.clone()
+        }
+        Ok(None) => None,
         Err(error) => {
             return LlmResponse(protocol_response(error_protocol(&request), &error));
         }
-    }
+    };
     let model_api = wants_anthropic(&request);
     let data: Vec<Value> = snapshot
         .model_listing()
         .into_iter()
+        .filter(|model| snapshot.permits_model(consumer_id.as_deref(), &model.id))
         .map(|model| {
             if model_api {
                 json!({
@@ -332,6 +336,18 @@ async fn handle(
     let mut tracker = UsageTracker::new(request_id.clone(), requested_model.clone());
     tracker.record.protocol = Some(ingress.to_string());
     tracker.record.api_key_id = key.as_ref().map(|key| key.id.clone());
+    let consumer_id = key.as_ref().and_then(|key| key.consumer_id.as_deref());
+
+    if !snapshot.permits_model(consumer_id, &requested_model) {
+        let error = GatewayError::forbidden(format!(
+            "consumer is not allowed to use model '{requested_model}'"
+        ))
+        .with_code("model_forbidden");
+        tracker.record.error = Some(error.message.clone());
+        tracker.finish_with_status(error.status);
+        usage::spawn_record(state.storage.clone(), tracker.record.clone());
+        return with_request_id(protocol_response(ingress, &error), &request_id);
+    }
 
     let ir = match decode_request(ingress, value) {
         Ok(ir) => ir,
@@ -344,7 +360,16 @@ async fn handle(
         }
     };
 
-    let response = execute(&state, &snapshot, &requested_model, &ir, tracker, ingress).await;
+    let response = execute(
+        &state,
+        &snapshot,
+        consumer_id,
+        &requested_model,
+        &ir,
+        tracker,
+        ingress,
+    )
+    .await;
     match response {
         Ok(response) => with_request_id(response, &request_id),
         Err(error) => with_request_id(protocol_response(ingress, &error), &request_id),
@@ -374,6 +399,7 @@ fn fail_request(
 async fn execute(
     state: &LlmDataState,
     snapshot: &RuntimeSnapshot,
+    consumer_id: Option<&str>,
     requested_model: &str,
     ir: &ChatRequest,
     mut tracker: UsageTracker,
@@ -401,6 +427,16 @@ async fn execute(
         let Some(provider) = snapshot.provider(&target.provider_id) else {
             continue;
         };
+        if !snapshot.permits_provider(consumer_id, &provider.id, &provider.name) {
+            last_error = Some(
+                GatewayError::forbidden(format!(
+                    "consumer is not allowed to use provider '{}'",
+                    provider.name
+                ))
+                .with_code("provider_forbidden"),
+            );
+            continue;
+        }
         tracker.record.provider_id = Some(provider.id.clone());
         tracker.record.provider_name = Some(provider.name.clone());
         tracker.record.model_id = Some(target.model_id.clone());

@@ -28,6 +28,43 @@ pub struct RuntimeSnapshot {
     routes: BTreeMap<String, Arc<RoutePlan>>,
     round_robin: RoundRobin,
     pub issues: Vec<ProviderIssue>,
+    policy_global: PolicyLimits,
+    policy_consumers: BTreeMap<String, PolicyLimits>,
+}
+
+/// Model and provider allowances granted by applicable policies. A dimension
+/// is unrestricted until some applicable policy names it.
+#[derive(Debug, Clone, Default)]
+struct PolicyLimits {
+    models: Option<Vec<String>>,
+    providers: Option<Vec<String>>,
+}
+
+impl PolicyLimits {
+    fn merge(&mut self, document: &serde_json::Value) {
+        extend(&mut self.models, document, "allowed_models");
+        extend(&mut self.providers, document, "allowed_providers");
+    }
+}
+
+fn extend(slot: &mut Option<Vec<String>>, document: &serde_json::Value, key: &str) {
+    let Some(values) = document.get(key).and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    let values = values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string);
+    slot.get_or_insert_with(Vec::new).extend(values);
+}
+
+fn permits(allowed: &Option<Vec<String>>, candidates: &[&str]) -> bool {
+    match allowed {
+        None => true,
+        Some(allowed) => allowed
+            .iter()
+            .any(|value| value == "*" || candidates.contains(&value.as_str())),
+    }
 }
 
 impl RuntimeSnapshot {
@@ -57,6 +94,18 @@ impl RuntimeSnapshot {
             }
         }
 
+        let mut policy_global = PolicyLimits::default();
+        let mut policy_consumers: BTreeMap<String, PolicyLimits> = BTreeMap::new();
+        for policy in &data.policies {
+            match &policy.consumer_id {
+                Some(consumer_id) => policy_consumers
+                    .entry(consumer_id.clone())
+                    .or_default()
+                    .merge(&policy.document),
+                None => policy_global.merge(&policy.document),
+            }
+        }
+
         let mut routes = BTreeMap::new();
         for route in &data.routes {
             if let Ok(plan) = RoutePlan::compile(&data, route, &providers) {
@@ -71,7 +120,41 @@ impl RuntimeSnapshot {
             routes,
             round_robin: RoundRobin::new(),
             issues,
+            policy_global,
+            policy_consumers,
         }
+    }
+
+    /// Whether the consumer may use the requested model. Global and
+    /// consumer-scoped policies both apply; a model must pass every policy
+    /// dimension that names models.
+    pub fn permits_model(&self, consumer_id: Option<&str>, model: &str) -> bool {
+        if !permits(&self.policy_global.models, &[model]) {
+            return false;
+        }
+        consumer_id.is_none_or(|consumer_id| {
+            self.policy_consumers
+                .get(consumer_id)
+                .is_none_or(|limits| permits(&limits.models, &[model]))
+        })
+    }
+
+    /// Whether the consumer may route to a provider, matched by id or name.
+    pub fn permits_provider(
+        &self,
+        consumer_id: Option<&str>,
+        provider_id: &str,
+        provider_name: &str,
+    ) -> bool {
+        let candidates = [provider_id, provider_name];
+        if !permits(&self.policy_global.providers, &candidates) {
+            return false;
+        }
+        consumer_id.is_none_or(|consumer_id| {
+            self.policy_consumers
+                .get(consumer_id)
+                .is_none_or(|limits| permits(&limits.providers, &candidates))
+        })
     }
 
     pub fn provider(&self, id: &str) -> Option<Arc<ProviderConfig>> {

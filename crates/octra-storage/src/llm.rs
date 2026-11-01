@@ -1,6 +1,7 @@
 //! LLM gateway persistence: providers, models, routing, virtual keys and usage.
 
 use chrono::{DateTime, Utc};
+use octra_api_core::Policy;
 use octra_core::{Error, Result};
 use sqlx::Row;
 
@@ -157,6 +158,7 @@ pub struct LlmUsageSummaryRow {
 #[derive(Debug, Clone, Default)]
 pub struct LlmRuntimeData {
     pub providers: Vec<LlmProviderRecord>,
+    pub policies: Vec<Policy>,
     pub models: Vec<LlmModelRecord>,
     pub groups: Vec<LlmRoutingGroupRecord>,
     pub routes: Vec<LlmRouteRecord>,
@@ -347,8 +349,10 @@ impl Storage {
             .llm_list_virtual_keys()
             .await
             .map_err(|err| err.into_octra())?;
+        let policies = self.list_policies().await?;
         Ok(LlmRuntimeData {
             providers,
+            policies,
             models,
             groups,
             routes,

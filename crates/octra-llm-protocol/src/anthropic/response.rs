@@ -300,6 +300,7 @@ pub fn error_type(error: &GatewayError) -> &'static str {
     match error.kind {
         ErrorKind::InvalidRequest => "invalid_request_error",
         ErrorKind::Unauthorized => "authentication_error",
+        ErrorKind::Forbidden => "permission_error",
         ErrorKind::NotFound => "not_found_error",
         ErrorKind::PayloadTooLarge => "request_too_large",
         ErrorKind::Upstream | ErrorKind::Config => "api_error",

@@ -246,6 +246,7 @@ mod tests {
     ) -> (LlmRuntimeData, BTreeMap<String, Arc<ProviderConfig>>) {
         let data = LlmRuntimeData {
             providers: providers.clone(),
+            policies: Vec::new(),
             models: vec![LlmModelRecord {
                 id: "m".into(),
                 provider_id: "anthropic".into(),
