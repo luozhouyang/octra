@@ -2724,6 +2724,8 @@ dependencies = [
  "octra-gateway-api",
  "octra-gateway-runtime",
  "octra-llm-gateway",
+ "octra-llm-plugin-builtin",
+ "octra-llm-plugin-runtime",
  "octra-mcp-gateway",
  "octra-observability",
  "octra-plugin-builtin",
@@ -2823,6 +2825,9 @@ dependencies = [
  "octra-core",
  "octra-data-plane",
  "octra-llm-core",
+ "octra-llm-plugin-api",
+ "octra-llm-plugin-builtin",
+ "octra-llm-plugin-runtime",
  "octra-llm-protocol",
  "octra-storage",
  "reqwest 0.12.28",
@@ -2833,6 +2838,46 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "octra-llm-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "octra-llm-core",
+ "octra-plugin-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "octra-llm-plugin-builtin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "octra-llm-core",
+ "octra-llm-plugin-api",
+ "octra-llm-plugin-runtime",
+ "octra-plugin-api",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "octra-llm-plugin-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "octra-core",
+ "octra-llm-core",
+ "octra-llm-plugin-api",
+ "octra-plugin-api",
+ "octra-storage",
+ "parking_lot",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

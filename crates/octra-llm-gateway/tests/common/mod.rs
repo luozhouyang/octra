@@ -13,7 +13,9 @@ use axum::routing::any;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use octra_config::OctraConfig;
-use octra_llm_gateway::{LlmControlState, LlmDataState, LlmRuntime, LlmUpstream, control_router};
+use octra_llm_gateway::{
+    LlmControlState, LlmDataState, LlmPluginRuntime, LlmRuntime, LlmUpstream, control_router,
+};
 use octra_storage::{
     LlmModelInput, LlmProviderAccountInput, LlmProviderInput, LlmRoutingTargetInput, Storage,
 };
@@ -316,6 +318,7 @@ pub struct Harness {
     pub storage: Arc<Storage>,
     pub runtime: Arc<LlmRuntime>,
     pub config: Arc<OctraConfig>,
+    pub plugins: Arc<LlmPluginRuntime>,
 }
 
 impl Harness {
@@ -327,10 +330,19 @@ impl Harness {
                 .await
                 .unwrap(),
         );
+        let plugins = Arc::new(
+            LlmPluginRuntime::bootstrap(
+                storage.clone(),
+                Arc::new(octra_llm_plugin_builtin::registry()),
+            )
+            .await
+            .unwrap(),
+        );
         Self {
             storage,
             runtime,
             config,
+            plugins,
         }
     }
 
@@ -342,14 +354,38 @@ impl Harness {
             self.config.clone(),
         )
         .with_upstream(test_upstream(&self.config))
+        .with_plugins(self.plugins.clone())
         .into_router()
     }
 
     pub fn control_router(&self) -> Router {
-        control_router(LlmControlState::new(
-            self.runtime.clone(),
-            self.storage.clone(),
-        ))
+        control_router(
+            LlmControlState::new(self.runtime.clone(), self.storage.clone())
+                .with_plugins(self.plugins.clone()),
+        )
+    }
+
+    /// Creates a plugin config through storage and reloads the chains.
+    pub async fn plugin_config(
+        &self,
+        plugin_name: &str,
+        scope: &str,
+        scope_id: Option<&str>,
+        config: Value,
+    ) -> String {
+        let plugin = self
+            .storage
+            .get_plugin_by_name(plugin_name)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("plugin {plugin_name} is not registered"));
+        let record = self
+            .storage
+            .create_plugin_config_raw(&plugin.id, scope, scope_id, true, &config.to_string())
+            .await
+            .unwrap();
+        self.plugins.reload().await.unwrap();
+        record.id
     }
 
     /// Creates a provider pointing at a mock upstream.

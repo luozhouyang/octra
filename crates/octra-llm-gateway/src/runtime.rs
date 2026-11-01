@@ -352,6 +352,7 @@ pub struct LlmDataState {
     pub storage: Arc<Storage>,
     pub config: Arc<OctraConfig>,
     pub upstream: Option<Arc<crate::upstream::Upstream>>,
+    pub plugins: Option<Arc<crate::LlmPluginRuntime>>,
 }
 
 impl LlmDataState {
@@ -361,12 +362,18 @@ impl LlmDataState {
             storage,
             config,
             upstream: None,
+            plugins: None,
         }
     }
 
     /// Overrides the upstream transport, for example to inject a test key.
     pub fn with_upstream(mut self, upstream: crate::upstream::Upstream) -> Self {
         self.upstream = Some(Arc::new(upstream));
+        self
+    }
+
+    pub fn with_plugins(mut self, plugins: Arc<crate::LlmPluginRuntime>) -> Self {
+        self.plugins = Some(plugins);
         self
     }
 
@@ -386,11 +393,21 @@ impl LlmDataState {
 pub struct LlmControlState {
     pub runtime: Arc<LlmRuntime>,
     pub storage: Arc<Storage>,
+    pub plugins: Option<Arc<crate::LlmPluginRuntime>>,
 }
 
 impl LlmControlState {
     pub fn new(runtime: Arc<LlmRuntime>, storage: Arc<Storage>) -> Self {
-        Self { runtime, storage }
+        Self {
+            runtime,
+            storage,
+            plugins: None,
+        }
+    }
+
+    pub fn with_plugins(mut self, plugins: Arc<crate::LlmPluginRuntime>) -> Self {
+        self.plugins = Some(plugins);
+        self
     }
 }
 

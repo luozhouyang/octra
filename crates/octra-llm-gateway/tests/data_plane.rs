@@ -481,6 +481,7 @@ async fn missing_secret_is_a_502_and_falls_through() {
         storage,
         runtime,
         config,
+        plugins: Arc::new(octra_llm_gateway::LlmPluginRuntime::empty()),
     };
     let broken_id = harness
         .provider(
@@ -1154,4 +1155,165 @@ async fn usage_cost_comes_from_model_pricing() {
     assert_eq!(usage[0].cost_micros, Some(138));
     assert_eq!(usage[0].cost_currency.as_deref(), Some("USD"));
     assert_eq!(usage[0].finish_reason.as_deref(), Some("stop"));
+}
+
+// ---------------------------------------------------------------------------
+// LLM plugins
+
+#[tokio::test]
+async fn model_map_routes_to_the_mapped_model() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("aliased", &[(provider, 0, 1)]).await;
+    harness
+        .plugin_config(
+            "llm-model-map",
+            "global",
+            None,
+            json!({"map": {"octra-default": "aliased"}}),
+        )
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["model"], "octra-default");
+    let usage = wait_for_usage(&harness.storage, 1).await;
+    assert_eq!(usage[0].virtual_model_id, "octra-default");
+}
+
+#[tokio::test]
+async fn model_map_cannot_bypass_model_policy() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+
+    let consumer = harness
+        .storage
+        .create_consumer(&CreateConsumer {
+            name: "mapped-team".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    harness
+        .storage
+        .llm_create_virtual_key(&LlmVirtualKeyInput {
+            name: "mapped-key".into(),
+            key_prefix: "octra-mapped".into(),
+            key_hash: hash_key("octra-mapped-key-0001"),
+            consumer_id: Some(consumer.id.clone()),
+            enabled: true,
+            expires_at: None,
+            permissions_json: "{}".into(),
+        })
+        .await
+        .unwrap();
+    harness
+        .storage
+        .create_policy(&CreatePolicy {
+            name: "allow-octra-default".into(),
+            consumer_id: Some(consumer.id),
+            document: Some(json!({"allowed_models": ["octra-default"]})),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    harness.runtime.reload().await.unwrap();
+    harness
+        .plugin_config(
+            "llm-model-map",
+            "global",
+            None,
+            json!({"map": {"octra-default": "not-allowed"}}),
+        )
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[("authorization", "Bearer octra-mapped-key-0001")],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "model_forbidden");
+    assert_eq!(upstream.request_count(), 0);
+}
+
+#[tokio::test]
+async fn param_override_and_system_prompt_reach_the_upstream() {
+    let (harness, upstream) = openai_harness().await;
+    harness
+        .plugin_config(
+            "llm-system-prompt",
+            "global",
+            None,
+            json!({"prompt": "be brief"}),
+        )
+        .await;
+    harness
+        .plugin_config(
+            "llm-param-override",
+            "global",
+            None,
+            json!({"set": {"temperature": 0.2, "max_tokens": 32}}),
+        )
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let request = &upstream.requests()[0];
+    assert_eq!(request.body["temperature"], 0.2);
+    assert_eq!(request.body["max_tokens"], 32);
+    let messages = request.body["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "be brief");
+}
+
+fn think_tag_stream(_request: Captured) -> axum::response::Response {
+    sse_response(openai_text_stream("<think>secret reasoning</think>hello"))
+}
+
+#[tokio::test]
+async fn think_tags_strips_reasoning_from_streams() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, think_tag_stream).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+    harness
+        .plugin_config("llm-think-tags", "global", None, json!({}))
+        .await;
+
+    let (status, _, body) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[],
+        Some(openai_body("octra-default", true)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(!body.contains("secret reasoning"), "body: {body}");
+    assert!(body.contains("hello"), "body: {body}");
 }

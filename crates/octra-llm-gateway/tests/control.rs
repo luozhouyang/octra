@@ -590,3 +590,142 @@ async fn group_strategies_are_validated() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+// ---------------------------------------------------------------------------
+// LLM plugins
+
+const PLUGINS: &str = "/api/v1/llm/plugins";
+
+async fn plugin_id(harness: &Harness, name: &str) -> String {
+    let (status, listed) = call(harness, Method::GET, PLUGINS, None).await;
+    assert_eq!(status, StatusCode::OK, "body: {listed}");
+    listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["name"] == name)
+        .unwrap_or_else(|| panic!("plugin {name} not listed"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn llm_plugin_catalog_and_config_crud() {
+    let harness = Harness::new().await;
+    let id = plugin_id(&harness, "llm-model-map").await;
+    let single = format!("{PLUGINS}/{id}");
+
+    let (status, detail) = call(&harness, Method::GET, &single, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["plugin"]["name"], "llm-model-map");
+    assert!(detail["configs"].as_array().unwrap().is_empty());
+
+    let (status, config) = create(
+        &harness,
+        &format!("{single}/configs"),
+        json!({"scope": "global", "config": {"map": {"alias": "model"}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {config}");
+    let config_id = config["id"].as_str().unwrap().to_string();
+    assert_eq!(config["scope"], "global");
+    assert_eq!(config["scope_id"], "");
+    assert_eq!(config["config"]["map"]["alias"], "model");
+
+    let (status, updated) = call(
+        &harness,
+        Method::PUT,
+        &format!("/api/v1/llm/plugin-configs/{config_id}"),
+        Some(json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {updated}");
+    assert_eq!(updated["enabled"], false);
+    assert_eq!(updated["config"]["map"]["alias"], "model");
+
+    let (status, reloaded) = call(&harness, Method::POST, &format!("{PLUGINS}/reload"), None).await;
+    assert_eq!(status, StatusCode::OK, "body: {reloaded}");
+    assert_eq!(reloaded["status"], "reloaded");
+
+    let (status, flags) = call(
+        &harness,
+        Method::PUT,
+        &single,
+        Some(json!({"enabled": false, "priority": 5})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {flags}");
+    assert_eq!(flags["plugin"]["enabled"], false);
+    assert_eq!(flags["plugin"]["priority"], 5);
+
+    let (status, _) = call(
+        &harness,
+        Method::DELETE,
+        &format!("/api/v1/llm/plugin-configs/{config_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, detail) = call(&harness, Method::GET, &single, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(detail["configs"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn llm_plugin_config_is_validated() {
+    let harness = Harness::new().await;
+    let id = plugin_id(&harness, "llm-model-map").await;
+    let configs = format!("{PLUGINS}/{id}/configs");
+
+    let (status, body) = create(&harness, &configs, json!({"scope": "global", "config": {}})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+
+    let (status, body) = create(
+        &harness,
+        &configs,
+        json!({"scope": "team", "config": {"map": {"a": "m"}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+
+    let (status, body) = create(
+        &harness,
+        &configs,
+        json!({"scope": "provider", "scope_id": "missing", "config": {"map": {"a": "m"}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+
+    let (status, body) = create(
+        &harness,
+        &configs,
+        json!({"scope": "model", "config": {"map": {"a": "m"}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}
+
+#[tokio::test]
+async fn provider_scoped_plugin_config_binds_to_the_provider() {
+    let harness = Harness::new().await;
+    let (status, provider) = create(
+        &harness,
+        PROVIDERS,
+        provider_body("openai-main", "https://api.openai.com/v1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {provider}");
+    let provider_id = provider["id"].as_str().unwrap();
+    let id = plugin_id(&harness, "llm-think-tags").await;
+
+    let (status, body) = create(
+        &harness,
+        &format!("{PLUGINS}/{id}/configs"),
+        json!({"scope": "provider", "scope_id": provider_id, "config": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_eq!(body["scope"], "provider");
+    assert_eq!(body["scope_id"], provider_id);
+}

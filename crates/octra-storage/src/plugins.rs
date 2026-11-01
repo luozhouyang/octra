@@ -297,6 +297,46 @@ impl Storage {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Creates a scoped config with a raw scope name. LLM plugins use scopes
+    /// that the API Gateway does not (`virtual_key`, `model`, `provider`), so
+    /// the caller validates the scope vocabulary before calling this.
+    pub async fn create_plugin_config_raw(
+        &self,
+        plugin_id: &str,
+        scope: &str,
+        scope_id: Option<&str>,
+        enabled: bool,
+        config_json: &str,
+    ) -> Result<PluginConfigRecord> {
+        let scope_id = if scope == "global" {
+            String::new()
+        } else {
+            scope_id
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| Error::Storage(format!("not_found: {scope} scope id is required")))?
+                .to_string()
+        };
+        let id = format!("pcfg_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO plugin_configs
+                (id, plugin_id, scope, scope_id, enabled, config)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(&id)
+        .bind(plugin_id)
+        .bind(scope)
+        .bind(scope_id)
+        .bind(i64::from(enabled))
+        .bind(config_json)
+        .execute(self.pool())
+        .await
+        .map_err(|error| map_error("plugin config already exists for this scope", error))?;
+        self.get_plugin_config(&id)
+            .await?
+            .ok_or_else(|| Error::Storage("plugin config vanished after insert".to_string()))
+    }
+
     pub async fn load_plugin_data(&self) -> Result<PluginData> {
         Ok(PluginData {
             plugins: self.list_plugins().await?,

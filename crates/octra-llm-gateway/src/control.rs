@@ -12,6 +12,8 @@ use axum::routing::{get, post, put};
 use axum::{Router, extract};
 use chrono::{DateTime, Utc};
 use octra_llm_core::Protocol;
+use octra_llm_plugin_api::LlmScope;
+use octra_storage::plugins::{PluginConfigRecord, PluginRecord};
 use octra_storage::{
     LlmModelInput, LlmModelRecord, LlmProviderAccountInput, LlmProviderAccountRecord,
     LlmProviderInput, LlmProviderRecord, LlmRouteRecord, LlmRoutingGroupRecord,
@@ -88,12 +90,28 @@ pub fn router(state: LlmControlState) -> Router {
                 .put(update_virtual_key)
                 .delete(delete_virtual_key),
         );
+    let plugins = Router::new()
+        .route("/api/v1/llm/plugins", get(list_plugins))
+        .route("/api/v1/llm/plugins/reload", post(reload_plugins))
+        .route(
+            "/api/v1/llm/plugins/{id}",
+            get(get_plugin).put(update_plugin),
+        )
+        .route(
+            "/api/v1/llm/plugins/{id}/configs",
+            get(list_plugin_configs).post(create_plugin_config),
+        )
+        .route(
+            "/api/v1/llm/plugin-configs/{id}",
+            put(update_plugin_config).delete(delete_plugin_config),
+        );
     Router::new()
         .merge(providers)
         .merge(models)
         .merge(groups)
         .merge(routes)
         .merge(keys)
+        .merge(plugins)
         .route("/api/v1/llm/reload", post(reload))
         .route("/api/v1/llm/usage", get(usage))
         .with_state(state)
@@ -1485,12 +1503,33 @@ async fn delete_virtual_key(
 // Runtime
 
 async fn reload(State(state): State<LlmControlState>) -> ApiResult<extract::Json<Value>> {
-    reload_runtime(&state.runtime).await
+    let response = reload_runtime(&state.runtime).await?;
+    if let Some(plugins) = &state.plugins {
+        plugins.reload().await.map_err(ApiError::internal)?;
+    }
+    Ok(response)
+}
+
+async fn reload_plugins(State(state): State<LlmControlState>) -> ApiResult<extract::Json<Value>> {
+    let plugins = state.plugins.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM plugin runtime is not enabled",
+        )
+    })?;
+    plugins.reload().await.map_err(ApiError::internal)?;
+    Ok(extract::Json(json!({
+        "status": "reloaded",
+        "plugins": plugins.registry().manifests().len(),
+    })))
 }
 
 /// Reloads after a mutation so the next data plane request sees the change.
 async fn reload_now(state: &LlmControlState) -> ApiResult<()> {
     state.runtime.reload().await.map_err(ApiError::internal)?;
+    if let Some(plugins) = &state.plugins {
+        plugins.reload().await.map_err(ApiError::internal)?;
+    }
     Ok(())
 }
 
@@ -1505,6 +1544,314 @@ pub async fn reload_runtime(runtime: &LlmRuntime) -> ApiResult<extract::Json<Val
         "routes": snapshot.model_listing().len(),
         "issues": snapshot.issues,
     })))
+}
+
+// ---------------------------------------------------------------------------
+// LLM plugins
+
+#[derive(Debug, Serialize)]
+pub struct PluginView {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub enabled: bool,
+    pub priority: i64,
+    pub description: String,
+    pub updated_at: String,
+}
+
+impl From<PluginRecord> for PluginView {
+    fn from(record: PluginRecord) -> Self {
+        Self {
+            id: record.id,
+            name: record.name,
+            version: record.version,
+            enabled: record.enabled,
+            priority: record.priority,
+            description: record.description,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PluginConfigView {
+    pub id: String,
+    pub plugin_id: String,
+    pub scope: String,
+    pub scope_id: String,
+    pub enabled: bool,
+    pub config: Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<PluginConfigRecord> for PluginConfigView {
+    fn from(record: PluginConfigRecord) -> Self {
+        Self {
+            id: record.id,
+            plugin_id: record.plugin_id,
+            scope: record.scope,
+            scope_id: record.scope_id,
+            enabled: record.enabled,
+            config: serde_json::from_str(&record.config_json).unwrap_or_else(|_| json!({})),
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PluginDetailView {
+    pub plugin: PluginView,
+    pub configs: Vec<PluginConfigView>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PluginFlagsBody {
+    pub enabled: Option<bool>,
+    pub priority: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PluginConfigBody {
+    pub scope: Option<String>,
+    pub scope_id: Option<String>,
+    pub enabled: Option<bool>,
+    pub config: Option<Value>,
+}
+
+async fn list_plugins(
+    State(state): State<LlmControlState>,
+) -> ApiResult<extract::Json<Vec<PluginView>>> {
+    let records = state
+        .storage
+        .list_plugins()
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(extract::Json(
+        records
+            .into_iter()
+            .filter(|record| record.kind == "llm")
+            .map(PluginView::from)
+            .collect(),
+    ))
+}
+
+async fn get_plugin(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<extract::Json<PluginDetailView>> {
+    let record = llm_plugin(&state, &id).await?;
+    let configs = state
+        .storage
+        .list_plugin_configs(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(extract::Json(PluginDetailView {
+        plugin: record.into(),
+        configs: configs.into_iter().map(PluginConfigView::from).collect(),
+    }))
+}
+
+async fn update_plugin(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+    extract::Json(body): extract::Json<PluginFlagsBody>,
+) -> ApiResult<extract::Json<PluginDetailView>> {
+    let _ = llm_plugin(&state, &id).await?;
+    let record = state
+        .storage
+        .update_plugin_flags(&id, body.enabled, body.priority)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("plugin", &id))?;
+    reload_now(&state).await?;
+    let configs = state
+        .storage
+        .list_plugin_configs(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(extract::Json(PluginDetailView {
+        plugin: record.into(),
+        configs: configs.into_iter().map(PluginConfigView::from).collect(),
+    }))
+}
+
+async fn list_plugin_configs(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<extract::Json<Vec<PluginConfigView>>> {
+    let _ = llm_plugin(&state, &id).await?;
+    let configs = state
+        .storage
+        .list_plugin_configs(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(extract::Json(
+        configs.into_iter().map(PluginConfigView::from).collect(),
+    ))
+}
+
+async fn create_plugin_config(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+    extract::Json(body): extract::Json<PluginConfigBody>,
+) -> ApiResult<(StatusCode, extract::Json<PluginConfigView>)> {
+    let plugin = llm_plugin(&state, &id).await?;
+    let scope = llm_scope(&body)?;
+    let config = body.config.unwrap_or_else(|| json!({}));
+    validate_plugin_config(&state, &plugin.name, &config)?;
+    ensure_scope_target(&state, scope, body.scope_id.as_deref()).await?;
+    let record = state
+        .storage
+        .create_plugin_config_raw(
+            &id,
+            scope.as_str(),
+            body.scope_id.as_deref(),
+            body.enabled.unwrap_or(true),
+            &config.to_string(),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    reload_now(&state).await?;
+    Ok((
+        StatusCode::CREATED,
+        extract::Json(PluginConfigView::from(record)),
+    ))
+}
+
+async fn update_plugin_config(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+    extract::Json(body): extract::Json<PluginConfigBody>,
+) -> ApiResult<extract::Json<PluginConfigView>> {
+    let existing = state
+        .storage
+        .get_plugin_config(&id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("plugin config", &id))?;
+    let plugin = llm_plugin(&state, &existing.plugin_id).await?;
+    let config_json = match &body.config {
+        Some(config) => {
+            validate_plugin_config(&state, &plugin.name, config)?;
+            Some(config.to_string())
+        }
+        None => None,
+    };
+    let record = state
+        .storage
+        .update_plugin_config(&id, body.enabled, config_json.as_deref())
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("plugin config", &id))?;
+    reload_now(&state).await?;
+    Ok(extract::Json(PluginConfigView::from(record)))
+}
+
+async fn delete_plugin_config(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    if !state
+        .storage
+        .delete_plugin_config(&id)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::not_found("plugin config", &id));
+    }
+    reload_now(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn llm_plugin(state: &LlmControlState, id: &str) -> ApiResult<PluginRecord> {
+    let record = state
+        .storage
+        .get_plugin(id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("plugin", id))?;
+    if record.kind != "llm" {
+        return Err(ApiError::not_found("LLM plugin", id));
+    }
+    Ok(record)
+}
+
+fn llm_scope(body: &PluginConfigBody) -> ApiResult<LlmScope> {
+    let raw = body
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .ok_or_else(|| ApiError::bad_request("`scope` is required").field("scope"))?;
+    LlmScope::parse(raw).ok_or_else(|| {
+        ApiError::bad_request("`scope` must be global, consumer, virtual_key, model or provider")
+            .field("scope")
+    })
+}
+
+fn validate_plugin_config(state: &LlmControlState, plugin: &str, config: &Value) -> ApiResult<()> {
+    if !config.is_object() {
+        return Err(ApiError::bad_request("`config` must be a JSON object").field("config"));
+    }
+    match &state.plugins {
+        Some(plugins) => plugins
+            .registry()
+            .validate(plugin, config)
+            .map_err(|error| ApiError::bad_request(error.message).field("config")),
+        None => Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM plugin runtime is not enabled",
+        )),
+    }
+}
+
+async fn ensure_scope_target(
+    state: &LlmControlState,
+    scope: LlmScope,
+    scope_id: Option<&str>,
+) -> ApiResult<()> {
+    if scope == LlmScope::Global {
+        return Ok(());
+    }
+    let id = scope_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| ApiError::bad_request("`scope_id` is required").field("scope_id"))?;
+    let exists = match scope {
+        LlmScope::Global => true,
+        LlmScope::Consumer => state
+            .storage
+            .get_consumer(id)
+            .await
+            .map_err(ApiError::internal)?
+            .is_some(),
+        LlmScope::VirtualKey => state
+            .storage
+            .llm_get_virtual_key(id)
+            .await
+            .map_err(ApiError::from_storage)?
+            .is_some(),
+        LlmScope::Model => state
+            .storage
+            .llm_get_model(id)
+            .await
+            .map_err(ApiError::from_storage)?
+            .is_some(),
+        LlmScope::Provider => state
+            .storage
+            .llm_get_provider(id)
+            .await
+            .map_err(ApiError::from_storage)?
+            .is_some(),
+    };
+    if exists {
+        Ok(())
+    } else {
+        Err(ApiError::not_found(scope.as_str(), id))
+    }
 }
 
 // ---------------------------------------------------------------------------

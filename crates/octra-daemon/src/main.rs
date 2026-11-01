@@ -10,7 +10,7 @@ use octra_api_gateway::{ApiControlState, ApiDataState, ApiMetrics, AuditState};
 use octra_config::Workspace;
 use octra_gateway_api::{AppState, AuthState};
 use octra_gateway_runtime::GatewayRuntime;
-use octra_llm_gateway::{LlmControlState, LlmDataState, LlmRuntime};
+use octra_llm_gateway::{LlmControlState, LlmDataState, LlmPluginRuntime, LlmRuntime};
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
 use octra_plugin_runtime::{PluginRegistry, PluginRuntime};
 use tokio_util::sync::CancellationToken;
@@ -57,6 +57,15 @@ async fn main() -> anyhow::Result<()> {
             .context("cannot build the plugin runtime")?,
     );
 
+    let llm_plugin_runtime = Arc::new(
+        LlmPluginRuntime::bootstrap(
+            storage.clone(),
+            Arc::new(octra_llm_plugin_builtin::registry()),
+        )
+        .await
+        .context("cannot build the LLM plugin runtime")?,
+    );
+
     let token =
         token::load_or_create(&workspace.token_file()).context("cannot prepare control token")?;
     let token = Arc::new(token);
@@ -81,10 +90,10 @@ async fn main() -> anyhow::Result<()> {
                 plugin_runtime.clone(),
             ),
         ))
-        .merge(octra_llm_gateway::control_router(LlmControlState::new(
-            llm_runtime.clone(),
-            storage.clone(),
-        )))
+        .merge(octra_llm_gateway::control_router(
+            LlmControlState::new(llm_runtime.clone(), storage.clone())
+                .with_plugins(llm_plugin_runtime.clone()),
+        ))
         .merge(octra_mcp_gateway::control_router(McpControlState::new(
             mcp_runtime.clone(),
             storage.clone(),
@@ -102,11 +111,10 @@ async fn main() -> anyhow::Result<()> {
         .layer(octra_gateway_api::cors_layer());
 
     let data_app = Router::new()
-        .merge(octra_llm_gateway::data_plane_router(LlmDataState::new(
-            llm_runtime,
-            storage.clone(),
-            config.clone(),
-        )))
+        .merge(octra_llm_gateway::data_plane_router(
+            LlmDataState::new(llm_runtime, storage.clone(), config.clone())
+                .with_plugins(llm_plugin_runtime.clone()),
+        ))
         .merge(octra_mcp_gateway::data_plane_router(McpDataState::new(
             mcp_runtime,
             storage.clone(),

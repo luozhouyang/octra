@@ -26,6 +26,8 @@ pub mod usage;
 pub use runtime::{LlmControlState, LlmDataState, LlmRuntime, RuntimeSnapshot};
 pub use upstream::Upstream as LlmUpstream;
 
+pub use octra_llm_plugin_runtime::LlmPluginRuntime;
+
 use axum::Router;
 use octra_config::OctraConfig;
 use octra_core::Result;

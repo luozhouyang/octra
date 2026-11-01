@@ -15,6 +15,11 @@ use chrono::{DateTime, Utc};
 use octra_llm_core::{
     AssistantContent, ChatRequest, ContentPart, GatewayError, Protocol, Usage, UserContent,
 };
+use octra_llm_plugin_api::{
+    LlmErrorContext, LlmLogContext, LlmProviderRequestContext, LlmRequestContext,
+    LlmResponseContext,
+};
+use octra_llm_plugin_runtime::LlmPluginChain;
 use octra_llm_protocol::decode_request;
 use serde_json::Value;
 use serde_json::json;
@@ -23,7 +28,7 @@ use tokio::time::timeout;
 use crate::accounts::{self, AccountRuntime};
 use crate::config::{ProviderConfig, is_local_url};
 use crate::cost;
-use crate::error::{LlmResult, protocol_response};
+use crate::error::{LlmResult, chain_error, protocol_response};
 use crate::keys::{self, KeyOutcome, presented_key};
 use crate::routing::Target;
 use crate::runtime::{LlmDataState, RuntimeSnapshot};
@@ -502,12 +507,60 @@ async fn handle(
         ir.stream = Some(stream);
     }
 
+    let virtual_key_id = key.as_ref().map(|key| key.id.clone());
+    let request_chain = state
+        .plugins
+        .as_ref()
+        .map(|plugins| plugins.request_chain(consumer_id, virtual_key_id.as_deref(), &ir.model));
+    if let Some(chain) = &request_chain {
+        let mut cx = LlmRequestContext {
+            request_id: &request_id,
+            ingress,
+            consumer_id,
+            virtual_key_id: virtual_key_id.as_deref(),
+            request: &mut ir,
+        };
+        let rejection = match chain.on_request(&mut cx).await {
+            Ok(rejection) => rejection,
+            Err(error) => Some(chain_error(error)),
+        };
+        if let Some(error) = rejection {
+            tracker.record.error = Some(error.message.clone());
+            tracker.finish_with_status(error.status);
+            usage::spawn_record(state.storage.clone(), tracker.record.clone());
+            return with_request_id(protocol_response(ingress, &error), &request_id);
+        }
+        // A plugin may have rewritten the model; policy applies to the
+        // effective model so an alias cannot escape an allow-list.
+        if ir.model.trim().is_empty() {
+            let error = GatewayError::invalid_request("model is required");
+            tracker.record.error = Some(error.message.clone());
+            tracker.finish_with_status(error.status);
+            usage::spawn_record(state.storage.clone(), tracker.record.clone());
+            return with_request_id(protocol_response(ingress, &error), &request_id);
+        }
+        if !snapshot.permits_model(consumer_id, &ir.model) {
+            let error = GatewayError::forbidden(format!(
+                "consumer is not allowed to use model '{}'",
+                ir.model
+            ))
+            .with_code("model_forbidden");
+            tracker.record.error = Some(error.message.clone());
+            tracker.finish_with_status(error.status);
+            usage::spawn_record(state.storage.clone(), tracker.record.clone());
+            return with_request_id(protocol_response(ingress, &error), &request_id);
+        }
+    }
+    let effective_model = ir.model.clone();
+
     let session = header_str(&request, &state.config.llm.session_header).map(str::to_string);
     let response = execute(
         &state,
         &snapshot,
         consumer_id,
+        virtual_key_id.as_deref(),
         &requested_model,
+        &effective_model,
         &ir,
         tracker,
         ingress,
@@ -516,7 +569,19 @@ async fn handle(
     .await;
     match response {
         Ok(response) => with_request_id(response, &request_id),
-        Err(error) => with_request_id(protocol_response(ingress, &error), &request_id),
+        Err(mut error) => {
+            if let Some(chain) = &request_chain {
+                let mut cx = LlmErrorContext {
+                    request_id: &request_id,
+                    ingress,
+                    error: &mut error,
+                };
+                if let Err(chain_error) = chain.on_error(&mut cx).await {
+                    error = crate::error::chain_error(chain_error);
+                }
+            }
+            with_request_id(protocol_response(ingress, &error), &request_id)
+        }
     }
 }
 
@@ -545,22 +610,24 @@ async fn execute(
     state: &LlmDataState,
     snapshot: &RuntimeSnapshot,
     consumer_id: Option<&str>,
+    virtual_key_id: Option<&str>,
     requested_model: &str,
+    effective_model: &str,
     ir: &ChatRequest,
     mut tracker: UsageTracker,
     ingress: Protocol,
     session: Option<&str>,
 ) -> LlmResult<Response> {
-    let Some(plan) = snapshot.resolve(requested_model) else {
+    let Some(plan) = snapshot.resolve(effective_model) else {
         let error = GatewayError::not_found(format!(
-            "model '{requested_model}' is not exposed by this gateway"
+            "model '{effective_model}' is not exposed by this gateway"
         ))
         .with_code("model_not_found");
         return Err(fail_request(state, &mut tracker, error));
     };
     if plan.is_empty() {
         let error = GatewayError::not_found(format!(
-            "model '{requested_model}' has no enabled routing target"
+            "model '{effective_model}' has no enabled routing target"
         ));
         return Err(fail_request(state, &mut tracker, error));
     }
@@ -662,6 +729,9 @@ async fn execute(
                 account.as_ref().map(|account| account.record.name.clone());
             tracker.record.pricing = snapshot.model_pricing(&provider.id, &target.model_id);
 
+            let provider_chain = state.plugins.as_ref().map(|plugins| {
+                plugins.provider_chain(consumer_id, virtual_key_id, effective_model, &provider.id)
+            });
             match try_attempt(
                 state,
                 snapshot,
@@ -673,6 +743,8 @@ async fn execute(
                 ingress,
                 account.as_ref(),
                 account_secret_ref,
+                provider_chain.as_ref(),
+                requested_model,
             )
             .await
             {
@@ -687,6 +759,20 @@ async fn execute(
                         tracker.finish_with_status(200);
                         if let Some(account) = &account {
                             consume_account(account, &tracker);
+                        }
+                        if let Some(chain) = &provider_chain {
+                            let cx = LlmLogContext {
+                                request_id: &tracker.record.request_id,
+                                ingress,
+                                consumer_id,
+                                virtual_key_id,
+                                model: effective_model,
+                                status: 200,
+                                latency_ms: tracker.elapsed_ms(),
+                                usage: &tracker.record.usage,
+                                error: None,
+                            };
+                            chain.on_log(&cx).await;
                         }
                         usage::spawn_record(state.storage.clone(), tracker.record.clone());
                     }
@@ -731,7 +817,7 @@ async fn execute(
 
     let error = last_error.unwrap_or_else(|| {
         GatewayError::not_found(format!(
-            "model '{requested_model}' has no provider that can serve it"
+            "model '{effective_model}' has no provider that can serve it"
         ))
     });
     Err(fail_request(state, &mut tracker, error))
@@ -793,8 +879,25 @@ async fn try_attempt(
     ingress: Protocol,
     account: Option<&Arc<AccountRuntime>>,
     account_secret_ref: Option<&str>,
+    chain: Option<&Arc<LlmPluginChain>>,
+    requested_model: &str,
 ) -> LlmResult<AttemptOutcome> {
     let mut ir = ir.clone();
+    if let Some(chain) = chain {
+        let mut cx = LlmProviderRequestContext {
+            request_id: &tracker.record.request_id,
+            target_model_id: &target.model_id,
+            provider_id: &provider.id,
+            protocol: target.protocol,
+            account_id: account.map(|account| account.record.id.as_str()),
+            request: &mut ir,
+        };
+        match chain.on_provider_request(&mut cx).await {
+            Ok(None) => {}
+            Ok(Some(error)) => return Err(error),
+            Err(error) => return Err(chain_error(error)),
+        }
+    }
     apply_model_limits(snapshot, provider, target, &mut ir);
 
     let mut body = translate::encode_request(target.protocol, &ir)?;
@@ -828,6 +931,7 @@ async fn try_attempt(
             state.storage.clone(),
             tracker.clone(),
             account.cloned(),
+            chain.cloned(),
         );
         return Ok(AttemptOutcome {
             response,
@@ -840,7 +944,25 @@ async fn try_attempt(
     let value = timeout(upstream.request_timeout(), upstream.send_json(builder))
         .await
         .map_err(|_| GatewayError::timeout("upstream request timed out"))??;
-    let response = translate::decode_response(target.protocol, value)?;
+    let mut response = translate::decode_response(target.protocol, value)?;
+    // Clients see the model name they asked for, not the routed provider
+    // model, so a model alias stays opaque.
+    response.model = requested_model.to_string();
+    if let Some(chain) = chain {
+        let mut usage = response.usage.clone();
+        let mut cx = LlmResponseContext {
+            request_id: &tracker.record.request_id,
+            ingress,
+            response: &mut response,
+            usage: &mut usage,
+        };
+        match chain.on_response(&mut cx).await {
+            Ok(None) => {}
+            Ok(Some(error)) => return Err(error),
+            Err(error) => return Err(chain_error(error)),
+        }
+        response.usage = usage;
+    }
     let usage = response.usage.clone();
     let finish_reason = response.finish_reason;
     let body = translate::encode_response(ingress, &response)?;

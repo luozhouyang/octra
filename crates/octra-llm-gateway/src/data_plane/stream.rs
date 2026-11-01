@@ -17,6 +17,7 @@ use futures_util::stream::unfold;
 use octra_config::OctraConfig;
 use octra_data_plane::sse::SseDecoder;
 use octra_llm_core::{GatewayError, Protocol, StreamEvent, Usage};
+use octra_llm_plugin_runtime::{LlmPluginChain, LlmStreamState};
 use octra_llm_protocol::{StreamDecoder, StreamEncoder};
 use octra_storage::Storage;
 use reqwest::Response as UpstreamResponse;
@@ -36,6 +37,7 @@ pub fn start(
     storage: Arc<Storage>,
     tracker: UsageTracker,
     account: Option<Arc<AccountRuntime>>,
+    plugins: Option<Arc<LlmPluginChain>>,
 ) -> Response {
     let idle = Duration::from_secs(config.llm.stream_idle_timeout_secs.max(1));
     let state = BridgeState {
@@ -47,6 +49,8 @@ pub fn start(
         storage,
         tracker,
         account,
+        plugins,
+        plugin_state: LlmStreamState::new(),
         idle,
         finished: false,
         saw_finish: false,
@@ -97,12 +101,8 @@ pub fn start(
                     Some(name) => format!("{name}\n{}", event.data),
                     None => event.data,
                 };
-                match state.protocol_decoder.decode_chunk(&payload) {
-                    Ok(events) => {
-                        for event in events {
-                            state.encode(&event, &mut out);
-                        }
-                    }
+                let events = match state.protocol_decoder.decode_chunk(&payload) {
+                    Ok(events) => events,
                     Err(error) => {
                         failed = Some(
                             GatewayError::upstream(502, error.message)
@@ -110,6 +110,26 @@ pub fn start(
                         );
                         break;
                     }
+                };
+                let events = match state.plugins.clone() {
+                    Some(chain) => {
+                        let request_id = state.tracker.record.request_id.clone();
+                        let ingress = state.ingress;
+                        match chain
+                            .on_stream_events(&request_id, ingress, events, &mut state.plugin_state)
+                            .await
+                        {
+                            Ok(events) => events,
+                            Err(error) => {
+                                failed = Some(crate::error::chain_error(error));
+                                break;
+                            }
+                        }
+                    }
+                    None => events,
+                };
+                for event in &events {
+                    state.encode(event, &mut out);
                 }
             }
             if let Some(error) = failed {
@@ -150,6 +170,8 @@ struct BridgeState {
     storage: Arc<Storage>,
     tracker: UsageTracker,
     account: Option<Arc<AccountRuntime>>,
+    plugins: Option<Arc<LlmPluginChain>>,
+    plugin_state: LlmStreamState,
     idle: Duration,
     finished: bool,
     saw_finish: bool,

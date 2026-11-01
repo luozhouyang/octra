@@ -16,6 +16,8 @@ octra-config.workspace = true
 octra-core.workspace = true
 octra-data-plane.workspace = true
 octra-llm-core.workspace = true
+octra-llm-plugin-api.workspace = true
+octra-llm-plugin-runtime.workspace = true
 octra-llm-protocol.workspace = true
 octra-storage.workspace = true
 reqwest.workspace = true
@@ -28,6 +30,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
+octra-llm-plugin-builtin.workspace = true
 octra-api-core.workspace = true
 http-body-util.workspace = true
 tower.workspace = true

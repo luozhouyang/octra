@@ -47,6 +47,17 @@ pub fn from_core(error: Error) -> GatewayError {
     }
 }
 
+/// Turns a plugin-chain failure into the error the client should see.
+pub fn chain_error(error: octra_llm_plugin_runtime::LlmChainError) -> GatewayError {
+    match error {
+        octra_llm_plugin_runtime::LlmChainError::Rejected(error) => error,
+        octra_llm_plugin_runtime::LlmChainError::Plugin(error) => {
+            tracing::error!(error = %error.message, "LLM plugin chain failed");
+            GatewayError::internal("LLM plugin failed").with_code("plugin_error")
+        }
+    }
+}
+
 pub type LlmResult<T> = std::result::Result<T, GatewayError>;
 
 #[allow(dead_code)]
