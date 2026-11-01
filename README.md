@@ -111,3 +111,7 @@ pnpm typecheck && pnpm test && pnpm build
 ```
 
 The Tauri desktop app requires system WebView dependencies (Xcode Command Line Tools on macOS, WebKitGTK on Linux), so the CI Rust job does not compile `octra-desktop` for now.
+
+## License
+
+Released under the [MIT License](./LICENSE).

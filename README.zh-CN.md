@@ -113,3 +113,7 @@ pnpm typecheck && pnpm test && pnpm build
 ```
 
 Tauri 桌面端需要系统 WebView 依赖（macOS 为 Xcode Command Line Tools，Linux 为 WebKitGTK），因此 CI 的 Rust 任务暂不编译 `octra-desktop`。
+
+## License
+
+基于 [MIT License](./LICENSE) 发布。
