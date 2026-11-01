@@ -14,17 +14,33 @@ repository = "https://github.com/luozhouyang/octra"
 
 [workspace.dependencies]
 anyhow = "1"
+async-trait = "0.1"
 axum = "0.8"
+base64 = "0.22"
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
+futures-util = "0.3"
+hex = "0.4"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+mime = "0.3"
+once_cell = "1"
+parking_lot = "0.12"
+rand = "0.8"
+regex = "1"
 reqwest = { version = "0.12", default-features = false, features = [
     "blocking",
     "json",
     "rustls-tls",
+    "stream",
+    "http2",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
@@ -34,15 +50,27 @@ sqlx = { version = "0.8", default-features = false, features = [
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
-tower-http = { version = "0.6", features = ["cors"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit", "timeout"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2"
 uuid = { version = "1", features = ["v4"] }
 
+octra-api-core = { path = "crates/octra-api-core" }
+octra-api-gateway = { path = "crates/octra-api-gateway" }
 octra-config = { path = "crates/octra-config" }
 octra-core = { path = "crates/octra-core" }
+octra-data-plane = { path = "crates/octra-data-plane" }
 octra-gateway-api = { path = "crates/octra-gateway-api" }
 octra-gateway-runtime = { path = "crates/octra-gateway-runtime" }
+octra-llm-core = { path = "crates/octra-llm-core" }
+octra-llm-gateway = { path = "crates/octra-llm-gateway" }
+octra-llm-protocol = { path = "crates/octra-llm-protocol" }
+octra-mcp-core = { path = "crates/octra-mcp-core" }
+octra-mcp-gateway = { path = "crates/octra-mcp-gateway" }
 octra-observability = { path = "crates/octra-observability" }
 octra-storage = { path = "crates/octra-storage" }

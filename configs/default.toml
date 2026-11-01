@@ -1,9 +1,25 @@
 # Octra daemon configuration.
 # Copied to $OCTRA_HOME/config.toml on first start.
-# Environment overrides: OCTRA_CONTROL_BIND, OCTRA_LOG_LEVEL, OCTRA_LOG_FORMAT.
+# Environment overrides: OCTRA_CONTROL_BIND, OCTRA_GATEWAY_BIND,
+# OCTRA_LOG_LEVEL, OCTRA_LOG_FORMAT.
 
 [daemon]
 control_bind = "127.0.0.1:8081"
+
+# Unified data plane for the API, LLM, and MCP gateways.
+[gateway]
+listen_bind = "127.0.0.1:8080"
+request_timeout_secs = 60
+connect_timeout_secs = 10
+max_body_bytes = 33554432
+
+[llm]
+request_timeout_secs = 120
+stream_idle_timeout_secs = 120
+
+[mcp]
+request_timeout_secs = 60
+tool_call_timeout_secs = 120
 
 [storage]
 path = "octra.db"

@@ -1513,6 +1513,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "indexmap 2.14.2",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1652,7 +1671,9 @@ checksum = "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
 dependencies = [
  "atomic-waker",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "h2",
  "http",
  "http-body",
  "httparse",
@@ -2606,6 +2627,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "octra-api-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "octra-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "octra-api-gateway"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "hex",
+ "http",
+ "http-body",
+ "http-body-util",
+ "octra-api-core",
+ "octra-config",
+ "octra-core",
+ "octra-data-plane",
+ "octra-gateway-runtime",
+ "octra-storage",
+ "rand 0.8.8",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "octra-cli"
 version = "0.1.0"
 dependencies = [
@@ -2643,14 +2704,32 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "octra-api-gateway",
  "octra-config",
  "octra-core",
  "octra-gateway-api",
  "octra-gateway-runtime",
+ "octra-llm-gateway",
+ "octra-mcp-gateway",
  "octra-observability",
  "octra-storage",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "octra-data-plane"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "http",
+ "octra-config",
+ "reqwest 0.12.28",
+ "serde_json",
  "tracing",
  "uuid",
 ]
@@ -2692,10 +2771,100 @@ name = "octra-gateway-runtime"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hex",
+ "http",
+ "octra-api-core",
  "octra-core",
  "octra-storage",
+ "sha2",
  "sqlx",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "octra-llm-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "octra-llm-gateway"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "hex",
+ "http",
+ "http-body-util",
+ "octra-config",
+ "octra-core",
+ "octra-data-plane",
+ "octra-llm-core",
+ "octra-llm-protocol",
+ "octra-storage",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "octra-llm-protocol"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "octra-core",
+ "octra-llm-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "octra-mcp-core"
+version = "0.1.0"
+dependencies = [
+ "octra-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "octra-mcp-gateway"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "futures-util",
+ "hex",
+ "http",
+ "http-body-util",
+ "octra-config",
+ "octra-core",
+ "octra-data-plane",
+ "octra-mcp-core",
+ "octra-storage",
+ "rand 0.8.8",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tower-http",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2712,9 +2881,16 @@ dependencies = [
 name = "octra-storage"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "octra-api-core",
  "octra-core",
+ "octra-llm-core",
+ "octra-mcp-core",
+ "serde",
+ "serde_json",
  "sqlx",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -3264,6 +3440,7 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -3283,12 +3460,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams 0.4.2",
  "web-sys",
  "webpki-roots",
 ]
@@ -3323,7 +3502,7 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
+ "wasm-streams 0.5.0",
  "web-sys",
 ]
 
@@ -4640,6 +4819,8 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]
@@ -4785,10 +4966,13 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 
@@ -5153,6 +5337,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b1f9c3798725016c6ee5f2f57869ec0831e8bbc0ab0310a86e787e97f41389e"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

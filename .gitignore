@@ -26,3 +26,6 @@ apps/desktop/src-tauri/target/
 .DS_Store
 .idea/
 .vscode/
+
+# Agent worktrees and local session state
+.claude/
