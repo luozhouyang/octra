@@ -32,14 +32,6 @@ pub async fn get_config(State(state): State<AppState>) -> Json<octra_config::Oct
     Json((*state.config).clone())
 }
 
-pub async fn list_services(State(state): State<AppState>) -> Json<Vec<octra_core::ServiceSummary>> {
-    Json(state.runtime.snapshot().await.services.clone())
-}
-
-pub async fn list_routes(State(state): State<AppState>) -> Json<Vec<octra_core::RouteSummary>> {
-    Json(state.runtime.snapshot().await.routes.clone())
-}
-
 pub async fn reload(
     State(state): State<AppState>,
 ) -> Result<Json<octra_core::SnapshotInfo>, ApiError> {

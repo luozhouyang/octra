@@ -8,6 +8,8 @@ pub enum Error {
     Storage(String),
     #[error("runtime error: {0}")]
     Runtime(String),
+    #[error("not found: {0}")]
+    NotFound(String),
     #[error("unauthorized")]
     Unauthorized,
     #[error(transparent)]

@@ -5,6 +5,7 @@ pub mod error;
 pub mod routes;
 pub mod state;
 
+pub use auth::AuthState;
 pub use state::AppState;
 
 use axum::Router;
@@ -12,29 +13,49 @@ use axum::http::{HeaderValue, Method, header};
 use axum::routing::{get, post};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-pub fn router(state: AppState) -> Router {
+/// System routes owned by the daemon core. Gateway module routers are merged
+/// by the daemon and protected with the same bearer-token layer.
+pub fn core_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/system/health", get(routes::health))
         .route("/api/v1/system/config", get(routes::get_config))
         .route("/api/v1/system/reload", post(routes::reload))
-        .route("/api/v1/services", get(routes::list_services))
-        .route("/api/v1/routes", get(routes::list_routes))
+        .with_state(state)
+}
+
+/// Core routes wrapped with authentication and CORS. Kept for tests and for
+/// embedding the control plane without extra gateway modules.
+pub fn protected_router(state: AppState) -> Router {
+    let auth = AuthState {
+        token: state.token.clone(),
+    };
+
+    core_router(state)
         .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            auth,
             auth::require_bearer,
         ))
         .layer(cors_layer())
-        .with_state(state)
+}
+
+pub fn router(state: AppState) -> Router {
+    protected_router(state)
 }
 
 /// The control plane stays loopback-only; CORS merely lets a local browser
 /// development build talk to it. Requests still require the bearer token.
-fn cors_layer() -> CorsLayer {
+pub fn cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
             origin.to_str().is_ok_and(is_loopback_origin)
         }))
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
 }
 

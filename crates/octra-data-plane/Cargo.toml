@@ -1,0 +1,16 @@
+[package]
+name = "octra-data-plane"
+description = "Shared HTTP, header, and SSE helpers for the Octra data plane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+bytes.workspace = true
+http.workspace = true
+octra-config.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
