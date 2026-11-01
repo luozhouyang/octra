@@ -4,7 +4,7 @@ English | [简体中文](./README.zh-CN.md)
 
 **Local-first Unified Gateway** — manage API, LLM, and MCP services in one place, with a cross-platform desktop app.
 
-This repository is the runnable foundation of Octra: a standalone Daemon with a unified data plane (API, LLM, and MCP gateways), an authenticated control plane, SQLite persistence, an admin CLI, a Tauri 2 desktop app, and dual Rust/TypeScript workspaces. The core gateway functionality is implemented; agent integration, plugins, and production hardening are still on the roadmap.
+This repository is the runnable foundation of Octra: a standalone Daemon with a unified data plane (API, LLM, and MCP gateways), an authenticated control plane, SQLite persistence, an admin CLI, a Tauri 2 desktop app, and dual Rust/TypeScript workspaces. The core gateway functionality is implemented; agent integration, WASM plugins, and production hardening are still on the roadmap.
 
 ## Repository layout
 
@@ -79,10 +79,11 @@ Environment variables: `OCTRA_HOME`, `OCTRA_CONTROL_BIND`, `OCTRA_GATEWAY_BIND`,
 ## Implemented today
 
 - Standalone daemon with two listeners and unified graceful shutdown.
-- Authenticated control plane: system health/config/reload plus CRUD for services, routes, upstreams, targets, consumers, credentials, LLM providers/models/routing groups/routes/virtual keys, and MCP servers/tools/ACLs/keys.
+- Authenticated control plane: system health/config/reload plus CRUD for services, routes, upstreams, targets, consumers, credentials, plugins/configs, LLM providers/models/routing groups/routes/virtual keys, and MCP servers/tools/ACLs/keys.
 - Constant-time Bearer token authentication; the token is randomly generated and persisted to disk.
 - SQLite + SQLx migrations with WAL / foreign_keys / busy_timeout; runtime snapshots keep the hot path off the database.
-- API Gateway: host/path/method/header routing, longest-prefix matching, round-robin and weighted load balancing, path stripping, timeouts, retries, API-key authentication, streaming proxy, access logs, and metrics.
+- API Gateway: host/path/method/header routing, longest-prefix matching, round-robin and weighted load balancing, path stripping, body limits, connect/request timeouts, retries, API-key authentication, streaming proxy, access logs, and metrics.
+- Plugin system: Kong-style phase chain with consumer > route > service > global scope precedence and priority ordering, fail-open/fail-closed policies, and built-in `request-id`, `header-rewrite`, `cors`, and `rate-limit` plugins configured per scope.
 - LLM Gateway: canonical IR, OpenAI ↔ Anthropic request/response/SSE conversion, virtual models, routing groups with priority/weight fallback, OpenAI-compatible and Anthropic providers (`env:` / `file:` secret references), virtual keys hashed in SQLite, usage records, and `count_tokens`.
 - MCP Gateway: Streamable HTTP and stdio upstreams, tool discovery and aggregation, `/mcp` JSON-RPC endpoint with sessions, per-consumer tool ACLs, API keys, and invocation audit rows.
 - CLI: `status`, `services`, `routes`, `reload`, `doctor`.
@@ -94,7 +95,7 @@ Environment variables: `OCTRA_HOME`, `OCTRA_CONTROL_BIND`, `OCTRA_GATEWAY_BIND`,
 - Pingora-based proxy engine (the current unified data plane uses Axum + reqwest).
 - OpenAI Responses and Gemini protocol adapters.
 - Agent discovery / config adapter / bridge.
-- Plugin runtime (native / WASM).
+- WASM plugin runtime (the native plugin system and built-ins are implemented).
 - OS Keychain integration for secrets.
 - Separate telemetry database and retention workers.
 - Cross-platform packaging, signing, and notarization.
