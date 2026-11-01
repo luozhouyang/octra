@@ -1,0 +1,38 @@
+@import "tailwindcss";
+@import "@octra/design-tokens/tokens.css";
+
+@theme inline {
+  --color-background: hsl(var(--octra-background));
+  --color-foreground: hsl(var(--octra-foreground));
+  --color-card: hsl(var(--octra-card));
+  --color-card-foreground: hsl(var(--octra-card-foreground));
+  --color-muted: hsl(var(--octra-muted));
+  --color-muted-foreground: hsl(var(--octra-muted-foreground));
+  --color-border: hsl(var(--octra-border));
+  --color-input: hsl(var(--octra-input));
+  --color-primary: hsl(var(--octra-primary));
+  --color-primary-foreground: hsl(var(--octra-primary-foreground));
+  --color-success: hsl(var(--octra-success));
+  --color-danger: hsl(var(--octra-danger));
+  --radius-lg: var(--octra-radius);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: hsl(var(--octra-background));
+  color: hsl(var(--octra-foreground));
+  font-family:
+    "Inter",
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}

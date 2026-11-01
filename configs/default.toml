@@ -1,0 +1,13 @@
+# Octra daemon configuration.
+# Copied to $OCTRA_HOME/config.toml on first start.
+# Environment overrides: OCTRA_CONTROL_BIND, OCTRA_LOG_LEVEL, OCTRA_LOG_FORMAT.
+
+[daemon]
+control_bind = "127.0.0.1:8081"
+
+[storage]
+path = "octra.db"
+
+[logging]
+level = "info"
+format = "pretty"

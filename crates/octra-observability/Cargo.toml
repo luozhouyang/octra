@@ -1,0 +1,12 @@
+[package]
+name = "octra-observability"
+description = "Tracing and metrics bootstrap for Octra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+octra-config.workspace = true
+octra-core.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

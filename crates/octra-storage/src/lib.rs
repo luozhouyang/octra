@@ -1,0 +1,164 @@
+//! SQLite persistence layer. Secrets are stored as references only.
+
+use std::path::Path;
+use std::time::Duration;
+
+use octra_core::{Error, Result, RouteSummary, ServiceSummary, SnapshotCounts};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::{Row, SqlitePool};
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeData {
+    pub services: Vec<ServiceSummary>,
+    pub routes: Vec<RouteSummary>,
+    pub counts: SnapshotCounts,
+}
+
+pub struct Storage {
+    pool: SqlitePool,
+}
+
+impl Storage {
+    pub async fn connect(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                Error::Storage(format!(
+                    "cannot create database directory {}: {err}",
+                    parent.display()
+                ))
+            })?;
+        }
+
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(5));
+
+        let storage = Self::from_options(options, 5).await?;
+        storage.migrate().await?;
+        Ok(storage)
+    }
+
+    pub async fn connect_in_memory() -> Result<Self> {
+        let options = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true);
+
+        let storage = Self::from_options(options, 1).await?;
+        storage.migrate().await?;
+        Ok(storage)
+    }
+
+    async fn from_options(options: SqliteConnectOptions, max_connections: u32) -> Result<Self> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(max_connections)
+            .connect_with(options)
+            .await
+            .map_err(|err| Error::Storage(format!("cannot open sqlite: {err}")))?;
+
+        Ok(Self { pool })
+    }
+
+    async fn migrate(&self) -> Result<()> {
+        sqlx::migrate!("../../migrations")
+            .run(&self.pool)
+            .await
+            .map_err(|err| Error::Storage(format!("migration failed: {err}")))
+    }
+
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
+    pub async fn ping(&self) -> Result<()> {
+        sqlx::query_scalar::<_, i64>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|err| Error::Storage(format!("sqlite ping failed: {err}")))?;
+        Ok(())
+    }
+
+    pub async fn load_runtime_data(&self) -> Result<RuntimeData> {
+        let service_rows =
+            sqlx::query("SELECT id, name, protocol, enabled FROM services ORDER BY name ASC")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|err| Error::Storage(format!("cannot load services: {err}")))?;
+
+        let services = service_rows
+            .into_iter()
+            .map(|row| ServiceSummary {
+                id: row.get("id"),
+                name: row.get("name"),
+                protocol: row.get("protocol"),
+                enabled: row.get::<i64, _>("enabled") != 0,
+            })
+            .collect();
+
+        let route_rows = sqlx::query(
+            "SELECT id, service_id, host, path_prefix, enabled FROM routes ORDER BY path_prefix ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|err| Error::Storage(format!("cannot load routes: {err}")))?;
+
+        let routes = route_rows
+            .into_iter()
+            .map(|row| RouteSummary {
+                id: row.get("id"),
+                service_id: row.get("service_id"),
+                host: row.get("host"),
+                path_prefix: row.get("path_prefix"),
+                enabled: row.get::<i64, _>("enabled") != 0,
+            })
+            .collect();
+
+        let counts = sqlx::query(
+            "SELECT
+                (SELECT COUNT(*) FROM services) AS services,
+                (SELECT COUNT(*) FROM routes) AS routes,
+                (SELECT COUNT(*) FROM upstreams) AS upstreams,
+                (SELECT COUNT(*) FROM targets) AS targets",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|err| Error::Storage(format!("cannot count runtime entities: {err}")))?;
+
+        Ok(RuntimeData {
+            services,
+            routes,
+            counts: SnapshotCounts {
+                services: counts.get("services"),
+                routes: counts.get("routes"),
+                upstreams: counts.get("upstreams"),
+                targets: counts.get("targets"),
+            },
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn migrations_create_the_initial_schema() {
+        let storage = Storage::connect_in_memory().await.unwrap();
+        storage.ping().await.unwrap();
+
+        let data = storage.load_runtime_data().await.unwrap();
+        assert!(data.services.is_empty());
+        assert!(data.routes.is_empty());
+        assert_eq!(data.counts.services, 0);
+
+        let tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'llm_providers'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(tables, 1);
+    }
+}

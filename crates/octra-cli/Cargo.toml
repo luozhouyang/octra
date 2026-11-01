@@ -1,0 +1,13 @@
+[package]
+name = "octra-cli"
+description = "Octra command line interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+octra-config.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true

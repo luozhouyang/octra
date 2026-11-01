@@ -1,0 +1,13 @@
+[package]
+name = "octra-storage"
+description = "SQLite storage and migrations for Octra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+octra-core.workspace = true
+sqlx.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -1,0 +1,19 @@
+{
+  "name": "octra",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "pnpm --filter @octra/desktop tauri dev",
+    "dev:web": "pnpm --filter @octra/desktop dev",
+    "build": "pnpm --filter @octra/desktop build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "format": "prettier --write .",
+    "daemon": "cargo run -p octra-daemon",
+    "cli": "cargo run -p octra-cli --"
+  },
+  "devDependencies": {
+    "prettier": "^3.0.0",
+    "typescript": "^5.0.0"
+  }
+}

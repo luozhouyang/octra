@@ -1,0 +1,12 @@
+[package]
+name = "octra-core"
+description = "Shared domain types and errors for Octra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+thiserror.workspace = true

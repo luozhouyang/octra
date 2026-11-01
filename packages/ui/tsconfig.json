@@ -1,0 +1,4 @@
+{
+  "extends": "@octra/tsconfig/react.json",
+  "include": ["src"]
+}

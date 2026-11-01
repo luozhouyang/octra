@@ -1,0 +1,21 @@
+{
+  "name": "@octra/api-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@octra/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@octra/tsconfig": "workspace:*",
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
+  }
+}

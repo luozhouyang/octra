@@ -1,0 +1,15 @@
+:root {
+  --octra-background: 222 47% 6%;
+  --octra-foreground: 210 40% 98%;
+  --octra-card: 222 40% 10%;
+  --octra-card-foreground: 210 40% 96%;
+  --octra-muted: 217 33% 17%;
+  --octra-muted-foreground: 215 20% 65%;
+  --octra-border: 217 33% 20%;
+  --octra-input: 217 33% 22%;
+  --octra-primary: 243 75% 59%;
+  --octra-primary-foreground: 0 0% 100%;
+  --octra-success: 142 71% 45%;
+  --octra-danger: 0 72% 51%;
+  --octra-radius: 0.75rem;
+}

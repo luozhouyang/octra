@@ -1,0 +1,15 @@
+[package]
+name = "octra-config"
+description = "Octra configuration and local workspace paths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dirs.workspace = true
+octra-core.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

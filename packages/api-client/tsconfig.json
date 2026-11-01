@@ -1,0 +1,4 @@
+{
+  "extends": "@octra/tsconfig/base.json",
+  "include": ["src"]
+}
