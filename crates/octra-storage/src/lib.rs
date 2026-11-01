@@ -2,6 +2,7 @@
 
 pub mod api_gateway;
 pub mod llm;
+pub mod logs;
 pub mod mcp;
 pub mod plugins;
 
@@ -10,6 +11,7 @@ pub use llm::{
     LlmRoutingGroupRecord, LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmRuntimeData,
     LlmStorageError, LlmUsageRecord, LlmUsageSummaryRow, LlmVirtualKeyInput, LlmVirtualKeyRecord,
 };
+pub use logs::{AuditLog, NewRequestLog, RequestLog};
 
 use std::path::Path;
 use std::time::Duration;
