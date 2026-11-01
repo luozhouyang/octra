@@ -8,13 +8,17 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+octra-api-gateway.workspace = true
 octra-config.workspace = true
 octra-core.workspace = true
 octra-gateway-api.workspace = true
 octra-gateway-runtime.workspace = true
+octra-llm-gateway.workspace = true
+octra-mcp-gateway.workspace = true
 octra-observability.workspace = true
 octra-storage.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 

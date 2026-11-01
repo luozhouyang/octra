@@ -1,5 +1,15 @@
 //! SQLite persistence layer. Secrets are stored as references only.
 
+pub mod api_gateway;
+pub mod llm;
+pub mod mcp;
+
+pub use llm::{
+    LlmModelInput, LlmModelRecord, LlmProviderInput, LlmProviderRecord, LlmRouteRecord,
+    LlmRoutingGroupRecord, LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmRuntimeData,
+    LlmStorageError, LlmUsageRecord, LlmUsageSummaryRow, LlmVirtualKeyInput, LlmVirtualKeyRecord,
+};
+
 use std::path::Path;
 use std::time::Duration;
 

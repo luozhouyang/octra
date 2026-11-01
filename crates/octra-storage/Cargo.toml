@@ -6,8 +6,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono.workspace = true
+octra-api-core.workspace = true
 octra-core.workspace = true
+octra-llm-core.workspace = true
+octra-mcp-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
