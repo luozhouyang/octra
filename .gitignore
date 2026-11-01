@@ -19,6 +19,9 @@ apps/desktop/src-tauri/target/
 *.db-shm
 *.log
 
+# Local design notes — never committed
+/docs/
+
 # OS / editor
 .DS_Store
 .idea/

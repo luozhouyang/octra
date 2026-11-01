@@ -1,105 +1,107 @@
 # Octra
 
-**Local-first Unified Gateway** — 统一管理 API、LLM、MCP 服务，并提供跨平台桌面应用。
+English | [简体中文](./README.zh-CN.md)
 
-当前仓库是 Octra 的可运行基础骨架：独立 Daemon（Axum 控制面 + SQLite）、管理 CLI、Tauri 2 桌面端，以及 Rust/TypeScript 双 Workspace。LLM 协议转换、Pingora 数据面、MCP Gateway 等按架构文档中的 Phase 逐步实现。
+**Local-first Unified Gateway** — manage API, LLM, and MCP services in one place, with a cross-platform desktop app.
 
-## 仓库布局
+This repository is the runnable foundation of Octra: a standalone Daemon (Axum control plane + SQLite), an admin CLI, a Tauri 2 desktop app, and dual Rust/TypeScript workspaces. LLM protocol translation, the Pingora data plane, the MCP Gateway, and more are being implemented phase by phase according to the architecture document.
+
+## Repository layout
 
 ```text
 octra/
 ├── apps/
-│   └── desktop/            # Tauri 2 + React + Vite 桌面端
-│       └── src-tauri/      # Tauri Rust Host（Sidecar 管理的落点）
+│   └── desktop/            # Tauri 2 + React + Vite desktop app
+│       └── src-tauri/      # Tauri Rust host (where sidecar management lives)
 ├── crates/
-│   ├── octra-core/         # 领域类型与错误
-│   ├── octra-config/       # 配置与本地目录解析
-│   ├── octra-storage/      # SQLite + SQLx Migrations
-│   ├── octra-observability/# tracing 初始化
-│   ├── octra-gateway-runtime/ # Runtime Snapshot + 原子重载
-│   ├── octra-gateway-api/  # Axum 控制面（Bearer 认证）
-│   ├── octra-daemon/       # 独立 Gateway Daemon
-│   └── octra-cli/          # 命令行管理
+│   ├── octra-core/         # Domain types and errors
+│   ├── octra-config/       # Configuration and local directory resolution
+│   ├── octra-storage/      # SQLite + SQLx migrations
+│   ├── octra-observability/# tracing initialization
+│   ├── octra-gateway-runtime/ # Runtime snapshot + atomic reload
+│   ├── octra-gateway-api/  # Axum control plane (Bearer auth)
+│   ├── octra-daemon/       # Standalone gateway daemon
+│   └── octra-cli/          # Command-line administration
 ├── packages/
-│   ├── types/              # 共享 TypeScript 类型
-│   ├── api-client/         # 控制面 API Client
-│   ├── ui/                 # 共享 UI 组件
-│   ├── tsconfig/           # 共享 tsconfig
-│   └── design-tokens/      # 设计令牌
-├── migrations/             # SQLx 迁移
-├── configs/default.toml    # Daemon 默认配置
+│   ├── types/              # Shared TypeScript types
+│   ├── api-client/         # Control-plane API client
+│   ├── ui/                 # Shared UI components
+│   ├── tsconfig/           # Shared tsconfig
+│   └── design-tokens/      # Design tokens
+├── migrations/             # SQLx migrations
+├── configs/default.toml    # Default daemon configuration
 ├── scripts/
-└── tests/                  # 集成 / 协议兼容 / 跨平台测试
+└── tests/                  # Integration / protocol compatibility / cross-platform tests
 ```
 
-## 快速开始
+## Quick start
 
-前置：Rust 1.97+、Node 24+、pnpm 10+。
+Prerequisites: Rust 1.97+, Node 24+, pnpm 10+.
 
 ```bash
 pnpm install
 
-# 终端 1：启动 Daemon（控制面 http://127.0.0.1:8081）
+# Terminal 1: start the daemon (control plane at http://127.0.0.1:8081)
 pnpm daemon
 
-# 终端 2：查看状态
+# Terminal 2: check status
 pnpm cli status
 pnpm cli services
 
-# 桌面端（需要 Tauri 依赖，见下）
+# Desktop app (requires Tauri dependencies, see below)
 pnpm dev
 
-# 仅浏览器调试前端
+# Browser-only frontend development
 pnpm dev:web
 ```
 
-Daemon 首次启动会在 `$OCTRA_HOME`（默认 `~/.octra`）下创建：
+On first start, the daemon creates the following under `$OCTRA_HOME` (defaults to `~/.octra`):
 
-| 文件 | 说明 |
+| File | Description |
 |---|---|
-| `config.toml` | Daemon 配置 |
-| `octra.db` | SQLite 数据库（WAL） |
-| `control.token` | 控制面 Bearer Token，Unix 下权限 `0600` |
+| `config.toml` | Daemon configuration |
+| `octra.db` | SQLite database (WAL) |
+| `control.token` | Control-plane Bearer token; mode `0600` on Unix |
 
-控制面默认只绑定回环地址，且所有接口强制 Bearer 认证。CLI 与桌面端从 `control.token` 读取凭据；`OCTRA_CONTROL_TOKEN` 可覆盖。
+The control plane binds to the loopback address by default, and every endpoint enforces Bearer authentication. The CLI and desktop app read credentials from `control.token`; `OCTRA_CONTROL_TOKEN` overrides it.
 
-环境变量：`OCTRA_HOME`、`OCTRA_CONTROL_BIND`、`OCTRA_LOG_LEVEL`、`OCTRA_LOG_FORMAT`（`pretty` / `json`）、`OCTRA_CONTROL_URL`（CLI）。
+Environment variables: `OCTRA_HOME`, `OCTRA_CONTROL_BIND`, `OCTRA_LOG_LEVEL`, `OCTRA_LOG_FORMAT` (`pretty` / `json`), `OCTRA_CONTROL_URL` (CLI).
 
-## 当前已实现
+## Implemented today
 
-- 独立 Daemon 生命周期与优雅关闭。
-- Axum 控制面：`/api/v1/system/health`、`/api/v1/system/config`、`/api/v1/services`、`/api/v1/routes`、`/api/v1/system/reload`。
-- 常量时间 Bearer Token 认证，Token 随机生成并落盘。
-- SQLite + SQLx 迁移，WAL / foreign_keys / busy_timeout。
-- Runtime Snapshot + 原子替换，代理热路径不直接查库（架构文档 13.2 的落点）。
-- CLI：`status`、`services`、`routes`、`reload`、`doctor`。
-- Tauri 2 + React 桌面端骨架，Dashboard 通过 Tauri command 访问 Daemon。
-- 双 Workspace、CI（Rust fmt/clippy/test；前端 typecheck/test/build）。
+- Standalone daemon lifecycle with graceful shutdown.
+- Axum control plane: `/api/v1/system/health`, `/api/v1/system/config`, `/api/v1/services`, `/api/v1/routes`, `/api/v1/system/reload`.
+- Constant-time Bearer token authentication; the token is randomly generated and persisted to disk.
+- SQLite + SQLx migrations with WAL / foreign_keys / busy_timeout.
+- Runtime snapshot + atomic swap; the proxy hot path never queries the database directly (the landing point described in section 13.2 of the architecture document).
+- CLI: `status`, `services`, `routes`, `reload`, `doctor`.
+- Tauri 2 + React desktop skeleton; the dashboard reaches the daemon through Tauri commands.
+- Dual workspace and CI (Rust fmt/clippy/test; frontend typecheck/test/build).
 
-## 尚未实现（按路线图推进）
+## Not yet implemented (tracked on the roadmap)
 
-- Pingora 数据面（API Gateway 实际转发）。
-- LLM Canonical IR、协议适配器、Provider 路由。
-- Agent Discovery / Config Adapter / Bridge。
-- MCP Gateway 与 Tool ACL。
-- 插件运行时（Native / WASM）。
-- OS Keychain Secrets 集成。
-- 跨平台打包、签名与公证。
+- Pingora data plane (actual API Gateway forwarding).
+- LLM canonical IR, protocol adapters, provider routing.
+- Agent discovery / config adapter / bridge.
+- MCP Gateway and tool ACL.
+- Plugin runtime (native / WASM).
+- OS Keychain integration for secrets.
+- Cross-platform packaging, signing, and notarization.
 
-## 安全边界
+## Security boundaries
 
-- SQLite 只保存 Secret 引用，不保存明文。
-- 控制面强制认证，默认仅回环地址。
-- Daemon 不嵌入 Tauri 主进程，可独立运行与测试。
-- 当前为开发骨架；生产使用前需完成 Secrets、权限与打包加固。
+- SQLite stores only secret references, never plaintext.
+- The control plane enforces authentication and binds to loopback by default.
+- The daemon is not embedded in the Tauri main process, so it can run and be tested standalone.
+- This is currently a development skeleton; secrets, permissions, and packaging must be hardened before production use.
 
-## 校验
+## Verification
 
 ```bash
 ./scripts/check.sh
 ```
 
-或分别执行：
+Or run each step individually:
 
 ```bash
 cargo fmt --all --check
@@ -108,4 +110,4 @@ cargo test --workspace --exclude octra-desktop
 pnpm typecheck && pnpm test && pnpm build
 ```
 
-Tauri 桌面端需要系统 WebView 依赖（macOS 为 Xcode Command Line Tools，Linux 为 WebKitGTK），因此 CI 的 Rust 任务暂不编译 `octra-desktop`。
+The Tauri desktop app requires system WebView dependencies (Xcode Command Line Tools on macOS, WebKitGTK on Linux), so the CI Rust job does not compile `octra-desktop` for now.
