@@ -104,7 +104,7 @@ async fn provider_validation_and_conflicts() {
     assert_eq!(body["base_url"], Value::Null);
 
     let mut bad = provider_body("x", "https://api.openai.com/v1");
-    bad["protocol"] = json!("gemini");
+    bad["protocol"] = json!("bogus");
     let (status, body) = create(&harness, PROVIDERS, bad).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["field"], "protocol");

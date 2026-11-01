@@ -771,3 +771,188 @@ fn _adapter_helpers_exist() {
     let _ = openai::request::encode_arguments;
     let _ = anthropic::response::stop_reason_to;
 }
+
+#[test]
+fn openai_responses_round_trip() {
+    use octra_llm_core::Protocol;
+    let request = serde_json::json!({
+        "model": "gpt-5",
+        "instructions": "be concise",
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{\"q\":1}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+        ],
+        "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+        "max_output_tokens": 64,
+        "store": true
+    });
+    let ir = decode_request(Protocol::OpenaiResponses, request).unwrap();
+    assert_eq!(ir.model, "gpt-5");
+    assert_eq!(ir.system.blocks, vec!["be concise"]);
+    assert_eq!(ir.messages.len(), 3);
+    assert_eq!(ir.max_tokens, Some(64));
+    assert_eq!(ir.tools.len(), 1);
+    assert_eq!(ir.extra["store"], true);
+
+    let encoded = encode_request(Protocol::OpenaiResponses, &ir).unwrap();
+    let back = decode_request(Protocol::OpenaiResponses, encoded).unwrap();
+    assert_eq!(back.system.blocks, ir.system.blocks);
+    assert_eq!(back.messages.len(), ir.messages.len());
+
+    let response = serde_json::json!({
+        "id": "resp_1",
+        "model": "gpt-5",
+        "status": "completed",
+        "output": [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]},
+            {"type": "function_call", "call_id": "call_2", "name": "lookup", "arguments": "{\"q\":2}"}
+        ],
+        "usage": {"input_tokens": 3, "output_tokens": 2, "output_tokens_details": {"reasoning_tokens": 1}}
+    });
+    let decoded = decode_response(Protocol::OpenaiResponses, response).unwrap();
+    assert_eq!(decoded.text(), "hello");
+    assert_eq!(decoded.finish_reason, FinishReason::ToolCalls);
+    assert_eq!(decoded.usage.input_tokens, 3);
+    assert_eq!(decoded.usage.reasoning_tokens, Some(1));
+    let encoded = encode_response(Protocol::OpenaiResponses, &decoded).unwrap();
+    assert_eq!(encoded["object"], "response");
+    assert_eq!(encoded["output_text"], "hello");
+}
+
+#[test]
+fn gemini_round_trip() {
+    use octra_llm_core::Protocol;
+    let request = serde_json::json!({
+        "contents": [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"functionCall": {"name": "lookup", "args": {"q": 1}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "lookup", "response": {"content": "ok"}}}]}
+        ],
+        "systemInstruction": {"parts": [{"text": "sys"}]},
+        "tools": [{"functionDeclarations": [{"name": "lookup", "parameters": {"type": "object"}}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 50}
+    });
+    let ir = decode_request(Protocol::Gemini, request).unwrap();
+    assert_eq!(ir.system.blocks, vec!["sys"]);
+    assert_eq!(ir.messages.len(), 3);
+    assert_eq!(ir.max_tokens, Some(50));
+    assert_eq!(ir.tools.len(), 1);
+
+    let encoded = encode_request(Protocol::Gemini, &ir).unwrap();
+    let back = decode_request(Protocol::Gemini, encoded).unwrap();
+    assert_eq!(back.system.blocks, ir.system.blocks);
+    assert_eq!(back.messages.len(), ir.messages.len());
+
+    let response = serde_json::json!({
+        "candidates": [{
+            "content": {"role": "model", "parts": [
+                {"text": "thinking", "thought": true},
+                {"text": "hello"}
+            ]},
+            "finishReason": "STOP"
+        }],
+        "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 5, "thoughtsTokenCount": 2}
+    });
+    let decoded = decode_response(Protocol::Gemini, response).unwrap();
+    assert_eq!(decoded.text(), "hello");
+    assert_eq!(decoded.finish_reason, FinishReason::Stop);
+    assert_eq!(decoded.usage.input_tokens, 4);
+    assert_eq!(decoded.usage.reasoning_tokens, Some(2));
+    let encoded = encode_response(Protocol::Gemini, &decoded).unwrap();
+    assert_eq!(encoded["candidates"][0]["finishReason"], "STOP");
+    assert_eq!(encoded["usageMetadata"]["promptTokenCount"], 4);
+}
+
+#[test]
+fn openai_responses_stream_round_trip() {
+    use octra_llm_core::Protocol;
+    let upstream = concat!(
+        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\"}}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n"
+    );
+    let mut decoder = stream_decoder(Protocol::OpenaiResponses);
+    let mut events = Vec::new();
+    for frame in sse_data_frames(upstream) {
+        let data = frame
+            .split_once('\n')
+            .map(|(_, data)| data)
+            .unwrap_or(&frame);
+        events.extend(decoder.decode_chunk(data).unwrap());
+    }
+    events.extend(decoder.finish());
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Usage(usage) if usage.output_tokens == 2))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Finish { .. }))
+    );
+
+    let mut encoder = stream_encoder(Protocol::OpenaiResponses);
+    let mut out = Vec::new();
+    for event in &events {
+        for frame in encoder.encode(event).unwrap() {
+            out.extend_from_sse(frame);
+        }
+    }
+    for frame in encoder.finish().unwrap() {
+        out.extend_from_sse(frame);
+    }
+    let rendered = render(&out);
+    assert!(rendered.contains("response.output_text.delta"));
+    assert!(rendered.contains("response.completed"));
+}
+
+#[test]
+fn gemini_stream_round_trip() {
+    use octra_llm_core::Protocol;
+    let upstream = concat!(
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]}}],\"modelVersion\":\"gemini-test\"}\n\n",
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"q\":1}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":2}}\n\n"
+    );
+    let mut decoder = stream_decoder(Protocol::Gemini);
+    let mut events = Vec::new();
+    for frame in sse_data_frames(upstream) {
+        events.extend(decoder.decode_chunk(&frame).unwrap());
+    }
+    events.extend(decoder.finish());
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "Hello"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::ToolCallStart { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Usage(_)))
+    );
+
+    let mut encoder = stream_encoder(Protocol::Gemini);
+    let mut out = Vec::new();
+    for event in &events {
+        for frame in encoder.encode(event).unwrap() {
+            out.extend_from_sse(frame);
+        }
+    }
+    for frame in encoder.finish().unwrap() {
+        out.extend_from_sse(frame);
+    }
+    let rendered = render(&out);
+    assert!(rendered.contains("functionCall"));
+    assert!(rendered.contains("finishReason"));
+}

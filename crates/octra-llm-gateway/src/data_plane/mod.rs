@@ -5,7 +5,7 @@ pub mod stream;
 pub mod translate;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderValue, header};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -34,9 +34,12 @@ const MAX_ATTEMPTS: usize = 3;
 pub fn router(state: LlmDataState) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(responses))
         .route("/v1/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_tokens))
         .route("/v1/models", get(list_models))
+        .route("/v1beta/models", get(gemini_list_models))
+        .route("/v1beta/models/{model_action}", post(gemini_model_action))
         .with_state(state)
 }
 
@@ -45,11 +48,134 @@ async fn chat_completions(
     incoming: Incoming,
     body: RemoteBody,
 ) -> LlmResponse {
-    LlmResponse(handle(state.0, incoming, body, Protocol::Openai).await)
+    LlmResponse(handle(state.0, incoming, body, Protocol::Openai, None, None).await)
+}
+
+async fn responses(
+    state: State<LlmDataState>,
+    incoming: Incoming,
+    body: RemoteBody,
+) -> LlmResponse {
+    LlmResponse(
+        handle(
+            state.0,
+            incoming,
+            body,
+            Protocol::OpenaiResponses,
+            None,
+            None,
+        )
+        .await,
+    )
 }
 
 async fn messages(state: State<LlmDataState>, incoming: Incoming, body: RemoteBody) -> LlmResponse {
-    LlmResponse(handle(state.0, incoming, body, Protocol::Anthropic).await)
+    LlmResponse(handle(state.0, incoming, body, Protocol::Anthropic, None, None).await)
+}
+
+async fn gemini_model_action(
+    state: State<LlmDataState>,
+    Path(model_action): Path<String>,
+    incoming: Incoming,
+    body: RemoteBody,
+) -> LlmResponse {
+    let Some((model, action)) = model_action.rsplit_once(':') else {
+        let error = GatewayError::not_found("missing Gemini model action").with_code("not_found");
+        return LlmResponse(protocol_response(Protocol::Gemini, &error));
+    };
+    let model = model.strip_prefix("models/").unwrap_or(model).to_string();
+    match action {
+        "generateContent" => LlmResponse(
+            handle(
+                state.0,
+                incoming,
+                body,
+                Protocol::Gemini,
+                Some(model),
+                Some(false),
+            )
+            .await,
+        ),
+        "streamGenerateContent" => LlmResponse(
+            handle(
+                state.0,
+                incoming,
+                body,
+                Protocol::Gemini,
+                Some(model),
+                Some(true),
+            )
+            .await,
+        ),
+        "countTokens" => LlmResponse(gemini_count_tokens(state.0, incoming, body, model).await),
+        other => {
+            let error = GatewayError::not_found(format!("unknown Gemini action '{other}'"));
+            LlmResponse(protocol_response(Protocol::Gemini, &error))
+        }
+    }
+}
+
+async fn gemini_count_tokens(
+    state: LlmDataState,
+    incoming: Incoming,
+    body: RemoteBody,
+    model: String,
+) -> Response {
+    let snapshot = state.runtime.snapshot().await;
+    let key = match authorize(&snapshot, &incoming).await {
+        Ok(key) => key,
+        Err(error) => return protocol_response(Protocol::Gemini, &error),
+    };
+    let consumer_id = key.as_ref().and_then(|key| key.consumer_id.as_deref());
+    if !snapshot.permits_model(consumer_id, &model) {
+        let error =
+            GatewayError::forbidden(format!("consumer is not allowed to use model '{model}'"))
+                .with_code("model_forbidden");
+        return protocol_response(Protocol::Gemini, &error);
+    }
+    let body = match body.0 {
+        Ok(body) => body,
+        Err(response) => return response.0,
+    };
+    let value: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return protocol_response(
+                Protocol::Gemini,
+                &GatewayError::invalid_request(format!("invalid JSON body: {error}")),
+            );
+        }
+    };
+    match decode_request(Protocol::Gemini, value) {
+        Ok(ir) => json_response(json!({"totalTokens": estimate_tokens(&ir)})),
+        Err(error) => protocol_response(Protocol::Gemini, &error.into_gateway()),
+    }
+}
+
+async fn gemini_list_models(state: State<LlmDataState>, request: Incoming) -> LlmResponse {
+    let state = state.0;
+    let snapshot = state.runtime.snapshot().await;
+    let consumer_id = match authorize(&snapshot, &request).await {
+        Ok(Some(key)) => {
+            touch(&state, &key.id).await;
+            key.consumer_id.clone()
+        }
+        Ok(None) => None,
+        Err(error) => return LlmResponse(protocol_response(Protocol::Gemini, &error)),
+    };
+    let models: Vec<Value> = snapshot
+        .model_listing()
+        .into_iter()
+        .filter(|model| snapshot.permits_model(consumer_id.as_deref(), &model.id))
+        .map(|model| {
+            json!({
+                "name": format!("models/{}", model.id),
+                "displayName": model.description,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent", "countTokens"],
+            })
+        })
+        .collect();
+    LlmResponse(json_response(json!({"models": models})))
 }
 
 async fn list_models(state: State<LlmDataState>, request: Incoming) -> LlmResponse {
@@ -165,7 +291,7 @@ async fn upstream_count(
     }
     let upstream_body = octra_llm_protocol::encode_request(Protocol::Anthropic, ir).ok()?;
     let upstream = state.upstream();
-    let url = upstream.endpoint(&provider).ok()?;
+    let url = upstream.endpoint(&provider, &target.model_id, false).ok()?;
     let mut body = upstream_body;
     body["model"] = json!(target.model_id);
     let builder = upstream
@@ -304,6 +430,8 @@ async fn handle(
     request: Incoming,
     body: RemoteBody,
     ingress: Protocol,
+    model_hint: Option<String>,
+    stream_override: Option<bool>,
 ) -> Response {
     let snapshot = state.runtime.snapshot().await;
     let key = match authorize(&snapshot, &request).await {
@@ -327,11 +455,14 @@ async fn handle(
         }
     };
 
-    let requested_model = value
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let requested_model = model_hint
+        .or_else(|| {
+            value
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
     let request_id = octra_data_plane::new_request_id();
     let mut tracker = UsageTracker::new(request_id.clone(), requested_model.clone());
     tracker.record.protocol = Some(ingress.to_string());
@@ -349,7 +480,7 @@ async fn handle(
         return with_request_id(protocol_response(ingress, &error), &request_id);
     }
 
-    let ir = match decode_request(ingress, value) {
+    let mut ir = match decode_request(ingress, value) {
         Ok(ir) => ir,
         Err(error) => {
             let error = error.into_gateway();
@@ -359,6 +490,13 @@ async fn handle(
             return protocol_response(ingress, &error);
         }
     };
+
+    if ir.model.is_empty() || ingress == Protocol::Gemini {
+        ir.model = requested_model.clone();
+    }
+    if let Some(stream) = stream_override {
+        ir.stream = Some(stream);
+    }
 
     let response = execute(
         &state,
@@ -419,6 +557,8 @@ async fn execute(
         return Err(fail_request(state, &mut tracker, error));
     }
 
+    let stateful_responses =
+        ingress == Protocol::OpenaiResponses && ir.extra.contains_key("previous_response_id");
     let upstream = state.upstream();
     let attempts = plan.attempts(snapshot.round_robin().next(plan.group_slot()));
     let mut last_error: Option<GatewayError> = None;
@@ -427,6 +567,15 @@ async fn execute(
         let Some(provider) = snapshot.provider(&target.provider_id) else {
             continue;
         };
+        if stateful_responses && provider.protocol != Protocol::OpenaiResponses {
+            last_error = Some(
+                GatewayError::invalid_request(
+                    "previous_response_id requires an OpenAI Responses upstream",
+                )
+                .with_code("previous_response_not_supported"),
+            );
+            continue;
+        }
         if !snapshot.permits_provider(consumer_id, &provider.id, &provider.name) {
             last_error = Some(
                 GatewayError::forbidden(format!(
@@ -527,13 +676,15 @@ async fn try_attempt(
     apply_model_limits(snapshot, provider, target, &mut ir);
 
     let mut body = translate::encode_request(target.protocol, &ir)?;
-    body["model"] = json!(target.model_id);
+    if target.protocol != Protocol::Gemini {
+        body["model"] = json!(target.model_id);
+    }
 
     if ir.stream == Some(true) && target.protocol == Protocol::Openai {
         body["stream_options"] = json!({"include_usage": true});
     }
 
-    let url = upstream.endpoint(provider)?;
+    let url = upstream.endpoint(provider, &target.model_id, ir.stream == Some(true))?;
     let builder = upstream.post_json(provider, &url, &body, ir.stream == Some(true))?;
 
     if ir.stream == Some(true) {

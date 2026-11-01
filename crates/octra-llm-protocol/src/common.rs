@@ -72,7 +72,9 @@ pub fn parse_sse_json(data: &str) -> ProtocolResult<Option<Value>> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamProtocol {
     OpenAi,
+    OpenAiResponses,
     Anthropic,
+    Gemini,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +91,16 @@ impl StreamCodec {
 
     pub const ANTHROPIC: StreamCodec = StreamCodec {
         protocol: UpstreamProtocol::Anthropic,
+        accept: "text/event-stream",
+    };
+
+    pub const OPENAI_RESPONSES: StreamCodec = StreamCodec {
+        protocol: UpstreamProtocol::OpenAiResponses,
+        accept: "text/event-stream",
+    };
+
+    pub const GEMINI: StreamCodec = StreamCodec {
+        protocol: UpstreamProtocol::Gemini,
         accept: "text/event-stream",
     };
 }

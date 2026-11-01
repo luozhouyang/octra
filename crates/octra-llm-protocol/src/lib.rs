@@ -10,7 +10,9 @@
 
 pub mod anthropic;
 pub mod common;
+pub mod gemini;
 pub mod openai;
+pub mod openai_responses;
 
 pub use common::{
     SseFrame, StreamCodec, UpstreamProtocol, parse_sse_json, sse_data_frame, sse_event_frame,
@@ -39,7 +41,9 @@ pub trait StreamEncoder {
 pub fn decode_request(protocol: Protocol, value: serde_json::Value) -> ProtocolResult<ChatRequest> {
     match protocol {
         Protocol::Openai => openai::request::decode_request(value),
+        Protocol::OpenaiResponses => openai_responses::request::decode_request(value),
         Protocol::Anthropic => anthropic::request::decode_request(value),
+        Protocol::Gemini => gemini::request::decode_request(value),
     }
 }
 
@@ -49,7 +53,9 @@ pub fn encode_request(
 ) -> ProtocolResult<serde_json::Value> {
     match protocol {
         Protocol::Openai => openai::request::encode_request(request),
+        Protocol::OpenaiResponses => openai_responses::request::encode_request(request),
         Protocol::Anthropic => anthropic::request::encode_request(request),
+        Protocol::Gemini => gemini::request::encode_request(request),
     }
 }
 
@@ -59,7 +65,9 @@ pub fn decode_response(
 ) -> ProtocolResult<ChatResponse> {
     match protocol {
         Protocol::Openai => openai::response::decode_response(value),
+        Protocol::OpenaiResponses => openai_responses::response::decode_response(value),
         Protocol::Anthropic => anthropic::response::decode_response(value),
+        Protocol::Gemini => gemini::response::decode_response(value),
     }
 }
 
@@ -69,7 +77,9 @@ pub fn encode_response(
 ) -> ProtocolResult<serde_json::Value> {
     match protocol {
         Protocol::Openai => openai::response::encode_response(response),
+        Protocol::OpenaiResponses => openai_responses::response::encode_response(response),
         Protocol::Anthropic => anthropic::response::encode_response(response),
+        Protocol::Gemini => gemini::response::encode_response(response),
     }
 }
 
@@ -77,7 +87,9 @@ pub fn encode_response(
 pub fn stream_decoder(protocol: Protocol) -> Box<dyn StreamDecoder + Send> {
     match protocol {
         Protocol::Openai => Box::new(openai::stream::Decoder::new()),
+        Protocol::OpenaiResponses => Box::new(openai_responses::stream::Decoder::new()),
         Protocol::Anthropic => Box::new(anthropic::stream::Decoder::new()),
+        Protocol::Gemini => Box::new(gemini::stream::Decoder::new()),
     }
 }
 
@@ -96,7 +108,9 @@ pub fn stream_encoder_with_usage(
 ) -> Box<dyn StreamEncoder + Send> {
     match protocol {
         Protocol::Openai => Box::new(openai::stream::Encoder::new().with_usage(include_usage)),
+        Protocol::OpenaiResponses => Box::new(openai_responses::stream::Encoder::new()),
         Protocol::Anthropic => Box::new(anthropic::stream::Encoder::new()),
+        Protocol::Gemini => Box::new(gemini::stream::Encoder::new()),
     }
 }
 
@@ -104,7 +118,9 @@ pub fn stream_encoder_with_usage(
 pub fn encode_error(protocol: Protocol, error: &GatewayError) -> serde_json::Value {
     match protocol {
         Protocol::Openai => openai::response::error_body(error),
+        Protocol::OpenaiResponses => openai_responses::response::error_body(error),
         Protocol::Anthropic => anthropic::response::error_body(error),
+        Protocol::Gemini => gemini::response::error_body(error),
     }
 }
 
@@ -112,7 +128,9 @@ pub fn encode_error(protocol: Protocol, error: &GatewayError) -> serde_json::Val
 pub fn encode_stream_error(protocol: Protocol, error: &GatewayError) -> Vec<SseFrame> {
     match protocol {
         Protocol::Openai => openai::response::error_frames(error),
+        Protocol::OpenaiResponses => openai_responses::response::error_frames(error),
         Protocol::Anthropic => anthropic::response::error_frames(error),
+        Protocol::Gemini => gemini::response::error_frames(error),
     }
 }
 

@@ -5,21 +5,27 @@ use serde_json::{Map, Value};
 #[serde(rename_all = "snake_case")]
 pub enum Protocol {
     Openai,
+    OpenaiResponses,
     Anthropic,
+    Gemini,
 }
 
 impl Protocol {
     pub fn as_str(&self) -> &'static str {
         match self {
             Protocol::Openai => "openai",
+            Protocol::OpenaiResponses => "openai_responses",
             Protocol::Anthropic => "anthropic",
+            Protocol::Gemini => "gemini",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "openai" | "openai_chat" | "chat_completions" => Some(Protocol::Openai),
+            "openai_responses" | "responses" => Some(Protocol::OpenaiResponses),
             "anthropic" | "messages" | "anthropic_messages" => Some(Protocol::Anthropic),
+            "gemini" | "google" | "generate_content" => Some(Protocol::Gemini),
             _ => None,
         }
     }

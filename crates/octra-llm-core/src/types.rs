@@ -375,7 +375,9 @@ impl ToolCall {
             crate::protocol::Protocol::Anthropic => {
                 self.anthropic_id.as_deref().unwrap_or(&self.id)
             }
-            crate::protocol::Protocol::Openai => &self.id,
+            crate::protocol::Protocol::Openai
+            | crate::protocol::Protocol::OpenaiResponses
+            | crate::protocol::Protocol::Gemini => &self.id,
         }
     }
 }

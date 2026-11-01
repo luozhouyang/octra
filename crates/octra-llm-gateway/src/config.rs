@@ -32,8 +32,9 @@ impl AuthType {
 
     pub fn default_for(protocol: Protocol) -> Self {
         match protocol {
-            Protocol::Openai => AuthType::Bearer,
+            Protocol::Openai | Protocol::OpenaiResponses => AuthType::Bearer,
             Protocol::Anthropic => AuthType::AnthropicApiKey,
+            Protocol::Gemini => AuthType::Header,
         }
     }
 }
@@ -103,6 +104,9 @@ impl ProviderConfig {
             auth = AuthType::Header;
             auth_header = Some(value.trim().to_string());
         }
+        if auth == AuthType::Header && auth_header.is_none() && protocol == Protocol::Gemini {
+            auth_header = Some("x-goog-api-key".to_string());
+        }
 
         let base_url = match record.base_url.as_deref().map(str::trim) {
             Some(url) if !url.is_empty() => normalize_base_url(url),
@@ -149,8 +153,9 @@ impl ProviderConfig {
 
 pub fn default_base_url(protocol: Protocol) -> &'static str {
     match protocol {
-        Protocol::Openai => "https://api.openai.com/v1",
+        Protocol::Openai | Protocol::OpenaiResponses => "https://api.openai.com/v1",
         Protocol::Anthropic => "https://api.anthropic.com/v1",
+        Protocol::Gemini => "https://generativelanguage.googleapis.com/v1beta",
     }
 }
 

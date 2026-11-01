@@ -875,3 +875,132 @@ async fn consumer_policies_restrict_models_and_providers() {
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
 }
+
+fn responses_upstream(_request: Captured) -> axum::response::Response {
+    json_response(json!({
+        "id": "resp_1",
+        "object": "response",
+        "model": "m",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hello from Responses"}]
+        }],
+        "usage": {"input_tokens": 3, "output_tokens": 4}
+    }))
+}
+
+fn gemini_upstream(_request: Captured) -> axum::response::Response {
+    json_response(json!({
+        "candidates": [{
+            "content": {"role": "model", "parts": [{"text": "Hello from Gemini"}]},
+            "finishReason": "STOP"
+        }],
+        "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 3}
+    }))
+}
+
+#[tokio::test]
+async fn responses_ingress_round_trip() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, responses_upstream).await;
+    let provider = harness
+        .provider(
+            "responses-mock",
+            "openai_responses",
+            &upstream.base_url,
+            "bearer",
+            0,
+        )
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        "/v1/responses",
+        &[],
+        json!({"model": "octra-default", "input": "hi"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["output_text"], "Hello from Responses");
+    assert_eq!(body["usage"]["input_tokens"], 3);
+    assert_eq!(upstream.requests()[0].path, "/v1/responses");
+}
+
+#[tokio::test]
+async fn gemini_ingress_to_openai_upstream() {
+    let (harness, upstream) = openai_harness().await;
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        "/v1beta/models/octra-default:generateContent",
+        &[],
+        json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["candidates"][0]["content"]["parts"][0]["text"],
+        "Hello from OpenAI"
+    );
+    assert_eq!(body["usageMetadata"]["promptTokenCount"], 11);
+    assert_eq!(upstream.request_count(), 1);
+}
+
+#[tokio::test]
+async fn openai_ingress_to_gemini_upstream() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, gemini_upstream).await;
+    let provider = harness
+        .provider("gemini-mock", "gemini", &upstream.base_url, "header", 0)
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "Hello from Gemini"
+    );
+    let captured = &upstream.requests()[0];
+    assert!(
+        captured.path.contains(":generateContent"),
+        "{}",
+        captured.path
+    );
+    assert!(
+        captured.body.get("model").is_none(),
+        "gemini body: {}",
+        captured.body
+    );
+}
+
+#[tokio::test]
+async fn responses_streaming_ingress() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+
+    let (status, _, body) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        "/v1/responses",
+        &[],
+        Some(json!({"model": "octra-default", "input": "hi", "stream": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("response.output_text.delta"), "body: {body}");
+    assert!(body.contains("response.completed"), "body: {body}");
+}

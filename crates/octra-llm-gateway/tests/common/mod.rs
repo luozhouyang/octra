@@ -108,7 +108,8 @@ async fn capture(
         let bearer = format!("Bearer {expected}");
         let authorized = headers.get("authorization").and_then(|v| v.to_str().ok())
             == Some(bearer.as_str())
-            || headers.get("x-api-key").and_then(|v| v.to_str().ok()) == Some(expected);
+            || headers.get("x-api-key").and_then(|v| v.to_str().ok()) == Some(expected)
+            || headers.get("x-goog-api-key").and_then(|v| v.to_str().ok()) == Some(expected);
         if !authorized {
             return json_status(
                 StatusCode::UNAUTHORIZED,

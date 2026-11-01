@@ -11,7 +11,7 @@ use octra_llm_core::{GatewayError, Protocol, Value};
 use octra_llm_protocol::UpstreamProtocol;
 use reqwest::{Client, RequestBuilder, Response, StatusCode, header};
 
-use crate::config::{AuthType, ProviderConfig};
+use crate::config::ProviderConfig;
 
 #[derive(Debug, Clone)]
 pub struct Upstream {
@@ -84,23 +84,15 @@ impl Upstream {
         })
     }
 
-    pub fn endpoint(&self, provider: &ProviderConfig) -> Result<String, GatewayError> {
-        let path = match provider.protocol {
-            Protocol::Openai => "/chat/completions",
-            Protocol::Anthropic => "/messages",
-        };
-        let url = provider.url(path);
-        if url.starts_with("http://") || url.starts_with("https://") {
-            Ok(url)
-        } else {
-            Err(GatewayError::config(format!(
-                "provider {}: base_url must start with http:// or https://",
-                provider.name
-            )))
-        }
+    pub fn endpoint(
+        &self,
+        provider: &ProviderConfig,
+        model: &str,
+        stream: bool,
+    ) -> Result<String, GatewayError> {
+        crate::adapter::for_protocol(provider.protocol).endpoint(provider, model, stream)
     }
 
-    /// Builds an authenticated POST for the provider.
     /// Builds an authenticated POST for the provider, tagging it with the
     /// request id generated for this gateway request.
     pub fn post_json(
@@ -129,34 +121,13 @@ impl Upstream {
         if stream {
             builder = builder.header(header::ACCEPT, "text/event-stream");
         }
-        if provider.protocol == Protocol::Anthropic {
-            builder = builder.header("anthropic-version", provider.anthropic_version.clone());
-        }
 
-        if let Some(key) = key {
-            builder = match provider.auth {
-                AuthType::Bearer => builder.bearer_auth(key),
-                AuthType::AnthropicApiKey => builder
-                    .header("x-api-key", key)
-                    .header("anthropic-version", provider.anthropic_version.clone()),
-                AuthType::Header => {
-                    let name = provider.auth_header.as_deref().unwrap_or("x-api-key");
-                    let name = header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-                        GatewayError::config(format!(
-                            "provider {}: invalid auth header name",
-                            provider.name
-                        ))
-                    })?;
-                    let value = header::HeaderValue::from_str(&key).map_err(|_| {
-                        GatewayError::config(format!(
-                            "provider {}: secret contains invalid header characters",
-                            provider.name
-                        ))
-                    })?;
-                    builder.header(name, value)
-                }
-                AuthType::None => builder,
-            };
+        let adapter = crate::adapter::for_protocol(provider.protocol);
+        for (name, value) in adapter.extra_headers(provider) {
+            builder = builder.header(name, value);
+        }
+        for (name, value) in adapter.auth_headers(provider, key.as_deref())? {
+            builder = builder.header(name, value);
         }
 
         for (name, value) in &provider.headers {
@@ -285,7 +256,9 @@ fn non_empty(value: String, message: impl FnOnce() -> String) -> Result<String, 
 pub fn wire(protocol: Protocol) -> UpstreamProtocol {
     match protocol {
         Protocol::Openai => UpstreamProtocol::OpenAi,
+        Protocol::OpenaiResponses => UpstreamProtocol::OpenAiResponses,
         Protocol::Anthropic => UpstreamProtocol::Anthropic,
+        Protocol::Gemini => UpstreamProtocol::Gemini,
     }
 }
 
@@ -301,6 +274,7 @@ pub fn mask_secret(secret: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AuthType;
     use octra_llm_core::ErrorKind;
     use octra_storage::LlmProviderRecord;
 
@@ -384,7 +358,7 @@ mod tests {
         let upstream = Upstream::new(&OctraConfig::default());
         let openai = provider("openai", "none", None, Some("https://api.openai.com/v1"));
         assert_eq!(
-            upstream.endpoint(&openai).unwrap(),
+            upstream.endpoint(&openai, "gpt-4o", false).unwrap(),
             "https://api.openai.com/v1/chat/completions"
         );
         let anthropic = provider(
@@ -394,11 +368,14 @@ mod tests {
             Some("https://api.anthropic.com/v1/"),
         );
         assert_eq!(
-            upstream.endpoint(&anthropic).unwrap(),
+            upstream.endpoint(&anthropic, "claude", false).unwrap(),
             "https://api.anthropic.com/v1/messages"
         );
         let bad = provider("openai", "none", None, Some("ftp://x"));
-        assert_eq!(upstream.endpoint(&bad).unwrap_err().kind, ErrorKind::Config);
+        assert_eq!(
+            upstream.endpoint(&bad, "m", false).unwrap_err().kind,
+            ErrorKind::Config
+        );
     }
 
     #[test]
