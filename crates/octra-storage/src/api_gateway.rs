@@ -4,9 +4,10 @@
 use std::collections::BTreeMap;
 
 use octra_api_core::{
-    ApiCredential, Consumer, CreateApiCredential, CreateConsumer, CreateRoute, CreateService,
-    CreateTarget, CreateUpstream, LoadBalanceAlgorithm, Route, Service, Target,
-    UpdateApiCredential, UpdateConsumer, UpdateRoute, UpdateService, UpdateTarget, UpdateUpstream,
+    ApiCredential, Consumer, CreateApiCredential, CreateConsumer, CreatePolicy, CreateRoute,
+    CreateService, CreateTarget, CreateUpstream, LoadBalanceAlgorithm, Policy, Route, Service,
+    Target, UpdateApiCredential, UpdateConsumer, UpdatePolicy, UpdateRoute, UpdateService,
+    UpdateTarget, UpdateUpstream,
 };
 use octra_core::{Error, Result};
 use sqlx::sqlite::SqliteRow;
@@ -23,6 +24,7 @@ const TARGET_COLUMNS: &str =
     "id, upstream_id, url, weight, healthy, enabled, created_at, updated_at";
 const CONSUMER_COLUMNS: &str = "id, name, kind, created_at, updated_at";
 const CREDENTIAL_COLUMNS: &str = "id, consumer_id, name, kind, key_prefix, key_hash, enabled, expires_at, last_used_at, created_at";
+const POLICY_COLUMNS: &str = "id, name, scope, consumer_id, document, created_at, updated_at";
 
 const SQLITE_CONSTRAINT_UNIQUE: &str = "2067";
 const SQLITE_CONSTRAINT_PRIMARYKEY: &str = "1555";
@@ -36,6 +38,7 @@ pub struct ApiRuntimeData {
     pub upstreams: Vec<UpstreamRow>,
     pub targets: Vec<Target>,
     pub credentials: Vec<ApiCredential>,
+    pub policies: Vec<Policy>,
     pub counts: ApiRuntimeCounts,
 }
 
@@ -172,6 +175,22 @@ fn map_consumer(row: &SqliteRow) -> Result<Consumer> {
         kind: decode(row.try_get("kind"), "consumer")?,
         created_at: parse_timestamp(&decode::<String>(row.try_get("created_at"), "consumer")?)?,
         updated_at: parse_timestamp(&decode::<String>(row.try_get("updated_at"), "consumer")?)?,
+    })
+}
+
+fn map_policy(row: &SqliteRow) -> Result<Policy> {
+    let document: String = decode(row.try_get("document"), "policy")?;
+    Ok(Policy {
+        id: decode(row.try_get("id"), "policy")?,
+        name: decode(row.try_get("name"), "policy")?,
+        scope: decode(row.try_get("scope"), "policy")?,
+        consumer_id: row
+            .try_get("consumer_id")
+            .map_err(|e| Error::Storage(format!("policy: {e}")))?,
+        document: serde_json::from_str(&document)
+            .map_err(|e| Error::Storage(format!("invalid policy document: {e}")))?,
+        created_at: parse_timestamp(&decode::<String>(row.try_get("created_at"), "policy")?)?,
+        updated_at: parse_timestamp(&decode::<String>(row.try_get("updated_at"), "policy")?)?,
     })
 }
 
@@ -710,6 +729,98 @@ impl Storage {
         affected(result.rows_affected(), "consumer")
     }
 
+    // Policies
+
+    pub async fn list_policies(&self) -> Result<Vec<Policy>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {POLICY_COLUMNS} FROM policies ORDER BY name ASC, id ASC"
+        ))
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "policies"))?;
+        rows.iter().map(map_policy).collect()
+    }
+
+    pub async fn get_policy(&self, id: &str) -> Result<Option<Policy>> {
+        let row = sqlx::query(&format!(
+            "SELECT {POLICY_COLUMNS} FROM policies WHERE id = ?"
+        ))
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "policy"))?;
+        row.as_ref().map(map_policy).transpose()
+    }
+
+    pub async fn create_policy(&self, input: &CreatePolicy) -> Result<Policy> {
+        let id = input.id.clone().unwrap_or_else(|| new_id("pol"));
+        let scope = input.scope.clone().unwrap_or_else(|| {
+            if input.consumer_id.is_some() {
+                "consumer".into()
+            } else {
+                "global".into()
+            }
+        });
+        let document = serde_json::to_string(
+            input
+                .document
+                .as_ref()
+                .unwrap_or(&serde_json::Value::Object(Default::default())),
+        )
+        .map_err(|e| Error::Storage(format!("cannot serialize policy document: {e}")))?;
+
+        sqlx::query(&format!(
+            "INSERT INTO policies (id, name, scope, consumer_id, document, created_at, updated_at)              VALUES (?, ?, ?, ?, ?, {now}, {now})",
+            now = now_expr()
+        ))
+        .bind(&id)
+        .bind(&input.name)
+        .bind(&scope)
+        .bind(&input.consumer_id)
+        .bind(document)
+        .execute(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "policy"))?;
+
+        self.get_policy(&id)
+            .await?
+            .ok_or_else(|| Error::Storage("policy disappeared after insert".into()))
+    }
+
+    pub async fn update_policy(&self, id: &str, input: &UpdatePolicy) -> Result<Policy> {
+        let document = input
+            .document
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| Error::Storage(format!("cannot serialize policy document: {e}")))?;
+        let result = sqlx::query(&format!(
+            "UPDATE policies SET                 name = COALESCE(?, name),                 scope = COALESCE(?, scope),                 consumer_id = COALESCE(?, consumer_id),                 document = COALESCE(?, document),                 updated_at = {now}              WHERE id = ?",
+            now = now_expr()
+        ))
+        .bind(&input.name)
+        .bind(&input.scope)
+        .bind(&input.consumer_id)
+        .bind(document)
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "policy"))?;
+        affected(result.rows_affected(), "policy")?;
+        self.get_policy(id)
+            .await?
+            .ok_or_else(|| Error::Storage("not_found: policy not found".into()))
+    }
+
+    pub async fn delete_policy(&self, id: &str) -> Result<()> {
+        let result = sqlx::query("DELETE FROM policies WHERE id = ?")
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(|e| map_db_error(e, "policy"))?;
+        affected(result.rows_affected(), "policy")
+    }
+
     // Credentials
 
     pub async fn list_credentials(&self, consumer_id: Option<&str>) -> Result<Vec<ApiCredential>> {
@@ -907,6 +1018,17 @@ impl Storage {
             .map(map_credential)
             .collect::<Result<Vec<_>>>()?;
 
+        let policies = sqlx::query(&format!(
+            "SELECT {POLICY_COLUMNS} FROM policies ORDER BY name ASC, id ASC"
+        ))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| map_db_error(e, "policies"))?;
+        let policies = policies
+            .iter()
+            .map(map_policy)
+            .collect::<Result<Vec<_>>>()?;
+
         let counts = sqlx::query(
             "SELECT
                 (SELECT COUNT(*) FROM services) AS services,
@@ -930,6 +1052,7 @@ impl Storage {
             upstreams,
             targets,
             credentials,
+            policies,
             counts: ApiRuntimeCounts {
                 services: decode(counts.try_get("services"), "counts")?,
                 routes: decode(counts.try_get("routes"), "counts")?,

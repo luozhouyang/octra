@@ -9,13 +9,15 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use octra_api_core::{
-    ApiCredential, Consumer, CreateApiCredential, CreateConsumer, CreateRoute, CreateService,
-    CreateTarget, CreateUpstream, Route, Service, Target, UpdateApiCredential, UpdateConsumer,
-    UpdateRoute, UpdateService, UpdateTarget, UpdateUpstream, Upstream,
+    ApiCredential, Consumer, CreateApiCredential, CreateConsumer, CreatePolicy, CreateRoute,
+    CreateService, CreateTarget, CreateUpstream, Policy, Route, Service, Target,
+    UpdateApiCredential, UpdateConsumer, UpdatePolicy, UpdateRoute, UpdateService, UpdateTarget,
+    UpdateUpstream, Upstream,
 };
 use octra_core::SnapshotInfo;
 use octra_plugin_api::Scope;
 use octra_storage::plugins::{PluginConfigRecord, PluginRecord};
+use octra_storage::{AuditLog, RequestLog};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -72,8 +74,16 @@ pub fn router(state: ApiControlState) -> Router {
                 .put(update_credential)
                 .delete(delete_credential),
         )
+        .route("/api/v1/policies", get(list_policies).post(create_policy))
+        .route(
+            "/api/v1/policies/{id}",
+            get(get_policy).put(update_policy).delete(delete_policy),
+        )
         .route("/api/v1/api/reload", post(reload))
         .route("/api/v1/api/metrics", get(metrics))
+        .route("/api/v1/api/metrics/prometheus", get(prometheus_metrics))
+        .route("/api/v1/system/logs", get(system_logs))
+        .route("/api/v1/audit-logs", get(audit_logs))
         .route("/api/v1/plugins", get(list_plugins))
         .route("/api/v1/plugins/reload", post(reload_plugins))
         .route("/api/v1/plugins/{id}", get(get_plugin).put(update_plugin))
@@ -390,6 +400,19 @@ pub async fn reload_plugins(State(state): State<ApiControlState>) -> ControlResu
 /// `GET /api/v1/api/metrics` on the authenticated control plane.
 pub async fn metrics(State(state): State<ApiControlState>) -> Json<crate::MetricsSnapshot> {
     Json(state.metrics.snapshot())
+}
+
+/// `GET /api/v1/api/metrics/prometheus`.
+pub async fn prometheus_metrics(
+    State(state): State<ApiControlState>,
+) -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.metrics.prometheus(),
+    )
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -823,4 +846,170 @@ pub async fn delete_credential(
     state.storage.delete_credential(&id).await?;
     reload_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn validate_policy_scope(scope: &str) -> ControlResult<()> {
+    match scope {
+        "global" | "consumer" => Ok(()),
+        _ => Err(ControlError::bad_request(
+            "policy scope must be global or consumer",
+        )),
+    }
+}
+
+fn validate_policy_document(document: &Value) -> ControlResult<()> {
+    let object = document
+        .as_object()
+        .ok_or_else(|| ControlError::bad_request("policy document must be a JSON object"))?;
+    if let Some(routes) = object.get("allowed_routes") {
+        let routes = routes.as_array().ok_or_else(|| {
+            ControlError::bad_request("policy.allowed_routes must be an array of route ids")
+        })?;
+        if routes.iter().any(|route| !route.is_string()) {
+            return Err(ControlError::bad_request(
+                "policy.allowed_routes must contain only strings",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn require_policy_consumer(
+    state: &ApiControlState,
+    consumer_id: Option<&str>,
+) -> ControlResult<()> {
+    if let Some(consumer_id) = consumer_id
+        && state.storage.get_consumer(consumer_id).await?.is_none()
+    {
+        return Err(not_found("consumer", consumer_id));
+    }
+    Ok(())
+}
+
+/// `GET /api/v1/policies`.
+pub async fn list_policies(
+    State(state): State<ApiControlState>,
+) -> ControlResult<Json<Vec<Policy>>> {
+    Ok(Json(state.storage.list_policies().await?))
+}
+
+/// `GET /api/v1/policies/{id}`.
+pub async fn get_policy(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+) -> ControlResult<Json<Policy>> {
+    let policy = state
+        .storage
+        .get_policy(&id)
+        .await?
+        .ok_or_else(|| not_found("policy", &id))?;
+    Ok(Json(policy))
+}
+
+/// `POST /api/v1/policies`.
+pub async fn create_policy(
+    State(state): State<ApiControlState>,
+    payload: Result<Json<CreatePolicy>, JsonRejection>,
+) -> ControlResult<(StatusCode, Json<Policy>)> {
+    let request = read_json(payload).await?;
+    if request.name.trim().is_empty() {
+        return Err(ControlError::bad_request("policy name must not be empty"));
+    }
+    require_policy_consumer(&state, request.consumer_id.as_deref()).await?;
+    let scope = request.scope.clone().unwrap_or_else(|| {
+        if request.consumer_id.is_some() {
+            "consumer".into()
+        } else {
+            "global".into()
+        }
+    });
+    validate_policy_scope(&scope)?;
+    if let Some(document) = &request.document {
+        validate_policy_document(document)?;
+    }
+
+    let policy = state
+        .storage
+        .create_policy(&CreatePolicy {
+            scope: Some(scope),
+            ..request
+        })
+        .await?;
+    reload_runtime(&state).await?;
+    Ok((StatusCode::CREATED, Json(policy)))
+}
+
+/// `PUT /api/v1/policies/{id}`.
+pub async fn update_policy(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<UpdatePolicy>, JsonRejection>,
+) -> ControlResult<Json<Policy>> {
+    let request = read_json(payload).await?;
+    state
+        .storage
+        .get_policy(&id)
+        .await?
+        .ok_or_else(|| not_found("policy", &id))?;
+    if let Some(scope) = &request.scope {
+        validate_policy_scope(scope)?;
+    }
+    require_policy_consumer(&state, request.consumer_id.as_deref()).await?;
+    if let Some(document) = &request.document {
+        validate_policy_document(document)?;
+    }
+
+    let policy = state.storage.update_policy(&id, &request).await?;
+    reload_runtime(&state).await?;
+    Ok(Json(policy))
+}
+
+/// `DELETE /api/v1/policies/{id}`.
+pub async fn delete_policy(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+) -> ControlResult<StatusCode> {
+    state.storage.delete_policy(&id).await?;
+    reload_runtime(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RequestLogQuery {
+    pub limit: Option<u32>,
+    pub request_id: Option<String>,
+    pub route_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct AuditLogQuery {
+    pub limit: Option<u32>,
+}
+
+/// `GET /api/v1/system/logs`.
+pub async fn system_logs(
+    State(state): State<ApiControlState>,
+    Query(query): Query<RequestLogQuery>,
+) -> ControlResult<Json<Vec<RequestLog>>> {
+    let logs = state
+        .storage
+        .list_request_logs(
+            query.limit.unwrap_or(100),
+            query.request_id.as_deref(),
+            query.route_id.as_deref(),
+        )
+        .await?;
+    Ok(Json(logs))
+}
+
+/// `GET /api/v1/audit-logs`.
+pub async fn audit_logs(
+    State(state): State<ApiControlState>,
+    Query(query): Query<AuditLogQuery>,
+) -> ControlResult<Json<Vec<AuditLog>>> {
+    let logs = state
+        .storage
+        .list_audit_logs(query.limit.unwrap_or(100))
+        .await?;
+    Ok(Json(logs))
 }

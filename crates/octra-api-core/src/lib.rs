@@ -220,6 +220,38 @@ pub struct UpdateConsumer {
     pub kind: Option<String>,
 }
 
+/// A policy document. API gateway policies grant route access; a policy with
+/// no consumer applies to every consumer, including anonymous traffic.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Policy {
+    pub id: String,
+    pub name: String,
+    pub scope: String,
+    pub consumer_id: Option<String>,
+    pub document: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CreatePolicy {
+    pub id: Option<String>,
+    pub name: String,
+    pub scope: Option<String>,
+    pub consumer_id: Option<String>,
+    pub document: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct UpdatePolicy {
+    pub name: Option<String>,
+    pub scope: Option<String>,
+    pub consumer_id: Option<String>,
+    pub document: Option<serde_json::Value>,
+}
+
 /// Stored API credential metadata. Plaintext keys are never persisted.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApiCredential {

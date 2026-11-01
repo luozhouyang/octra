@@ -59,6 +59,10 @@ pub struct RuntimeSnapshot {
     /// Upstreams per service id, in name-then-id order.
     service_upstreams: HashMap<String, Vec<String>>,
     target_pools: HashMap<String, Arc<TargetPool>>,
+    /// Route ids granted by consumer-scoped policies.
+    consumer_policy_routes: HashMap<String, Vec<String>>,
+    /// Route ids granted by policies that apply to every consumer.
+    global_policy_routes: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for RuntimeSnapshot {
@@ -89,6 +93,21 @@ impl RuntimeSnapshot {
 
         let target_pools = compile_pools(&data);
 
+        let mut consumer_policy_routes: HashMap<String, Vec<String>> = HashMap::new();
+        let mut global_policy_routes: Option<Vec<String>> = None;
+        for policy in &data.policies {
+            let routes = allowed_routes(&policy.document);
+            match &policy.consumer_id {
+                Some(consumer_id) => consumer_policy_routes
+                    .entry(consumer_id.clone())
+                    .or_default()
+                    .extend(routes),
+                None => global_policy_routes
+                    .get_or_insert_with(Vec::new)
+                    .extend(routes),
+            }
+        }
+
         let mut service_upstreams: HashMap<String, Vec<String>> = HashMap::new();
         for upstream in &data.upstreams {
             service_upstreams
@@ -114,7 +133,30 @@ impl RuntimeSnapshot {
             credential_index,
             service_upstreams,
             target_pools,
+            consumer_policy_routes,
+            global_policy_routes,
         }
+    }
+
+    /// Whether the consumer may reach the route. With no applicable policy the
+    /// route is allowed; once a policy applies, only granted routes pass.
+    pub fn permits_route(&self, consumer_id: Option<&str>, route_id: &str) -> bool {
+        let mut restricted = false;
+        if let Some(allowed) = &self.global_policy_routes {
+            restricted = true;
+            if route_listed(allowed, route_id) {
+                return true;
+            }
+        }
+        if let Some(consumer_id) = consumer_id
+            && let Some(allowed) = self.consumer_policy_routes.get(consumer_id)
+        {
+            restricted = true;
+            if route_listed(allowed, route_id) {
+                return true;
+            }
+        }
+        !restricted
     }
 
     /// Resolves a plaintext API key to an active credential.
@@ -136,10 +178,21 @@ impl RuntimeSnapshot {
             .map(String::as_str)
     }
 
-    /// The load-balancing pool of a service's first upstream.
+    /// The first upstream pool for a service that has eligible targets.
+    /// Falls back to the first configured pool so exhaustion is reported by
+    /// the proxy as an unavailable upstream rather than a missing one.
     pub fn pool_for_service(&self, service_id: &str) -> Option<&Arc<TargetPool>> {
-        self.target_pools
-            .get(self.upstream_for_service(service_id)?)
+        let mut fallback = None;
+        for upstream_id in self.service_upstreams.get(service_id)? {
+            let Some(pool) = self.target_pools.get(upstream_id) else {
+                continue;
+            };
+            if pool.has_eligible() {
+                return Some(pool);
+            }
+            fallback.get_or_insert(pool);
+        }
+        fallback
     }
 
     pub fn pools(&self) -> impl Iterator<Item = (&str, &Arc<TargetPool>)> {
@@ -147,6 +200,26 @@ impl RuntimeSnapshot {
             .iter()
             .map(|(id, pool)| (id.as_str(), pool))
     }
+}
+
+fn allowed_routes(document: &serde_json::Value) -> Vec<String> {
+    document
+        .get("allowed_routes")
+        .and_then(serde_json::Value::as_array)
+        .map(|routes| {
+            routes
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn route_listed(allowed: &[String], route_id: &str) -> bool {
+    allowed
+        .iter()
+        .any(|route| route == "*" || route == route_id)
 }
 
 fn to_credential_entry(credential: &ApiCredential) -> CredentialEntry {

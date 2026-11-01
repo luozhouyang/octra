@@ -12,6 +12,7 @@ http.workspace = true
 octra-api-core.workspace = true
 octra-core.workspace = true
 octra-storage.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true

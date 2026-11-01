@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use axum::Router;
-use octra_api_gateway::{ApiControlState, ApiDataState, ApiMetrics};
+use octra_api_gateway::{ApiControlState, ApiDataState, ApiMetrics, AuditState};
 use octra_config::Workspace;
 use octra_gateway_api::{AppState, AuthState};
 use octra_gateway_runtime::GatewayRuntime;
@@ -90,6 +90,12 @@ async fn main() -> anyhow::Result<()> {
             storage.clone(),
         )))
         .layer(axum::middleware::from_fn_with_state(
+            AuditState {
+                storage: storage.clone(),
+            },
+            octra_api_gateway::record_control_audit,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
             AuthState { token },
             octra_gateway_api::auth::require_bearer,
         ))
@@ -107,7 +113,8 @@ async fn main() -> anyhow::Result<()> {
             config.clone(),
         )))
         .merge(octra_api_gateway::data_plane_router(
-            ApiDataState::with_plugins(api_runtime, config.clone(), api_metrics, plugin_runtime),
+            ApiDataState::with_plugins(api_runtime, config.clone(), api_metrics, plugin_runtime)
+                .with_storage(storage.clone()),
         ));
 
     let control_listener = tokio::net::TcpListener::bind(&config.daemon.control_bind)

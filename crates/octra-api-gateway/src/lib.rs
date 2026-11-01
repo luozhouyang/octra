@@ -7,6 +7,7 @@
 //! * [`control_router`] exposes CRUD endpoints for the gateway configuration on
 //!   the control plane. The daemon protects it with the shared bearer token.
 
+pub mod audit;
 pub mod control;
 pub mod data;
 pub mod error;
@@ -22,6 +23,7 @@ use octra_gateway_runtime::GatewayRuntime;
 use octra_plugin_runtime::PluginRuntime;
 use octra_storage::Storage;
 
+pub use audit::{AuditState, record_control_audit};
 pub use error::ControlError;
 pub use key::{GeneratedApiKey, generate_api_key};
 pub use metrics::{ApiMetrics, MetricsSnapshot};
@@ -30,6 +32,7 @@ pub use metrics::{ApiMetrics, MetricsSnapshot};
 pub struct ApiDataState {
     pub runtime: Arc<GatewayRuntime>,
     pub plugins: Arc<PluginRuntime>,
+    pub storage: Option<Arc<Storage>>,
     pub config: Arc<OctraConfig>,
     pub client: reqwest::Client,
     pub metrics: Arc<ApiMetrics>,
@@ -58,10 +61,18 @@ impl ApiDataState {
         Self {
             runtime,
             plugins,
+            storage: None,
             config,
             client,
             metrics,
         }
+    }
+
+    /// Records access logs to storage. Without this the data plane keeps its
+    /// existing in-memory logging only.
+    pub fn with_storage(mut self, storage: Arc<Storage>) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     pub fn metrics(&self) -> &Arc<ApiMetrics> {

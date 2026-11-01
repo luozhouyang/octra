@@ -76,6 +76,10 @@ impl TargetPool {
         self.eligible_refs().into_iter().map(Arc::clone).collect()
     }
 
+    pub fn has_eligible(&self) -> bool {
+        self.targets.iter().any(|endpoint| endpoint.eligible)
+    }
+
     /// Selects the next eligible target, or `None` when none qualify.
     pub fn select(&self) -> Option<Arc<Endpoint>> {
         self.select_excluding(|_| false)

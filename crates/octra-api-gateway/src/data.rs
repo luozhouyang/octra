@@ -30,6 +30,7 @@ use octra_plugin_api::{
     UpstreamRequestContext,
 };
 use octra_plugin_runtime::PluginChain;
+use octra_storage::NewRequestLog;
 
 use crate::ApiDataState;
 
@@ -84,6 +85,21 @@ pub async fn proxy(
             request_id = %request_id,
             "api gateway: no route"
         );
+        persist_request_log(
+            &state,
+            NewRequestLog {
+                request_id: request_id.clone(),
+                method: method.as_str().to_string(),
+                path: path.clone(),
+                status: response.status().as_u16(),
+                latency_ms: elapsed.as_millis() as u64,
+                route_id: None,
+                service_id: None,
+                target_url: None,
+                consumer_id: None,
+                error: None,
+            },
+        );
         return with_request_id(response, &request_id);
     };
 
@@ -126,6 +142,7 @@ pub async fn proxy(
             let elapsed = started.elapsed();
             state.metrics.record(response.status().as_u16(), elapsed, 0);
             return complete(
+                &state,
                 &chain,
                 &subject,
                 Finish {
@@ -147,6 +164,25 @@ pub async fn proxy(
         let elapsed = started.elapsed();
         state.metrics.record(response.status().as_u16(), elapsed, 0);
         return complete(
+            &state,
+            &chain,
+            &subject,
+            Finish {
+                latency: elapsed,
+                target: None,
+                error: None,
+            },
+            response,
+        )
+        .await;
+    }
+
+    if !snapshot.permits_route(consumer_id.as_deref(), route_id.as_str()) {
+        let response = forbidden();
+        let elapsed = started.elapsed();
+        state.metrics.record(response.status().as_u16(), elapsed, 0);
+        return complete(
+            &state,
             &chain,
             &subject,
             Finish {
@@ -165,6 +201,7 @@ pub async fn proxy(
         state.metrics.record_upstream_error();
         state.metrics.record(response.status().as_u16(), elapsed, 0);
         return complete(
+            &state,
             &chain,
             &subject,
             Finish {
@@ -191,6 +228,7 @@ pub async fn proxy(
         state.metrics.record_upstream_error();
         state.metrics.record(response.status().as_u16(), elapsed, 0);
         return complete(
+            &state,
             &chain,
             &subject,
             Finish {
@@ -219,6 +257,7 @@ pub async fn proxy(
             let elapsed = started.elapsed();
             state.metrics.record(response.status().as_u16(), elapsed, 0);
             return complete(
+                &state,
                 &chain,
                 &subject,
                 Finish {
@@ -255,6 +294,7 @@ pub async fn proxy(
         let elapsed = started.elapsed();
         state.metrics.record(response.status().as_u16(), elapsed, 0);
         return complete(
+            &state,
             &chain,
             &subject,
             Finish {
@@ -278,6 +318,7 @@ pub async fn proxy(
                 let elapsed = started.elapsed();
                 state.metrics.record(response.status().as_u16(), elapsed, 0);
                 return complete(
+                    &state,
                     &chain,
                     &subject,
                     Finish {
@@ -325,6 +366,7 @@ pub async fn proxy(
                         .metrics
                         .record(replacement.status().as_u16(), elapsed, 0);
                     return complete(
+                        &state,
                         &chain,
                         &subject,
                         Finish {
@@ -353,6 +395,7 @@ pub async fn proxy(
             );
             let response = Response::from_parts(response_parts, filtered);
             complete(
+                &state,
                 &chain,
                 &subject,
                 Finish {
@@ -389,6 +432,7 @@ pub async fn proxy(
                 Err(error) => plugin_failure(error),
             };
             complete(
+                &state,
                 &chain,
                 &subject,
                 Finish {
@@ -439,6 +483,7 @@ struct OwnedBodyContext {
 }
 
 async fn complete(
+    state: &ApiDataState,
     chain: &PluginChain,
     subject: &LogSubject<'_>,
     finish: Finish,
@@ -496,7 +541,34 @@ async fn complete(
         );
     }
 
+    persist_request_log(
+        state,
+        NewRequestLog {
+            request_id: request_id.to_string(),
+            method: method.as_str().to_string(),
+            path: path.to_string(),
+            status,
+            latency_ms: finish.latency.as_millis() as u64,
+            route_id: Some(route.id.clone()),
+            service_id: Some(service.id.clone()),
+            target_url: finish.target.clone(),
+            consumer_id: consumer.map(str::to_string),
+            error: finish.error.clone(),
+        },
+    );
+
     with_request_id(response, request_id)
+}
+
+fn persist_request_log(state: &ApiDataState, log: NewRequestLog) {
+    let Some(storage) = state.storage.clone() else {
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(error) = storage.insert_request_log(&log).await {
+            tracing::warn!(%error, "api gateway: cannot persist request log");
+        }
+    });
 }
 
 fn plugin_failure(error: PluginError) -> Response {
@@ -602,6 +674,14 @@ fn unauthorized() -> Response {
         .headers_mut()
         .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
     response
+}
+
+fn forbidden() -> Response {
+    json_error(
+        StatusCode::FORBIDDEN,
+        "forbidden",
+        "consumer policy does not grant this route",
+    )
 }
 
 fn bad_gateway(message: &str) -> Response {

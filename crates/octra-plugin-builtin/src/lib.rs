@@ -4,6 +4,7 @@
 //! the hot path allocation-light. They are trusted, in-process Rust code;
 //! third-party extensions will use the WASM runtime instead.
 
+mod circuit_breaker;
 mod cors;
 mod header_rewrite;
 mod rate_limit;
@@ -13,6 +14,7 @@ use octra_plugin_api::{Capability, PluginKind, PluginManifest, PluginRuntimeKind
 use octra_plugin_runtime::PluginRegistry;
 use serde_json::Value;
 
+pub use circuit_breaker::CircuitBreakerFactory;
 pub use cors::CorsFactory;
 pub use header_rewrite::HeaderRewriteFactory;
 pub use rate_limit::RateLimitFactory;
@@ -22,6 +24,7 @@ pub fn register(registry: &mut PluginRegistry) {
     registry.register(RequestIdFactory);
     registry.register(CorsFactory);
     registry.register(RateLimitFactory);
+    registry.register(CircuitBreakerFactory);
     registry.register(HeaderRewriteFactory);
 }
 

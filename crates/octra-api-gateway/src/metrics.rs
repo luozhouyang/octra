@@ -59,6 +59,47 @@ impl ApiMetrics {
         self.upstream_errors.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Prometheus text exposition (version 0.0.4).
+    pub fn prometheus(&self) -> String {
+        let snapshot = self.snapshot();
+        let micros = self.latency_micros_total.load(Ordering::Relaxed);
+        format!(
+            "\
+# HELP octra_api_requests_total Total requests handled by the API data plane.
+# TYPE octra_api_requests_total counter
+octra_api_requests_total {requests_total}
+# HELP octra_api_responses_total Responses grouped by status class.
+# TYPE octra_api_responses_total counter
+octra_api_responses_total{{class=\"2xx\"}} {status_2xx}
+octra_api_responses_total{{class=\"3xx\"}} {status_3xx}
+octra_api_responses_total{{class=\"4xx\"}} {status_4xx}
+octra_api_responses_total{{class=\"5xx\"}} {status_5xx}
+# HELP octra_api_upstream_errors_total Upstream transport failures.
+# TYPE octra_api_upstream_errors_total counter
+octra_api_upstream_errors_total {upstream_errors}
+# HELP octra_api_retries_total Retried upstream attempts.
+# TYPE octra_api_retries_total counter
+octra_api_retries_total {retries}
+# HELP octra_api_request_duration_seconds Request latency.
+# TYPE octra_api_request_duration_seconds summary
+octra_api_request_duration_seconds_sum {seconds}
+octra_api_request_duration_seconds_count {requests_total}
+# HELP octra_api_uptime_seconds Seconds since the first recorded request.
+# TYPE octra_api_uptime_seconds gauge
+octra_api_uptime_seconds {uptime}
+",
+            requests_total = snapshot.requests_total,
+            status_2xx = snapshot.status_2xx,
+            status_3xx = snapshot.status_3xx,
+            status_4xx = snapshot.status_4xx,
+            status_5xx = snapshot.status_5xx,
+            upstream_errors = snapshot.upstream_errors,
+            retries = snapshot.retries,
+            seconds = micros as f64 / 1_000_000.0,
+            uptime = snapshot.uptime_secs,
+        )
+    }
+
     pub fn snapshot(&self) -> MetricsSnapshot {
         let total = self.requests_total.load(Ordering::Relaxed);
         let micros = self.latency_micros_total.load(Ordering::Relaxed);
@@ -102,5 +143,11 @@ mod tests {
         assert_eq!(snapshot.upstream_errors, 1);
         assert_eq!(snapshot.retries, 3);
         assert!(snapshot.latency_avg_ms > 0.0);
+
+        let text = metrics.prometheus();
+        assert!(text.contains("octra_api_requests_total 4"));
+        assert!(text.contains("octra_api_responses_total{class=\"4xx\"} 1"));
+        assert!(text.contains("octra_api_upstream_errors_total 1"));
+        assert!(text.contains("octra_api_request_duration_seconds_count 4"));
     }
 }
