@@ -1,15 +1,20 @@
 [package]
 name = "octra-gateway-runtime"
-description = "Runtime snapshot and reload plumbing for the Octra gateway"
+description = "Compiled runtime snapshot and reload plumbing for the Octra API gateway"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+hex.workspace = true
+http.workspace = true
+octra-api-core.workspace = true
 octra-core.workspace = true
 octra-storage.workspace = true
+sha2.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 sqlx.workspace = true
