@@ -13,9 +13,10 @@ use axum::{Router, extract};
 use chrono::{DateTime, Utc};
 use octra_llm_core::Protocol;
 use octra_storage::{
-    LlmModelInput, LlmModelRecord, LlmProviderInput, LlmProviderRecord, LlmRouteRecord,
-    LlmRoutingGroupRecord, LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmStorageError,
-    LlmUsageRecord, LlmVirtualKeyInput, LlmVirtualKeyRecord,
+    LlmModelInput, LlmModelRecord, LlmProviderAccountInput, LlmProviderAccountRecord,
+    LlmProviderInput, LlmProviderRecord, LlmRouteRecord, LlmRoutingGroupRecord,
+    LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmStorageError, LlmUsageRecord,
+    LlmVirtualKeyInput, LlmVirtualKeyRecord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,6 +35,18 @@ pub fn router(state: LlmControlState) -> Router {
             get(get_provider)
                 .put(update_provider)
                 .delete(delete_provider),
+        )
+        .route(
+            "/api/v1/llm/providers/{id}/accounts",
+            get(list_provider_accounts).post(create_account),
+        )
+        .route(
+            "/api/v1/llm/accounts/{id}",
+            get(get_account).put(update_account).delete(delete_account),
+        )
+        .route(
+            "/api/v1/llm/accounts/{id}/quota/reset",
+            post(reset_account_quota),
         );
     let models = Router::new()
         .route("/api/v1/llm/models", get(list_models).post(create_model))
@@ -431,9 +444,12 @@ impl GroupBody {
             .strategy
             .clone()
             .unwrap_or_else(|| "priority".to_string());
-        if !matches!(strategy.as_str(), "priority" | "weighted" | "round_robin") {
+        if !matches!(
+            strategy.as_str(),
+            "priority" | "weighted" | "order" | "rotate" | "round_robin" | "usage" | "quota"
+        ) {
             return Err(ApiError::bad_request(
-                "strategy must be priority, weighted or round_robin",
+                "strategy must be priority, weighted, order, rotate, usage or quota",
             )
             .field("strategy"));
         }
@@ -454,6 +470,7 @@ pub struct GroupView {
 pub struct TargetBody {
     pub provider_id: Option<String>,
     pub model_id: Option<String>,
+    pub account_id: Option<String>,
     pub weight: Option<i64>,
     pub priority: Option<i64>,
     pub position: Option<i64>,
@@ -488,6 +505,11 @@ impl TargetBody {
                 .ok_or_else(|| ApiError::bad_request("`model_id` is required").field("model_id"))?
                 .trim()
                 .to_string(),
+            account_id: self
+                .account_id
+                .or_else(|| existing.and_then(|target| target.account_id.clone()))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
             weight,
             priority: self
                 .priority
@@ -507,6 +529,7 @@ pub struct TargetView {
     pub group_id: String,
     pub provider_id: String,
     pub model_id: String,
+    pub account_id: Option<String>,
     pub weight: i64,
     pub priority: i64,
     pub position: i64,
@@ -521,6 +544,7 @@ impl From<LlmRoutingTargetRecord> for TargetView {
             group_id: record.group_id,
             provider_id: record.provider_id,
             model_id: record.model_id,
+            account_id: record.account_id,
             weight: record.weight,
             priority: record.priority,
             position: record.position,
@@ -728,6 +752,256 @@ async fn delete_provider(
     }
     reload_now(&state).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Provider accounts
+
+#[derive(Debug, Deserialize)]
+pub struct AccountBody {
+    pub name: Option<String>,
+    pub secret_ref: Option<String>,
+    pub weight: Option<i64>,
+    pub priority: Option<i64>,
+    pub enabled: Option<bool>,
+    pub quota_limit: Option<i64>,
+    pub quota_unit: Option<String>,
+    pub quota_period: Option<String>,
+    pub config: Option<Value>,
+}
+
+impl AccountBody {
+    fn into_input(
+        self,
+        existing: Option<&LlmProviderAccountRecord>,
+    ) -> ApiResult<LlmProviderAccountInput> {
+        let weight = self
+            .weight
+            .or(existing.map(|account| account.weight))
+            .unwrap_or(1);
+        if !(1..=1000).contains(&weight) {
+            return Err(
+                ApiError::bad_request("`weight` must be between 1 and 1000").field("weight")
+            );
+        }
+        let quota_unit = self
+            .quota_unit
+            .or_else(|| existing.map(|account| account.quota_unit.clone()))
+            .unwrap_or_else(|| "requests".to_string());
+        if !matches!(quota_unit.as_str(), "requests" | "tokens" | "cost_micros") {
+            return Err(ApiError::bad_request(
+                "`quota_unit` must be requests, tokens or cost_micros",
+            )
+            .field("quota_unit"));
+        }
+        let quota_period = self
+            .quota_period
+            .or_else(|| existing.map(|account| account.quota_period.clone()))
+            .unwrap_or_else(|| "none".to_string());
+        if !matches!(quota_period.as_str(), "none" | "day" | "month") {
+            return Err(
+                ApiError::bad_request("`quota_period` must be none, day or month")
+                    .field("quota_period"),
+            );
+        }
+        if self.quota_limit.is_some_and(|limit| limit < 0) {
+            return Err(
+                ApiError::bad_request("`quota_limit` must not be negative").field("quota_limit")
+            );
+        }
+        let name = self
+            .name
+            .or_else(|| existing.map(|account| account.name.clone()))
+            .ok_or_else(|| ApiError::bad_request("`name` is required").field("name"))?
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            return Err(ApiError::bad_request("`name` is required").field("name"));
+        }
+        Ok(LlmProviderAccountInput {
+            name,
+            secret_ref: match self.secret_ref {
+                Some(value) => non_empty(Some(value), "secret_ref")?,
+                None => existing.and_then(|account| account.secret_ref.clone()),
+            },
+            weight,
+            priority: self
+                .priority
+                .or(existing.map(|account| account.priority))
+                .unwrap_or(0),
+            enabled: self
+                .enabled
+                .or(existing.map(|account| account.enabled))
+                .unwrap_or(true),
+            quota_limit: self
+                .quota_limit
+                .or(existing.and_then(|account| account.quota_limit)),
+            quota_unit,
+            quota_period,
+            config_json: match self.config {
+                Some(value) => value.to_string(),
+                None => existing
+                    .map(|account| account.config_json.clone())
+                    .unwrap_or_else(|| "{}".to_string()),
+            },
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct AccountView {
+    pub id: String,
+    pub provider_id: String,
+    pub name: String,
+    pub secret_ref: Option<String>,
+    pub weight: i64,
+    pub priority: i64,
+    pub enabled: bool,
+    pub quota_limit: Option<i64>,
+    pub quota_unit: String,
+    pub quota_period: String,
+    pub quota_used: i64,
+    pub quota_reset_at: Option<String>,
+    pub cooldown_until: Option<String>,
+    pub last_error: Option<String>,
+    pub config: Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<LlmProviderAccountRecord> for AccountView {
+    fn from(record: LlmProviderAccountRecord) -> Self {
+        Self {
+            id: record.id,
+            provider_id: record.provider_id,
+            name: record.name,
+            secret_ref: record.secret_ref,
+            weight: record.weight,
+            priority: record.priority,
+            enabled: record.enabled,
+            quota_limit: record.quota_limit,
+            quota_unit: record.quota_unit,
+            quota_period: record.quota_period,
+            quota_used: record.quota_used,
+            quota_reset_at: record.quota_reset_at,
+            cooldown_until: record.cooldown_until,
+            last_error: record.last_error,
+            config: serde_json::from_str(&record.config_json).unwrap_or_else(|_| json!({})),
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+async fn list_provider_accounts(
+    State(state): State<LlmControlState>,
+    Path(provider_id): Path<String>,
+) -> ApiResult<extract::Json<Vec<AccountView>>> {
+    if state
+        .storage
+        .llm_get_provider(&provider_id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .is_none()
+    {
+        return Err(ApiError::not_found("provider", &provider_id));
+    }
+    let records = state
+        .storage
+        .llm_list_provider_accounts(&provider_id)
+        .await
+        .map_err(ApiError::from_storage)?;
+    Ok(extract::Json(
+        records.into_iter().map(AccountView::from).collect(),
+    ))
+}
+
+async fn get_account(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<extract::Json<AccountView>> {
+    let record = state
+        .storage
+        .llm_get_account(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("account", &id))?;
+    Ok(extract::Json(record.into()))
+}
+
+async fn create_account(
+    State(state): State<LlmControlState>,
+    Path(provider_id): Path<String>,
+    extract::Json(body): extract::Json<AccountBody>,
+) -> ApiResult<(StatusCode, extract::Json<AccountView>)> {
+    let input = body.into_input(None)?;
+    let record = state
+        .storage
+        .llm_create_account(&provider_id, &input)
+        .await
+        .map_err(ApiError::from_storage)?;
+    reload_now(&state).await?;
+    Ok((StatusCode::CREATED, extract::Json(record.into())))
+}
+
+async fn update_account(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+    extract::Json(body): extract::Json<AccountBody>,
+) -> ApiResult<extract::Json<AccountView>> {
+    let existing = state
+        .storage
+        .llm_get_account(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("account", &id))?;
+    let input = body.into_input(Some(&existing))?;
+    let record = state
+        .storage
+        .llm_update_account(&id, &input)
+        .await
+        .map_err(ApiError::from_storage)?;
+    reload_now(&state).await?;
+    Ok(extract::Json(record.into()))
+}
+
+async fn delete_account(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    if !state
+        .storage
+        .llm_delete_account(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+    {
+        return Err(ApiError::not_found("account", &id));
+    }
+    reload_now(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn reset_account_quota(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<extract::Json<AccountView>> {
+    if !state
+        .storage
+        .llm_reset_account_quota(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+    {
+        return Err(ApiError::not_found("account", &id));
+    }
+    state.runtime.accounts().reset(&id);
+    reload_now(&state).await?;
+    let record = state
+        .storage
+        .llm_get_account(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("account", &id))?;
+    Ok(extract::Json(record.into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1227,6 +1501,7 @@ pub async fn reload_runtime(runtime: &LlmRuntime) -> ApiResult<extract::Json<Val
         "status": "reloaded",
         "generated_at": snapshot.generated_at,
         "providers": snapshot.enabled_providers().count(),
+        "accounts": snapshot.data.accounts.len(),
         "routes": snapshot.model_listing().len(),
         "issues": snapshot.issues,
     })))
@@ -1271,12 +1546,20 @@ pub struct UsageRecordView {
     pub virtual_model_id: String,
     pub provider_id: Option<String>,
     pub model_id: Option<String>,
+    pub account_id: Option<String>,
+    pub account_name: Option<String>,
     pub api_key_id: Option<String>,
     pub protocol: Option<String>,
     pub status_code: Option<i64>,
     pub latency_ms: Option<i64>,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub cost_micros: Option<i64>,
+    pub cost_currency: Option<String>,
+    pub finish_reason: Option<String>,
     pub error: Option<String>,
     pub created_at: String,
 }
@@ -1289,12 +1572,20 @@ impl From<LlmUsageRecord> for UsageRecordView {
             virtual_model_id: record.virtual_model_id,
             provider_id: record.provider_id,
             model_id: record.model_id,
+            account_id: record.account_id,
+            account_name: record.account_name,
             api_key_id: record.api_key_id,
             protocol: record.protocol,
             status_code: record.status_code,
             latency_ms: record.latency_ms,
             input_tokens: record.input_tokens,
             output_tokens: record.output_tokens,
+            cache_read_tokens: record.cache_read_tokens,
+            cache_write_tokens: record.cache_write_tokens,
+            reasoning_tokens: record.reasoning_tokens,
+            cost_micros: record.cost_micros,
+            cost_currency: record.cost_currency,
+            finish_reason: record.finish_reason,
             error: record.error,
             created_at: record.created_at,
         }

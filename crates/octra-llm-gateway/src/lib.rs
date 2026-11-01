@@ -10,9 +10,11 @@
 //!        ◀── streamed SSE / JSON ◀── protocol adapter ◀── upstream adapter ◀── provider
 //! ```
 
+pub mod accounts;
 pub mod adapter;
 pub mod config;
 pub mod control;
+pub mod cost;
 pub mod data_plane;
 pub mod error;
 pub mod keys;

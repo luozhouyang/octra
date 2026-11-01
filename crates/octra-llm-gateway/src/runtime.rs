@@ -10,6 +10,7 @@ use octra_llm_core::Protocol;
 use octra_storage::{LlmRuntimeData, Storage};
 use tokio::sync::RwLock;
 
+use crate::accounts::{AccountPool, AccountRuntime};
 use crate::config::ProviderConfig;
 use crate::routing::{RoundRobin, RoutePlan};
 
@@ -26,6 +27,7 @@ pub struct RuntimeSnapshot {
     pub data: LlmRuntimeData,
     providers: BTreeMap<String, Arc<ProviderConfig>>,
     routes: BTreeMap<String, Arc<RoutePlan>>,
+    accounts_by_provider: BTreeMap<String, Vec<Arc<AccountRuntime>>>,
     round_robin: RoundRobin,
     pub issues: Vec<ProviderIssue>,
     policy_global: PolicyLimits,
@@ -68,7 +70,14 @@ fn permits(allowed: &Option<Vec<String>>, candidates: &[&str]) -> bool {
 }
 
 impl RuntimeSnapshot {
-    pub fn build(mut data: LlmRuntimeData) -> Self {
+    pub fn build(data: LlmRuntimeData) -> Self {
+        let pool = AccountPool::new();
+        pool.sync(&data.accounts);
+        Self::build_with_pool(data, &pool)
+    }
+
+    /// Builds a snapshot from data whose accounts are already in `pool`.
+    pub fn build_with_pool(mut data: LlmRuntimeData, pool: &AccountPool) -> Self {
         data.providers.sort_by(|a, b| {
             a.priority
                 .cmp(&b.priority)
@@ -106,6 +115,21 @@ impl RuntimeSnapshot {
             }
         }
 
+        let mut accounts_by_provider: BTreeMap<String, Vec<Arc<AccountRuntime>>> = BTreeMap::new();
+        for record in &data.accounts {
+            let Some(entry) = pool.get(&record.id) else {
+                tracing::warn!(
+                    account_id = %record.id,
+                    "provider account is missing from the account pool"
+                );
+                continue;
+            };
+            accounts_by_provider
+                .entry(record.provider_id.clone())
+                .or_default()
+                .push(entry);
+        }
+
         let mut routes = BTreeMap::new();
         for route in &data.routes {
             if let Ok(plan) = RoutePlan::compile(&data, route, &providers) {
@@ -118,6 +142,7 @@ impl RuntimeSnapshot {
             data,
             providers,
             routes,
+            accounts_by_provider,
             round_robin: RoundRobin::new(),
             issues,
             policy_global,
@@ -159,6 +184,29 @@ impl RuntimeSnapshot {
 
     pub fn provider(&self, id: &str) -> Option<Arc<ProviderConfig>> {
         self.providers.get(id).cloned()
+    }
+
+    /// Accounts configured for a provider, with live quota/cooldown state.
+    pub fn accounts_for(&self, provider_id: &str) -> &[Arc<AccountRuntime>] {
+        self.accounts_by_provider
+            .get(provider_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Parsed pricing document for a provider model, when one is configured.
+    pub fn model_pricing(&self, provider_id: &str, model_id: &str) -> Option<serde_json::Value> {
+        let model = self
+            .data
+            .models
+            .iter()
+            .find(|model| model.provider_id == provider_id && model.model_id == model_id)?;
+        let value: serde_json::Value = serde_json::from_str(&model.pricing_json).ok()?;
+        if value.as_object().is_some_and(|object| !object.is_empty()) {
+            Some(value)
+        } else {
+            None
+        }
     }
 
     pub fn enabled_providers(&self) -> impl Iterator<Item = &Arc<ProviderConfig>> {
@@ -230,13 +278,16 @@ pub struct ModelListing {
 pub struct LlmRuntime {
     pub storage: Arc<Storage>,
     pub config: Arc<OctraConfig>,
+    account_pool: AccountPool,
     snapshot: RwLock<Arc<RuntimeSnapshot>>,
 }
 
 impl LlmRuntime {
     pub async fn bootstrap(storage: Arc<Storage>, config: Arc<OctraConfig>) -> Result<Self> {
+        let account_pool = AccountPool::new();
         let data = storage.llm_load_runtime_data().await?;
-        let mut snapshot = RuntimeSnapshot::build(data);
+        persist_quota_resets(&storage, account_pool.sync(&data.accounts));
+        let mut snapshot = RuntimeSnapshot::build_with_pool(data, &account_pool);
         for issue in &snapshot.issues {
             tracing::warn!(
                 provider_id = %issue.provider_id,
@@ -248,6 +299,7 @@ impl LlmRuntime {
         Ok(Self {
             storage,
             config,
+            account_pool,
             snapshot: RwLock::new(Arc::new(snapshot)),
         })
     }
@@ -256,7 +308,8 @@ impl LlmRuntime {
     /// requests keep the snapshot they started with.
     pub async fn reload(&self) -> Result<()> {
         let data = self.storage.llm_load_runtime_data().await?;
-        let snapshot = Arc::new(RuntimeSnapshot::build(data));
+        persist_quota_resets(&self.storage, self.account_pool.sync(&data.accounts));
+        let snapshot = Arc::new(RuntimeSnapshot::build_with_pool(data, &self.account_pool));
         let mut guard = self.snapshot.write().await;
         *guard = snapshot;
         Ok(())
@@ -265,6 +318,32 @@ impl LlmRuntime {
     pub async fn snapshot(&self) -> Arc<RuntimeSnapshot> {
         self.snapshot.read().await.clone()
     }
+
+    /// Live account state, for explicit quota resets from the control plane.
+    pub fn accounts(&self) -> &AccountPool {
+        &self.account_pool
+    }
+}
+
+fn persist_quota_resets(storage: &Arc<Storage>, resets: Vec<crate::accounts::QuotaReset>) {
+    if resets.is_empty() {
+        return;
+    }
+    let storage = storage.clone();
+    tokio::spawn(async move {
+        for reset in resets {
+            if let Err(error) = storage
+                .llm_roll_account_quota(&reset.account_id, &reset.quota_reset_at)
+                .await
+            {
+                tracing::warn!(
+                    account_id = %reset.account_id,
+                    error = ?error,
+                    "cannot persist quota period rollover"
+                );
+            }
+        }
+    });
 }
 
 #[derive(Clone)]
@@ -375,6 +454,7 @@ mod tests {
                 &LlmRoutingTargetInput {
                     provider_id: provider.id.clone(),
                     model_id: "m1".into(),
+                    account_id: None,
                     weight: 1,
                     priority: 0,
                     position: 0,

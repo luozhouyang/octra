@@ -1004,3 +1004,154 @@ async fn responses_streaming_ingress() {
     assert!(body.contains("response.output_text.delta"), "body: {body}");
     assert!(body.contains("response.completed"), "body: {body}");
 }
+
+// ---------------------------------------------------------------------------
+// Provider accounts
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static RATE_LIMIT_ONCE: AtomicUsize = AtomicUsize::new(0);
+
+fn rate_limited_once(_request: Captured) -> axum::response::Response {
+    if RATE_LIMIT_ONCE.fetch_add(1, Ordering::SeqCst) == 0 {
+        json_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"error": {"message": "rate limited"}}),
+        )
+    } else {
+        json_response(openai_completion("second account"))
+    }
+}
+
+#[tokio::test]
+async fn rate_limited_account_falls_back_to_the_next() {
+    RATE_LIMIT_ONCE.store(0, Ordering::SeqCst);
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, rate_limited_once).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    let first = harness.account(&provider, "a-first", 0, 1, None, 0).await;
+    let second = harness.account(&provider, "b-second", 0, 1, None, 0).await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "second account");
+    assert_eq!(upstream.request_count(), 2);
+
+    let usage = wait_for_usage(&harness.storage, 1).await;
+    assert_eq!(usage[0].account_id.as_deref(), Some(second.as_str()));
+    assert_ne!(usage[0].account_id.as_deref(), Some(first.as_str()));
+
+    // The rate-limited account is taken out of rotation for a while.
+    let mut cooled = false;
+    for _ in 0..50 {
+        let account = harness
+            .storage
+            .llm_get_account(&first)
+            .await
+            .unwrap()
+            .unwrap();
+        if account.cooldown_until.is_some() {
+            cooled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(cooled, "rate-limited account should be cooling down");
+}
+
+#[tokio::test]
+async fn exhausted_account_is_skipped() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness
+        .account(&provider, "a-exhausted", 0, 1, Some(1), 1)
+        .await;
+    let healthy = harness.account(&provider, "b-healthy", 0, 1, None, 0).await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(upstream.request_count(), 1);
+    let usage = wait_for_usage(&harness.storage, 1).await;
+    assert_eq!(usage[0].account_id.as_deref(), Some(healthy.as_str()));
+}
+
+#[tokio::test]
+async fn session_header_pins_requests_to_one_account() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.account(&provider, "a", 0, 1, None, 0).await;
+    harness.account(&provider, "b", 0, 1, None, 0).await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+
+    for _ in 0..2 {
+        let (status, _, body) = send(
+            harness.data_router(),
+            axum::http::Method::POST,
+            COMPLETION_PATH,
+            &[("x-octra-session", "sticky-session")],
+            Some(openai_body("octra-default", false)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+    }
+
+    let usage = wait_for_usage(&harness.storage, 2).await;
+    let first = usage[1].account_id.clone();
+    assert!(first.is_some());
+    assert_eq!(usage[0].account_id, first);
+}
+
+#[tokio::test]
+async fn usage_cost_comes_from_model_pricing() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.account(&provider, "a", 0, 1, None, 0).await;
+    harness
+        .model_priced(
+            &provider,
+            "m",
+            r#"{"currency":"USD","input_per_million":3.0,"output_per_million":15.0}"#,
+        )
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let usage = wait_for_usage(&harness.storage, 1).await;
+    // prompt_tokens 11 * 3 + completion_tokens 7 * 15 = 138 micro-dollars.
+    assert_eq!(usage[0].cost_micros, Some(138));
+    assert_eq!(usage[0].cost_currency.as_deref(), Some("USD"));
+    assert_eq!(usage[0].finish_reason.as_deref(), Some("stop"));
+}

@@ -87,6 +87,7 @@ pub struct LlmRoutingTargetRecord {
     pub group_id: String,
     pub provider_id: String,
     pub model_id: String,
+    pub account_id: Option<String>,
     pub weight: i64,
     pub priority: i64,
     pub position: i64,
@@ -98,9 +99,52 @@ pub struct LlmRoutingTargetRecord {
 pub struct LlmRoutingTargetInput {
     pub provider_id: String,
     pub model_id: String,
+    pub account_id: Option<String>,
     pub weight: i64,
     pub priority: i64,
     pub position: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmProviderAccountRecord {
+    pub id: String,
+    pub provider_id: String,
+    pub name: String,
+    pub secret_ref: Option<String>,
+    pub weight: i64,
+    pub priority: i64,
+    pub enabled: bool,
+    pub quota_limit: Option<i64>,
+    pub quota_unit: String,
+    pub quota_period: String,
+    pub quota_used: i64,
+    pub quota_reset_at: Option<String>,
+    pub cooldown_until: Option<String>,
+    pub last_error: Option<String>,
+    pub config_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmProviderAccountInput {
+    pub name: String,
+    pub secret_ref: Option<String>,
+    pub weight: i64,
+    pub priority: i64,
+    pub enabled: bool,
+    pub quota_limit: Option<i64>,
+    pub quota_unit: String,
+    pub quota_period: String,
+    pub config_json: String,
+}
+
+/// Aggregated usage for one account over a quota period.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LlmAccountUsage {
+    pub requests: i64,
+    pub tokens: i64,
+    pub cost_micros: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,14 +179,45 @@ pub struct LlmUsageRecord {
     pub virtual_model_id: String,
     pub provider_id: Option<String>,
     pub model_id: Option<String>,
+    pub account_id: Option<String>,
+    pub account_name: Option<String>,
     pub api_key_id: Option<String>,
     pub protocol: Option<String>,
     pub status_code: Option<i64>,
     pub latency_ms: Option<i64>,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub cost_micros: Option<i64>,
+    pub cost_currency: Option<String>,
+    pub finish_reason: Option<String>,
     pub error: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LlmUsageInput {
+    pub request_id: String,
+    pub virtual_model_id: String,
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
+    pub account_id: Option<String>,
+    pub account_name: Option<String>,
+    pub api_key_id: Option<String>,
+    pub protocol: Option<String>,
+    pub status_code: Option<i64>,
+    pub latency_ms: Option<i64>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub cost_micros: Option<i64>,
+    pub cost_currency: Option<String>,
+    pub finish_reason: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +238,7 @@ pub struct LlmRuntimeData {
     pub groups: Vec<LlmRoutingGroupRecord>,
     pub routes: Vec<LlmRouteRecord>,
     pub targets: Vec<LlmRoutingTargetRecord>,
+    pub accounts: Vec<LlmProviderAccountRecord>,
     pub virtual_keys: Vec<LlmVirtualKeyRecord>,
 }
 
@@ -210,6 +286,40 @@ fn missing_fk(err: &sqlx::Error) -> bool {
         }
         _ => false,
     }
+}
+
+fn validate_account_input(input: &LlmProviderAccountInput) -> LlmResult<()> {
+    if input.name.trim().is_empty() {
+        return Err(LlmStorageError::Backend(
+            "account name must not be empty".to_string(),
+        ));
+    }
+    if !(1..=1000).contains(&input.weight) {
+        return Err(LlmStorageError::Backend(
+            "account weight must be between 1 and 1000".to_string(),
+        ));
+    }
+    if !matches!(
+        input.quota_unit.as_str(),
+        "requests" | "tokens" | "cost_micros"
+    ) {
+        return Err(LlmStorageError::Backend(format!(
+            "unknown quota unit '{}'",
+            input.quota_unit
+        )));
+    }
+    if !matches!(input.quota_period.as_str(), "none" | "day" | "month") {
+        return Err(LlmStorageError::Backend(format!(
+            "unknown quota period '{}'",
+            input.quota_period
+        )));
+    }
+    if input.quota_limit.is_some_and(|limit| limit < 0) {
+        return Err(LlmStorageError::Backend(
+            "quota limit must not be negative".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn provider_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmProviderRecord {
@@ -276,6 +386,7 @@ fn target_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmRoutingTargetRecord {
         group_id: row.get("group_id"),
         provider_id: row.get("provider_id"),
         model_id: row.get("model_id"),
+        account_id: row.get("account_id"),
         weight: row.get("weight"),
         priority: row.get("priority"),
         position: row.get("position"),
@@ -283,6 +394,32 @@ fn target_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmRoutingTargetRecord {
         updated_at: row.get("updated_at"),
     }
 }
+
+fn account_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmProviderAccountRecord {
+    LlmProviderAccountRecord {
+        id: row.get("id"),
+        provider_id: row.get("provider_id"),
+        name: row.get("name"),
+        secret_ref: row.get("secret_ref"),
+        weight: row.get("weight"),
+        priority: row.get("priority"),
+        enabled: row.get::<i64, _>("enabled") != 0,
+        quota_limit: row.get("quota_limit"),
+        quota_unit: row.get("quota_unit"),
+        quota_period: row.get("quota_period"),
+        quota_used: row.get("quota_used"),
+        quota_reset_at: row.get("quota_reset_at"),
+        cooldown_until: row.get("cooldown_until"),
+        last_error: row.get("last_error"),
+        config_json: row.get("config_json"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+const ACCOUNT_COLUMNS: &str = "id, provider_id, name, secret_ref, weight, priority, enabled, \
+     quota_limit, quota_unit, quota_period, quota_used, quota_reset_at, cooldown_until, \
+     last_error, config_json, created_at, updated_at";
 
 fn virtual_key_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmVirtualKeyRecord {
     LlmVirtualKeyRecord {
@@ -312,12 +449,20 @@ fn usage_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmUsageRecord {
         virtual_model_id: row.get("virtual_model_id"),
         provider_id: row.get("provider_id"),
         model_id: row.get("model_id"),
+        account_id: row.get("account_id"),
+        account_name: row.get("account_name"),
         api_key_id: row.get("api_key_id"),
         protocol: row.get("protocol"),
         status_code: row.get("status_code"),
         latency_ms: row.get("latency_ms"),
         input_tokens: row.get("input_tokens"),
         output_tokens: row.get("output_tokens"),
+        cache_read_tokens: row.get("cache_read_tokens"),
+        cache_write_tokens: row.get("cache_write_tokens"),
+        reasoning_tokens: row.get("reasoning_tokens"),
+        cost_micros: row.get("cost_micros"),
+        cost_currency: row.get("cost_currency"),
+        finish_reason: row.get("finish_reason"),
         error: row.get("error"),
         created_at: row.get("created_at"),
     }
@@ -345,6 +490,10 @@ impl Storage {
             .llm_list_routing_targets()
             .await
             .map_err(|err| err.into_octra())?;
+        let accounts = self
+            .llm_list_accounts()
+            .await
+            .map_err(|err| err.into_octra())?;
         let virtual_keys = self
             .llm_list_virtual_keys()
             .await
@@ -357,6 +506,7 @@ impl Storage {
             groups,
             routes,
             targets,
+            accounts,
             virtual_keys,
         })
     }
@@ -466,6 +616,230 @@ impl Storage {
             .await
             .map_err(backend)?;
         Ok(count > 0)
+    }
+
+    // Provider accounts
+
+    pub async fn llm_list_accounts(&self) -> LlmResult<Vec<LlmProviderAccountRecord>> {
+        let sql = format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM llm_provider_accounts \
+             ORDER BY provider_id ASC, priority ASC, name ASC"
+        );
+        let rows = sqlx::query(&sql)
+            .fetch_all(self.pool())
+            .await
+            .map_err(backend)?;
+        Ok(rows.iter().map(account_from_row).collect())
+    }
+
+    pub async fn llm_list_provider_accounts(
+        &self,
+        provider_id: &str,
+    ) -> LlmResult<Vec<LlmProviderAccountRecord>> {
+        let sql = format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM llm_provider_accounts \
+             WHERE provider_id = ? ORDER BY priority ASC, name ASC"
+        );
+        let rows = sqlx::query(&sql)
+            .bind(provider_id)
+            .fetch_all(self.pool())
+            .await
+            .map_err(backend)?;
+        Ok(rows.iter().map(account_from_row).collect())
+    }
+
+    pub async fn llm_get_account(&self, id: &str) -> LlmResult<Option<LlmProviderAccountRecord>> {
+        let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM llm_provider_accounts WHERE id = ?");
+        let row = sqlx::query(&sql)
+            .bind(id)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(backend)?;
+        Ok(row.as_ref().map(account_from_row))
+    }
+
+    pub async fn llm_create_account(
+        &self,
+        provider_id: &str,
+        input: &LlmProviderAccountInput,
+    ) -> LlmResult<LlmProviderAccountRecord> {
+        if !self.llm_provider_exists(provider_id).await? {
+            return Err(not_found("provider", provider_id));
+        }
+        validate_account_input(input)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO llm_provider_accounts (id, provider_id, name, secret_ref, weight, priority,
+                 enabled, quota_limit, quota_unit, quota_period, config_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(provider_id)
+        .bind(&input.name)
+        .bind(&input.secret_ref)
+        .bind(input.weight)
+        .bind(input.priority)
+        .bind(input.enabled as i64)
+        .bind(input.quota_limit)
+        .bind(&input.quota_unit)
+        .bind(&input.quota_period)
+        .bind(&input.config_json)
+        .execute(self.pool())
+        .await
+        .map_err(conflict)?;
+        self.llm_get_account(&id)
+            .await?
+            .ok_or_else(|| backend(sqlx::Error::RowNotFound))
+    }
+
+    pub async fn llm_update_account(
+        &self,
+        id: &str,
+        input: &LlmProviderAccountInput,
+    ) -> LlmResult<LlmProviderAccountRecord> {
+        validate_account_input(input)?;
+        let affected = sqlx::query(
+            "UPDATE llm_provider_accounts SET name = ?, secret_ref = ?, weight = ?, priority = ?,
+                 enabled = ?, quota_limit = ?, quota_unit = ?, quota_period = ?, config_json = ?,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?",
+        )
+        .bind(&input.name)
+        .bind(&input.secret_ref)
+        .bind(input.weight)
+        .bind(input.priority)
+        .bind(input.enabled as i64)
+        .bind(input.quota_limit)
+        .bind(&input.quota_unit)
+        .bind(&input.quota_period)
+        .bind(&input.config_json)
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(conflict)?
+        .rows_affected();
+        if affected == 0 {
+            return Err(not_found("account", id));
+        }
+        self.llm_get_account(id)
+            .await?
+            .ok_or_else(|| not_found("account", id))
+    }
+
+    pub async fn llm_delete_account(&self, id: &str) -> LlmResult<bool> {
+        let affected = sqlx::query("DELETE FROM llm_provider_accounts WHERE id = ?")
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(backend)?
+            .rows_affected();
+        Ok(affected > 0)
+    }
+
+    /// Clears the rolling quota counter and the persisted cooldown.
+    pub async fn llm_reset_account_quota(&self, id: &str) -> LlmResult<bool> {
+        let affected = sqlx::query(
+            "UPDATE llm_provider_accounts SET quota_used = 0, quota_reset_at = NULL,
+                 cooldown_until = NULL, last_error = NULL,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?",
+        )
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(backend)?
+        .rows_affected();
+        Ok(affected > 0)
+    }
+
+    /// Adds one request's consumption to the account quota. The increment is
+    /// applied to the counter matching the account's configured unit.
+    pub async fn llm_consume_account_quota(
+        &self,
+        id: &str,
+        requests: i64,
+        tokens: i64,
+        cost_micros: i64,
+    ) -> LlmResult<()> {
+        sqlx::query(
+            "UPDATE llm_provider_accounts SET
+                 quota_used = quota_used + CASE quota_unit
+                     WHEN 'tokens' THEN ?
+                     WHEN 'cost_micros' THEN ?
+                     ELSE ?
+                 END,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?",
+        )
+        .bind(tokens)
+        .bind(cost_micros)
+        .bind(requests)
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    pub async fn llm_set_account_cooldown(
+        &self,
+        id: &str,
+        until: &str,
+        last_error: Option<&str>,
+    ) -> LlmResult<()> {
+        sqlx::query(
+            "UPDATE llm_provider_accounts SET cooldown_until = ?, last_error = ?,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?",
+        )
+        .bind(until)
+        .bind(last_error)
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Persists a rolled quota period: counter back to zero, next boundary.
+    pub async fn llm_roll_account_quota(&self, id: &str, reset_at: &str) -> LlmResult<()> {
+        sqlx::query(
+            "UPDATE llm_provider_accounts SET quota_used = 0, quota_reset_at = ?,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?",
+        )
+        .bind(reset_at)
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Aggregates persisted usage for an account since an ISO timestamp.
+    pub async fn llm_account_usage_since(
+        &self,
+        account_id: &str,
+        since: Option<&str>,
+    ) -> LlmResult<LlmAccountUsage> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS requests,
+                 SUM(input_tokens + output_tokens) AS tokens,
+                 SUM(COALESCE(cost_micros, 0)) AS cost_micros
+             FROM llm_usage
+             WHERE account_id = ? AND (? IS NULL OR created_at >= ?)",
+        )
+        .bind(account_id)
+        .bind(since)
+        .bind(since)
+        .fetch_one(self.pool())
+        .await
+        .map_err(backend)?;
+        Ok(LlmAccountUsage {
+            requests: row.get::<Option<i64>, _>("requests").unwrap_or(0),
+            tokens: row.get::<Option<i64>, _>("tokens").unwrap_or(0),
+            cost_micros: row.get::<Option<i64>, _>("cost_micros").unwrap_or(0),
+        })
     }
 
     // Models
@@ -652,9 +1026,31 @@ impl Storage {
 
     // Routing targets
 
+    /// A routing target may only pin an account that belongs to its provider.
+    async fn check_target_account(
+        &self,
+        provider_id: &str,
+        account_id: Option<&str>,
+    ) -> LlmResult<()> {
+        let Some(account_id) = account_id else {
+            return Ok(());
+        };
+        let account = self
+            .llm_get_account(account_id)
+            .await?
+            .ok_or_else(|| not_found("account", account_id))?;
+        if account.provider_id != provider_id {
+            return Err(LlmStorageError::Conflict(format!(
+                "account {account_id} does not belong to provider {provider_id}"
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn llm_list_routing_targets(&self) -> LlmResult<Vec<LlmRoutingTargetRecord>> {
         let rows = sqlx::query(
-            "SELECT id, group_id, provider_id, model_id, weight, priority, position, created_at, updated_at
+            "SELECT id, group_id, provider_id, model_id, account_id, weight, priority, position,
+                 created_at, updated_at
              FROM llm_routing_targets ORDER BY priority ASC, position ASC",
         )
         .fetch_all(self.pool())
@@ -668,7 +1064,8 @@ impl Storage {
         id: &str,
     ) -> LlmResult<Option<LlmRoutingTargetRecord>> {
         let row = sqlx::query(
-            "SELECT id, group_id, provider_id, model_id, weight, priority, position, created_at, updated_at
+            "SELECT id, group_id, provider_id, model_id, account_id, weight, priority, position,
+                 created_at, updated_at
              FROM llm_routing_targets WHERE id = ?",
         )
         .bind(id)
@@ -689,15 +1086,19 @@ impl Storage {
         if !self.llm_provider_exists(&input.provider_id).await? {
             return Err(not_found("provider", &input.provider_id));
         }
+        self.check_target_account(&input.provider_id, input.account_id.as_deref())
+            .await?;
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO llm_routing_targets (id, group_id, provider_id, model_id, weight, priority, position)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO llm_routing_targets (id, group_id, provider_id, model_id, account_id,
+                 weight, priority, position)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(group_id)
         .bind(&input.provider_id)
         .bind(&input.model_id)
+        .bind(&input.account_id)
         .bind(input.weight)
         .bind(input.priority)
         .bind(input.position)
@@ -717,13 +1118,17 @@ impl Storage {
         if !self.llm_provider_exists(&input.provider_id).await? {
             return Err(not_found("provider", &input.provider_id));
         }
+        self.check_target_account(&input.provider_id, input.account_id.as_deref())
+            .await?;
         let affected = sqlx::query(
-            "UPDATE llm_routing_targets SET provider_id = ?, model_id = ?, weight = ?, priority = ?, position = ?,
+            "UPDATE llm_routing_targets SET provider_id = ?, model_id = ?, account_id = ?,
+                 weight = ?, priority = ?, position = ?,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?",
         )
         .bind(&input.provider_id)
         .bind(&input.model_id)
+        .bind(&input.account_id)
         .bind(input.weight)
         .bind(input.priority)
         .bind(input.position)
@@ -958,36 +1363,33 @@ impl Storage {
     // Usage
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn llm_insert_usage(
-        &self,
-        request_id: &str,
-        virtual_model_id: &str,
-        provider_id: Option<&str>,
-        model_id: Option<&str>,
-        api_key_id: Option<&str>,
-        protocol: Option<&str>,
-        status_code: Option<i64>,
-        latency_ms: Option<i64>,
-        input_tokens: i64,
-        output_tokens: i64,
-        error: Option<&str>,
-    ) -> LlmResult<()> {
+    pub async fn llm_insert_usage(&self, input: &LlmUsageInput) -> LlmResult<()> {
         sqlx::query(
-            "INSERT INTO llm_usage (request_id, virtual_model_id, provider_id, model_id, api_key_id,
-                 protocol, status_code, latency_ms, input_tokens, output_tokens, error)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO llm_usage (request_id, virtual_model_id, provider_id, model_id,
+                 account_id, account_name, api_key_id, protocol, status_code, latency_ms,
+                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                 reasoning_tokens, cost_micros, cost_currency, finish_reason, error)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(request_id)
-        .bind(virtual_model_id)
-        .bind(provider_id)
-        .bind(model_id)
-        .bind(api_key_id)
-        .bind(protocol)
-        .bind(status_code)
-        .bind(latency_ms)
-        .bind(input_tokens)
-        .bind(output_tokens)
-        .bind(error)
+        .bind(&input.request_id)
+        .bind(&input.virtual_model_id)
+        .bind(&input.provider_id)
+        .bind(&input.model_id)
+        .bind(&input.account_id)
+        .bind(&input.account_name)
+        .bind(&input.api_key_id)
+        .bind(&input.protocol)
+        .bind(input.status_code)
+        .bind(input.latency_ms)
+        .bind(input.input_tokens)
+        .bind(input.output_tokens)
+        .bind(input.cache_read_tokens)
+        .bind(input.cache_write_tokens)
+        .bind(input.reasoning_tokens)
+        .bind(input.cost_micros)
+        .bind(&input.cost_currency)
+        .bind(&input.finish_reason)
+        .bind(&input.error)
         .execute(self.pool())
         .await
         .map_err(backend)?;
@@ -996,8 +1398,10 @@ impl Storage {
 
     pub async fn llm_list_usage(&self, limit: i64) -> LlmResult<Vec<LlmUsageRecord>> {
         let rows = sqlx::query(
-            "SELECT id, request_id, virtual_model_id, provider_id, model_id, api_key_id, protocol,
-                 status_code, latency_ms, input_tokens, output_tokens, error, created_at
+            "SELECT id, request_id, virtual_model_id, provider_id, model_id, account_id,
+                 account_name, api_key_id, protocol, status_code, latency_ms, input_tokens,
+                 output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                 cost_micros, cost_currency, finish_reason, error, created_at
              FROM llm_usage ORDER BY id DESC LIMIT ?",
         )
         .bind(limit.clamp(1, 1000))
@@ -1170,6 +1574,7 @@ mod tests {
                 &LlmRoutingTargetInput {
                     provider_id: provider.id.clone(),
                     model_id: "gpt-4o".to_string(),
+                    account_id: None,
                     weight: 2,
                     priority: 1,
                     position: 0,
@@ -1187,6 +1592,7 @@ mod tests {
                     &LlmRoutingTargetInput {
                         provider_id: provider.id.clone(),
                         model_id: "gpt-4o".to_string(),
+                        account_id: None,
                         weight: 1,
                         priority: 0,
                         position: 0,
@@ -1257,35 +1663,31 @@ mod tests {
         assert!(touched.last_used_at.is_some());
 
         storage
-            .llm_insert_usage(
-                "req-1",
-                "octra-default",
-                Some("prov-1"),
-                Some("gpt-4o"),
-                Some(&key.id),
-                Some("openai"),
-                Some(200),
-                Some(12),
-                100,
-                50,
-                None,
-            )
+            .llm_insert_usage(&LlmUsageInput {
+                request_id: "req-1".into(),
+                virtual_model_id: "octra-default".into(),
+                provider_id: Some("prov-1".into()),
+                model_id: Some("gpt-4o".into()),
+                api_key_id: Some(key.id.clone()),
+                protocol: Some("openai".into()),
+                status_code: Some(200),
+                latency_ms: Some(12),
+                input_tokens: 100,
+                output_tokens: 50,
+                ..LlmUsageInput::default()
+            })
             .await
             .unwrap();
         storage
-            .llm_insert_usage(
-                "req-2",
-                "octra-default",
-                None,
-                None,
-                None,
-                Some("anthropic"),
-                Some(502),
-                Some(3),
-                0,
-                0,
-                Some("upstream failed"),
-            )
+            .llm_insert_usage(&LlmUsageInput {
+                request_id: "req-2".into(),
+                virtual_model_id: "octra-default".into(),
+                protocol: Some("anthropic".into()),
+                status_code: Some(502),
+                latency_ms: Some(3),
+                error: Some("upstream failed".into()),
+                ..LlmUsageInput::default()
+            })
             .await
             .unwrap();
 

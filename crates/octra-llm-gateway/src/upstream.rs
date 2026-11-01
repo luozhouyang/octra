@@ -63,10 +63,20 @@ impl Upstream {
         &self,
         provider: &ProviderConfig,
     ) -> Result<Option<String>, GatewayError> {
+        self.resolve_secret_for(provider, provider.secret_ref.as_deref())
+    }
+
+    /// Resolves a secret, preferring an account-level reference over the
+    /// provider's own. Tests still override both.
+    pub fn resolve_secret_for(
+        &self,
+        provider: &ProviderConfig,
+        account_secret_ref: Option<&str>,
+    ) -> Result<Option<String>, GatewayError> {
         if let Some(key) = &self.test_api_key_env {
             return Ok(Some(key.clone()));
         }
-        let Some(reference) = provider.secret_ref.as_deref() else {
+        let Some(reference) = account_secret_ref.or(provider.secret_ref.as_deref()) else {
             if provider.requires_secret() {
                 let mut error = GatewayError::config(format!(
                     "provider {} has no secret_ref configured",
@@ -102,7 +112,20 @@ impl Upstream {
         body: &Value,
         stream: bool,
     ) -> Result<RequestBuilder, GatewayError> {
-        let key = self.resolve_secret(provider)?;
+        self.post_json_with_secret(provider, url, body, stream, None)
+    }
+
+    /// Like [`Upstream::post_json`], but uses an account-level secret
+    /// reference when one is configured.
+    pub fn post_json_with_secret(
+        &self,
+        provider: &ProviderConfig,
+        url: &str,
+        body: &Value,
+        stream: bool,
+        account_secret_ref: Option<&str>,
+    ) -> Result<RequestBuilder, GatewayError> {
+        let key = self.resolve_secret_for(provider, account_secret_ref)?;
         let mut builder = self
             .client
             .post(url)

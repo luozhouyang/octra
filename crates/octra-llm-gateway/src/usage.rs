@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use octra_llm_core::{FinishReason, Usage};
-use octra_storage::Storage;
+use octra_storage::{LlmUsageInput, Storage};
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -15,11 +15,18 @@ pub struct UsageRecord {
     pub provider_id: Option<String>,
     pub provider_name: Option<String>,
     pub model_id: Option<String>,
+    pub account_id: Option<String>,
+    pub account_name: Option<String>,
     pub api_key_id: Option<String>,
     pub protocol: Option<String>,
     pub status_code: Option<u16>,
     pub latency_ms: Option<u64>,
     pub usage: Usage,
+    pub finish_reason: Option<String>,
+    pub cost_micros: Option<i64>,
+    pub cost_currency: Option<String>,
+    /// Model pricing used to compute the cost when it was not set directly.
+    pub pricing: Option<Value>,
     pub error: Option<String>,
 }
 
@@ -31,11 +38,17 @@ impl UsageRecord {
             provider_id: None,
             provider_name: None,
             model_id: None,
+            account_id: None,
+            account_name: None,
             api_key_id: None,
             protocol: None,
             status_code: None,
             latency_ms: None,
             usage: Usage::default(),
+            finish_reason: None,
+            cost_micros: None,
+            cost_currency: None,
+            pricing: None,
             error: None,
         }
     }
@@ -73,26 +86,70 @@ impl UsageTracker {
 /// response path and must never panic the handler.
 pub fn spawn_record(storage: Arc<Storage>, record: UsageRecord) {
     tokio::spawn(async move {
-        let protocol = record.protocol.as_deref();
-        let result = storage
-            .llm_insert_usage(
-                &record.request_id,
-                &record.virtual_model_id,
-                record.provider_id.as_deref(),
-                record.model_id.as_deref(),
-                record.api_key_id.as_deref(),
-                protocol,
-                record.status_code.map(i64::from),
-                record
-                    .latency_ms
-                    .map(|value| value.min(i64::MAX as u64) as i64),
-                record.usage.input_tokens.min(i64::MAX as u64) as i64,
-                record.usage.output_tokens.min(i64::MAX as u64) as i64,
-                record.error.as_deref(),
-            )
-            .await;
-        if let Err(error) = result {
+        let (cost_micros, cost_currency) = match (record.cost_micros, &record.pricing) {
+            (Some(micros), _) => (micros, record.cost_currency.clone()),
+            (None, Some(pricing)) => match crate::cost::compute(&record.usage, pricing) {
+                Some(cost) => (cost.micros, Some(cost.currency)),
+                None => {
+                    tracing::debug!(
+                        request_id = %record.request_id,
+                        "llm model has no usable pricing; recording zero cost"
+                    );
+                    (0, None)
+                }
+            },
+            (None, None) => (0, record.cost_currency.clone()),
+        };
+        let input_tokens = record.usage.input_tokens.min(i64::MAX as u64) as i64;
+        let output_tokens = record.usage.output_tokens.min(i64::MAX as u64) as i64;
+        let input = LlmUsageInput {
+            request_id: record.request_id.clone(),
+            virtual_model_id: record.virtual_model_id.clone(),
+            provider_id: record.provider_id.clone(),
+            model_id: record.model_id.clone(),
+            account_id: record.account_id.clone(),
+            account_name: record.account_name.clone(),
+            api_key_id: record.api_key_id.clone(),
+            protocol: record.protocol.clone(),
+            status_code: record.status_code.map(i64::from),
+            latency_ms: record
+                .latency_ms
+                .map(|value| value.min(i64::MAX as u64) as i64),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens: record
+                .usage
+                .cache_read_tokens
+                .map(|value| value.min(i64::MAX as u64) as i64),
+            cache_write_tokens: record
+                .usage
+                .cache_write_tokens
+                .map(|value| value.min(i64::MAX as u64) as i64),
+            reasoning_tokens: record
+                .usage
+                .reasoning_tokens
+                .map(|value| value.min(i64::MAX as u64) as i64),
+            cost_micros: Some(cost_micros),
+            cost_currency,
+            finish_reason: record.finish_reason.clone(),
+            error: record.error.clone(),
+        };
+        if let Err(error) = storage.llm_insert_usage(&input).await {
             tracing::warn!(error = ?error, request_id = %record.request_id, "cannot record llm usage");
+        }
+        if let Some(account_id) = &record.account_id {
+            let tokens = input_tokens.saturating_add(output_tokens);
+            if let Err(error) = storage
+                .llm_consume_account_quota(account_id, 1, tokens, cost_micros)
+                .await
+            {
+                tracing::warn!(
+                    error = ?error,
+                    account_id,
+                    request_id = %record.request_id,
+                    "cannot update account quota"
+                );
+            }
         }
     });
 }

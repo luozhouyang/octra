@@ -14,7 +14,9 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use octra_config::OctraConfig;
 use octra_llm_gateway::{LlmControlState, LlmDataState, LlmRuntime, LlmUpstream, control_router};
-use octra_storage::{LlmModelInput, LlmProviderInput, LlmRoutingTargetInput, Storage};
+use octra_storage::{
+    LlmModelInput, LlmProviderAccountInput, LlmProviderInput, LlmRoutingTargetInput, Storage,
+};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
@@ -390,6 +392,7 @@ impl Harness {
                     &LlmRoutingTargetInput {
                         provider_id: provider_id.clone(),
                         model_id: "m".to_string(),
+                        account_id: None,
                         weight: *weight,
                         priority: *priority,
                         position: index as i64,
@@ -406,6 +409,10 @@ impl Harness {
     }
 
     pub async fn model(&self, provider_id: &str, model_id: &str) {
+        self.model_priced(provider_id, model_id, "{}").await;
+    }
+
+    pub async fn model_priced(&self, provider_id: &str, model_id: &str, pricing_json: &str) {
         self.storage
             .llm_create_model(&LlmModelInput {
                 provider_id: provider_id.to_string(),
@@ -415,12 +422,50 @@ impl Harness {
                 context_window: None,
                 max_output_tokens: None,
                 capabilities: "{}".to_string(),
-                pricing_json: "{}".to_string(),
+                pricing_json: pricing_json.to_string(),
                 enabled: true,
             })
             .await
             .unwrap();
         self.runtime.reload().await.unwrap();
+    }
+
+    /// Creates a provider account, optionally pre-consuming its quota.
+    pub async fn account(
+        &self,
+        provider_id: &str,
+        name: &str,
+        priority: i64,
+        weight: i64,
+        quota_limit: Option<i64>,
+        quota_used: i64,
+    ) -> String {
+        let record = self
+            .storage
+            .llm_create_account(
+                provider_id,
+                &LlmProviderAccountInput {
+                    name: name.to_string(),
+                    secret_ref: Some("env:OCTRA_TEST_UNUSED_SECRET".to_string()),
+                    weight,
+                    priority,
+                    enabled: true,
+                    quota_limit,
+                    quota_unit: "requests".to_string(),
+                    quota_period: "none".to_string(),
+                    config_json: "{}".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        if quota_used > 0 {
+            self.storage
+                .llm_consume_account_quota(&record.id, quota_used, 0, 0)
+                .await
+                .unwrap();
+        }
+        self.runtime.reload().await.unwrap();
+        record.id
     }
 
     pub async fn key(

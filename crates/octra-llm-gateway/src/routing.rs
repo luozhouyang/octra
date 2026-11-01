@@ -15,6 +15,7 @@ pub struct Target {
     pub provider_id: String,
     pub provider_name: String,
     pub model_id: String,
+    pub account_id: Option<String>,
     pub protocol: Protocol,
     pub weight: u32,
     pub priority: i64,
@@ -111,6 +112,7 @@ impl RoutePlan {
                 provider_id: record.provider_id.clone(),
                 provider_name: provider.name.clone(),
                 model_id: record.model_id.clone(),
+                account_id: record.account_id.clone(),
                 protocol,
                 weight: record.weight.clamp(1, 1000) as u32,
                 priority: record.priority,
@@ -148,27 +150,46 @@ impl RoutePlan {
     /// Attempt order for one request: every round in priority order, then the
     /// highest-priority target once more to satisfy the retry/fallback budget.
     pub fn attempts(&self, tick: u64) -> Vec<Target> {
-        let mut attempts = Vec::new();
-        for (round_index, round) in self.rounds.iter().enumerate() {
-            let cycle = &self.cycles[round_index];
-            if cycle.is_empty() {
-                continue;
-            }
-            let start = if round_index == 0 {
-                (tick % cycle.len() as u64) as usize
-            } else {
-                0
-            };
-            let mut seen = std::collections::HashSet::new();
-            for offset in 0..cycle.len() {
-                let index = cycle[(start + offset) % cycle.len()];
-                if seen.insert(index) {
-                    attempts.push(round[index].clone());
+        let mut attempts = match self.strategy.as_str() {
+            "order" => self.flat(),
+            "rotate" | "round_robin" => {
+                let mut flat = self.flat();
+                if !flat.is_empty() {
+                    let start = (tick % flat.len() as u64) as usize;
+                    flat.rotate_left(start);
                 }
+                flat
             }
-        }
+            _ => {
+                let mut attempts = Vec::new();
+                for (round_index, round) in self.rounds.iter().enumerate() {
+                    let cycle = &self.cycles[round_index];
+                    if cycle.is_empty() {
+                        continue;
+                    }
+                    let start = if round_index == 0 {
+                        (tick % cycle.len() as u64) as usize
+                    } else {
+                        0
+                    };
+                    let mut seen = std::collections::HashSet::new();
+                    for offset in 0..cycle.len() {
+                        let index = cycle[(start + offset) % cycle.len()];
+                        if seen.insert(index) {
+                            attempts.push(round[index].clone());
+                        }
+                    }
+                }
+                attempts
+            }
+        };
         attempts.extend(self.fallback.iter().cloned());
         attempts
+    }
+
+    /// Every target in priority then position order.
+    fn flat(&self) -> Vec<Target> {
+        self.rounds.iter().flatten().cloned().collect()
     }
 
     pub fn rounds(&self) -> &[Vec<Target>] {
@@ -232,6 +253,7 @@ mod tests {
             group_id: "g".into(),
             provider_id: provider.into(),
             model_id: format!("{provider}-model"),
+            account_id: None,
             weight,
             priority,
             position: 0,
@@ -268,6 +290,7 @@ mod tests {
             }],
             routes: Vec::new(),
             targets,
+            accounts: Vec::new(),
             virtual_keys: Vec::new(),
         };
         let providers = providers

@@ -42,6 +42,10 @@ pub struct GatewayConfig {
 pub struct LlmConfig {
     pub request_timeout_secs: u64,
     pub stream_idle_timeout_secs: u64,
+    /// Header carrying a stable session id for account affinity.
+    pub session_header: String,
+    /// How long an account is skipped after a rate-limit or quota error.
+    pub account_cooldown_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +100,8 @@ impl Default for LlmConfig {
         Self {
             request_timeout_secs: 120,
             stream_idle_timeout_secs: 120,
+            session_header: "x-octra-session".to_string(),
+            account_cooldown_secs: 60,
         }
     }
 }

@@ -403,3 +403,190 @@ async fn usage_endpoint_summarizes_traffic() {
     assert_eq!(usage["recent"][0]["status_code"], 200);
     assert_eq!(usage["recent"][0]["model_id"], "m");
 }
+
+// ---------------------------------------------------------------------------
+// Provider accounts
+
+#[tokio::test]
+async fn account_crud_round_trip() {
+    let harness = Harness::new().await;
+    let (status, provider) = create(
+        &harness,
+        PROVIDERS,
+        provider_body("openai-main", "https://api.openai.com/v1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {provider}");
+    let provider_id = provider["id"].as_str().unwrap().to_string();
+    let accounts = format!("{PROVIDERS}/{provider_id}/accounts");
+
+    let (status, account) = create(
+        &harness,
+        &accounts,
+        json!({
+            "name": "primary",
+            "quota_limit": 100,
+            "quota_unit": "tokens",
+            "quota_period": "day",
+            "priority": 1,
+            "weight": 2,
+            "secret_ref": "env:OCTRA_TEST_UNUSED_SECRET"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {account}");
+    let account_id = account["id"].as_str().unwrap().to_string();
+    assert_eq!(account["quota_unit"], "tokens");
+    assert_eq!(account["quota_period"], "day");
+    assert_eq!(account["quota_used"], 0);
+    assert_eq!(account["provider_id"], provider_id);
+
+    let (status, listed) = call(&harness, Method::GET, &accounts, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+
+    let single = format!("/api/v1/llm/accounts/{account_id}");
+    let (status, fetched) = call(&harness, Method::GET, &single, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["name"], "primary");
+
+    let (status, updated) = call(
+        &harness,
+        Method::PUT,
+        &single,
+        Some(json!({"enabled": false, "priority": 3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {updated}");
+    assert_eq!(updated["enabled"], false);
+    assert_eq!(updated["priority"], 3);
+    // Omitted fields keep their values.
+    assert_eq!(updated["quota_unit"], "tokens");
+    assert_eq!(updated["quota_limit"], 100);
+
+    let (status, reset) = call(
+        &harness,
+        Method::POST,
+        &format!("/api/v1/llm/accounts/{account_id}/quota/reset"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {reset}");
+    assert_eq!(reset["quota_used"], 0);
+
+    let (status, _) = call(&harness, Method::DELETE, &single, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&harness, Method::GET, &single, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn account_input_is_validated() {
+    let harness = Harness::new().await;
+    let (_, provider) = create(
+        &harness,
+        PROVIDERS,
+        provider_body("openai-main", "https://api.openai.com/v1"),
+    )
+    .await;
+    let provider_id = provider["id"].as_str().unwrap();
+    let accounts = format!("{PROVIDERS}/{provider_id}/accounts");
+
+    let (status, body) = create(
+        &harness,
+        &accounts,
+        json!({"name": "bad", "quota_unit": "watts"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let (status, body) = create(
+        &harness,
+        &accounts,
+        json!({"name": "bad", "quota_period": "hour"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let (status, body) = create(&harness, &accounts, json!({"name": ""})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}
+
+#[tokio::test]
+async fn routing_target_may_pin_an_account() {
+    let harness = Harness::new().await;
+    let (_, provider) = create(
+        &harness,
+        PROVIDERS,
+        provider_body("openai-main", "https://api.openai.com/v1"),
+    )
+    .await;
+    let provider_id = provider["id"].as_str().unwrap().to_string();
+    let (_, account) = create(
+        &harness,
+        &format!("{PROVIDERS}/{provider_id}/accounts"),
+        json!({"name": "pinned"}),
+    )
+    .await;
+    let account_id = account["id"].as_str().unwrap().to_string();
+
+    let (status, group) = create(&harness, GROUPS, json!({"name": "g", "strategy": "usage"})).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {group}");
+    let group_id = group["id"].as_str().unwrap().to_string();
+
+    let (status, target) = create(
+        &harness,
+        &format!("{GROUPS}/{group_id}/targets"),
+        json!({
+            "provider_id": provider_id,
+            "model_id": "m",
+            "account_id": account_id
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {target}");
+    assert_eq!(target["account_id"], account_id);
+
+    // An account from another provider cannot be pinned.
+    let (_, other) = create(
+        &harness,
+        PROVIDERS,
+        provider_body("other", "https://api.openai.com/v1"),
+    )
+    .await;
+    let other_id = other["id"].as_str().unwrap();
+    let (status, body) = create(
+        &harness,
+        &format!("{GROUPS}/{group_id}/targets"),
+        json!({"provider_id": other_id, "model_id": "m", "account_id": account_id}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+}
+
+#[tokio::test]
+async fn group_strategies_are_validated() {
+    let harness = Harness::new().await;
+    for strategy in [
+        "priority",
+        "weighted",
+        "order",
+        "rotate",
+        "round_robin",
+        "usage",
+        "quota",
+    ] {
+        let (status, body) = create(
+            &harness,
+            GROUPS,
+            json!({"name": format!("g-{strategy}"), "strategy": strategy}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "strategy {strategy}: {body}");
+    }
+    let (status, _) = create(
+        &harness,
+        GROUPS,
+        json!({"name": "g-bogus", "strategy": "magic"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

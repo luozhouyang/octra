@@ -28,6 +28,78 @@ enum Command {
     Reload,
     /// Print local paths and daemon reachability
     Doctor,
+    /// Manage LLM provider accounts
+    #[command(subcommand)]
+    Accounts(AccountsCommand),
+    /// Show recent LLM usage
+    Usage {
+        /// Maximum number of recent records
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountsCommand {
+    /// List accounts for a provider
+    List {
+        /// Provider id
+        provider: String,
+    },
+    /// Create an account for a provider
+    Create {
+        /// Provider id
+        provider: String,
+        /// Account name
+        name: String,
+        /// Secret reference, e.g. env:OPENAI_KEY_B
+        #[arg(long)]
+        secret_ref: Option<String>,
+        #[arg(long, default_value_t = 1)]
+        weight: i64,
+        #[arg(long, default_value_t = 0)]
+        priority: i64,
+        /// Quota limit in the configured unit
+        #[arg(long)]
+        quota_limit: Option<i64>,
+        /// requests, tokens or cost_micros
+        #[arg(long, default_value = "requests")]
+        quota_unit: String,
+        /// none, day or month
+        #[arg(long, default_value = "none")]
+        quota_period: String,
+    },
+    /// Update an existing account
+    Update {
+        /// Account id
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        secret_ref: Option<String>,
+        #[arg(long)]
+        weight: Option<i64>,
+        #[arg(long)]
+        priority: Option<i64>,
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[arg(long)]
+        quota_limit: Option<i64>,
+        #[arg(long)]
+        quota_unit: Option<String>,
+        #[arg(long)]
+        quota_period: Option<String>,
+    },
+    /// Delete an account
+    Delete {
+        /// Account id
+        id: String,
+    },
+    /// Reset an account's quota counter and cooldown
+    ResetQuota {
+        /// Account id
+        id: String,
+    },
 }
 
 struct Control {
@@ -46,8 +118,85 @@ fn main() -> Result<()> {
         Command::Routes => print_json(control.get("/api/v1/routes")?)?,
         Command::Reload => print_json(control.post("/api/v1/system/reload")?)?,
         Command::Doctor => doctor(&control)?,
+        Command::Usage { limit } => {
+            print_json(control.get(&format!("/api/v1/llm/usage?limit={limit}"))?)?
+        }
+        Command::Accounts(command) => accounts(&control, command)?,
     }
 
+    Ok(())
+}
+
+fn accounts(control: &Control, command: AccountsCommand) -> Result<()> {
+    match command {
+        AccountsCommand::List { provider } => {
+            print_json(control.get(&format!("/api/v1/llm/providers/{provider}/accounts"))?)?
+        }
+        AccountsCommand::Create {
+            provider,
+            name,
+            secret_ref,
+            weight,
+            priority,
+            quota_limit,
+            quota_unit,
+            quota_period,
+        } => {
+            let mut body = serde_json::json!({
+                "name": name,
+                "weight": weight,
+                "priority": priority,
+                "quota_unit": quota_unit,
+                "quota_period": quota_period,
+            });
+            if let Some(secret_ref) = secret_ref {
+                body["secret_ref"] = serde_json::json!(secret_ref);
+            }
+            if let Some(quota_limit) = quota_limit {
+                body["quota_limit"] = serde_json::json!(quota_limit);
+            }
+            print_json(
+                control.post_json(&format!("/api/v1/llm/providers/{provider}/accounts"), &body)?,
+            )?
+        }
+        AccountsCommand::Update {
+            id,
+            name,
+            secret_ref,
+            weight,
+            priority,
+            enabled,
+            quota_limit,
+            quota_unit,
+            quota_period,
+        } => {
+            let mut body = serde_json::Map::new();
+            for (key, value) in [
+                ("name", name.map(serde_json::Value::from)),
+                ("secret_ref", secret_ref.map(serde_json::Value::from)),
+                ("weight", weight.map(serde_json::Value::from)),
+                ("priority", priority.map(serde_json::Value::from)),
+                ("enabled", enabled.map(serde_json::Value::from)),
+                ("quota_limit", quota_limit.map(serde_json::Value::from)),
+                ("quota_unit", quota_unit.map(serde_json::Value::from)),
+                ("quota_period", quota_period.map(serde_json::Value::from)),
+            ] {
+                if let Some(value) = value {
+                    body.insert(key.to_string(), value);
+                }
+            }
+            print_json(control.put(
+                &format!("/api/v1/llm/accounts/{id}"),
+                &serde_json::Value::Object(body),
+            )?)?
+        }
+        AccountsCommand::Delete { id } => {
+            print_json(control.delete(&format!("/api/v1/llm/accounts/{id}"))?)?
+        }
+        AccountsCommand::ResetQuota { id } => {
+            print_json(control.post(&format!("/api/v1/llm/accounts/{id}/quota/reset"))?)?
+        }
+    }
     Ok(())
 }
 
@@ -110,13 +259,55 @@ impl Control {
 
         parse_response(response)
     }
+
+    fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+        let response = self
+            .client()?
+            .post(format!("{}{path}", self.base_url))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .with_context(|| format!("cannot reach the Octra daemon at {}", self.base_url))?;
+
+        parse_response(response)
+    }
+
+    fn put(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+        let response = self
+            .client()?
+            .put(format!("{}{path}", self.base_url))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .with_context(|| format!("cannot reach the Octra daemon at {}", self.base_url))?;
+
+        parse_response(response)
+    }
+
+    fn delete(&self, path: &str) -> Result<serde_json::Value> {
+        let response = self
+            .client()?
+            .delete(format!("{}{path}", self.base_url))
+            .bearer_auth(&self.token)
+            .send()
+            .with_context(|| format!("cannot reach the Octra daemon at {}", self.base_url))?;
+
+        parse_response(response)
+    }
 }
 
 fn parse_response(response: reqwest::blocking::Response) -> Result<serde_json::Value> {
     let status = response.status();
-    let value: serde_json::Value = response
-        .json()
-        .unwrap_or_else(|_| serde_json::json!({ "error": "response was not valid JSON" }));
+    let text = response
+        .text()
+        .context("cannot read the daemon response body")?;
+    let value = if text.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "error": "response was not valid JSON", "body": text }),
+        )
+    };
 
     if !status.is_success() {
         bail!("daemon returned {status}: {value}");

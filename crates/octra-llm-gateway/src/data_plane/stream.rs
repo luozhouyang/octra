@@ -21,6 +21,7 @@ use octra_llm_protocol::{StreamDecoder, StreamEncoder};
 use octra_storage::Storage;
 use reqwest::Response as UpstreamResponse;
 
+use crate::accounts::AccountRuntime;
 use crate::usage::{self, UsageTracker};
 
 /// Starts a bridged SSE response. The HTTP status is already 200; upstream
@@ -34,6 +35,7 @@ pub fn start(
     include_usage: bool,
     storage: Arc<Storage>,
     tracker: UsageTracker,
+    account: Option<Arc<AccountRuntime>>,
 ) -> Response {
     let idle = Duration::from_secs(config.llm.stream_idle_timeout_secs.max(1));
     let state = BridgeState {
@@ -44,6 +46,7 @@ pub fn start(
         ingress,
         storage,
         tracker,
+        account,
         idle,
         finished: false,
         saw_finish: false,
@@ -146,6 +149,7 @@ struct BridgeState {
     ingress: Protocol,
     storage: Arc<Storage>,
     tracker: UsageTracker,
+    account: Option<Arc<AccountRuntime>>,
     idle: Duration,
     finished: bool,
     saw_finish: bool,
@@ -219,6 +223,21 @@ impl BridgeState {
                 tracker.finish_with_status(error.status);
             }
             None => tracker.finish_with_status(200),
+        }
+        if let Some(account) = &self.account {
+            let usage = &tracker.record.usage;
+            let tokens = usage
+                .input_tokens
+                .saturating_add(usage.output_tokens)
+                .min(i64::MAX as u64) as i64;
+            let cost = tracker
+                .record
+                .pricing
+                .as_ref()
+                .and_then(|pricing| crate::cost::compute(usage, pricing))
+                .map(|cost| cost.micros)
+                .unwrap_or(0);
+            account.consume(1, tokens, cost);
         }
         usage::spawn_record(self.storage.clone(), tracker.record);
     }

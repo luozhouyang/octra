@@ -4,6 +4,8 @@ pub mod remote;
 pub mod stream;
 pub mod translate;
 
+use std::sync::Arc;
+
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, header};
@@ -18,7 +20,9 @@ use serde_json::Value;
 use serde_json::json;
 use tokio::time::timeout;
 
+use crate::accounts::{self, AccountRuntime};
 use crate::config::{ProviderConfig, is_local_url};
+use crate::cost;
 use crate::error::{LlmResult, protocol_response};
 use crate::keys::{self, KeyOutcome, presented_key};
 use crate::routing::Target;
@@ -498,6 +502,7 @@ async fn handle(
         ir.stream = Some(stream);
     }
 
+    let session = header_str(&request, &state.config.llm.session_header).map(str::to_string);
     let response = execute(
         &state,
         &snapshot,
@@ -506,6 +511,7 @@ async fn handle(
         &ir,
         tracker,
         ingress,
+        session.as_deref(),
     )
     .await;
     match response {
@@ -534,6 +540,7 @@ fn fail_request(
     error
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     state: &LlmDataState,
     snapshot: &RuntimeSnapshot,
@@ -542,6 +549,7 @@ async fn execute(
     ir: &ChatRequest,
     mut tracker: UsageTracker,
     ingress: Protocol,
+    session: Option<&str>,
 ) -> LlmResult<Response> {
     let Some(plan) = snapshot.resolve(requested_model) else {
         let error = GatewayError::not_found(format!(
@@ -560,10 +568,16 @@ async fn execute(
     let stateful_responses =
         ingress == Protocol::OpenaiResponses && ir.extra.contains_key("previous_response_id");
     let upstream = state.upstream();
-    let attempts = plan.attempts(snapshot.round_robin().next(plan.group_slot()));
+    let tick = snapshot.round_robin().next(plan.group_slot());
+    let attempts = plan.attempts(tick);
+    let now_ms = Utc::now().timestamp_millis();
     let mut last_error: Option<GatewayError> = None;
+    let mut budget = 0usize;
 
-    for target in attempts.iter().take(MAX_ATTEMPTS) {
+    'targets: for target in attempts.iter() {
+        if budget >= MAX_ATTEMPTS {
+            break;
+        }
         let Some(provider) = snapshot.provider(&target.provider_id) else {
             continue;
         };
@@ -586,62 +600,130 @@ async fn execute(
             );
             continue;
         }
-        tracker.record.provider_id = Some(provider.id.clone());
-        tracker.record.provider_name = Some(provider.name.clone());
-        tracker.record.model_id = Some(target.model_id.clone());
 
-        // Any provider that authenticates needs a resolvable secret
-        // reference; without one the attempt would only end in a 401.
-        if provider.requires_secret()
-            && provider.secret_ref.is_none()
-            && state.upstream().test_key().is_none()
-        {
-            last_error = Some(
-                GatewayError::config(format!(
-                    "provider {} has no secret_ref configured",
-                    provider.name
-                ))
-                .with_code("secret_unavailable"),
+        let accounts = snapshot.accounts_for(&provider.id);
+        let selected: Vec<Option<Arc<AccountRuntime>>> = if accounts.is_empty() {
+            // No account pool configured: use the provider credential.
+            vec![None]
+        } else {
+            let candidates = accounts::candidates(
+                accounts,
+                target.account_id.as_deref(),
+                &plan.strategy,
+                session,
+                tick,
+                now_ms,
             );
-            continue;
-        }
-
-        match try_attempt(
-            state,
-            snapshot,
-            upstream.as_ref(),
-            &provider,
-            target,
-            ir,
-            &tracker,
-            ingress,
-        )
-        .await
-        {
-            Ok(outcome) => {
-                // Streaming responses carry their own tracker: usage is
-                // recorded when the stream closes, once the upstream has
-                // reported its final token counts.
-                if !outcome.streaming {
-                    tracker.record.usage = outcome.usage;
-                    tracker.finish_with_status(200);
-                    usage::spawn_record(state.storage.clone(), tracker.record.clone());
-                }
-                return Ok(outcome.response);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    request_id = %tracker.record.request_id,
-                    provider = %provider.name,
-                    model = %target.model_id,
-                    status = error.status,
-                    retryable = error.kind.is_retryable(),
-                    "llm upstream attempt failed"
+            if candidates.is_empty() {
+                last_error = Some(
+                    GatewayError::new(
+                        503,
+                        octra_llm_core::ErrorKind::Upstream,
+                        format!("provider {} has no available account", provider.name),
+                    )
+                    .with_code("account_unavailable"),
                 );
-                let retryable = error.kind.is_retryable();
-                last_error = Some(error);
-                if !retryable {
-                    break;
+                continue;
+            }
+            candidates.into_iter().map(Some).collect()
+        };
+
+        for account in selected {
+            if budget >= MAX_ATTEMPTS {
+                break 'targets;
+            }
+            budget += 1;
+
+            let account_secret_ref = account
+                .as_ref()
+                .and_then(|account| account.record.secret_ref.as_deref());
+            // Any provider that authenticates needs a resolvable secret
+            // reference; without one the attempt would only end in a 401.
+            if provider.requires_secret()
+                && provider.secret_ref.is_none()
+                && account_secret_ref.is_none()
+                && upstream.test_key().is_none()
+            {
+                last_error = Some(
+                    GatewayError::config(format!(
+                        "provider {} has no secret_ref configured",
+                        provider.name
+                    ))
+                    .with_code("secret_unavailable"),
+                );
+                continue;
+            }
+
+            tracker.record.provider_id = Some(provider.id.clone());
+            tracker.record.provider_name = Some(provider.name.clone());
+            tracker.record.model_id = Some(target.model_id.clone());
+            tracker.record.account_id = account.as_ref().map(|account| account.record.id.clone());
+            tracker.record.account_name =
+                account.as_ref().map(|account| account.record.name.clone());
+            tracker.record.pricing = snapshot.model_pricing(&provider.id, &target.model_id);
+
+            match try_attempt(
+                state,
+                snapshot,
+                upstream.as_ref(),
+                &provider,
+                target,
+                ir,
+                &tracker,
+                ingress,
+                account.as_ref(),
+                account_secret_ref,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    // Streaming responses carry their own tracker: usage is
+                    // recorded when the stream closes, once the upstream has
+                    // reported its final token counts.
+                    if !outcome.streaming {
+                        tracker.record.usage = outcome.usage.clone();
+                        tracker.record.finish_reason =
+                            Some(usage::finish_reason_label(&outcome.finish_reason).to_string());
+                        tracker.finish_with_status(200);
+                        if let Some(account) = &account {
+                            consume_account(account, &tracker);
+                        }
+                        usage::spawn_record(state.storage.clone(), tracker.record.clone());
+                    }
+                    return Ok(outcome.response);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        request_id = %tracker.record.request_id,
+                        provider = %provider.name,
+                        model = %target.model_id,
+                        account = ?tracker.record.account_name,
+                        status = error.status,
+                        retryable = error.kind.is_retryable(),
+                        "llm upstream attempt failed"
+                    );
+                    let retryable = error.kind.is_retryable();
+                    let rate_limited =
+                        error.status == 429 || error.code.as_deref() == Some("quota_exceeded");
+                    if rate_limited && let Some(account) = &account {
+                        let cooldown_ms =
+                            state.config.llm.account_cooldown_secs.max(1) as i64 * 1000;
+                        let until = Utc::now().timestamp_millis() + cooldown_ms;
+                        account.mark_cooldown(until);
+                        spawn_cooldown(
+                            state.storage.clone(),
+                            account.record.id.clone(),
+                            until,
+                            error.message.clone(),
+                        );
+                    }
+                    last_error = Some(error);
+                    if rate_limited {
+                        continue;
+                    }
+                    if !retryable {
+                        break 'targets;
+                    }
                 }
             }
         }
@@ -655,9 +737,47 @@ async fn execute(
     Err(fail_request(state, &mut tracker, error))
 }
 
+/// Adds a completed request to the live account quota counter.
+fn consume_account(account: &AccountRuntime, tracker: &UsageTracker) {
+    let usage = &tracker.record.usage;
+    let tokens = usage
+        .input_tokens
+        .saturating_add(usage.output_tokens)
+        .min(i64::MAX as u64) as i64;
+    let cost_micros = tracker
+        .record
+        .pricing
+        .as_ref()
+        .and_then(|pricing| cost::compute(usage, pricing))
+        .map(|cost| cost.micros)
+        .unwrap_or(0);
+    account.consume(1, tokens, cost_micros);
+}
+
+fn spawn_cooldown(
+    storage: Arc<octra_storage::Storage>,
+    account_id: String,
+    until_ms: i64,
+    last_error: String,
+) {
+    let Some(until) = DateTime::<Utc>::from_timestamp_millis(until_ms) else {
+        return;
+    };
+    let until = until.to_rfc3339();
+    tokio::spawn(async move {
+        if let Err(error) = storage
+            .llm_set_account_cooldown(&account_id, &until, Some(&last_error))
+            .await
+        {
+            tracing::warn!(account_id, error = ?error, "cannot persist account cooldown");
+        }
+    });
+}
+
 struct AttemptOutcome {
     response: Response,
     usage: Usage,
+    finish_reason: octra_llm_core::FinishReason,
     streaming: bool,
 }
 
@@ -671,6 +791,8 @@ async fn try_attempt(
     ir: &ChatRequest,
     tracker: &UsageTracker,
     ingress: Protocol,
+    account: Option<&Arc<AccountRuntime>>,
+    account_secret_ref: Option<&str>,
 ) -> LlmResult<AttemptOutcome> {
     let mut ir = ir.clone();
     apply_model_limits(snapshot, provider, target, &mut ir);
@@ -685,7 +807,13 @@ async fn try_attempt(
     }
 
     let url = upstream.endpoint(provider, &target.model_id, ir.stream == Some(true))?;
-    let builder = upstream.post_json(provider, &url, &body, ir.stream == Some(true))?;
+    let builder = upstream.post_json_with_secret(
+        provider,
+        &url,
+        &body,
+        ir.stream == Some(true),
+        account_secret_ref,
+    )?;
 
     if ir.stream == Some(true) {
         let upstream_response = timeout(upstream.request_timeout(), upstream.send_stream(builder))
@@ -699,10 +827,12 @@ async fn try_attempt(
             ir.include_usage.unwrap_or(false),
             state.storage.clone(),
             tracker.clone(),
+            account.cloned(),
         );
         return Ok(AttemptOutcome {
             response,
             usage: Usage::default(),
+            finish_reason: octra_llm_core::FinishReason::Stop,
             streaming: true,
         });
     }
@@ -712,10 +842,12 @@ async fn try_attempt(
         .map_err(|_| GatewayError::timeout("upstream request timed out"))??;
     let response = translate::decode_response(target.protocol, value)?;
     let usage = response.usage.clone();
+    let finish_reason = response.finish_reason;
     let body = translate::encode_response(ingress, &response)?;
     Ok(AttemptOutcome {
         response: json_response(body),
         usage,
+        finish_reason,
         streaming: false,
     })
 }
