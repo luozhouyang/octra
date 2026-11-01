@@ -12,6 +12,7 @@ use octra_gateway_api::{AppState, AuthState};
 use octra_gateway_runtime::GatewayRuntime;
 use octra_llm_gateway::{LlmControlState, LlmDataState, LlmRuntime};
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
+use octra_plugin_runtime::{PluginRegistry, PluginRuntime};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -48,6 +49,14 @@ async fn main() -> anyhow::Result<()> {
             .context("cannot build the MCP gateway runtime")?,
     );
 
+    let mut plugin_registry = PluginRegistry::new();
+    octra_plugin_builtin::register(&mut plugin_registry);
+    let plugin_runtime = Arc::new(
+        PluginRuntime::bootstrap(storage.clone(), Arc::new(plugin_registry))
+            .await
+            .context("cannot build the plugin runtime")?,
+    );
+
     let token =
         token::load_or_create(&workspace.token_file()).context("cannot prepare control token")?;
     let token = Arc::new(token);
@@ -65,10 +74,11 @@ async fn main() -> anyhow::Result<()> {
     let control_app = Router::new()
         .merge(octra_gateway_api::core_router(app_state))
         .merge(octra_api_gateway::control_router(
-            ApiControlState::with_metrics(
+            ApiControlState::with_plugins(
                 storage.clone(),
                 api_runtime.clone(),
                 api_metrics.clone(),
+                plugin_runtime.clone(),
             ),
         ))
         .merge(octra_llm_gateway::control_router(LlmControlState::new(
@@ -97,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
             config.clone(),
         )))
         .merge(octra_api_gateway::data_plane_router(
-            ApiDataState::with_metrics(api_runtime, config.clone(), api_metrics),
+            ApiDataState::with_plugins(api_runtime, config.clone(), api_metrics, plugin_runtime),
         ));
 
     let control_listener = tokio::net::TcpListener::bind(&config.daemon.control_bind)

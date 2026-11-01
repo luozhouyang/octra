@@ -19,6 +19,7 @@ use std::sync::Arc;
 use axum::Router;
 use octra_config::OctraConfig;
 use octra_gateway_runtime::GatewayRuntime;
+use octra_plugin_runtime::PluginRuntime;
 use octra_storage::Storage;
 
 pub use error::ControlError;
@@ -28,6 +29,7 @@ pub use metrics::{ApiMetrics, MetricsSnapshot};
 #[derive(Clone)]
 pub struct ApiDataState {
     pub runtime: Arc<GatewayRuntime>,
+    pub plugins: Arc<PluginRuntime>,
     pub config: Arc<OctraConfig>,
     pub client: reqwest::Client,
     pub metrics: Arc<ApiMetrics>,
@@ -43,9 +45,19 @@ impl ApiDataState {
         config: Arc<OctraConfig>,
         metrics: Arc<ApiMetrics>,
     ) -> Self {
+        Self::with_plugins(runtime, config, metrics, Arc::new(PluginRuntime::empty()))
+    }
+
+    pub fn with_plugins(
+        runtime: Arc<GatewayRuntime>,
+        config: Arc<OctraConfig>,
+        metrics: Arc<ApiMetrics>,
+        plugins: Arc<PluginRuntime>,
+    ) -> Self {
         let client = http_client::build(&config);
         Self {
             runtime,
+            plugins,
             config,
             client,
             metrics,
@@ -61,6 +73,7 @@ impl ApiDataState {
 pub struct ApiControlState {
     pub storage: Arc<Storage>,
     pub runtime: Arc<GatewayRuntime>,
+    pub plugins: Arc<PluginRuntime>,
     pub metrics: Arc<ApiMetrics>,
 }
 
@@ -74,9 +87,19 @@ impl ApiControlState {
         runtime: Arc<GatewayRuntime>,
         metrics: Arc<ApiMetrics>,
     ) -> Self {
+        Self::with_plugins(storage, runtime, metrics, Arc::new(PluginRuntime::empty()))
+    }
+
+    pub fn with_plugins(
+        storage: Arc<Storage>,
+        runtime: Arc<GatewayRuntime>,
+        metrics: Arc<ApiMetrics>,
+        plugins: Arc<PluginRuntime>,
+    ) -> Self {
         Self {
             storage,
             runtime,
+            plugins,
             metrics,
         }
     }
