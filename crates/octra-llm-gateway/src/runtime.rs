@@ -1,0 +1,340 @@
+//! Immutable routing snapshot shared by the data plane and control plane.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use octra_config::OctraConfig;
+use octra_core::Result;
+use octra_llm_core::Protocol;
+use octra_storage::{LlmRuntimeData, Storage};
+use tokio::sync::RwLock;
+
+use crate::config::ProviderConfig;
+use crate::routing::{RoundRobin, RoutePlan};
+
+/// Configuration errors for one provider, reported by the control plane.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProviderIssue {
+    pub provider_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeSnapshot {
+    pub generated_at: DateTime<Utc>,
+    pub data: LlmRuntimeData,
+    providers: BTreeMap<String, Arc<ProviderConfig>>,
+    routes: BTreeMap<String, Arc<RoutePlan>>,
+    round_robin: RoundRobin,
+    pub issues: Vec<ProviderIssue>,
+}
+
+impl RuntimeSnapshot {
+    pub fn build(mut data: LlmRuntimeData) -> Self {
+        data.providers.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        let mut providers = BTreeMap::new();
+        let mut issues = Vec::new();
+        for record in &data.providers {
+            if !record.enabled {
+                continue;
+            }
+            match ProviderConfig::from_record(record) {
+                Ok(config) => {
+                    providers.insert(record.id.clone(), Arc::new(config));
+                }
+                Err(error) => {
+                    let crate::config::ProviderConfigError::Invalid(message) = error;
+                    issues.push(ProviderIssue {
+                        provider_id: record.id.clone(),
+                        message,
+                    });
+                }
+            }
+        }
+
+        let mut routes = BTreeMap::new();
+        for route in &data.routes {
+            if let Ok(plan) = RoutePlan::compile(&data, route, &providers) {
+                routes.insert(route.virtual_model_id.clone(), Arc::new(plan));
+            }
+        }
+
+        Self {
+            generated_at: Utc::now(),
+            data,
+            providers,
+            routes,
+            round_robin: RoundRobin::new(),
+            issues,
+        }
+    }
+
+    pub fn provider(&self, id: &str) -> Option<Arc<ProviderConfig>> {
+        self.providers.get(id).cloned()
+    }
+
+    pub fn enabled_providers(&self) -> impl Iterator<Item = &Arc<ProviderConfig>> {
+        self.providers.values()
+    }
+
+    /// Resolves a requested model name to its routing plan.
+    pub fn resolve(&self, virtual_model_id: &str) -> Option<Arc<RoutePlan>> {
+        self.routes.get(virtual_model_id).cloned()
+    }
+
+    pub fn round_robin(&self) -> RoundRobin {
+        self.round_robin.clone()
+    }
+
+    /// Models exposed by `GET /v1/models`: route names plus provider models.
+    pub fn model_listing(&self) -> Vec<ModelListing> {
+        let mut listing: BTreeMap<String, ModelListing> = BTreeMap::new();
+        for route in self.routes.keys() {
+            listing.insert(
+                route.clone(),
+                ModelListing {
+                    id: route.clone(),
+                    owned_by: "octra".to_string(),
+                    protocol: Protocol::Openai,
+                    created: self.generated_at.timestamp(),
+                    description: "Octra virtual model".to_string(),
+                },
+            );
+        }
+        for model in &self.data.models {
+            if !model.enabled {
+                continue;
+            }
+            let Some(provider) = self.providers.get(&model.provider_id) else {
+                continue;
+            };
+            let protocol = model
+                .protocol
+                .as_deref()
+                .and_then(Protocol::parse)
+                .unwrap_or(provider.protocol);
+            listing
+                .entry(model.model_id.clone())
+                .or_insert_with(|| ModelListing {
+                    id: model.model_id.clone(),
+                    owned_by: provider.name.clone(),
+                    protocol,
+                    created: self.generated_at.timestamp(),
+                    description: model
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| "Provider model".to_string()),
+                });
+        }
+        listing.into_values().collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelListing {
+    pub id: String,
+    pub owned_by: String,
+    pub protocol: Protocol,
+    pub created: i64,
+    pub description: String,
+}
+
+pub struct LlmRuntime {
+    pub storage: Arc<Storage>,
+    pub config: Arc<OctraConfig>,
+    snapshot: RwLock<Arc<RuntimeSnapshot>>,
+}
+
+impl LlmRuntime {
+    pub async fn bootstrap(storage: Arc<Storage>, config: Arc<OctraConfig>) -> Result<Self> {
+        let data = storage.llm_load_runtime_data().await?;
+        let mut snapshot = RuntimeSnapshot::build(data);
+        for issue in &snapshot.issues {
+            tracing::warn!(
+                provider_id = %issue.provider_id,
+                message = %issue.message,
+                "llm provider configuration ignored"
+            );
+        }
+        snapshot.issues.shrink_to_fit();
+        Ok(Self {
+            storage,
+            config,
+            snapshot: RwLock::new(Arc::new(snapshot)),
+        })
+    }
+
+    /// Reloads configuration and atomically swaps the snapshot. In-flight
+    /// requests keep the snapshot they started with.
+    pub async fn reload(&self) -> Result<()> {
+        let data = self.storage.llm_load_runtime_data().await?;
+        let snapshot = Arc::new(RuntimeSnapshot::build(data));
+        let mut guard = self.snapshot.write().await;
+        *guard = snapshot;
+        Ok(())
+    }
+
+    pub async fn snapshot(&self) -> Arc<RuntimeSnapshot> {
+        self.snapshot.read().await.clone()
+    }
+}
+
+#[derive(Clone)]
+pub struct LlmDataState {
+    pub runtime: Arc<LlmRuntime>,
+    pub storage: Arc<Storage>,
+    pub config: Arc<OctraConfig>,
+    pub upstream: Option<Arc<crate::upstream::Upstream>>,
+}
+
+impl LlmDataState {
+    pub fn new(runtime: Arc<LlmRuntime>, storage: Arc<Storage>, config: Arc<OctraConfig>) -> Self {
+        Self {
+            runtime,
+            storage,
+            config,
+            upstream: None,
+        }
+    }
+
+    /// Overrides the upstream transport, for example to inject a test key.
+    pub fn with_upstream(mut self, upstream: crate::upstream::Upstream) -> Self {
+        self.upstream = Some(Arc::new(upstream));
+        self
+    }
+
+    /// The LLM data plane router built from this state.
+    pub fn into_router(self) -> axum::Router {
+        crate::data_plane::router(self)
+    }
+
+    pub(crate) fn upstream(&self) -> Arc<crate::upstream::Upstream> {
+        self.upstream
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::upstream::Upstream::new(&self.config)))
+    }
+}
+
+#[derive(Clone)]
+pub struct LlmControlState {
+    pub runtime: Arc<LlmRuntime>,
+    pub storage: Arc<Storage>,
+}
+
+impl LlmControlState {
+    pub fn new(runtime: Arc<LlmRuntime>, storage: Arc<Storage>) -> Self {
+        Self { runtime, storage }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use octra_storage::{LlmModelInput, LlmProviderInput, LlmRoutingTargetInput, LlmStorageError};
+
+    async fn storage() -> Arc<Storage> {
+        Arc::new(Storage::connect_in_memory().await.unwrap())
+    }
+
+    fn provider_input(name: &str, base_url: &str, enabled: bool) -> LlmProviderInput {
+        LlmProviderInput {
+            name: name.into(),
+            kind: "openai".into(),
+            protocol: "openai".into(),
+            auth_type: "none".into(),
+            base_url: Some(base_url.into()),
+            secret_ref: None,
+            priority: 0,
+            config_json: "{}".into(),
+            enabled,
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_builds_and_reload_swaps_routes() {
+        let storage = storage().await;
+        let config = Arc::new(OctraConfig::default());
+        let runtime = LlmRuntime::bootstrap(storage.clone(), config.clone())
+            .await
+            .unwrap();
+        assert!(runtime.snapshot().await.resolve("octra-default").is_none());
+
+        let provider = storage
+            .llm_create_provider(&provider_input("local", "http://127.0.0.1:9/v1", true))
+            .await
+            .unwrap();
+        storage
+            .llm_create_model(&LlmModelInput {
+                provider_id: provider.id.clone(),
+                model_id: "m1".into(),
+                display_name: Some("Model One".into()),
+                protocol: None,
+                context_window: None,
+                max_output_tokens: None,
+                capabilities: "{}".into(),
+                pricing_json: "{}".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        let group = storage
+            .llm_create_routing_group("g", "priority")
+            .await
+            .unwrap();
+        storage
+            .llm_create_routing_target(
+                &group.id,
+                &LlmRoutingTargetInput {
+                    provider_id: provider.id.clone(),
+                    model_id: "m1".into(),
+                    weight: 1,
+                    priority: 0,
+                    position: 0,
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .llm_create_route("octra-default", Some(&group.id))
+            .await
+            .unwrap();
+
+        runtime.reload().await.unwrap();
+        let snapshot = runtime.snapshot().await;
+        let plan = snapshot.resolve("octra-default").expect("route");
+        assert_eq!(plan.attempts(0).len(), 2);
+        let listing = snapshot.model_listing();
+        assert!(listing.iter().any(|model| model.id == "octra-default"));
+        assert!(listing.iter().any(|model| model.id == "m1"));
+    }
+
+    #[tokio::test]
+    async fn invalid_provider_config_is_reported_and_skipped() {
+        let storage = storage().await;
+        let bad = storage
+            .llm_create_provider(&LlmProviderInput {
+                protocol: "grpc".into(),
+                ..provider_input("bad", "http://127.0.0.1:9/v1", true)
+            })
+            .await
+            .unwrap();
+        let snapshot = LlmRuntime::bootstrap(storage, Arc::new(OctraConfig::default()))
+            .await
+            .unwrap()
+            .snapshot()
+            .await;
+        assert!(snapshot.provider(&bad.id).is_none());
+        assert_eq!(snapshot.issues.len(), 1);
+    }
+
+    #[test]
+    fn storage_errors_convert() {
+        let error: octra_core::Error = LlmStorageError::Backend("x".to_string()).into_octra();
+        assert!(matches!(error, octra_core::Error::Storage(_)));
+    }
+}

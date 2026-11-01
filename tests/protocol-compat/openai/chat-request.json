@@ -1,0 +1,57 @@
+{
+  "model": "gpt-4o-mini",
+  "messages": [
+    { "role": "system", "content": "You are a concise assistant." },
+    { "role": "developer", "content": "Reply in English." },
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "What is in this image?" },
+        {
+          "type": "image_url",
+          "image_url": { "url": "https://example.com/cat.png", "detail": "high" }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "Let me check the weather.",
+      "tool_calls": [
+        {
+          "id": "call_abc123",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"city\":\"Paris\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_abc123",
+      "content": "{\"temperature\":21}"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather",
+        "parameters": {
+          "type": "object",
+          "properties": { "city": { "type": "string" } },
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "temperature": 0.2,
+  "top_p": 0.9,
+  "max_tokens": 512,
+  "stop": ["END"],
+  "stream": false,
+  "metadata": { "trace": "abc" }
+}

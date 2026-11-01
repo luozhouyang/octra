@@ -1,0 +1,13 @@
+[package]
+name = "octra-llm-protocol"
+description = "OpenAI and Anthropic protocol adaptation for Octra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+octra-core.workspace = true
+octra-llm-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

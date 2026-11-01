@@ -1,0 +1,24 @@
+{
+  "id": "msg_01xyz",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-5",
+  "content": [
+    { "type": "thinking", "thinking": "I should check the weather.", "signature": "sig-1" },
+    { "type": "text", "text": "It is sunny in Paris." },
+    {
+      "type": "tool_use",
+      "id": "toolu_01abc",
+      "name": "get_weather",
+      "input": { "city": "Paris" }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 42,
+    "output_tokens": 17,
+    "cache_read_input_tokens": 8,
+    "cache_creation_input_tokens": 0
+  }
+}

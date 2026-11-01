@@ -1,0 +1,32 @@
+[package]
+name = "octra-llm-gateway"
+description = "LLM Gateway routing, providers, data plane, and control plane for Octra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+http.workspace = true
+octra-config.workspace = true
+octra-core.workspace = true
+octra-data-plane.workspace = true
+octra-llm-core.workspace = true
+octra-llm-protocol.workspace = true
+octra-storage.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+http-body-util.workspace = true
+tower.workspace = true

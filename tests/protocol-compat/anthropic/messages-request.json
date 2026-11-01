@@ -1,0 +1,72 @@
+{
+  "model": "claude-sonnet-4-5",
+  "max_tokens": 1024,
+  "system": [
+    { "type": "text", "text": "You are a concise assistant." },
+    { "type": "text", "text": "Reply in English." }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "What is in this image?" },
+        {
+          "type": "image",
+          "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "aGVsbG8="
+          }
+        },
+        {
+          "type": "document",
+          "source": { "type": "url", "url": "https://example.com/doc.pdf" },
+          "title": "spec.pdf"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "thinking", "thinking": "I should check the weather.", "signature": "sig-1" },
+        { "type": "text", "text": "Let me check the weather." },
+        {
+          "type": "tool_use",
+          "id": "toolu_01abc",
+          "name": "get_weather",
+          "input": { "city": "Paris" }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01abc",
+          "content": [{ "type": "text", "text": "{\"temperature\":21}" }]
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get the current weather",
+      "input_schema": {
+        "type": "object",
+        "properties": { "city": { "type": "string" } },
+        "required": ["city"]
+      }
+    },
+    { "type": "web_search_20250305", "name": "web_search", "max_uses": 3 }
+  ],
+  "tool_choice": { "type": "auto", "disable_parallel_tool_use": false },
+  "temperature": 0.3,
+  "top_p": 0.9,
+  "top_k": 40,
+  "stop_sequences": ["END"],
+  "thinking": { "type": "enabled", "budget_tokens": 2048 },
+  "stream": false,
+  "metadata": { "user_id": "u-1" }
+}
