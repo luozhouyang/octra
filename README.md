@@ -4,7 +4,7 @@ English | [简体中文](./README.zh-CN.md)
 
 **Local-first Unified Gateway** — manage API, LLM, and MCP services in one place, with a cross-platform desktop app.
 
-This repository is the runnable foundation of Octra: a standalone Daemon (Axum control plane + SQLite), an admin CLI, a Tauri 2 desktop app, and dual Rust/TypeScript workspaces. LLM protocol translation, the Pingora data plane, the MCP Gateway, and more are being implemented phase by phase according to the architecture document.
+This repository is the runnable foundation of Octra: a standalone Daemon with a unified data plane (API, LLM, and MCP gateways), an authenticated control plane, SQLite persistence, an admin CLI, a Tauri 2 desktop app, and dual Rust/TypeScript workspaces. The core gateway functionality is implemented; agent integration, plugins, and production hardening are still on the roadmap.
 
 ## Repository layout
 
@@ -16,10 +16,18 @@ octra/
 ├── crates/
 │   ├── octra-core/         # Domain types and errors
 │   ├── octra-config/       # Configuration and local directory resolution
-│   ├── octra-storage/      # SQLite + SQLx migrations
+│   ├── octra-storage/      # SQLite + SQLx migrations and repositories
 │   ├── octra-observability/# tracing initialization
-│   ├── octra-gateway-runtime/ # Runtime snapshot + atomic reload
-│   ├── octra-gateway-api/  # Axum control plane (Bearer auth)
+│   ├── octra-data-plane/   # Shared HTTP, header, and SSE helpers
+│   ├── octra-api-core/     # API Gateway domain types
+│   ├── octra-api-gateway/  # API proxy + service/route/upstream CRUD
+│   ├── octra-gateway-runtime/ # API runtime snapshot, matcher, balancer
+│   ├── octra-gateway-api/  # Shared control plane (health, auth, CORS)
+│   ├── octra-llm-core/     # Canonical LLM IR
+│   ├── octra-llm-protocol/ # OpenAI/Anthropic protocol adapters
+│   ├── octra-llm-gateway/  # LLM routing, providers, data plane, control plane
+│   ├── octra-mcp-core/     # MCP JSON-RPC types
+│   ├── octra-mcp-gateway/  # MCP stdio/HTTP clients, /mcp endpoint, control plane
 │   ├── octra-daemon/       # Standalone gateway daemon
 │   └── octra-cli/          # Command-line administration
 ├── packages/
@@ -41,7 +49,8 @@ Prerequisites: Rust 1.97+, Node 24+, pnpm 10+.
 ```bash
 pnpm install
 
-# Terminal 1: start the daemon (control plane at http://127.0.0.1:8081)
+# Terminal 1: start the daemon
+# control plane: http://127.0.0.1:8081, data plane: http://127.0.0.1:8080
 pnpm daemon
 
 # Terminal 2: check status
@@ -63,37 +72,41 @@ On first start, the daemon creates the following under `$OCTRA_HOME` (defaults t
 | `octra.db` | SQLite database (WAL) |
 | `control.token` | Control-plane Bearer token; mode `0600` on Unix |
 
-The control plane binds to the loopback address by default, and every endpoint enforces Bearer authentication. The CLI and desktop app read credentials from `control.token`; `OCTRA_CONTROL_TOKEN` overrides it.
+The control plane binds to the loopback address by default, and every endpoint enforces Bearer authentication. The data plane binds to loopback by default as well; configure `gateway.listen_bind` if you need a different interface. The CLI and desktop app read credentials from `control.token`; `OCTRA_CONTROL_TOKEN` overrides it.
 
-Environment variables: `OCTRA_HOME`, `OCTRA_CONTROL_BIND`, `OCTRA_LOG_LEVEL`, `OCTRA_LOG_FORMAT` (`pretty` / `json`), `OCTRA_CONTROL_URL` (CLI).
+Environment variables: `OCTRA_HOME`, `OCTRA_CONTROL_BIND`, `OCTRA_GATEWAY_BIND`, `OCTRA_LOG_LEVEL`, `OCTRA_LOG_FORMAT` (`pretty` / `json`), `OCTRA_CONTROL_TOKEN`, `OCTRA_CONTROL_URL` (CLI).
 
 ## Implemented today
 
-- Standalone daemon lifecycle with graceful shutdown.
-- Axum control plane: `/api/v1/system/health`, `/api/v1/system/config`, `/api/v1/services`, `/api/v1/routes`, `/api/v1/system/reload`.
+- Standalone daemon with two listeners and unified graceful shutdown.
+- Authenticated control plane: system health/config/reload plus CRUD for services, routes, upstreams, targets, consumers, credentials, LLM providers/models/routing groups/routes/virtual keys, and MCP servers/tools/ACLs/keys.
 - Constant-time Bearer token authentication; the token is randomly generated and persisted to disk.
-- SQLite + SQLx migrations with WAL / foreign_keys / busy_timeout.
-- Runtime snapshot + atomic swap; the proxy hot path never queries the database directly (the landing point described in section 13.2 of the architecture document).
+- SQLite + SQLx migrations with WAL / foreign_keys / busy_timeout; runtime snapshots keep the hot path off the database.
+- API Gateway: host/path/method/header routing, longest-prefix matching, round-robin and weighted load balancing, path stripping, timeouts, retries, API-key authentication, streaming proxy, access logs, and metrics.
+- LLM Gateway: canonical IR, OpenAI ↔ Anthropic request/response/SSE conversion, virtual models, routing groups with priority/weight fallback, OpenAI-compatible and Anthropic providers (`env:` / `file:` secret references), virtual keys hashed in SQLite, usage records, and `count_tokens`.
+- MCP Gateway: Streamable HTTP and stdio upstreams, tool discovery and aggregation, `/mcp` JSON-RPC endpoint with sessions, per-consumer tool ACLs, API keys, and invocation audit rows.
 - CLI: `status`, `services`, `routes`, `reload`, `doctor`.
 - Tauri 2 + React desktop skeleton; the dashboard reaches the daemon through Tauri commands.
 - Dual workspace and CI (Rust fmt/clippy/test; frontend typecheck/test/build).
 
 ## Not yet implemented (tracked on the roadmap)
 
-- Pingora data plane (actual API Gateway forwarding).
-- LLM canonical IR, protocol adapters, provider routing.
+- Pingora-based proxy engine (the current unified data plane uses Axum + reqwest).
+- OpenAI Responses and Gemini protocol adapters.
 - Agent discovery / config adapter / bridge.
-- MCP Gateway and tool ACL.
 - Plugin runtime (native / WASM).
 - OS Keychain integration for secrets.
+- Separate telemetry database and retention workers.
 - Cross-platform packaging, signing, and notarization.
 
 ## Security boundaries
 
-- SQLite stores only secret references, never plaintext.
+- SQLite stores only secret references and API-key hashes, never plaintext credential values.
 - The control plane enforces authentication and binds to loopback by default.
+- The data plane binds to loopback by default; API keys are optional per service, and LLM/MCP keys are enforced once configured.
+- Provider secrets resolve from `env:` or `file:` references at request time and are never logged.
 - The daemon is not embedded in the Tauri main process, so it can run and be tested standalone.
-- This is currently a development skeleton; secrets, permissions, and packaging must be hardened before production use.
+- This is still a development build; secrets, permissions, and packaging must be hardened before production use.
 
 ## Verification
 
