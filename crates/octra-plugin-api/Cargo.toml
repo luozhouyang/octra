@@ -1,0 +1,16 @@
+[package]
+name = "octra-plugin-api"
+description = "Plugin manifests, contexts, and traits for Octra gateways"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+bytes.workspace = true
+http.workspace = true
+octra-api-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

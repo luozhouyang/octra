@@ -3,6 +3,7 @@
 pub mod api_gateway;
 pub mod llm;
 pub mod mcp;
+pub mod plugins;
 
 pub use llm::{
     LlmModelInput, LlmModelRecord, LlmProviderInput, LlmProviderRecord, LlmRouteRecord,

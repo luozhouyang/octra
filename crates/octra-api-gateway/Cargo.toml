@@ -20,6 +20,8 @@ octra-config.workspace = true
 octra-core.workspace = true
 octra-data-plane.workspace = true
 octra-gateway-runtime.workspace = true
+octra-plugin-api.workspace = true
+octra-plugin-runtime.workspace = true
 octra-storage.workspace = true
 rand.workspace = true
 reqwest.workspace = true
@@ -31,3 +33,6 @@ tower.workspace = true
 tracing.workspace = true
 url.workspace = true
 
+
+[dev-dependencies]
+octra-plugin-builtin.workspace = true

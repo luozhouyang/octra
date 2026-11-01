@@ -73,4 +73,7 @@ octra-llm-protocol = { path = "crates/octra-llm-protocol" }
 octra-mcp-core = { path = "crates/octra-mcp-core" }
 octra-mcp-gateway = { path = "crates/octra-mcp-gateway" }
 octra-observability = { path = "crates/octra-observability" }
+octra-plugin-api = { path = "crates/octra-plugin-api" }
+octra-plugin-builtin = { path = "crates/octra-plugin-builtin" }
+octra-plugin-runtime = { path = "crates/octra-plugin-runtime" }
 octra-storage = { path = "crates/octra-storage" }
