@@ -1,0 +1,37 @@
+[package]
+name = "octra-mcp-gateway"
+description = "MCP Gateway client adapters, data plane, and control plane for Octra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+http.workspace = true
+octra-config.workspace = true
+octra-core.workspace = true
+octra-data-plane.workspace = true
+octra-mcp-core.workspace = true
+octra-storage.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[[bin]]
+name = "mock_mcp_stdio"
+path = "src/bin/mock_mcp_stdio.rs"
+
+[dev-dependencies]
+http-body-util.workspace = true
+tower.workspace = true
