@@ -79,11 +79,11 @@ Environment variables: `OCTRA_HOME`, `OCTRA_CONTROL_BIND`, `OCTRA_GATEWAY_BIND`,
 ## Implemented today
 
 - Standalone daemon with two listeners and unified graceful shutdown.
-- Authenticated control plane: system health/config/reload plus CRUD for services, routes, upstreams, targets, consumers, credentials, plugins/configs, LLM providers/models/routing groups/routes/virtual keys, and MCP servers/tools/ACLs/keys.
+- Authenticated control plane: system health/config/reload plus CRUD for services, routes, upstreams, targets, consumers, credentials, policies, plugins/configs, LLM providers/models/routing groups/routes/virtual keys, and MCP servers/tools/ACLs/keys; request and audit logs are queryable.
 - Constant-time Bearer token authentication; the token is randomly generated and persisted to disk.
 - SQLite + SQLx migrations with WAL / foreign_keys / busy_timeout; runtime snapshots keep the hot path off the database.
-- API Gateway: host/path/method/header routing, longest-prefix matching, round-robin and weighted load balancing, path stripping, body limits, connect/request timeouts, retries, API-key authentication, streaming proxy, access logs, and metrics.
-- Plugin system: Kong-style phase chain with consumer > route > service > global scope precedence and priority ordering, fail-open/fail-closed policies, and built-in `request-id`, `header-rewrite`, `cors`, and `rate-limit` plugins configured per scope.
+- API Gateway: host/path/method/header routing, longest-prefix matching, round-robin and weighted load balancing with multi-upstream fallback, path stripping, body limits, connect/request timeouts, retries, API-key authentication, policy-based per-consumer route authorization with default deny, streaming proxy, persisted access logs, and JSON and Prometheus metrics.
+- Plugin system: Kong-style phase chain with consumer > route > service > global scope precedence and priority ordering, fail-open/fail-closed policies, and built-in `request-id`, `header-rewrite`, `cors`, `rate-limit`, and `circuit-breaker` plugins configured per scope.
 - LLM Gateway: canonical IR, OpenAI ↔ Anthropic request/response/SSE conversion, virtual models, routing groups with priority/weight fallback, OpenAI-compatible and Anthropic providers (`env:` / `file:` secret references), virtual keys hashed in SQLite, usage records, and `count_tokens`.
 - MCP Gateway: Streamable HTTP and stdio upstreams, tool discovery and aggregation, `/mcp` JSON-RPC endpoint with sessions, per-consumer tool ACLs, API keys, and invocation audit rows.
 - CLI: `status`, `services`, `routes`, `reload`, `doctor`.
@@ -97,6 +97,7 @@ Environment variables: `OCTRA_HOME`, `OCTRA_CONTROL_BIND`, `OCTRA_GATEWAY_BIND`,
 - Agent discovery / config adapter / bridge.
 - WASM plugin runtime (the native plugin system and built-ins are implemented).
 - OS Keychain integration for secrets.
+- Request/response body transformation.
 - Separate telemetry database and retention workers.
 - Cross-platform packaging, signing, and notarization.
 
