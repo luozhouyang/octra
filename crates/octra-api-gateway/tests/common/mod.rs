@@ -40,6 +40,7 @@ struct MockState {
 async fn mock_echo(State(state): State<MockState>, request: Request<Body>) -> Response {
     use axum::body::to_bytes;
 
+    let method = request.method().to_string();
     let path = request.uri().path().to_string();
     let query = request.uri().query().unwrap_or_default().to_string();
     state.calls.lock().unwrap().push(path.clone());
@@ -55,11 +56,19 @@ async fn mock_echo(State(state): State<MockState>, request: Request<Body>) -> Re
             .unwrap_or_default()
             .to_string()
     };
+    let mut header_values = serde_json::Map::new();
+    for (name, value) in &headers {
+        if let Ok(value) = value.to_str() {
+            header_values.insert(name.to_string(), Value::String(value.to_string()));
+        }
+    }
 
     let payload = serde_json::json!({
         "server": state.name,
+        "method": method,
         "path": path,
         "query": query,
+        "headers": header_values,
         "body": String::from_utf8_lossy(&body),
         "host": header("host"),
         "xff": header("x-forwarded-for"),
@@ -82,6 +91,9 @@ async fn mock_echo(State(state): State<MockState>, request: Request<Body>) -> Re
         .status(StatusCode::CREATED)
         .header(header::CONTENT_TYPE, "application/json")
         .header("x-upstream", state.name)
+        .header("x-old", "old-value")
+        .header("x-remove", "gone")
+        .header("x-replace", "old")
         .body(Body::from(payload.to_string()))
         .unwrap()
         .into_response()

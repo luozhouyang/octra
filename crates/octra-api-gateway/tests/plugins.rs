@@ -14,4 +14,6 @@ mod plugins {
     mod jwt;
     mod key_auth;
     mod rate_limit;
+    mod request_transformer;
+    mod response_transformer;
 }

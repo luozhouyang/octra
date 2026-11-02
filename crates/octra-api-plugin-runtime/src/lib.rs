@@ -12,9 +12,9 @@ use axum::response::Response;
 use bytes::Bytes;
 use octra_api_core::PluginInstance;
 use octra_api_plugin_types::{
-    ApiGatewayPlugin, ApiGatewayPluginFactory, BodyContext, ErrorContext, FailPolicy, LogContext,
-    PluginAction, PluginError, PluginManifest, PluginPhase, RequestBodyContext, RequestContext,
-    ResponseBodyContext, ResponseContext, UpstreamRequestContext,
+    ApiGatewayPlugin, ApiGatewayPluginFactory, BodyContext, Capability, ErrorContext, FailPolicy,
+    LogContext, PluginAction, PluginError, PluginManifest, PluginPhase, RequestBodyContext,
+    RequestContext, ResponseBodyContext, ResponseContext, UpstreamRequestContext,
 };
 use octra_core::{Error, Result};
 use parking_lot::{Mutex, RwLock};
@@ -70,6 +70,7 @@ struct PluginEntry {
     priority: i32,
     timeout: Duration,
     phases: Vec<PluginPhase>,
+    capabilities: Vec<Capability>,
     auth: bool,
     ordering: Option<Value>,
     service_id: Option<String>,
@@ -139,6 +140,12 @@ impl PluginChain {
         self.entries
             .iter()
             .any(|entry| entry.phases.contains(&phase))
+    }
+
+    pub fn has_capability(&self, capability: Capability) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.capabilities.contains(&capability))
     }
 
     pub fn has_auth(&self) -> bool {
@@ -391,6 +398,7 @@ impl PluginChains {
                 priority: manifest.priority,
                 timeout: manifest.timeout(),
                 phases: factory.phases(),
+                capabilities: manifest.capabilities.clone(),
                 auth: factory.auth(),
                 ordering: plugin.ordering.clone(),
                 service_id: plugin.service_id.clone(),

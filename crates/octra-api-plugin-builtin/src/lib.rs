@@ -16,6 +16,9 @@ mod key_auth;
 mod rate_limit;
 mod request_size_limiting;
 mod request_termination;
+mod request_transformer;
+mod response_transformer;
+mod transform;
 
 use axum::body::Body;
 use axum::response::Response;
@@ -40,6 +43,8 @@ pub use jwt::JwtFactory;
 pub use key_auth::KeyAuthFactory;
 pub use request_size_limiting::RequestSizeLimitingFactory;
 pub use request_termination::RequestTerminationFactory;
+pub use request_transformer::RequestTransformerFactory;
+pub use response_transformer::ResponseTransformerFactory;
 
 pub fn register(registry: &mut PluginRegistry) {
     registry.register(CorrelationIdFactory);
@@ -54,6 +59,8 @@ pub fn register(registry: &mut PluginRegistry) {
     registry.register(IpRestrictionFactory);
     registry.register(RequestSizeLimitingFactory);
     registry.register(RequestTerminationFactory);
+    registry.register(RequestTransformerFactory);
+    registry.register(ResponseTransformerFactory);
 }
 
 pub(crate) fn plugin_response(status: StatusCode, message: &str) -> Response {

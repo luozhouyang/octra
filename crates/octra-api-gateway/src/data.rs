@@ -18,8 +18,9 @@ use http_body_util::BodyExt as _;
 use octra_api_core::{Route, Service};
 use octra_api_plugin_runtime::PluginChain;
 use octra_api_plugin_types::{
-    AuthBasic, AuthJwt, AuthKey, ConsumerInfo, ErrorContext, GatewayState, LogContext, PluginError,
-    RequestContext, ResponseContext, UpstreamRequestContext,
+    AuthBasic, AuthJwt, AuthKey, Capability, ConsumerInfo, ErrorContext, GatewayState, LogContext,
+    PluginError, RequestBodyContext, RequestContext, ResponseBodyContext, ResponseContext,
+    UpstreamRequestContext,
 };
 use octra_data_plane::{
     HEADER_REQUEST_ID, apply_forwarded_headers, error_response, new_request_id,
@@ -428,7 +429,9 @@ pub async fn proxy(
         .await;
     }
 
-    let payload = if attempts.len() > 1 {
+    let request_body_plugins = pre_chain.has_capability(Capability::RequestBody)
+        || post_chain.has_capability(Capability::RequestBody);
+    let payload = if attempts.len() > 1 || request_body_plugins {
         match axum::body::to_bytes(body, max_body).await {
             Ok(bytes) => RequestBody::Buffered(bytes),
             Err(_) => {
@@ -453,6 +456,40 @@ pub async fn proxy(
         }
     } else {
         RequestBody::Stream(Body::new(http_body_util::Limited::new(body, max_body)))
+    };
+
+    let payload = if request_body_plugins {
+        match payload {
+            RequestBody::Buffered(bytes) => {
+                let bytes = {
+                    let mut body_cx = RequestBodyContext {
+                        request_id: &request_id,
+                        state: &mut auth_state,
+                        method: &parts.method,
+                        uri: &parts.uri,
+                        headers: &parts.headers,
+                        consumer_id: consumer_id.as_deref(),
+                        route,
+                        service,
+                    };
+                    let bytes = match pre_chain.on_request_buffer(&mut body_cx, bytes).await {
+                        Ok(bytes) => bytes,
+                        Err(error) => return failed_plugin(&state, &subject, started, error),
+                    };
+                    match post_chain.on_request_buffer(&mut body_cx, bytes).await {
+                        Ok(bytes) => bytes,
+                        Err(error) => return failed_plugin(&state, &subject, started, error),
+                    }
+                };
+                if let Ok(value) = HeaderValue::from_str(&bytes.len().to_string()) {
+                    parts.headers.insert(header::CONTENT_LENGTH, value);
+                }
+                RequestBody::Buffered(bytes)
+            }
+            stream => stream,
+        }
+    } else {
+        payload
     };
 
     let outcome = forward(
@@ -513,6 +550,59 @@ pub async fn proxy(
                     }
                 }
             }
+
+            let response_body_plugins = pre_chain.has_capability(Capability::ResponseBody)
+                || post_chain.has_capability(Capability::ResponseBody);
+            let response_body = if response_body_plugins {
+                match axum::body::to_bytes(response_body, max_body).await {
+                    Ok(bytes) => {
+                        let bytes = {
+                            let mut body_cx = ResponseBodyContext {
+                                request_id: &request_id,
+                                state: &mut auth_state,
+                                status: response_parts.status,
+                                headers: &response_parts.headers,
+                                consumer_id: consumer_id.as_deref(),
+                                route,
+                                service,
+                                target_url: &target,
+                            };
+                            let bytes =
+                                match pre_chain.on_response_buffer(&mut body_cx, bytes).await {
+                                    Ok(bytes) => bytes,
+                                    Err(error) => {
+                                        return failed_plugin(&state, &subject, started, error);
+                                    }
+                                };
+                            match post_chain.on_response_buffer(&mut body_cx, bytes).await {
+                                Ok(bytes) => bytes,
+                                Err(error) => {
+                                    return failed_plugin(&state, &subject, started, error);
+                                }
+                            }
+                        };
+                        response_parts.headers.remove(header::CONTENT_LENGTH);
+                        if response_parts.status != StatusCode::NO_CONTENT
+                            && response_parts.status != StatusCode::NOT_MODIFIED
+                        {
+                            if let Ok(value) = HeaderValue::from_str(&bytes.len().to_string()) {
+                                response_parts.headers.insert(header::CONTENT_LENGTH, value);
+                            }
+                        }
+                        Body::from(bytes)
+                    }
+                    Err(_) => {
+                        return failed_plugin(
+                            &state,
+                            &subject,
+                            started,
+                            PluginError::fail_closed("response body exceeds gateway limit"),
+                        );
+                    }
+                }
+            } else {
+                response_body
+            };
 
             let response = Response::from_parts(response_parts, response_body);
             complete(
