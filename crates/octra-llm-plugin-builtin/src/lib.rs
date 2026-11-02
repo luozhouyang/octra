@@ -15,8 +15,10 @@ pub use redaction::RedactionFactory;
 pub use system_prompt::SystemPromptFactory;
 pub use think_tags::ThinkTagsFactory;
 
+use octra_api_plugin_types::{
+    Capability, FailPolicy, PluginKind, PluginManifest, PluginRuntimeKind,
+};
 use octra_llm_plugin_runtime::LlmPluginRegistry;
-use octra_plugin_api::{Capability, FailPolicy, PluginKind, PluginManifest, PluginRuntimeKind};
 
 /// Builds a registry with every built-in LLM plugin. The API Gateway keeps
 /// its own registry; the two are separate catalogs filtered by kind.

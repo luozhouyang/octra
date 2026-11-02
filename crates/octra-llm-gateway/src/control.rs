@@ -12,7 +12,7 @@ use axum::routing::{get, post, put};
 use axum::{Router, extract};
 use chrono::{DateTime, Utc};
 use octra_llm_core::Protocol;
-use octra_llm_plugin_api::LlmScope;
+use octra_llm_plugin_types::LlmScope;
 use octra_storage::plugins::{PluginConfigRecord, PluginRecord};
 use octra_storage::{
     LlmModelInput, LlmModelRecord, LlmProviderAccountInput, LlmProviderAccountRecord,

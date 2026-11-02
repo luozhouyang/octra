@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use octra_llm_plugin_api::{
+use octra_api_plugin_types::{PluginError, PluginManifest};
+use octra_llm_plugin_types::{
     LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext,
 };
-use octra_plugin_api::{PluginError, PluginManifest};
 use serde_json::{Map, Value};
 
 use crate::manifest;
@@ -183,7 +183,7 @@ fn apply_extra(cx: &mut LlmRequestContext<'_>, key: &str, value: Option<Value>) 
 mod tests {
     use super::*;
     use octra_llm_core::{ChatRequest, Protocol};
-    use octra_llm_plugin_api::LlmRequestMeta;
+    use octra_llm_plugin_types::LlmRequestMeta;
     use serde_json::json;
 
     fn context<'a>(

@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use octra_api_plugin_types::{PluginError, PluginManifest};
 use octra_llm_core::StreamEvent;
-use octra_llm_plugin_api::{
+use octra_llm_plugin_types::{
     LlmPlugin, LlmPluginFactory, LlmStreamAction, LlmStreamContext, LlmStreamResult,
 };
-use octra_plugin_api::{PluginError, PluginManifest};
 use serde_json::{Value, json};
 
 use crate::manifest;
@@ -147,7 +147,7 @@ fn longest_suffix_prefix(value: &str, tag: &str) -> usize {
 mod tests {
     use super::*;
     use octra_llm_core::{FinishReason, Protocol};
-    use octra_llm_plugin_api::LlmRequestMeta;
+    use octra_llm_plugin_types::LlmRequestMeta;
 
     struct Harness {
         plugin: Arc<dyn LlmPlugin>,

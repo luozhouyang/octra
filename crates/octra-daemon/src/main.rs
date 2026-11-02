@@ -7,12 +7,12 @@ use std::time::Instant;
 use anyhow::Context;
 use axum::Router;
 use octra_api_gateway::{ApiControlState, ApiDataState, ApiMetrics, AuditState};
+use octra_api_plugin_runtime::{PluginRegistry, PluginRuntime};
 use octra_config::Workspace;
-use octra_gateway_api::{AppState, AuthState};
-use octra_gateway_runtime::GatewayRuntime;
 use octra_llm_gateway::{LlmControlState, LlmDataState, LlmPluginRuntime, LlmRuntime};
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
-use octra_plugin_runtime::{PluginRegistry, PluginRuntime};
+use octra_runtime::GatewayRuntime;
+use octra_types::{AppState, AuthState};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let mut plugin_registry = PluginRegistry::new();
-    octra_plugin_builtin::register(&mut plugin_registry);
+    octra_api_plugin_builtin::register(&mut plugin_registry);
     let plugin_runtime = Arc::new(
         PluginRuntime::bootstrap(storage.clone(), Arc::new(plugin_registry))
             .await
@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
     let api_metrics = Arc::new(ApiMetrics::default());
 
     let control_app = Router::new()
-        .merge(octra_gateway_api::core_router(app_state))
+        .merge(octra_types::core_router(app_state))
         .merge(octra_api_gateway::control_router(
             ApiControlState::with_plugins(
                 storage.clone(),
@@ -106,9 +106,9 @@ async fn main() -> anyhow::Result<()> {
         ))
         .layer(axum::middleware::from_fn_with_state(
             AuthState { token },
-            octra_gateway_api::auth::require_bearer,
+            octra_types::auth::require_bearer,
         ))
-        .layer(octra_gateway_api::cors_layer());
+        .layer(octra_types::cors_layer());
 
     let data_app = Router::new()
         .merge(octra_llm_gateway::data_plane_router(

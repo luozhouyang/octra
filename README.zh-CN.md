@@ -23,8 +23,8 @@ octra/
 │   ├── octra-data-plane/   # 共享 HTTP、Header、SSE 工具
 │   ├── octra-api-core/     # API Gateway 领域类型
 │   ├── octra-api-gateway/  # API 代理 + Service/Route/Upstream CRUD
-│   ├── octra-gateway-runtime/ # API Runtime Snapshot、匹配器、负载均衡
-│   ├── octra-gateway-api/  # 共享控制面（健康检查、认证、CORS）
+│   ├── octra-runtime/      # API Runtime Snapshot、匹配器、负载均衡
+│   ├── octra-types/        # 共享控制面（健康检查、认证、CORS）
 │   ├── octra-llm-core/     # Canonical LLM IR
 │   ├── octra-llm-protocol/ # OpenAI/Anthropic 协议适配
 │   ├── octra-llm-gateway/  # LLM 路由、Provider、数据面与控制面

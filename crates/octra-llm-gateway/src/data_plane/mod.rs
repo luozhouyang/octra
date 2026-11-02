@@ -15,8 +15,8 @@ use chrono::{DateTime, Utc};
 use octra_llm_core::{
     AssistantContent, ChatRequest, ContentPart, GatewayError, Protocol, Usage, UserContent,
 };
-use octra_llm_plugin_api::{LlmLogEvent, LlmProviderInfo, LlmRequestMeta, LlmRequestState};
 use octra_llm_plugin_runtime::LlmPluginChain;
+use octra_llm_plugin_types::{LlmLogEvent, LlmProviderInfo, LlmRequestMeta, LlmRequestState};
 use octra_llm_protocol::decode_request;
 use serde_json::Value;
 use serde_json::json;

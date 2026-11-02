@@ -16,8 +16,8 @@ use octra_api_core::{
     UpdateKeyauthCredential, UpdatePluginInstance, UpdateRoute, UpdateService, UpdateTarget,
     UpdateUpstream, Upstream,
 };
+use octra_api_plugin_types::PluginManifest;
 use octra_core::SnapshotInfo;
-use octra_plugin_api::PluginManifest;
 use octra_storage::{AuditLog, RequestLog};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

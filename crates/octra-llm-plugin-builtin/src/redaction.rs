@@ -12,12 +12,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use octra_api_plugin_types::{Capability, FailPolicy, PluginError, PluginManifest};
 use octra_llm_core::{AssistantContent, ChatRequest, ContentPart, Message, StreamEvent};
-use octra_llm_plugin_api::{
+use octra_llm_plugin_types::{
     LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmProviderRequestContext,
     LlmRequestContext, LlmResponseContext, LlmStreamAction, LlmStreamContext, LlmStreamResult,
 };
-use octra_plugin_api::{Capability, FailPolicy, PluginError, PluginManifest};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -791,7 +791,9 @@ mod tests {
     use octra_llm_core::{
         ChatRequest, ChatResponse, FinishReason, Message, Protocol, Role, StreamEvent, UserContent,
     };
-    use octra_llm_plugin_api::{LlmPlugin, LlmRequestContext, LlmRequestMeta, LlmResponseContext};
+    use octra_llm_plugin_types::{
+        LlmPlugin, LlmRequestContext, LlmRequestMeta, LlmResponseContext,
+    };
     use serde_json::json;
 
     fn meta() -> LlmRequestMeta<'static> {

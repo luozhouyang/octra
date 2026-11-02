@@ -21,8 +21,8 @@ octra/
 │   ├── octra-data-plane/   # Shared HTTP, header, and SSE helpers
 │   ├── octra-api-core/     # API Gateway domain types
 │   ├── octra-api-gateway/  # API proxy + service/route/upstream CRUD
-│   ├── octra-gateway-runtime/ # API runtime snapshot, matcher, balancer
-│   ├── octra-gateway-api/  # Shared control plane (health, auth, CORS)
+│   ├── octra-runtime/      # API runtime snapshot, matcher, balancer
+│   ├── octra-types/        # Shared control plane (health, auth, CORS)
 │   ├── octra-llm-core/     # Canonical LLM IR
 │   ├── octra-llm-protocol/ # OpenAI/Anthropic protocol adapters
 │   ├── octra-llm-gateway/  # LLM routing, providers, data plane, control plane

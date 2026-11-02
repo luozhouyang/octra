@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use octra_llm_plugin_api::{
+use octra_api_plugin_types::{PluginError, PluginManifest};
+use octra_llm_plugin_types::{
     LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext,
 };
-use octra_plugin_api::{PluginError, PluginManifest};
 use serde_json::Value;
 
 use crate::manifest;
@@ -89,7 +89,7 @@ impl LlmPlugin for SystemPromptPlugin {
 mod tests {
     use super::*;
     use octra_llm_core::{ChatRequest, Protocol, SystemPrompt};
-    use octra_llm_plugin_api::LlmRequestMeta;
+    use octra_llm_plugin_types::LlmRequestMeta;
     use serde_json::json;
 
     async fn apply(config: Value, request: &mut ChatRequest) {

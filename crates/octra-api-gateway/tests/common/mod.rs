@@ -20,9 +20,9 @@ use octra_api_gateway::{
     ApiControlState, ApiDataState, ApiMetrics, AuditState, control_router, data_plane_router,
     record_control_audit,
 };
+use octra_api_plugin_runtime::{PluginRegistry, PluginRuntime};
 use octra_config::OctraConfig;
-use octra_gateway_runtime::GatewayRuntime;
-use octra_plugin_runtime::{PluginRegistry, PluginRuntime};
+use octra_runtime::GatewayRuntime;
 use octra_storage::Storage;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -118,7 +118,7 @@ pub async fn gateway_with_config(config: OctraConfig) -> Gateway {
     let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
     let runtime = Arc::new(GatewayRuntime::bootstrap(storage.clone()).await.unwrap());
     let mut registry = PluginRegistry::new();
-    octra_plugin_builtin::register(&mut registry);
+    octra_api_plugin_builtin::register(&mut registry);
     let plugins = Arc::new(
         PluginRuntime::bootstrap(storage.clone(), Arc::new(registry))
             .await
@@ -286,7 +286,7 @@ pub async fn service_plugin(storage: &Storage, service_id: &str, name: &str, con
 pub async fn create_plugin_config(
     storage: &Storage,
     plugin_name: &str,
-    scope: octra_plugin_api::Scope,
+    scope: octra_api_plugin_types::Scope,
     scope_id: Option<&str>,
     config: Value,
 ) {
@@ -296,10 +296,10 @@ pub async fn create_plugin_config(
         ..Default::default()
     };
     match scope {
-        octra_plugin_api::Scope::Global => {}
-        octra_plugin_api::Scope::Service => input.service_id = scope_id.map(str::to_string),
-        octra_plugin_api::Scope::Route => input.route_id = scope_id.map(str::to_string),
-        octra_plugin_api::Scope::Consumer => input.consumer_id = scope_id.map(str::to_string),
+        octra_api_plugin_types::Scope::Global => {}
+        octra_api_plugin_types::Scope::Service => input.service_id = scope_id.map(str::to_string),
+        octra_api_plugin_types::Scope::Route => input.route_id = scope_id.map(str::to_string),
+        octra_api_plugin_types::Scope::Consumer => input.consumer_id = scope_id.map(str::to_string),
     }
     storage.api.create_plugin_instance(&input).await.unwrap();
 }

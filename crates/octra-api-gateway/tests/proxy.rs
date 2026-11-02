@@ -15,7 +15,7 @@ use octra_api_core::{
 };
 use octra_api_gateway::{ApiControlState, ApiDataState, control_router, data_plane_router};
 use octra_config::OctraConfig;
-use octra_gateway_runtime::GatewayRuntime;
+use octra_runtime::GatewayRuntime;
 use octra_storage::Storage;
 use tower::ServiceExt;
 
@@ -449,7 +449,7 @@ async fn cors_preflight_short_circuits_before_auth() {
     create_plugin_config(
         &gateway.storage,
         "cors",
-        octra_plugin_api::Scope::Global,
+        octra_api_plugin_types::Scope::Global,
         None,
         serde_json::json!({"allow_origins": ["https://app.test"]}),
     )
@@ -516,7 +516,7 @@ async fn header_rewrite_plugin_applies_to_request_and_response() {
     create_plugin_config(
         &gateway.storage,
         "header-rewrite",
-        octra_plugin_api::Scope::Global,
+        octra_api_plugin_types::Scope::Global,
         None,
         serde_json::json!({
             "request": {"set": {"x-plugin": "global"}},
@@ -548,7 +548,7 @@ async fn route_scoped_plugin_overrides_global_config() {
     create_plugin_config(
         &gateway.storage,
         "header-rewrite",
-        octra_plugin_api::Scope::Global,
+        octra_api_plugin_types::Scope::Global,
         None,
         serde_json::json!({"request": {"set": {"x-plugin": "global"}}}),
     )
@@ -556,7 +556,7 @@ async fn route_scoped_plugin_overrides_global_config() {
     create_plugin_config(
         &gateway.storage,
         "header-rewrite",
-        octra_plugin_api::Scope::Route,
+        octra_api_plugin_types::Scope::Route,
         Some("svc-scope-route"),
         serde_json::json!({"request": {"set": {"x-plugin": "route"}}}),
     )
@@ -584,7 +584,7 @@ async fn rate_limit_plugin_rejects_after_burst() {
     create_plugin_config(
         &gateway.storage,
         "rate-limit",
-        octra_plugin_api::Scope::Global,
+        octra_api_plugin_types::Scope::Global,
         None,
         serde_json::json!({"requests_per_second": 1, "burst": 1, "key": "global"}),
     )

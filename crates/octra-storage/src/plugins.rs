@@ -1,7 +1,7 @@
 //! Plugin catalog and per-scope configuration repositories.
 
+use octra_api_plugin_types::{PluginManifest, Scope};
 use octra_core::{Error, Result};
-use octra_plugin_api::{PluginManifest, Scope};
 use sqlx::Row;
 
 use super::llm::LlmStore;

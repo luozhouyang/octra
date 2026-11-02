@@ -52,10 +52,7 @@ mod tests {
         assert!(first.prefix.starts_with("ok_"));
         assert_eq!(first.prefix.len(), DISPLAY_PREFIX_LEN);
         assert!(first.plaintext.starts_with(&first.prefix));
-        assert_eq!(
-            first.hash,
-            octra_gateway_runtime::hash_api_key(&first.plaintext)
-        );
+        assert_eq!(first.hash, octra_runtime::hash_api_key(&first.plaintext));
         assert_eq!(first.hash.len(), 64);
         assert!(!first.hash.contains(&first.plaintext));
     }

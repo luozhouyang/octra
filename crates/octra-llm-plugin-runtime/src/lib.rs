@@ -13,15 +13,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use octra_api_plugin_types::{FailPolicy, PluginError, PluginManifest};
 use octra_core::{Error, Result};
 use octra_llm_core::{GatewayError, StreamEvent};
-use octra_llm_plugin_api::{
+use octra_llm_plugin_types::{
     LLM_PLUGIN_API_VERSION, LlmAction, LlmErrorContext, LlmLogContext, LlmLogEvent, LlmPlugin,
     LlmPluginFactory, LlmPluginResult, LlmProviderInfo, LlmProviderRequestContext,
     LlmRequestContext, LlmRequestMeta, LlmRequestState, LlmResponseContext, LlmScope,
     LlmStreamAction, LlmStreamContext, LlmStreamResult,
 };
-use octra_plugin_api::{FailPolicy, PluginError, PluginManifest};
 use octra_storage::Storage;
 use octra_storage::plugins::{PluginConfigRecord, PluginData, PluginRecord};
 use parking_lot::{Mutex, RwLock};
@@ -902,9 +902,9 @@ impl LlmPluginRuntime {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use octra_api_plugin_types::{Capability, PluginKind, PluginRuntimeKind};
     use octra_llm_core::{ChatRequest, ChatResponse, FinishReason, Protocol, Usage};
-    use octra_llm_plugin_api::LlmPluginResult;
-    use octra_plugin_api::{Capability, PluginKind, PluginRuntimeKind};
+    use octra_llm_plugin_types::LlmPluginResult;
 
     struct MarkPlugin {
         manifest: PluginManifest,

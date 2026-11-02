@@ -18,9 +18,9 @@ pub mod metrics;
 use std::sync::Arc;
 
 use axum::Router;
+use octra_api_plugin_runtime::PluginRuntime;
 use octra_config::OctraConfig;
-use octra_gateway_runtime::GatewayRuntime;
-use octra_plugin_runtime::PluginRuntime;
+use octra_runtime::GatewayRuntime;
 use octra_storage::Storage;
 
 pub use audit::{AuditState, record_control_audit};
