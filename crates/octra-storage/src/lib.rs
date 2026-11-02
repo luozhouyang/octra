@@ -14,6 +14,9 @@ pub use llm::{
     LlmVirtualKeyRecord, LlmVirtualKeyUsage,
 };
 pub use logs::{AuditLog, NewRequestLog, RequestLog};
+pub use plugins::{
+    PluginArtifactInput, PluginArtifactRecord, PluginConfigRecord, PluginData, PluginRecord,
+};
 
 use std::path::Path;
 use std::time::Duration;

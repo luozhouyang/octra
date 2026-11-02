@@ -534,6 +534,7 @@ pub trait PluginHost: Send + Sync {
 pub trait PluginStorage: Send + Sync {
     fn kv_get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError>;
     fn kv_put(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), StorageError>;
+    fn kv_delete(&self, key: &str) -> Result<bool, StorageError>;
     fn kv_incr(&self, key: &str, delta: i64, ttl: Option<Duration>) -> Result<i64, StorageError>;
 
     fn get(&self, entity: &str, key: &Value) -> Result<Option<Value>, StorageError>;

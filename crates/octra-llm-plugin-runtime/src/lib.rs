@@ -1081,6 +1081,10 @@ mod tests {
             config_schema_json: "{}".into(),
             artifact_path: None,
             artifact_hash: None,
+            source: "builtin".into(),
+            artifact_id: None,
+            storage_path: None,
+            approved_capabilities: Vec::new(),
             updated_at: String::new(),
         }
     }

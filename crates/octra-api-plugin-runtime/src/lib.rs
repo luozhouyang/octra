@@ -151,6 +151,10 @@ impl PluginStorage for NoopPluginStorage {
         Err(StorageError::Unavailable)
     }
 
+    fn kv_delete(&self, _key: &str) -> std::result::Result<bool, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
     fn kv_incr(
         &self,
         _key: &str,
