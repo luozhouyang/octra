@@ -439,7 +439,7 @@ impl LlmPluginChain {
                 state: state.slot(&entry.name),
             };
             let started = Instant::now();
-            let timed_out = tokio::time::timeout(entry.timeout, entry.plugin.on_log(&cx))
+            let timed_out = tokio::time::timeout(entry.timeout, entry.plugin.on_log(&mut cx))
                 .await
                 .is_err();
             entry.stats.record(

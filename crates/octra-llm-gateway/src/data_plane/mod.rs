@@ -460,6 +460,15 @@ async fn handle(
             Err(error) => Some(chain_error(error)),
         };
         if let Some(error) = rejection {
+            log_rejection(
+                chain,
+                &meta,
+                &ir.model,
+                &tracker,
+                &error,
+                &mut request_state,
+            )
+            .await;
             tracker.record.error = Some(error.message.clone());
             tracker.finish_with_status(error.status);
             usage::spawn_record(state.storage.clone(), tracker.record.clone());
@@ -480,6 +489,15 @@ async fn handle(
                 ir.model
             ))
             .with_code("model_forbidden");
+            log_rejection(
+                chain,
+                &meta,
+                &ir.model,
+                &tracker,
+                &error,
+                &mut request_state,
+            )
+            .await;
             tracker.record.error = Some(error.message.clone());
             tracker.finish_with_status(error.status);
             usage::spawn_record(state.storage.clone(), tracker.record.clone());
@@ -594,6 +612,7 @@ async fn execute(
     }
     attempts.extend(fallback);
     let mut last_error: Option<GatewayError> = None;
+    let mut last_chain: Option<Arc<LlmPluginChain>> = None;
     let mut budget = 0usize;
 
     'targets: for target in attempts.iter() {
@@ -705,6 +724,7 @@ async fn execute(
                     &provider.id,
                 )
             });
+            last_chain = provider_chain.clone();
             let provider_info = LlmProviderInfo {
                 attempt: budget as u32,
                 target_model_id: &target.model_id,
@@ -749,9 +769,15 @@ async fn execute(
                         if let Some(chain) = &provider_chain {
                             let event = LlmLogEvent {
                                 model: effective_model,
+                                provider_id: Some(&provider.id),
+                                provider_name: Some(&provider.name),
+                                account_id: account.as_ref().map(|a| a.record.id.as_str()),
+                                account_name: account.as_ref().map(|a| a.record.name.as_str()),
                                 status: 200,
                                 latency_ms: tracker.elapsed_ms(),
                                 usage: &tracker.record.usage,
+                                finish_reason: tracker.record.finish_reason.as_deref(),
+                                streaming: false,
                                 error: None,
                             };
                             chain.on_log(meta, &event, request_state).await;
@@ -805,7 +831,48 @@ async fn execute(
             "model '{effective_model}' has no provider that can serve it"
         ))
     });
+    if let Some(chain) = &last_chain {
+        let event = LlmLogEvent {
+            model: effective_model,
+            provider_id: tracker.record.provider_id.as_deref(),
+            provider_name: tracker.record.provider_name.as_deref(),
+            account_id: tracker.record.account_id.as_deref(),
+            account_name: tracker.record.account_name.as_deref(),
+            status: error.status,
+            latency_ms: tracker.elapsed_ms(),
+            usage: &tracker.record.usage,
+            finish_reason: tracker.record.finish_reason.as_deref(),
+            streaming: false,
+            error: Some(&error.message),
+        };
+        chain.on_log(meta, &event, request_state).await;
+    }
     Err(fail_request(state, &mut tracker, error))
+}
+
+/// Emits a log-stage observation for a request rejected before routing.
+async fn log_rejection(
+    chain: &LlmPluginChain,
+    meta: &LlmRequestMeta<'_>,
+    model: &str,
+    tracker: &UsageTracker,
+    error: &GatewayError,
+    state: &mut LlmRequestState,
+) {
+    let event = LlmLogEvent {
+        model,
+        provider_id: None,
+        provider_name: None,
+        account_id: None,
+        account_name: None,
+        status: error.status,
+        latency_ms: tracker.elapsed_ms(),
+        usage: &tracker.record.usage,
+        finish_reason: None,
+        streaming: false,
+        error: Some(&error.message),
+    };
+    chain.on_log(meta, &event, state).await;
 }
 
 /// Health, quota and capability signals used to rank one routing target.
@@ -973,6 +1040,9 @@ async fn try_attempt(
             chain.cloned(),
             stream::StreamMeta {
                 request_id: meta.request_id.to_string(),
+                model: target.model_id.clone(),
+                provider_id: provider.id.clone(),
+                provider_name: provider.name.clone(),
                 ingress,
                 consumer_id: meta.consumer_id.map(str::to_string),
                 virtual_key_id: meta.virtual_key_id.map(str::to_string),

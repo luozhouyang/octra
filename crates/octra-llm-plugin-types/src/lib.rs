@@ -86,7 +86,7 @@ pub type LlmStreamResult = Result<LlmStreamAction, PluginError>;
 
 /// Contract version a factory must implement to be registered. Bumped when a
 /// context or trait signature changes incompatibly.
-pub const LLM_PLUGIN_API_VERSION: u32 = 1;
+pub const LLM_PLUGIN_API_VERSION: u32 = 2;
 
 /// Read-only request metadata shared by every stage. Headers other than the
 /// user agent are not exposed, so credentials and cookies cannot leak into a
@@ -173,9 +173,15 @@ pub struct LlmErrorContext<'a> {
 /// Content-free observation data; never carries prompt or response text.
 pub struct LlmLogEvent<'a> {
     pub model: &'a str,
+    pub provider_id: Option<&'a str>,
+    pub provider_name: Option<&'a str>,
+    pub account_id: Option<&'a str>,
+    pub account_name: Option<&'a str>,
     pub status: u16,
     pub latency_ms: u64,
     pub usage: &'a Usage,
+    pub finish_reason: Option<&'a str>,
+    pub streaming: bool,
     pub error: Option<&'a str>,
 }
 
@@ -213,7 +219,7 @@ pub trait LlmPlugin: Send + Sync {
         Ok(LlmAction::Continue)
     }
 
-    async fn on_log(&self, _cx: &LlmLogContext<'_>) {}
+    async fn on_log(&self, _cx: &mut LlmLogContext<'_>) {}
 }
 
 /// Creates configured LLM plugin instances. Configuration is validated once

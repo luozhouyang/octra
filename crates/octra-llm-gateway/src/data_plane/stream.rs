@@ -18,7 +18,7 @@ use octra_config::OctraConfig;
 use octra_data_plane::sse::SseDecoder;
 use octra_llm_core::{GatewayError, Protocol, StreamEvent, Usage};
 use octra_llm_plugin_runtime::LlmPluginChain;
-use octra_llm_plugin_types::{LlmRequestMeta, LlmRequestState};
+use octra_llm_plugin_types::{LlmLogEvent, LlmRequestMeta, LlmRequestState};
 use octra_llm_protocol::{StreamDecoder, StreamEncoder};
 use octra_storage::Storage;
 use reqwest::Response as UpstreamResponse;
@@ -167,6 +167,9 @@ pub fn start(
 /// Owned request metadata for the stream's lifetime.
 pub struct StreamMeta {
     pub request_id: String,
+    pub model: String,
+    pub provider_id: String,
+    pub provider_name: String,
     pub ingress: Protocol,
     pub consumer_id: Option<String>,
     pub virtual_key_id: Option<String>,
@@ -268,7 +271,7 @@ impl BridgeState {
                 for frame in octra_llm_protocol::encode_stream_error(self.ingress, &error) {
                     out.extend(frame.to_bytes());
                 }
-                self.record(Some(error));
+                self.record(Some(error)).await;
                 self.finished = true;
                 return out;
             }
@@ -279,7 +282,7 @@ impl BridgeState {
         for frame in self.encoder.finish().unwrap_or_default() {
             out.extend(frame.to_bytes());
         }
-        self.record(None);
+        self.record(None).await;
         self.finished = true;
         out
     }
@@ -291,12 +294,12 @@ impl BridgeState {
         for frame in octra_llm_protocol::encode_stream_error(self.ingress, &error) {
             out.extend(frame.to_bytes());
         }
-        self.record(Some(error));
+        self.record(Some(error)).await;
         self.finished = true;
         out
     }
 
-    fn record(&mut self, error: Option<GatewayError>) {
+    async fn record(&mut self, error: Option<GatewayError>) {
         let mut tracker = self.tracker.clone();
         tracker.record.usage = self.usage.clone();
         match error {
@@ -324,6 +327,29 @@ impl BridgeState {
                 .map(|cost| cost.micros)
                 .unwrap_or(0);
             account.consume(1, tokens, cost);
+        }
+        if let Some(chain) = self.plugins.clone() {
+            let meta = self.meta.as_meta();
+            let event = LlmLogEvent {
+                model: &self.meta.model,
+                provider_id: Some(&self.meta.provider_id),
+                provider_name: Some(&self.meta.provider_name),
+                account_id: self
+                    .account
+                    .as_ref()
+                    .map(|account| account.record.id.as_str()),
+                account_name: self
+                    .account
+                    .as_ref()
+                    .map(|account| account.record.name.as_str()),
+                status: tracker.record.status_code.unwrap_or(200),
+                latency_ms: tracker.record.latency_ms.unwrap_or_default(),
+                usage: &tracker.record.usage,
+                finish_reason: tracker.record.finish_reason.as_deref(),
+                streaming: true,
+                error: tracker.record.error.as_deref(),
+            };
+            chain.on_log(&meta, &event, &mut self.plugin_state).await;
         }
         usage::spawn_record(self.storage.clone(), tracker.record);
     }

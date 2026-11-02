@@ -1644,3 +1644,69 @@ async fn fully_paced_account_returns_429() {
     );
     assert_eq!(second.2["error"]["code"], "account_paced");
 }
+
+#[tokio::test]
+async fn budget_guard_rejects_after_the_request_limit() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("budget-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+    harness
+        .plugin_config(
+            "llm-budget-guard",
+            "global",
+            None,
+            json!({"requests": 1, "period": "day"}),
+        )
+        .await;
+
+    let first = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK, "body: {}", first.2);
+
+    let second = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(
+        second.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "body: {}",
+        second.2
+    );
+    assert_eq!(second.2["error"]["code"], "budget_exceeded");
+}
+
+#[tokio::test]
+async fn audit_plugin_keeps_streaming_output_intact() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("audit-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+    harness
+        .plugin_config("llm-request-audit", "global", None, json!({}))
+        .await;
+
+    let (status, _, text) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[],
+        Some(openai_body("octra-default", true)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(text.contains("Hello from OpenAI"), "body: {text}");
+}
