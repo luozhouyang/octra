@@ -30,7 +30,7 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 
 const SERVICE_COLUMNS: &str = "id, name, protocol, host, port, path, retries, connect_timeout, \
-     write_timeout, read_timeout, enabled, description, created_at, updated_at";
+     write_timeout, read_timeout, enabled, description, tags, created_at, updated_at";
 const ROUTE_COLUMNS: &str = "id, name, protocols, methods, hosts, paths, headers, strip_path, \
      preserve_host, request_buffering, response_buffering, regex_priority, service_id, enabled, \
      tags, created_at, updated_at";

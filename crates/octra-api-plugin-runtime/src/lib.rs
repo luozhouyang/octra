@@ -67,6 +67,7 @@ impl PluginRegistry {
 struct PluginEntry {
     pub id: String,
     name: String,
+    instance_name: Option<String>,
     priority: i32,
     timeout: Duration,
     phases: Vec<PluginPhase>,
@@ -424,6 +425,7 @@ impl PluginChains {
             entries.push(PluginEntry {
                 id: plugin.id.clone(),
                 name: plugin.name.clone(),
+                instance_name: plugin.instance_name.clone(),
                 priority: manifest.priority,
                 timeout: manifest.timeout(),
                 phases: factory.phases(),
@@ -531,7 +533,7 @@ impl PluginChains {
 
         let mut seen = HashSet::new();
         for entry in self.pre_auth_entries(route_id, service_id) {
-            seen.insert(entry.name);
+            seen.insert((entry.name, entry.instance_name.unwrap_or_default()));
         }
 
         let entries = resolve(
@@ -577,17 +579,21 @@ fn resolve(
     service_id: Option<&str>,
     consumer_id: Option<&str>,
     groups: &[ConsumerGroupRef<'_>],
-    exclude: &HashSet<String>,
+    exclude: &HashSet<(String, String)>,
 ) -> Vec<PluginEntry> {
-    let mut best: HashMap<&str, (i32, &PluginEntry)> = HashMap::new();
+    let mut best: HashMap<(&str, &str), (i32, &PluginEntry)> = HashMap::new();
     for entry in entries {
-        if exclude.contains(&entry.name) {
+        let key = (
+            entry.name.as_str(),
+            entry.instance_name.as_deref().unwrap_or(""),
+        );
+        if exclude.contains(&(entry.name.clone(), key.1.to_string())) {
             continue;
         }
         let Some(score) = entry.applies(route_id, service_id, consumer_id, groups) else {
             continue;
         };
-        let replace = match best.get(entry.name.as_str()) {
+        let replace = match best.get(&key) {
             None => true,
             Some((current, current_entry)) => {
                 score > *current
@@ -597,7 +603,7 @@ fn resolve(
             }
         };
         if replace {
-            best.insert(entry.name.as_str(), (score, entry));
+            best.insert(key, (score, entry));
         }
     }
 

@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use serde_json::{Value, json};
 
-use crate::common::{Gateway, gateway, get, header_default, request};
+use crate::common::{Gateway, gateway, get, header_default, request, seed_service, spawn_mock};
 
 fn json_request(method: &str, uri: &str, body: Value) -> Request<Body> {
     let mut request = request(method, uri);
@@ -84,32 +84,23 @@ async fn list_envelope_and_cursor_pagination() {
 #[tokio::test]
 async fn tag_filters_support_and_or() {
     let gateway = gateway().await;
-    for (username, tags) in [
+    for (name, tags) in [
         ("a", json!(["prod", "eu"])),
         ("b", json!(["prod"])),
         ("c", json!(["dev"])),
     ] {
-        let (status, _, _) = gateway
-            .send_control(json_request(
-                "POST",
-                "/admin/consumers",
-                json!({"username": username, "tags": tags}),
-            ))
-            .await;
-        assert_eq!(status, StatusCode::CREATED);
+        create_service(&gateway, json!({"name": name, "tags": tags})).await;
     }
 
     let count = |page: &Value| page["data"].as_array().unwrap().len();
-    let (_, _, page) = gateway
-        .send_control(get("/admin/consumers?tags=prod"))
-        .await;
+    let (_, _, page) = gateway.send_control(get("/admin/services?tags=prod")).await;
     assert_eq!(count(&page), 2);
     let (_, _, page) = gateway
-        .send_control(get("/admin/consumers?tags=prod,eu"))
+        .send_control(get("/admin/services?tags=prod,eu"))
         .await;
     assert_eq!(count(&page), 1);
     let (_, _, page) = gateway
-        .send_control(get("/admin/consumers?tags=prod/dev"))
+        .send_control(get("/admin/services?tags=prod/dev"))
         .await;
     assert_eq!(count(&page), 3);
 }
@@ -252,4 +243,77 @@ async fn admin_errors_use_kong_shapes() {
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(conflict["name"], "unique constraint violation");
+}
+
+#[tokio::test]
+async fn kong_plural_credential_paths() {
+    let gateway = gateway().await;
+    let (_, _, consumer) = gateway
+        .send_control(json_request(
+            "POST",
+            "/admin/consumers",
+            json!({"username": "alice"}),
+        ))
+        .await;
+    let consumer_id = consumer["id"].as_str().unwrap().to_string();
+
+    let (status, _, credential) = gateway
+        .send_control(json_request(
+            "POST",
+            "/admin/key-auths",
+            json!({"consumer_id": consumer_id}),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(credential["key"].as_str().unwrap().starts_with("ok_"));
+    assert_eq!(credential["consumer"]["id"], consumer_id);
+
+    let (status, _, page) = gateway.send_control(get("/admin/key-auths")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["data"].as_array().unwrap().len(), 1);
+
+    let (status, _, fetched) = gateway
+        .send_control(get(&format!(
+            "/admin/key-auths/{}",
+            credential["id"].as_str().unwrap()
+        )))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["consumer"]["id"], consumer_id);
+}
+
+#[tokio::test]
+async fn instance_named_plugins_all_run() {
+    let (addr, _calls) = spawn_mock("named").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-named",
+        &format!("http://{addr}"),
+        false,
+        "/named",
+        true,
+    )
+    .await;
+    gateway.reload().await;
+
+    for (instance, header) in [("one", "x-one:1"), ("two", "x-two:2")] {
+        let (status, _, _) = gateway
+            .send_control(json_request(
+                "POST",
+                "/admin/plugins",
+                json!({
+                    "name": "request-transformer",
+                    "instance_name": instance,
+                    "config": {"add": {"headers": [header]}}
+                }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    let (status, _, json) = gateway.send(get("/named/items")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["headers"]["x-one"], "1");
+    assert_eq!(json["headers"]["x-two"], "2");
 }

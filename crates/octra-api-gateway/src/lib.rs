@@ -9,9 +9,7 @@
 
 pub mod admin;
 pub mod audit;
-pub mod control;
 pub mod data;
-pub mod error;
 pub mod http_client;
 pub mod key;
 pub mod metrics;
@@ -25,7 +23,6 @@ use octra_runtime::GatewayRuntime;
 use octra_storage::Storage;
 
 pub use audit::{AuditState, record_control_audit};
-pub use error::ControlError;
 pub use key::{GeneratedApiKey, generate_api_key};
 pub use metrics::{ApiMetrics, MetricsSnapshot};
 
@@ -125,5 +122,5 @@ pub fn data_plane_router(state: ApiDataState) -> Router {
 
 /// Control plane router for gateway configuration.
 pub fn control_router(state: ApiControlState) -> Router {
-    control::router(state)
+    admin::router().with_state(state)
 }

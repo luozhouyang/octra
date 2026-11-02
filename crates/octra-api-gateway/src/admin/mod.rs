@@ -9,6 +9,7 @@ mod consumers;
 mod credentials;
 mod error;
 mod list;
+mod operations;
 mod plugins;
 mod routes;
 mod schemas;
@@ -154,33 +155,33 @@ pub fn router() -> Router<ApiControlState> {
                 .delete(plugins::delete),
         )
         .route(
-            "/admin/key-auth",
+            "/admin/key-auths",
             get(credentials::list_keyauth).post(credentials::create_keyauth),
         )
         .route(
-            "/admin/key-auth/{id}",
+            "/admin/key-auths/{id}",
             get(credentials::get_keyauth)
                 .patch(credentials::update_keyauth)
                 .put(credentials::update_keyauth)
                 .delete(credentials::delete_keyauth),
         )
         .route(
-            "/admin/basic-auth",
+            "/admin/basic-auths",
             get(credentials::list_basicauth).post(credentials::create_basicauth),
         )
         .route(
-            "/admin/basic-auth/{id}",
+            "/admin/basic-auths/{id}",
             get(credentials::get_basicauth)
                 .patch(credentials::update_basicauth)
                 .put(credentials::update_basicauth)
                 .delete(credentials::delete_basicauth),
         )
         .route(
-            "/admin/jwt",
+            "/admin/jwts",
             get(credentials::list_jwt).post(credentials::create_jwt),
         )
         .route(
-            "/admin/jwt/{id}",
+            "/admin/jwts/{id}",
             get(credentials::get_jwt)
                 .patch(credentials::update_jwt)
                 .put(credentials::update_jwt)
@@ -201,6 +202,14 @@ pub fn router() -> Router<ApiControlState> {
         .route("/admin/schemas/plugins/validate", post(schemas::validate))
         .route("/admin/schemas/plugins/{name}", get(schemas::get))
         .route("/admin/status", get(status::status))
+        .route("/admin/metrics", get(operations::metrics))
+        .route(
+            "/admin/metrics/prometheus",
+            get(operations::prometheus_metrics),
+        )
+        .route("/admin/logs", get(operations::logs))
+        .route("/admin/audit-logs", get(operations::audit_logs))
+        .route("/admin/reload", post(operations::reload))
 }
 
 pub(crate) async fn reload_all(state: &ApiControlState) -> AdminResult<()> {

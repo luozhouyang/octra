@@ -398,6 +398,7 @@ mod tests {
             read_timeout: 5000,
             enabled: true,
             description: String::new(),
+            tags: Vec::new(),
             created_at: 0,
             updated_at: 0,
         }

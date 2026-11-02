@@ -245,7 +245,7 @@ async fn metrics_endpoint_counts_requests() {
     gateway.reload().await;
     let _ = gateway.send(get("/missing")).await;
 
-    let (status, _, json) = gateway.send_control(get("/api/v1/api/metrics")).await;
+    let (status, _, json) = gateway.send_control(get("/admin/metrics")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["requests_total"], 1);
     assert_eq!(json["status_4xx"], 1);
@@ -269,7 +269,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
 
     let response = control()
         .oneshot(post(
-            "/api/v1/services",
+            "/admin/services",
             serde_json::json!({ "id": "svc", "name": "svc" }),
         ))
         .await
@@ -279,7 +279,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     // A service pointing to a missing service is a 404.
     let response = control()
         .oneshot(post(
-            "/api/v1/routes",
+            "/admin/routes",
             serde_json::json!({ "service_id": "missing", "paths": ["/"] }),
         ))
         .await
@@ -288,7 +288,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
 
     let response = control()
         .oneshot(post(
-            "/api/v1/upstreams",
+            "/admin/upstreams",
             serde_json::json!({ "id": "up", "name": "svc", "algorithm": "round-robin" }),
         ))
         .await
@@ -297,7 +297,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
 
     let response = control()
         .oneshot(post(
-            "/api/v1/targets",
+            "/admin/targets",
             serde_json::json!({ "upstream_id": "up", "target": addr.to_string(), "weight": 1001 }),
         ))
         .await
@@ -306,7 +306,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
 
     let response = control()
         .oneshot(post(
-            "/api/v1/targets",
+            "/admin/targets",
             serde_json::json!({ "upstream_id": "up", "target": "ftp://nope" }),
         ))
         .await
@@ -315,7 +315,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
 
     let response = control()
         .oneshot(post(
-            "/api/v1/targets",
+            "/admin/targets",
             serde_json::json!({ "upstream_id": "up", "target": addr.to_string() }),
         ))
         .await
@@ -324,7 +324,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
 
     let response = control()
         .oneshot(post(
-            "/api/v1/routes",
+            "/admin/routes",
             serde_json::json!({ "id": "r", "service_id": "svc", "paths": ["/"], "methods": ["BREW"] }),
         ))
         .await
@@ -333,7 +333,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
 
     let response = control()
         .oneshot(post(
-            "/api/v1/routes",
+            "/admin/routes",
             serde_json::json!({ "id": "r", "service_id": "svc", "paths": ["/"] }),
         ))
         .await
@@ -343,7 +343,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     // Duplicate service name conflicts.
     let response = control()
         .oneshot(post(
-            "/api/v1/services",
+            "/admin/services",
             serde_json::json!({ "id": "svc2", "name": "svc" }),
         ))
         .await
@@ -352,7 +352,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
 
     let response = control()
         .oneshot(post(
-            "/api/v1/services",
+            "/admin/services",
             serde_json::json!({ "name": "bad", "connect_timeout": 0 }),
         ))
         .await
@@ -364,7 +364,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
 
     let response = control()
         .oneshot(post(
-            "/api/v1/consumers",
+            "/admin/consumers",
             serde_json::json!({ "id": "c", "username": "consumer" }),
         ))
         .await
@@ -373,7 +373,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
 
     let response = control()
         .oneshot(post(
-            "/api/v1/credentials",
+            "/admin/key-auths",
             serde_json::json!({ "consumer_id": "c" }),
         ))
         .await
@@ -395,18 +395,18 @@ async fn control_plane_crud_validation_and_key_issuance() {
 
     let response = control()
         .oneshot(post(
-            "/api/v1/credentials",
+            "/admin/key-auths",
             serde_json::json!({ "consumer_id": "missing" }),
         ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    // List filters reach through the query string.
+    // Related targets are reachable through the nested upstream endpoint.
     let response = control()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/targets?upstream_id=up")
+                .uri("/admin/upstreams/up/targets")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -414,7 +414,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
         .unwrap();
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let targets: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(targets.as_array().unwrap().len(), 1);
+    assert_eq!(targets["data"].as_array().unwrap().len(), 1);
 
     // The configured route is proxied end to end through a fresh data router.
     let data = data_plane_router(ApiDataState::new(
@@ -601,27 +601,27 @@ async fn plugin_configs_crud_via_control_plane() {
     let gateway = gateway().await;
 
     let list = Request::builder()
-        .uri("/api/v1/plugins")
+        .uri("/admin/plugins/enabled")
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .unwrap();
     let (status, _, json) = gateway.send_control(list).await;
     assert_eq!(status, StatusCode::OK);
-    let names: Vec<&str> = json
+    let names: Vec<&str> = json["enabled_plugins"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|plugin| plugin["name"].as_str().unwrap())
+        .map(|name| name.as_str().unwrap())
         .collect();
     assert!(names.contains(&"cors"));
     assert!(names.contains(&"rate-limiting"));
 
     let create = Request::builder()
         .method("POST")
-        .uri("/api/v1/plugins/correlation-id/instances")
+        .uri("/admin/plugins")
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"config":{}}"#))
+        .body(Body::from(r#"{"name":"correlation-id","config":{}}"#))
         .unwrap();
     let (status, _, json) = gateway.send_control(create).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -630,7 +630,7 @@ async fn plugin_configs_crud_via_control_plane() {
 
     let update = Request::builder()
         .method("PUT")
-        .uri(format!("/api/v1/plugin-instances/{config_id}"))
+        .uri(format!("/admin/plugins/{config_id}"))
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(r#"{"enabled":false}"#))
@@ -641,7 +641,7 @@ async fn plugin_configs_crud_via_control_plane() {
 
     let delete = Request::builder()
         .method("DELETE")
-        .uri(format!("/api/v1/plugin-instances/{config_id}"))
+        .uri(format!("/admin/plugins/{config_id}"))
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .unwrap();
@@ -654,14 +654,16 @@ async fn plugin_config_rejects_unknown_scope_target() {
     let gateway = gateway().await;
     let create = Request::builder()
         .method("POST")
-        .uri("/api/v1/plugins/cors/instances")
+        .uri("/admin/plugins")
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"service_id":"missing","config":{}}"#))
+        .body(Body::from(
+            r#"{"name":"cors","service_id":"missing","config":{}}"#,
+        ))
         .unwrap();
     let (status, _, json) = gateway.send_control(create).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(json["error"]["code"], "not_found");
+    assert_eq!(json["name"], "not found");
 }
 
 #[tokio::test]
@@ -823,7 +825,7 @@ async fn prometheus_metrics_are_exposed_on_the_control_plane() {
     let _ = gateway.send(get("/missing")).await;
 
     let request = Request::builder()
-        .uri("/api/v1/api/metrics/prometheus")
+        .uri("/admin/metrics/prometheus")
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .unwrap();
@@ -882,7 +884,7 @@ async fn request_logs_are_persisted_and_queryable() {
     assert_eq!(logs[0].service_id.as_deref(), Some("svc-logs"));
 
     let query = Request::builder()
-        .uri("/api/v1/system/logs?limit=10&route_id=svc-logs-route")
+        .uri("/admin/logs?limit=10&route_id=svc-logs-route")
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .unwrap();
@@ -899,7 +901,7 @@ async fn control_mutations_write_audit_rows() {
     let gateway = gateway().await;
     let create = Request::builder()
         .method("POST")
-        .uri("/api/v1/services")
+        .uri("/admin/services")
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(r#"{"id":"audited","name":"audited"}"#))
@@ -917,10 +919,10 @@ async fn control_mutations_write_audit_rows() {
     }
     assert!(!rows.is_empty());
     assert_eq!(rows[0].action, "control.post");
-    assert_eq!(rows[0].target.as_deref(), Some("/api/v1/services"));
+    assert_eq!(rows[0].target.as_deref(), Some("/admin/services"));
 
     let query = Request::builder()
-        .uri("/api/v1/audit-logs?limit=10")
+        .uri("/admin/audit-logs?limit=10")
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .unwrap();

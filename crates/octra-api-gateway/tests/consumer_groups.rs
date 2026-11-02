@@ -50,7 +50,7 @@ async fn consumer_group_crud_and_membership_via_the_control_plane() {
     let (status, _, group) = gateway
         .send_control(json_request(
             "POST",
-            "/api/v1/consumer-groups",
+            "/admin/consumer_groups",
             json!({"name": "admins"}),
         ))
         .await;
@@ -60,7 +60,7 @@ async fn consumer_group_crud_and_membership_via_the_control_plane() {
     let (status, _, consumer) = gateway
         .send_control(json_request(
             "POST",
-            "/api/v1/consumers",
+            "/admin/consumers",
             json!({"username": "alice"}),
         ))
         .await;
@@ -70,7 +70,7 @@ async fn consumer_group_crud_and_membership_via_the_control_plane() {
     let (status, _, member) = gateway
         .send_control(json_request(
             "POST",
-            &format!("/api/v1/consumer-groups/{group_id}/consumers"),
+            &format!("/admin/consumer_groups/{group_id}/consumers"),
             json!({"consumer_id": consumer_id}),
         ))
         .await;
@@ -78,23 +78,21 @@ async fn consumer_group_crud_and_membership_via_the_control_plane() {
     assert_eq!(member["consumer_group_id"], group_id);
 
     let (status, _, members) = gateway
-        .send_control(get(&format!(
-            "/api/v1/consumer-groups/{group_id}/consumers"
-        )))
+        .send_control(get(&format!("/admin/consumer_groups/{group_id}/consumers")))
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(members[0]["username"], "alice");
+    assert_eq!(members["data"][0]["username"], "alice");
 
     let (status, _, groups) = gateway
         .send_control(get(&format!(
-            "/api/v1/consumers/{consumer_id}/consumer-groups"
+            "/admin/consumers/{consumer_id}/consumer_groups"
         )))
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(groups[0]["name"], "admins");
+    assert_eq!(groups["data"][0]["name"], "admins");
 
     let (status, _, group) = gateway
-        .send_control(get("/api/v1/consumer-groups/admins"))
+        .send_control(get("/admin/consumer_groups/admins"))
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(group["id"], group_id);
@@ -102,23 +100,21 @@ async fn consumer_group_crud_and_membership_via_the_control_plane() {
     let (status, _, _) = gateway
         .send_control(request(
             "DELETE",
-            &format!("/api/v1/consumer-groups/{group_id}/consumers/{consumer_id}"),
+            &format!("/admin/consumer_groups/{group_id}/consumers/{consumer_id}"),
         ))
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (status, _, members) = gateway
-        .send_control(get(&format!(
-            "/api/v1/consumer-groups/{group_id}/consumers"
-        )))
+        .send_control(get(&format!("/admin/consumer_groups/{group_id}/consumers")))
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(members.as_array().unwrap().is_empty());
+    assert!(members["data"].as_array().unwrap().is_empty());
 
     let (status, _, _) = gateway
         .send_control(json_request(
             "PUT",
-            &format!("/api/v1/consumer-groups/{group_id}"),
+            &format!("/admin/consumer_groups/{group_id}"),
             json!({"name": "operators"}),
         ))
         .await;
@@ -127,7 +123,7 @@ async fn consumer_group_crud_and_membership_via_the_control_plane() {
     let (status, _, _) = gateway
         .send_control(request(
             "DELETE",
-            &format!("/api/v1/consumer-groups/{group_id}"),
+            &format!("/admin/consumer_groups/{group_id}"),
         ))
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -139,8 +135,8 @@ async fn authentication_plugins_cannot_be_group_scoped() {
     let (status, _, _) = gateway
         .send_control(json_request(
             "POST",
-            "/api/v1/plugins/key-auth/instances",
-            json!({"consumer_group_id": "missing"}),
+            "/admin/plugins",
+            json!({"name": "key-auth", "consumer_group_id": "missing"}),
         ))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

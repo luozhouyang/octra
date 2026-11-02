@@ -16,6 +16,10 @@ pub(super) fn map_service(row: &SqliteRow) -> Result<Service> {
         read_timeout: decode(row.try_get("read_timeout"), "service")?,
         enabled: decode::<i64>(row.try_get("enabled"), "service")? != 0,
         description: decode(row.try_get("description"), "service")?,
+        tags: decode_json_or_default(
+            row.try_get::<Option<String>, _>("tags").ok().flatten(),
+            "tags",
+        )?,
         created_at: decode(row.try_get("created_at"), "service")?,
         updated_at: decode(row.try_get("updated_at"), "service")?,
     })

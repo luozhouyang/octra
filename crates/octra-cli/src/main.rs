@@ -114,8 +114,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Status => print_json(control.get("/api/v1/system/health")?)?,
-        Command::Services => print_json(control.get("/api/v1/services")?)?,
-        Command::Routes => print_json(control.get("/api/v1/routes")?)?,
+        Command::Services => print_json(control.get("/admin/services")?)?,
+        Command::Routes => print_json(control.get("/admin/routes")?)?,
         Command::Reload => print_json(control.post("/api/v1/system/reload")?)?,
         Command::Doctor => doctor(&control)?,
         Command::Usage { limit } => {

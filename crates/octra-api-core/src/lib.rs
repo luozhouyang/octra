@@ -52,6 +52,7 @@ pub struct Service {
     pub read_timeout: i64,
     pub enabled: bool,
     pub description: String,
+    pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -71,6 +72,7 @@ pub struct CreateService {
     pub read_timeout: Option<i64>,
     pub enabled: Option<bool>,
     pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,6 +94,7 @@ pub struct UpdateService {
     pub read_timeout: Option<i64>,
     pub enabled: Option<bool>,
     pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------

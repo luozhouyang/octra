@@ -37,8 +37,9 @@ impl ApiStore {
 
         sqlx::query(&format!(
             "INSERT INTO services (id, name, protocol, host, port, path, retries, \
-             connect_timeout, write_timeout, read_timeout, enabled, description, created_at, \
-             updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now}, {now})",
+             connect_timeout, write_timeout, read_timeout, enabled, description, tags, \
+             created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now}, {now})",
             now = epoch_now()
         ))
         .bind(&id)
@@ -53,6 +54,7 @@ impl ApiStore {
         .bind(input.read_timeout.unwrap_or(60_000))
         .bind(input.enabled.unwrap_or(true))
         .bind(input.description.clone().unwrap_or_default())
+        .bind(encode_json(&input.tags.clone().unwrap_or_default())?)
         .execute(self.pool())
         .await
         .map_err(|e| map_db_error(e, "service"))?;
@@ -78,6 +80,7 @@ impl ApiStore {
                 read_timeout = COALESCE(?, read_timeout), \
                 enabled = COALESCE(?, enabled), \
                 description = COALESCE(?, description), \
+                tags = COALESCE(?, tags), \
                 updated_at = {now} \
              WHERE id = ?",
             now = epoch_now()
@@ -94,6 +97,7 @@ impl ApiStore {
         .bind(input.read_timeout)
         .bind(input.enabled)
         .bind(&input.description)
+        .bind(input.tags.as_ref().map(encode_json).transpose()?)
         .bind(id)
         .execute(self.pool())
         .await
