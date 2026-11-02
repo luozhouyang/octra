@@ -2,10 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use octra_api_core::PluginInstance;
-use octra_api_plugin_runtime::PluginHostProvider;
 use octra_api_plugin_types::{
-    Capability, EntityQuery, EntitySpec, LogLevel, PluginHost, PluginManifest, PluginStorage,
-    StorageError,
+    Capability, EntityQuery, EntitySpec, LogLevel, PluginHost, PluginHostProvider, PluginManifest,
+    PluginStorage, StorageError,
 };
 use octra_plugin_storage::{PluginStorageError, PluginStorageRoot, PluginStore};
 use parking_lot::{Mutex, RwLock};

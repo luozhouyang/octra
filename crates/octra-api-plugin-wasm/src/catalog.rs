@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use octra_api_plugin_runtime::PluginFactoryResolver;
-use octra_api_plugin_types::{ApiGatewayPluginFactory, PluginManifest};
+use octra_api_plugin_types::{ApiGatewayPluginFactory, PluginFactoryResolver, PluginManifest};
 use parking_lot::RwLock;
 
 use crate::WasmPluginFactory;

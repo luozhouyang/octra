@@ -3228,7 +3228,6 @@ dependencies = [
  "bytes",
  "http",
  "octra-api-core",
- "octra-api-plugin-runtime",
  "octra-api-plugin-types",
  "octra-plugin-storage",
  "parking_lot",

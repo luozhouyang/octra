@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use axum::response::Response;
 use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode, Uri};
-use octra_api_core::{Route, Service};
+use octra_api_core::{PluginInstance, Route, Service};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -579,4 +579,17 @@ pub trait ApiGatewayPluginFactory: Send + Sync {
     fn validate(&self, config: &Value) -> Result<(), PluginError> {
         self.create("validation", config.clone()).map(|_| ())
     }
+}
+
+/// Resolves plugin factories from one or more catalogs. The daemon uses a
+/// composite resolver (built-ins plus installed WASM artifacts); tests and
+/// early boot can use a registry directly.
+pub trait PluginFactoryResolver: Send + Sync {
+    fn factory(&self, name: &str) -> Option<Arc<dyn ApiGatewayPluginFactory>>;
+    fn manifests(&self) -> Vec<PluginManifest>;
+}
+
+/// Builds the host handle passed to a factory for one configured instance.
+pub trait PluginHostProvider: Send + Sync {
+    fn host_for(&self, instance: &PluginInstance) -> Arc<dyn PluginHost>;
 }

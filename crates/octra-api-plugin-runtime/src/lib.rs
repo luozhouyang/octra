@@ -64,13 +64,7 @@ impl PluginRegistry {
     }
 }
 
-/// Resolves plugin factories from one or more catalogs. The daemon uses a
-/// composite resolver (built-ins plus installed WASM artifacts); tests and
-/// early boot can use the registry directly.
-pub trait PluginFactoryResolver: Send + Sync {
-    fn factory(&self, name: &str) -> Option<Arc<dyn ApiGatewayPluginFactory>>;
-    fn manifests(&self) -> Vec<PluginManifest>;
-}
+pub use octra_api_plugin_types::{PluginFactoryResolver, PluginHostProvider};
 
 impl PluginFactoryResolver for PluginRegistry {
     fn factory(&self, name: &str) -> Option<Arc<dyn ApiGatewayPluginFactory>> {
@@ -122,11 +116,6 @@ impl PluginFactoryResolver for CompositePluginFactoryResolver {
         manifests.sort_by(|left, right| left.name.cmp(&right.name));
         manifests
     }
-}
-
-/// Builds the host handle passed to a factory for one configured instance.
-pub trait PluginHostProvider: Send + Sync {
-    fn host_for(&self, instance: &PluginInstance) -> Arc<dyn PluginHost>;
 }
 
 /// Used by built-in-only runtimes; built-in factories ignore the host.

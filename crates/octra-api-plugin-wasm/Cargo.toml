@@ -12,7 +12,6 @@ axum.workspace = true
 bytes.workspace = true
 http.workspace = true
 octra-api-core.workspace = true
-octra-api-plugin-runtime.workspace = true
 octra-api-plugin-types.workspace = true
 octra-plugin-storage.workspace = true
 parking_lot.workspace = true
