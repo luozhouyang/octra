@@ -632,7 +632,7 @@ impl TargetPool {
         };
 
         (0..len)
-            .map(|step| Arc::clone(&eligible[(start + step) % len]))
+            .map(|step| Arc::clone(eligible[(start + step) % len]))
             .collect()
     }
 
