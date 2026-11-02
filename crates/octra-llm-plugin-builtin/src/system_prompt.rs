@@ -102,6 +102,7 @@ mod tests {
             session_id: None,
             client_ip: None,
             user_agent: None,
+            intent: None,
         };
         let mut state = serde_json::Value::Null;
         let mut cx = LlmRequestContext {

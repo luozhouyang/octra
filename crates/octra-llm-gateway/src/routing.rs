@@ -27,6 +27,152 @@ impl Target {
     }
 }
 
+/// Client hint about what the request is for. Routing uses it to bias target
+/// order; it never removes a target from the fallback path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutingIntent {
+    Chat,
+    Coding,
+    Reasoning,
+    Vision,
+    LongContext,
+    ToolUse,
+    Custom(String),
+}
+
+impl RoutingIntent {
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        let lower = value.to_ascii_lowercase();
+        Some(match lower.as_str() {
+            "chat" => Self::Chat,
+            "coding" | "code" => Self::Coding,
+            "reasoning" => Self::Reasoning,
+            "vision" | "image" => Self::Vision,
+            "long_context" | "long-context" => Self::LongContext,
+            "tool_use" | "tool-use" | "tools" => Self::ToolUse,
+            _ => Self::Custom(value.to_string()),
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Chat => "chat",
+            Self::Coding => "coding",
+            Self::Reasoning => "reasoning",
+            Self::Vision => "vision",
+            Self::LongContext => "long_context",
+            Self::ToolUse => "tool_use",
+            Self::Custom(value) => value,
+        }
+    }
+}
+
+/// Signals used to rank targets. `None` capability flags mean the operator did
+/// not declare them, so they never penalize a target.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TargetSignal {
+    pub context_window: Option<u64>,
+    pub vision: Option<bool>,
+    pub tools: Option<bool>,
+    pub reasoning: Option<bool>,
+    pub usage: i64,
+    pub quota_remaining: i64,
+    pub latency_ms: u64,
+    pub failures: u64,
+    pub price_per_million: f64,
+    pub pace_wait_ms: u64,
+}
+
+/// Reorders the non-fallback attempt list by strategy. The fallback entry is
+/// appended by the caller so ranking can never duplicate the best target ahead
+/// of the remaining candidates.
+pub fn rank_targets(
+    targets: &mut Vec<Target>,
+    strategy: &str,
+    intent: Option<&RoutingIntent>,
+    estimated_tokens: u64,
+    signal: impl Fn(&Target) -> TargetSignal,
+) {
+    if !matches!(strategy, "usage" | "quota" | "smart" | "intent" | "pace") {
+        return;
+    }
+    let mut scored: Vec<(f64, Target)> = targets
+        .drain(..)
+        .map(|target| {
+            let signal = signal(&target);
+            (
+                score_target(strategy, intent, estimated_tokens, &signal),
+                target,
+            )
+        })
+        .collect();
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    targets.extend(scored.into_iter().map(|(_, target)| target));
+}
+
+fn score_target(
+    strategy: &str,
+    intent: Option<&RoutingIntent>,
+    estimated_tokens: u64,
+    signal: &TargetSignal,
+) -> f64 {
+    let health = -(signal.latency_ms as f64) * 0.05
+        - (signal.failures as f64) * 500.0
+        - (signal.usage as f64) * 0.001
+        - signal.price_per_million * 10.0;
+    match strategy {
+        "usage" => -(signal.usage as f64),
+        "quota" => signal.quota_remaining as f64,
+        "pace" => -(signal.pace_wait_ms as f64),
+        "smart" => health,
+        "intent" => health + intent_score(intent, estimated_tokens, signal),
+        _ => 0.0,
+    }
+}
+
+fn intent_score(
+    intent: Option<&RoutingIntent>,
+    estimated_tokens: u64,
+    signal: &TargetSignal,
+) -> f64 {
+    let mut score = 0.0;
+    match intent {
+        Some(RoutingIntent::LongContext) => {
+            if let Some(window) = signal.context_window {
+                if window < estimated_tokens {
+                    score -= 10_000.0 + (estimated_tokens - window) as f64 / 1000.0;
+                } else {
+                    score += window as f64 / 100_000.0;
+                }
+            }
+        }
+        Some(RoutingIntent::Vision) => match signal.vision {
+            Some(false) => score -= 10_000.0,
+            Some(true) => score += 50.0,
+            None => {}
+        },
+        Some(RoutingIntent::ToolUse) => match signal.tools {
+            Some(false) => score -= 10_000.0,
+            Some(true) => score += 50.0,
+            None => {}
+        },
+        Some(RoutingIntent::Reasoning) if signal.reasoning == Some(true) => {
+            score += 50.0;
+        }
+        _ => {}
+    }
+    score
+}
+
 /// Ordered targets for one virtual model. Rounds are ordered by ascending
 /// priority; within a round, a weighted round-robin picks the next target.
 #[derive(Debug, Clone)]
@@ -150,7 +296,15 @@ impl RoutePlan {
     /// Attempt order for one request: every round in priority order, then the
     /// highest-priority target once more to satisfy the retry/fallback budget.
     pub fn attempts(&self, tick: u64) -> Vec<Target> {
-        let mut attempts = match self.strategy.as_str() {
+        let (mut attempts, fallback) = self.parts(tick);
+        attempts.extend(fallback);
+        attempts
+    }
+
+    /// Splits the attempt order into rankable targets and the fallback retry,
+    /// which always stays at the end.
+    pub fn parts(&self, tick: u64) -> (Vec<Target>, Vec<Target>) {
+        let attempts = match self.strategy.as_str() {
             "order" => self.flat(),
             "rotate" | "round_robin" => {
                 let mut flat = self.flat();
@@ -183,8 +337,7 @@ impl RoutePlan {
                 attempts
             }
         };
-        attempts.extend(self.fallback.iter().cloned());
-        attempts
+        (attempts, self.fallback.clone())
     }
 
     /// Every target in priority then position order.
@@ -314,6 +467,81 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    fn compiled(model: &str) -> Target {
+        Target {
+            provider_id: format!("{model}-provider"),
+            provider_name: model.into(),
+            model_id: model.into(),
+            account_id: None,
+            protocol: Protocol::Openai,
+            weight: 1,
+            priority: 0,
+        }
+    }
+
+    #[test]
+    fn intent_ranking_prefers_declared_capabilities() {
+        let mut targets = vec![compiled("plain"), compiled("vision")];
+        rank_targets(
+            &mut targets,
+            "intent",
+            Some(&RoutingIntent::Vision),
+            100,
+            |target| TargetSignal {
+                vision: Some(target.model_id == "vision"),
+                ..TargetSignal::default()
+            },
+        );
+        assert_eq!(targets[0].model_id, "vision");
+
+        let mut targets = vec![compiled("small"), compiled("large")];
+        rank_targets(
+            &mut targets,
+            "intent",
+            Some(&RoutingIntent::LongContext),
+            100_000,
+            |target| TargetSignal {
+                context_window: Some(if target.model_id == "large" {
+                    200_000
+                } else {
+                    8_000
+                }),
+                ..TargetSignal::default()
+            },
+        );
+        assert_eq!(targets[0].model_id, "large");
+    }
+
+    #[test]
+    fn usage_and_quota_rank_targets() {
+        let mut targets = vec![compiled("hot"), compiled("cold")];
+        rank_targets(&mut targets, "usage", None, 0, |target| TargetSignal {
+            usage: if target.model_id == "hot" { 50 } else { 0 },
+            ..TargetSignal::default()
+        });
+        assert_eq!(targets[0].model_id, "cold");
+
+        let mut targets = vec![compiled("low"), compiled("high")];
+        rank_targets(&mut targets, "quota", None, 0, |target| TargetSignal {
+            quota_remaining: if target.model_id == "high" { 900 } else { 10 },
+            ..TargetSignal::default()
+        });
+        assert_eq!(targets[0].model_id, "high");
+    }
+
+    #[test]
+    fn parts_keeps_the_fallback_out_of_ranking() {
+        let (data, providers) = setup(
+            vec![target("t1", "low", 10, 100), target("t2", "high", 0, 1)],
+            vec![provider("low", "openai"), provider("high", "openai")],
+        );
+        let plan = RoutePlan::compile(&data, &route(), &providers).unwrap();
+        let (attempts, fallback) = plan.parts(0);
+        assert_eq!(attempts[0].provider_id, "high");
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].provider_id, "high");
     }
 
     #[test]

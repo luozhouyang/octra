@@ -21,6 +21,18 @@ pub struct AccountRuntime {
     used: AtomicI64,
     cooldown_until_ms: AtomicI64,
     period_end_ms: AtomicI64,
+    latency_ewma_ms: AtomicI64,
+    failure_ewma: AtomicI64,
+    pace_tat_ms: AtomicI64,
+    pace: Option<Pace>,
+}
+
+/// Request pacing derived from `config_json`: `{"requests_per_minute": 60,
+/// "burst": 10}`. Pacing is opt-in per account.
+#[derive(Debug, Clone, Copy)]
+struct Pace {
+    interval_ms: i64,
+    tolerance_ms: i64,
 }
 
 /// A quota counter that rolled over and should be persisted.
@@ -44,6 +56,10 @@ impl AccountRuntime {
             used: AtomicI64::new(record.quota_used),
             cooldown_until_ms: AtomicI64::new(cooldown),
             period_end_ms: AtomicI64::new(period_end.timestamp_millis()),
+            latency_ewma_ms: AtomicI64::new(0),
+            failure_ewma: AtomicI64::new(0),
+            pace_tat_ms: AtomicI64::new(0),
+            pace: parse_pace(&record),
             record,
         }
     }
@@ -92,6 +108,71 @@ impl AccountRuntime {
 
     pub fn clear_usage(&self) {
         self.used.store(0, Ordering::Relaxed);
+    }
+
+    /// Smooths observed upstream latency into the account health signal.
+    pub fn observe_success(&self, latency_ms: u64) {
+        let sample = latency_ms.min(i64::MAX as u64) as i64;
+        let current = self.latency_ewma_ms.load(Ordering::Relaxed);
+        let next = if current == 0 {
+            sample
+        } else {
+            (current * 7 + sample) / 8
+        };
+        self.latency_ewma_ms.store(next, Ordering::Relaxed);
+        let failures = self.failure_ewma.load(Ordering::Relaxed);
+        if failures > 0 {
+            self.failure_ewma
+                .store(failures - failures / 4, Ordering::Relaxed);
+        }
+    }
+
+    /// Raises the failure signal; it decays on later successes.
+    pub fn observe_failure(&self) {
+        let current = self.failure_ewma.load(Ordering::Relaxed);
+        let next = current + (1000 - current) / 2;
+        self.failure_ewma.store(next.min(1000), Ordering::Relaxed);
+    }
+
+    pub fn latency_ewma_ms(&self) -> u64 {
+        self.latency_ewma_ms.load(Ordering::Relaxed).max(0) as u64
+    }
+
+    pub fn failure_ewma(&self) -> u64 {
+        self.failure_ewma.load(Ordering::Relaxed).max(0) as u64
+    }
+
+    /// Consumes one pacing slot. Returns false when the account is paced out.
+    /// Only call this immediately before making an upstream attempt.
+    pub fn try_acquire(&self, now_ms: i64) -> bool {
+        let Some(pace) = self.pace else {
+            return true;
+        };
+        let mut tat = self.pace_tat_ms.load(Ordering::Relaxed);
+        loop {
+            if tat - pace.tolerance_ms > now_ms {
+                return false;
+            }
+            let next = tat.max(now_ms).saturating_add(pace.interval_ms);
+            match self.pace_tat_ms.compare_exchange_weak(
+                tat,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(current) => tat = current,
+            }
+        }
+    }
+
+    /// Milliseconds until this account can accept another paced request.
+    pub fn pace_wait_ms(&self, now_ms: i64) -> u64 {
+        let Some(pace) = self.pace else {
+            return 0;
+        };
+        let tat = self.pace_tat_ms.load(Ordering::Relaxed);
+        (tat - pace.tolerance_ms - now_ms).max(0) as u64
     }
 
     /// Resets the live counter when its quota period has elapsed.
@@ -155,6 +236,12 @@ impl AccountPool {
                         period_end_ms: AtomicI64::new(
                             existing.period_end_ms.load(Ordering::Relaxed),
                         ),
+                        latency_ewma_ms: AtomicI64::new(
+                            existing.latency_ewma_ms.load(Ordering::Relaxed),
+                        ),
+                        failure_ewma: AtomicI64::new(existing.failure_ewma.load(Ordering::Relaxed)),
+                        pace_tat_ms: AtomicI64::new(existing.pace_tat_ms.load(Ordering::Relaxed)),
+                        pace: parse_pace(record),
                     })
                 }
                 None => Arc::new(AccountRuntime::new(record.clone())),
@@ -284,9 +371,27 @@ fn order_tier(
             let b = b.quota_remaining().unwrap_or(i64::MAX);
             b.cmp(&a)
         }),
+        "smart" => ordered.sort_by(|a, b| {
+            smart_key(a)
+                .partial_cmp(&smart_key(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        "pace" => ordered.sort_by_key(|account| account.pace_wait_ms(_now_ms)),
         _ => {}
     }
     ordered
+}
+
+/// Lower is better: latency plus failure and quota pressure.
+fn smart_key(account: &AccountRuntime) -> f64 {
+    let pressure = match account.quota_remaining() {
+        Some(remaining) => {
+            let limit = account.record.quota_limit.unwrap_or(0).max(1) as f64;
+            (limit - remaining as f64) / limit
+        }
+        None => 0.0,
+    };
+    account.latency_ewma_ms() as f64 + account.failure_ewma() as f64 * 500.0 + pressure * 1000.0
 }
 
 fn weighted_cycle(tier: &[Arc<AccountRuntime>]) -> Vec<usize> {
@@ -312,6 +417,28 @@ fn parse_ms(value: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|value| value.timestamp_millis())
+}
+
+fn parse_pace(record: &LlmProviderAccountRecord) -> Option<Pace> {
+    let value: serde_json::Value = serde_json::from_str(&record.config_json).ok()?;
+    let rpm = value
+        .get("requests_per_minute")
+        .or_else(|| value.get("rpm"))
+        .and_then(serde_json::Value::as_i64)?;
+    if rpm <= 0 {
+        tracing::warn!(account_id = %record.id, rpm, "ignoring non-positive account pacing");
+        return None;
+    }
+    let burst = value
+        .get("burst")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(1)
+        .max(1);
+    let interval_ms = (60_000 / rpm).max(1);
+    Some(Pace {
+        interval_ms,
+        tolerance_ms: interval_ms.saturating_mul(burst.saturating_sub(1)),
+    })
 }
 
 fn stored_period_end(record: &LlmProviderAccountRecord) -> Option<DateTime<Utc>> {
@@ -463,6 +590,52 @@ mod tests {
             candidates(&limited, None, "quota", None, 0, 0)[0].id(),
             "high"
         );
+    }
+
+    #[test]
+    fn smart_prefers_healthy_accounts() {
+        let slow = runtime(account("slow", 0, 1, None, 0));
+        slow.observe_success(1200);
+        slow.observe_failure();
+        let fast = runtime(account("fast", 0, 1, None, 0));
+        fast.observe_success(80);
+        let ordered = candidates(&[slow, fast], None, "smart", None, 0, 0);
+        assert_eq!(ordered[0].id(), "fast");
+    }
+
+    #[test]
+    fn gcra_pacing_limits_and_recovers() {
+        let mut record = account("paced", 0, 1, None, 0);
+        record.config_json = r#"{"requests_per_minute": 60, "burst": 1}"#.into();
+        let paced = AccountRuntime::new(record);
+        let now = 1_000_000;
+        assert!(paced.try_acquire(now));
+        assert!(!paced.try_acquire(now));
+        assert_eq!(paced.pace_wait_ms(now), 1_000);
+        assert_eq!(paced.pace_wait_ms(now + 1_000), 0);
+        assert!(paced.try_acquire(now + 1_000));
+    }
+
+    #[test]
+    fn pacing_burst_allows_short_bursts() {
+        let mut record = account("bursty", 0, 1, None, 0);
+        record.config_json = r#"{"requests_per_minute": 60, "burst": 3}"#.into();
+        let paced = AccountRuntime::new(record);
+        let now = 5_000;
+        assert!(paced.try_acquire(now));
+        assert!(paced.try_acquire(now));
+        assert!(paced.try_acquire(now));
+        assert!(!paced.try_acquire(now));
+    }
+
+    #[test]
+    fn invalid_pacing_config_is_ignored() {
+        let mut record = account("unpaced", 0, 1, None, 0);
+        record.config_json = r#"{"requests_per_minute": 0}"#.into();
+        let entry = AccountRuntime::new(record);
+        for _ in 0..10 {
+            assert!(entry.try_acquire(0));
+        }
     }
 
     #[test]

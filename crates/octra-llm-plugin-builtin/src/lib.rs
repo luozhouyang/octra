@@ -3,12 +3,14 @@
 //! Each plugin performs one bounded rewrite of the canonical request or
 //! stream and validates its configuration at chain-compile time.
 
+mod intent_hint;
 mod model_map;
 mod param_override;
 mod redaction;
 mod system_prompt;
 mod think_tags;
 
+pub use intent_hint::IntentHintFactory;
 pub use model_map::ModelMapFactory;
 pub use param_override::ParamOverrideFactory;
 pub use redaction::RedactionFactory;
@@ -24,6 +26,7 @@ use octra_llm_plugin_runtime::LlmPluginRegistry;
 /// its own registry; the two are separate catalogs filtered by kind.
 pub fn registry() -> LlmPluginRegistry {
     let mut registry = LlmPluginRegistry::new();
+    registry.register(IntentHintFactory);
     registry.register(ModelMapFactory);
     registry.register(ParamOverrideFactory);
     registry.register(RedactionFactory);

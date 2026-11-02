@@ -1492,3 +1492,155 @@ async fn redaction_state_is_isolated_between_concurrent_requests() {
         "second@two.com"
     );
 }
+
+#[tokio::test]
+async fn intent_header_routes_to_a_capable_target() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("intent-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness
+        .model_with(
+            &provider,
+            "plain-model",
+            Some(128_000),
+            r#"{"vision": false}"#,
+            "{}",
+        )
+        .await;
+    harness
+        .model_with(
+            &provider,
+            "vision-model",
+            Some(128_000),
+            r#"{"vision": true}"#,
+            "{}",
+        )
+        .await;
+    harness
+        .route_to_strategy(
+            "octra-vision",
+            "intent",
+            &[
+                (provider.clone(), "plain-model".to_string(), 0, 1),
+                (provider.clone(), "vision-model".to_string(), 0, 1),
+            ],
+        )
+        .await;
+    harness
+        .plugin_config("llm-intent-hint", "global", None, json!({}))
+        .await;
+
+    let (status, _, text) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[("x-octra-intent", "vision")],
+        Some(openai_body("octra-vision", false)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {text}");
+    let captured = upstream.requests();
+    let request = captured.last().expect("upstream request");
+    assert_eq!(request.body["model"], "vision-model");
+}
+
+#[tokio::test]
+async fn pacing_spreads_requests_across_accounts() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("pace-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness
+        .route_to("octra-default", &[(provider.clone(), 0, 1)])
+        .await;
+    harness
+        .account_with_config(
+            &provider,
+            "pace-a",
+            0,
+            1,
+            r#"{"requests_per_minute": 1, "burst": 1}"#,
+        )
+        .await;
+    harness
+        .account_with_config(
+            &provider,
+            "pace-b",
+            0,
+            1,
+            r#"{"requests_per_minute": 1, "burst": 1}"#,
+        )
+        .await;
+
+    for _ in 0..2 {
+        let (status, _, text) = send(
+            harness.data_router(),
+            axum::http::Method::POST,
+            COMPLETION_PATH,
+            &[],
+            Some(openai_body("octra-default", false)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {text}");
+    }
+
+    let usage = wait_for_usage(&harness.storage, 2).await;
+    let names: std::collections::BTreeSet<_> = usage
+        .iter()
+        .filter_map(|row| row.account_name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        ["pace-a".to_string(), "pace-b".to_string()]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[tokio::test]
+async fn fully_paced_account_returns_429() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("paced-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness
+        .route_to("octra-default", &[(provider.clone(), 0, 1)])
+        .await;
+    harness
+        .account_with_config(
+            &provider,
+            "only-account",
+            0,
+            1,
+            r#"{"requests_per_minute": 1, "burst": 1}"#,
+        )
+        .await;
+
+    let first = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK, "body: {}", first.2);
+
+    let second = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(
+        second.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "body: {}",
+        second.2
+    );
+    assert_eq!(second.2["error"]["code"], "account_paced");
+}

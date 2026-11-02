@@ -173,6 +173,7 @@ pub struct StreamMeta {
     pub session_id: Option<String>,
     pub client_ip: Option<std::net::IpAddr>,
     pub user_agent: Option<String>,
+    pub intent: Option<String>,
 }
 
 impl StreamMeta {
@@ -185,6 +186,7 @@ impl StreamMeta {
             session_id: self.session_id.as_deref(),
             client_ip: self.client_ip,
             user_agent: self.user_agent.as_deref(),
+            intent: self.intent.as_deref(),
         }
     }
 }
@@ -305,6 +307,10 @@ impl BridgeState {
             None => tracker.finish_with_status(200),
         }
         if let Some(account) = &self.account {
+            match tracker.record.error {
+                Some(_) => account.observe_failure(),
+                None => account.observe_success(tracker.record.latency_ms.unwrap_or_default()),
+            }
             let usage = &tracker.record.usage;
             let tokens = usage
                 .input_tokens

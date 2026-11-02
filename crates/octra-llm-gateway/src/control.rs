@@ -466,10 +466,19 @@ impl GroupBody {
             .unwrap_or_else(|| "priority".to_string());
         if !matches!(
             strategy.as_str(),
-            "priority" | "weighted" | "order" | "rotate" | "round_robin" | "usage" | "quota"
+            "priority"
+                | "weighted"
+                | "order"
+                | "rotate"
+                | "round_robin"
+                | "usage"
+                | "quota"
+                | "smart"
+                | "pace"
+                | "intent"
         ) {
             return Err(ApiError::bad_request(
-                "strategy must be priority, weighted, order, rotate, usage or quota",
+                "strategy must be priority, weighted, order, rotate, usage, quota, smart, pace or intent",
             )
             .field("strategy"));
         }

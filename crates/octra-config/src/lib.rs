@@ -44,6 +44,8 @@ pub struct LlmConfig {
     pub stream_idle_timeout_secs: u64,
     /// Header carrying a stable session id for account affinity.
     pub session_header: String,
+    /// Header carrying a client intent hint for routing.
+    pub intent_header: String,
     /// How long an account is skipped after a rate-limit or quota error.
     pub account_cooldown_secs: u64,
 }
@@ -101,6 +103,7 @@ impl Default for LlmConfig {
             request_timeout_secs: 120,
             stream_idle_timeout_secs: 120,
             session_header: "x-octra-session".to_string(),
+            intent_header: "x-octra-intent".to_string(),
             account_cooldown_secs: 60,
         }
     }

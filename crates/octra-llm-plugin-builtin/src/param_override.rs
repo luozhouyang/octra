@@ -207,6 +207,7 @@ mod tests {
             session_id: None,
             client_ip: None,
             user_agent: None,
+            intent: None,
         }
     }
 

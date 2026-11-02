@@ -473,6 +473,100 @@ impl Harness {
         self.runtime.reload().await.unwrap();
     }
 
+    pub async fn model_with(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        context_window: Option<i64>,
+        capabilities: &str,
+        pricing_json: &str,
+    ) {
+        self.storage
+            .llm
+            .create_model(&LlmModelInput {
+                provider_id: provider_id.to_string(),
+                model_id: model_id.to_string(),
+                display_name: None,
+                protocol: None,
+                context_window,
+                max_output_tokens: None,
+                capabilities: capabilities.to_string(),
+                pricing_json: pricing_json.to_string(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        self.runtime.reload().await.unwrap();
+    }
+
+    pub async fn route_to_strategy(
+        &self,
+        virtual_model: &str,
+        strategy: &str,
+        targets: &[(String, String, i64, i64)],
+    ) {
+        let group = self
+            .storage
+            .llm
+            .create_routing_group(&format!("{virtual_model}-group"), strategy)
+            .await
+            .unwrap();
+        for (index, (provider_id, model_id, priority, weight)) in targets.iter().enumerate() {
+            self.storage
+                .llm
+                .create_routing_target(
+                    &group.id,
+                    &LlmRoutingTargetInput {
+                        provider_id: provider_id.clone(),
+                        model_id: model_id.clone(),
+                        account_id: None,
+                        weight: *weight,
+                        priority: *priority,
+                        position: index as i64,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        self.storage
+            .llm
+            .create_route(virtual_model, Some(&group.id))
+            .await
+            .unwrap();
+        self.runtime.reload().await.unwrap();
+    }
+
+    pub async fn account_with_config(
+        &self,
+        provider_id: &str,
+        name: &str,
+        priority: i64,
+        weight: i64,
+        config_json: &str,
+    ) -> String {
+        let record = self
+            .storage
+            .llm
+            .create_account(
+                provider_id,
+                &LlmProviderAccountInput {
+                    name: name.to_string(),
+                    secret_ref: Some("env:OCTRA_TEST_UNUSED_SECRET".to_string()),
+                    weight,
+                    priority,
+                    enabled: true,
+                    quota_limit: None,
+                    quota_unit: "requests".to_string(),
+                    quota_period: "none".to_string(),
+                    config_json: config_json.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        self.runtime.reload().await.unwrap();
+        record.id
+    }
+
     /// Creates a provider account, optionally pre-consuming its quota.
     pub async fn account(
         &self,

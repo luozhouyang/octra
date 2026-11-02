@@ -21,6 +21,15 @@ pub struct ProviderIssue {
     pub message: String,
 }
 
+/// Model capability flags used by intent-aware routing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelProfile {
+    pub context_window: Option<u64>,
+    pub vision: Option<bool>,
+    pub tools: Option<bool>,
+    pub reasoning: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshot {
     pub generated_at: DateTime<Utc>,
@@ -192,6 +201,30 @@ impl RuntimeSnapshot {
             .get(provider_id)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    /// Declared capabilities of a provider model, used for intent ranking.
+    /// Missing declarations stay `None` so they never penalize a target.
+    pub fn model_profile(&self, provider_id: &str, model_id: &str) -> ModelProfile {
+        let Some(model) = self
+            .data
+            .models
+            .iter()
+            .find(|model| model.provider_id == provider_id && model.model_id == model_id)
+        else {
+            return ModelProfile::default();
+        };
+        let capabilities: serde_json::Value =
+            serde_json::from_str(&model.capabilities).unwrap_or(serde_json::Value::Null);
+        let flag = |key: &str| capabilities.get(key).and_then(serde_json::Value::as_bool);
+        ModelProfile {
+            context_window: model
+                .context_window
+                .and_then(|value| u64::try_from(value).ok()),
+            vision: flag("vision"),
+            tools: flag("tools"),
+            reasoning: flag("reasoning"),
+        }
     }
 
     /// Parsed pricing document for a provider model, when one is configured.

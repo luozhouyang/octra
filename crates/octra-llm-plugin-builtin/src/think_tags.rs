@@ -171,6 +171,7 @@ mod tests {
                 session_id: None,
                 client_ip: None,
                 user_agent: None,
+                intent: None,
             };
             let mut cx = LlmStreamContext {
                 meta: &meta,
@@ -255,6 +256,7 @@ mod tests {
             session_id: None,
             client_ip: None,
             user_agent: None,
+            intent: None,
         };
         let mut cx = LlmStreamContext {
             meta: &meta,

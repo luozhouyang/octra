@@ -1043,6 +1043,7 @@ mod tests {
             session_id: None,
             client_ip: None,
             user_agent: None,
+            intent: None,
         };
         let mut state = LlmRequestState::new();
         assert!(
@@ -1115,6 +1116,7 @@ mod tests {
             session_id: None,
             client_ip: None,
             user_agent: None,
+            intent: None,
         };
         let mut state = LlmRequestState::new();
         let events = chain
@@ -1205,6 +1207,7 @@ mod tests {
             session_id: None,
             client_ip: None,
             user_agent: None,
+            intent: None,
         };
         let mut request = ChatRequest::new("m", Vec::new());
         let mut state = LlmRequestState::new();
@@ -1286,6 +1289,7 @@ mod tests {
             session_id: None,
             client_ip: None,
             user_agent: None,
+            intent: None,
         };
         let mut request = ChatRequest::new("m", Vec::new());
         let mut state = LlmRequestState::new();
@@ -1357,6 +1361,7 @@ mod tests {
             session_id: None,
             client_ip: None,
             user_agent: None,
+            intent: None,
         };
         let mut state = LlmRequestState::new();
         assert!(matches!(
@@ -1380,6 +1385,7 @@ mod tests {
             session_id: None,
             client_ip: None,
             user_agent: None,
+            intent: None,
         }
     }
 

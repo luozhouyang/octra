@@ -573,6 +573,9 @@ async fn group_strategies_are_validated() {
         "round_robin",
         "usage",
         "quota",
+        "smart",
+        "pace",
+        "intent",
     ] {
         let (status, body) = create(
             &harness,

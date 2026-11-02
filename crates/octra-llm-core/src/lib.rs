@@ -10,9 +10,11 @@
 //! speak the same protocol.
 
 pub mod protocol;
+pub mod tokens;
 pub mod types;
 
 pub use protocol::{ErrorKind, GatewayError, Protocol, ProtocolError, ProtocolResult};
+pub use tokens::estimate_tokens;
 pub use types::{
     AssistantContent, Attachment, AttachmentData, ChatRequest, ChatResponse, ContentPart,
     FinishReason, FunctionCall, FunctionDefinition, Message, ProgrammaticOutput, Reasoning,

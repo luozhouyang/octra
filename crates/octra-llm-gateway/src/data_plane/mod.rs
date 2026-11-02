@@ -12,9 +12,7 @@ use axum::http::{HeaderValue, header};
 use axum::response::Response;
 use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
-use octra_llm_core::{
-    AssistantContent, ChatRequest, ContentPart, GatewayError, Protocol, Usage, UserContent,
-};
+use octra_llm_core::{ChatRequest, ContentPart, GatewayError, Protocol, Usage, estimate_tokens};
 use octra_llm_plugin_runtime::LlmPluginChain;
 use octra_llm_plugin_types::{LlmLogEvent, LlmProviderInfo, LlmRequestMeta, LlmRequestState};
 use octra_llm_protocol::decode_request;
@@ -27,7 +25,7 @@ use crate::config::{ProviderConfig, is_local_url};
 use crate::cost;
 use crate::error::{LlmResult, chain_error, protocol_response};
 use crate::keys::{self, KeyOutcome, presented_key};
-use crate::routing::Target;
+use crate::routing::{RoutingIntent, Target, TargetSignal, rank_targets};
 use crate::runtime::{LlmDataState, RuntimeSnapshot};
 use crate::upstream::Upstream;
 use crate::usage::{self, UsageTracker};
@@ -310,73 +308,6 @@ async fn upstream_count(
     result.get("input_tokens").and_then(Value::as_u64)
 }
 
-/// Rough token estimate: about four characters per token for other text and
-/// one token per CJK character, plus a small per-part overhead. Only a size
-/// hint for `count_tokens`, never used for billing.
-pub fn estimate_tokens(request: &ChatRequest) -> u64 {
-    let mut total = 0usize;
-    for block in &request.system.blocks {
-        total += text_tokens(block);
-    }
-    for message in &request.messages {
-        if let Some(content) = &message.content {
-            total += content_tokens(content);
-        }
-        for block in &message.assistant {
-            match block {
-                AssistantContent::Text { text } => total += text_tokens(text),
-                AssistantContent::Reasoning { text, .. } => total += text_tokens(text),
-                AssistantContent::ToolCall { arguments, .. } => {
-                    total += text_tokens(&arguments.to_string())
-                }
-                _ => {}
-            }
-        }
-        for result in &message.tool_results {
-            total += content_tokens(&result.content);
-        }
-    }
-    for tool in &request.tools {
-        if let Some(function) = &tool.function {
-            total += text_tokens(&function.name);
-            if let Some(description) = &function.description {
-                total += text_tokens(description);
-            }
-            if let Some(parameters) = &function.parameters {
-                total += text_tokens(&parameters.to_string());
-            }
-        }
-    }
-    total as u64
-}
-
-fn text_tokens(text: &str) -> usize {
-    let mut cjk = 0usize;
-    let mut other = 0usize;
-    for ch in text.chars() {
-        if matches!(ch, '\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}' | '\u{ac00}'..='\u{d7af}')
-        {
-            cjk += 1;
-        } else {
-            other += 1;
-        }
-    }
-    cjk + other.div_ceil(4) + 4
-}
-
-fn content_tokens(content: &UserContent) -> usize {
-    content
-        .parts
-        .iter()
-        .map(|part| match part {
-            ContentPart::Text { text, .. } => text_tokens(text),
-            ContentPart::Reasoning { text, .. } => text_tokens(text),
-            ContentPart::Image(_) | ContentPart::File(_) => 1000,
-            ContentPart::Unsupported { .. } => 4,
-        })
-        .sum()
-}
-
 /// Ingress protocol inferred from request headers; used to shape auth errors
 /// on endpoints that accept both protocols (such as `GET /v1/models`).
 fn error_protocol(request: &Incoming) -> Protocol {
@@ -507,6 +438,7 @@ async fn handle(
     let virtual_key_id = key.as_ref().map(|key| key.id.clone());
     let session = header_str(&request, &state.config.llm.session_header).map(str::to_string);
     let user_agent = header_str(&request, "user-agent");
+    let intent = header_str(&request, &state.config.llm.intent_header);
     let meta = LlmRequestMeta {
         request_id: &request_id,
         ingress,
@@ -515,6 +447,7 @@ async fn handle(
         session_id: session.as_deref(),
         client_ip: request.client_ip,
         user_agent,
+        intent,
     };
     let mut request_state = LlmRequestState::new();
     let request_chain = state
@@ -631,9 +564,35 @@ async fn execute(
     let stateful_responses =
         ingress == Protocol::OpenaiResponses && ir.extra.contains_key("previous_response_id");
     let upstream = state.upstream();
-    let tick = snapshot.round_robin().next(plan.group_slot());
-    let attempts = plan.attempts(tick);
     let now_ms = Utc::now().timestamp_millis();
+    let tick = snapshot.round_robin().next(plan.group_slot());
+    let intent = ir
+        .extra
+        .get("octra_intent")
+        .and_then(Value::as_str)
+        .and_then(RoutingIntent::parse);
+    let estimated_tokens = estimate_tokens(ir);
+    let (mut attempts, fallback) = plan.parts(tick);
+    rank_targets(
+        &mut attempts,
+        &plan.strategy,
+        intent.as_ref(),
+        estimated_tokens,
+        |target| target_signal(snapshot, target, now_ms),
+    );
+    if matches!(
+        plan.strategy.as_str(),
+        "smart" | "intent" | "pace" | "usage" | "quota"
+    ) {
+        tracing::debug!(
+            strategy = %plan.strategy,
+            intent = ?intent,
+            tokens = estimated_tokens,
+            targets = ?attempts.iter().map(Target::label).collect::<Vec<_>>(),
+            "llm target order"
+        );
+    }
+    attempts.extend(fallback);
     let mut last_error: Option<GatewayError> = None;
     let mut budget = 0usize;
 
@@ -694,6 +653,19 @@ async fn execute(
         for account in selected {
             if budget >= MAX_ATTEMPTS {
                 break 'targets;
+            }
+            if let Some(account) = &account
+                && !account.try_acquire(now_ms)
+            {
+                last_error = Some(
+                    GatewayError::new(
+                        429,
+                        octra_llm_core::ErrorKind::Upstream,
+                        format!("account {} is paced", account.record.name),
+                    )
+                    .with_code("account_paced"),
+                );
+                continue;
             }
             budget += 1;
 
@@ -771,6 +743,7 @@ async fn execute(
                             Some(usage::finish_reason_label(&outcome.finish_reason).to_string());
                         tracker.finish_with_status(200);
                         if let Some(account) = &account {
+                            account.observe_success(tracker.elapsed_ms());
                             consume_account(account, &tracker);
                         }
                         if let Some(chain) = &provider_chain {
@@ -797,6 +770,9 @@ async fn execute(
                         retryable = error.kind.is_retryable(),
                         "llm upstream attempt failed"
                     );
+                    if let Some(account) = &account {
+                        account.observe_failure();
+                    }
                     let retryable = error.kind.is_retryable();
                     let rate_limited =
                         error.status == 429 || error.code.as_deref() == Some("quota_exceeded");
@@ -830,6 +806,61 @@ async fn execute(
         ))
     });
     Err(fail_request(state, &mut tracker, error))
+}
+
+/// Health, quota and capability signals used to rank one routing target.
+fn target_signal(snapshot: &RuntimeSnapshot, target: &Target, now_ms: i64) -> TargetSignal {
+    let profile = snapshot.model_profile(&target.provider_id, &target.model_id);
+    let mut usage = 0i64;
+    let mut latency_ms = 0u64;
+    let mut failures = 0u64;
+    let mut pace_wait_ms = 0u64;
+    let mut quota: Option<i64> = None;
+    let mut unlimited = false;
+    let mut accounts = 0usize;
+    for account in snapshot.accounts_for(&target.provider_id) {
+        if let Some(pinned) = target.account_id.as_deref()
+            && account.id() != pinned
+        {
+            continue;
+        }
+        accounts += 1;
+        usage = usage.saturating_add(account.used());
+        latency_ms = latency_ms.max(account.latency_ewma_ms());
+        failures = failures.saturating_add(account.failure_ewma());
+        pace_wait_ms = pace_wait_ms.max(account.pace_wait_ms(now_ms));
+        match account.quota_remaining() {
+            Some(remaining) => {
+                *quota.get_or_insert(0) += remaining.max(0);
+            }
+            None => unlimited = true,
+        }
+    }
+    let price_per_million = snapshot
+        .model_pricing(&target.provider_id, &target.model_id)
+        .and_then(|pricing| {
+            pricing
+                .get("input_per_million")
+                .and_then(Value::as_f64)
+                .or_else(|| pricing.get("input").and_then(Value::as_f64))
+        })
+        .unwrap_or(0.0);
+    TargetSignal {
+        context_window: profile.context_window,
+        vision: profile.vision,
+        tools: profile.tools,
+        reasoning: profile.reasoning,
+        usage,
+        quota_remaining: if accounts == 0 || unlimited {
+            i64::MAX
+        } else {
+            quota.unwrap_or(0)
+        },
+        latency_ms,
+        failures,
+        price_per_million,
+        pace_wait_ms,
+    }
 }
 
 /// Adds a completed request to the live account quota counter.
@@ -948,6 +979,7 @@ async fn try_attempt(
                 session_id: meta.session_id.map(str::to_string),
                 client_ip: meta.client_ip,
                 user_agent: meta.user_agent.map(str::to_string),
+                intent: meta.intent.map(str::to_string),
             },
             std::mem::take(request_state),
         );
@@ -1053,7 +1085,7 @@ fn apply_model_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use octra_llm_core::Message;
+    use octra_llm_core::{Message, UserContent};
 
     fn header_map(pairs: &[(&str, &str)]) -> axum::http::HeaderMap {
         let mut headers = axum::http::HeaderMap::new();

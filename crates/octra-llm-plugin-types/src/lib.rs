@@ -99,6 +99,8 @@ pub struct LlmRequestMeta<'a> {
     pub session_id: Option<&'a str>,
     pub client_ip: Option<IpAddr>,
     pub user_agent: Option<&'a str>,
+    /// Client intent hint from the configured header, if any.
+    pub intent: Option<&'a str>,
 }
 
 /// Per-request, per-plugin state. Plugins receive their own slot, so one
