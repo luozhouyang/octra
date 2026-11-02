@@ -8,6 +8,7 @@ mod common;
 mod plugins {
     mod acl;
     mod basic_auth;
+    mod correlation_id;
     mod cors;
     mod ip_restriction;
     mod jwt;

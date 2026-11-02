@@ -7,13 +7,13 @@
 mod acl;
 mod basic_auth;
 mod circuit_breaker;
+mod correlation_id;
 mod cors;
 mod header_rewrite;
 mod ip_restriction;
 mod jwt;
 mod key_auth;
 mod rate_limit;
-mod request_id;
 mod request_size_limiting;
 mod request_termination;
 
@@ -28,10 +28,10 @@ use octra_api_plugin_types::{
 use serde_json::{Value, json};
 
 pub use circuit_breaker::CircuitBreakerFactory;
+pub use correlation_id::CorrelationIdFactory;
 pub use cors::CorsFactory;
 pub use header_rewrite::HeaderRewriteFactory;
 pub use rate_limit::RateLimitFactory;
-pub use request_id::RequestIdFactory;
 
 pub use acl::AclFactory;
 pub use basic_auth::BasicAuthFactory;
@@ -42,7 +42,7 @@ pub use request_size_limiting::RequestSizeLimitingFactory;
 pub use request_termination::RequestTerminationFactory;
 
 pub fn register(registry: &mut PluginRegistry) {
-    registry.register(RequestIdFactory);
+    registry.register(CorrelationIdFactory);
     registry.register(CorsFactory);
     registry.register(RateLimitFactory);
     registry.register(CircuitBreakerFactory);

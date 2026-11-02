@@ -2,7 +2,7 @@
 //!
 //! Every request is matched against the compiled runtime snapshot. Plugins run
 //! in ordered phases while keeping the existing Octra plugin names
-//! (`request-id`, `cors`, `rate-limit`, `header-rewrite`, `circuit-breaker`).
+//! (`correlation-id`, `cors`, `rate-limit`, `header-rewrite`, `circuit-breaker`).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -153,6 +153,23 @@ pub async fn proxy(
         Ok(Some(response)) => {
             let elapsed = started.elapsed();
             state.metrics.record(response.status().as_u16(), elapsed, 0);
+            let request_headers = parts.headers.clone();
+            let response = match apply_response_plugins(
+                &[pre_chain.as_ref()],
+                &request_id,
+                &mut auth_state,
+                &request_headers,
+                None,
+                route,
+                service,
+                "",
+                response,
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => return failed_plugin(&state, &subject, started, error),
+            };
             return complete(
                 &state,
                 &pre_chain,
@@ -209,6 +226,23 @@ pub async fn proxy(
             Ok(Some(response)) => {
                 let elapsed = started.elapsed();
                 state.metrics.record(response.status().as_u16(), elapsed, 0);
+                let request_headers = parts.headers.clone();
+                let response = match apply_response_plugins(
+                    &[pre_chain.as_ref(), post_chain.as_ref()],
+                    &request_id,
+                    &mut auth_state,
+                    &request_headers,
+                    Some(consumer_id),
+                    route,
+                    service,
+                    "",
+                    response,
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => return failed_plugin(&state, &subject, started, error),
+                };
                 return complete(
                     &state,
                     &pre_chain,
@@ -680,6 +714,41 @@ struct LogSubject<'a> {
     route: &'a Route,
     service: &'a Service,
     consumer: Option<String>,
+}
+
+/// Runs response phases for a short-circuited response, mirroring the response
+/// pipeline used for upstream responses.
+async fn apply_response_plugins(
+    chains: &[&PluginChain],
+    request_id: &str,
+    auth_state: &mut GatewayState,
+    request_headers: &HeaderMap,
+    consumer_id: Option<&str>,
+    route: &Route,
+    service: &Service,
+    target_url: &str,
+    response: Response,
+) -> std::result::Result<Response, PluginError> {
+    let mut response = response;
+    for chain in chains {
+        let (mut parts, body) = response.into_parts();
+        let mut cx = ResponseContext {
+            request_id,
+            state: auth_state,
+            request_headers,
+            status: &mut parts.status,
+            headers: &mut parts.headers,
+            consumer_id,
+            route,
+            service,
+            target_url,
+        };
+        match chain.on_response(&mut cx).await? {
+            None => response = Response::from_parts(parts, body),
+            Some(replacement) => return Ok(replacement),
+        }
+    }
+    Ok(response)
 }
 
 async fn complete(

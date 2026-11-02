@@ -66,6 +66,8 @@ async fn mock_echo(State(state): State<MockState>, request: Request<Body>) -> Re
         "xfh": header("x-forwarded-host"),
         "xfp": header("x-forwarded-proto"),
         "request_id": header("x-request-id"),
+        "kong_request_id": header("kong-request-id"),
+        "x_correlation_id": header("x-correlation-id"),
         "plugin_header": header("x-plugin"),
         "connection": header("connection"),
         "apikey": header("apikey"),

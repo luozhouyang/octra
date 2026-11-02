@@ -621,14 +621,14 @@ async fn plugin_configs_crud_via_control_plane() {
 
     let create = Request::builder()
         .method("POST")
-        .uri("/api/v1/plugins/request-id/instances")
+        .uri("/api/v1/plugins/correlation-id/instances")
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(r#"{"config":{}}"#))
         .unwrap();
     let (status, _, json) = gateway.send_control(create).await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(json["name"], "request-id");
+    assert_eq!(json["name"], "correlation-id");
     let config_id = json["id"].as_str().unwrap().to_string();
 
     let update = Request::builder()
