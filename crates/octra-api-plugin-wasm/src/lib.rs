@@ -13,7 +13,7 @@ mod host;
 mod host_provider;
 mod metrics;
 
-pub use adapter::WasmApiGatewayPlugin;
+pub use adapter::{AdminDispatch, WasmApiGatewayPlugin};
 pub use catalog::WasmPluginCatalog;
 pub use engine::{WasmEngine, WasmLimits};
 pub use factory::WasmPluginFactory;

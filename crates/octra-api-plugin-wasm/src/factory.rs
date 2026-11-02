@@ -42,6 +42,27 @@ impl WasmPluginFactory {
             stats,
         })
     }
+
+    /// Creates a concrete plugin instance for Admin API dispatch.
+    pub fn create_admin(
+        &self,
+        host: Arc<dyn PluginHost>,
+        config: Value,
+    ) -> Result<Arc<WasmApiGatewayPlugin>, PluginError> {
+        let config_json = serde_json::to_string(&config).map_err(|error| {
+            PluginError::fail_closed(format!("cannot serialize plugin config: {error}"))
+        })?;
+        let plugin = WasmApiGatewayPlugin::new(
+            self.manifest.clone(),
+            self.component.clone(),
+            host,
+            config_json,
+            self.limits.clone(),
+            self.gate.clone(),
+            self.stats.clone(),
+        )?;
+        Ok(Arc::new(plugin))
+    }
 }
 
 impl ApiGatewayPluginFactory for WasmPluginFactory {

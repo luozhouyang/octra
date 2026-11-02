@@ -132,6 +132,22 @@ interface types {
         credential-id: option<string>,
         credential-type: option<string>,
     }
+
+    record admin-request {
+        request-id: string,
+        method: string,
+        path: string,
+        query: string,
+        headers: list<tuple<string, string>>,
+        params: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    record admin-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
 }
 
 interface host {
@@ -181,9 +197,12 @@ interface plugin-api {
         body-action,
         error-info,
         error-action,
+        admin-request,
+        admin-response,
     };
 
     configure: func(config-json: string) -> result<_, string>;
+    on-admin-request: func(req: admin-request) -> result<admin-response, string>;
     on-rewrite: func(req: request) -> result<action, string>;
     on-request: func(req: request) -> result<action, string>;
     on-request-body: func(req: request, body: list<u8>) -> result<request-body-action, string>;

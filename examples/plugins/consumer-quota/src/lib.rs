@@ -10,7 +10,9 @@
 #[allow(warnings)]
 mod bindings;
 
-use octra_plugin_sdk::{ApiPlugin, Decision, Error, LogEntry, RequestContext, Response};
+use octra_plugin_sdk::{
+    AdminRequest, ApiPlugin, Decision, Error, LogEntry, RequestContext, Response,
+};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -98,6 +100,42 @@ impl ApiPlugin for ConsumerQuota {
         Ok(Decision::continue_request())
     }
 
+    fn on_admin_request(&self, request: &AdminRequest) -> Result<Response, Error> {
+        match request.path.as_str() {
+            "/status" if request.method.eq_ignore_ascii_case("GET") => Ok(json_response(
+                200,
+                json!({
+                    "limit": self.config.limit,
+                    "window_seconds": self.config.window_seconds,
+                    "anonymous_limit": self.config.anonymous_limit,
+                    "reject_status": self.config.reject_status,
+                }),
+            )),
+            path if path.starts_with("/usage/") => {
+                let consumer = request.param("consumer").unwrap_or_default();
+                let rows = request.storage().query(
+                    "quota_usage",
+                    &json!({
+                        "filters": [{
+                            "field": "consumer_id",
+                            "op": "eq",
+                            "value": format!("consumer:{consumer}")
+                        }],
+                        "limit": 20,
+                    }),
+                )?;
+                Ok(json_response(
+                    200,
+                    json!({ "consumer": consumer, "usage": rows }),
+                ))
+            }
+            _ => Ok(json_response(
+                404,
+                json!({ "message": "admin route not found" }),
+            )),
+        }
+    }
+
     fn on_log(&self, entry: &LogEntry) {
         if entry.status == self.config.reject_status {
             octra_plugin_sdk::log::warn(&format!(
@@ -105,6 +143,14 @@ impl ApiPlugin for ConsumerQuota {
                 entry.request_id, entry.consumer_id
             ));
         }
+    }
+}
+
+fn json_response(status: u16, body: serde_json::Value) -> Response {
+    Response {
+        status,
+        headers: vec![("content-type".to_string(), "application/json".to_string())],
+        body: body.to_string().into_bytes(),
     }
 }
 

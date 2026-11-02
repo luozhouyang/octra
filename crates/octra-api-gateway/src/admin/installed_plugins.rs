@@ -394,7 +394,7 @@ pub async fn entity_rows(
     Ok(Json(json!({ "data": rows })))
 }
 
-fn wasm(state: &ApiControlState) -> AdminResult<&Arc<crate::WasmControlState>> {
+pub(super) fn wasm(state: &ApiControlState) -> AdminResult<&Arc<crate::WasmControlState>> {
     state
         .wasm
         .as_ref()

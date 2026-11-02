@@ -11,6 +11,7 @@ mod error;
 mod installed_plugins;
 mod list;
 mod operations;
+mod plugin_api;
 mod plugins;
 mod routes;
 mod schemas;
@@ -19,7 +20,7 @@ mod status;
 mod upstreams;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 
 use crate::ApiControlState;
 
@@ -186,6 +187,15 @@ pub fn router() -> Router<ApiControlState> {
             get(installed_plugins::entity_rows),
         )
         .route(
+            "/admin/plugins/{name}/admin-routes",
+            get(plugin_api::admin_routes),
+        )
+        .route("/admin/plugins/{name}/api", any(plugin_api::dispatch_root))
+        .route(
+            "/admin/plugins/{name}/api/{*path}",
+            any(plugin_api::dispatch),
+        )
+        .route(
             "/admin/plugins/{id}",
             get(plugins::get)
                 .patch(plugins::update)
@@ -304,4 +314,14 @@ pub(crate) async fn resolve_consumer_group_id(
         .await?
         .map(|group| group.id)
         .ok_or_else(|| AdminError::not_found(format!("consumer group '{id_or_name}' not found")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admin_routes_do_not_conflict() {
+        let _ = router();
+    }
 }

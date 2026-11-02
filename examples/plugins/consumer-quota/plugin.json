@@ -8,7 +8,15 @@
   "description": "Per-consumer fixed-window quota backed by plugin-owned SQLite storage",
   "timeout_ms": 50,
   "fail_policy": "closed",
-  "capabilities": ["request_headers", "log", "storage_entities"],
+  "capabilities": ["request_headers", "log", "storage_entities", "admin_api"],
+  "admin_routes": [
+    { "method": "GET", "path": "/status", "summary": "Quota configuration" },
+    {
+      "method": "GET",
+      "path": "/usage/{consumer}",
+      "summary": "Recent usage for a consumer"
+    }
+  ],
   "entities": [
     {
       "name": "quota_usage",

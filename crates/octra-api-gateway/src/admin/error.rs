@@ -46,6 +46,46 @@ impl AdminError {
         }
     }
 
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            name: "forbidden",
+            code: 403,
+            message: message.into(),
+            fields: None,
+        }
+    }
+
+    pub fn method_not_allowed(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::METHOD_NOT_ALLOWED,
+            name: "method not allowed",
+            code: 405,
+            message: message.into(),
+            fields: None,
+        }
+    }
+
+    pub fn payload_too_large(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            name: "payload too large",
+            code: 413,
+            message: message.into(),
+            fields: None,
+        }
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            name: "service unavailable",
+            code: 503,
+            message: message.into(),
+            fields: None,
+        }
+    }
+
     fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,

@@ -1,6 +1,9 @@
 use std::path::{Component, Path, PathBuf};
 
-use octra_api_plugin_types::{PluginKind, PluginManifest, PluginPhase, PluginRuntimeKind};
+use octra_api_plugin_types::{
+    Capability, MAX_ADMIN_ROUTES, PluginKind, PluginManifest, PluginPhase, PluginRuntimeKind,
+    canonical_admin_path, parse_admin_route,
+};
 use sha2::{Digest, Sha256};
 
 use crate::entity;
@@ -119,6 +122,51 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginStorageError
     }
     for migration in &manifest.migrations {
         validate_migration_path(&migration.file)?;
+    }
+    validate_admin_routes(manifest)?;
+    Ok(())
+}
+
+const ADMIN_METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+fn validate_admin_routes(manifest: &PluginManifest) -> Result<(), PluginStorageError> {
+    let declares = manifest.capabilities.contains(&Capability::AdminApi);
+    if manifest.admin_routes.is_empty() {
+        if declares {
+            return Err(PluginStorageError::InvalidManifest(
+                "the admin_api capability requires at least one admin_routes entry".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    if !declares {
+        return Err(PluginStorageError::InvalidManifest(
+            "admin_routes require the admin_api capability".to_string(),
+        ));
+    }
+    if manifest.admin_routes.len() > MAX_ADMIN_ROUTES {
+        return Err(PluginStorageError::InvalidManifest(format!(
+            "a plugin may declare at most {MAX_ADMIN_ROUTES} admin routes"
+        )));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for route in &manifest.admin_routes {
+        let method = route.method.trim().to_ascii_uppercase();
+        if !ADMIN_METHODS.contains(&method.as_str()) {
+            return Err(PluginStorageError::InvalidManifest(format!(
+                "admin route '{}' has an unsupported method '{}'",
+                route.path, route.method
+            )));
+        }
+        let segments =
+            parse_admin_route(&route.path).map_err(PluginStorageError::InvalidManifest)?;
+        let canonical = canonical_admin_path(&segments);
+        if !seen.insert((method, canonical.clone())) {
+            return Err(PluginStorageError::InvalidManifest(format!(
+                "admin route '{canonical}' is declared twice for the same method"
+            )));
+        }
     }
     Ok(())
 }
@@ -266,5 +314,96 @@ mod tests {
         );
         artifact(dir.path(), &legacy, None);
         assert!(validate_artifact_dir(dir.path()).is_ok());
+    }
+
+    fn admin_manifest(capabilities: &str, routes: &str) -> String {
+        format!(
+            r#"{{
+                "api_version": "1",
+                "name": "demo-plugin",
+                "version": "1.0.0",
+                "kind": "api",
+                "runtime": "wasm",
+                "priority": 100,
+                "description": "demo",
+                "capabilities": {capabilities},
+                "admin_routes": {routes},
+                "migrations": []
+            }}"#
+        )
+    }
+
+    fn admin_artifact(manifest: &str) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        artifact(dir.path(), manifest, None);
+        validate_artifact_dir(dir.path()).is_ok()
+    }
+
+    #[test]
+    fn accepts_valid_admin_routes() {
+        assert!(admin_artifact(&admin_manifest(
+            r#"["admin_api"]"#,
+            r#"[
+                {"method":"GET","path":"/status","summary":"Status"},
+                {"method":"DELETE","path":"/consumers/{consumer}/usage"}
+            ]"#,
+        )));
+    }
+
+    #[test]
+    fn rejects_admin_routes_without_the_capability() {
+        assert!(!admin_artifact(&admin_manifest(
+            r#"[]"#,
+            r#"[{"method":"GET","path":"/status"}]"#,
+        )));
+    }
+
+    #[test]
+    fn rejects_the_capability_without_admin_routes() {
+        assert!(!admin_artifact(&admin_manifest(r#"["admin_api"]"#, "[]")));
+    }
+
+    #[test]
+    fn rejects_invalid_admin_route_methods_and_paths() {
+        for route in [
+            r#"{"method":"TRACE","path":"/status"}"#,
+            r#"{"method":"GET","path":"status"}"#,
+            r#"{"method":"GET","path":"/a/../b"}"#,
+            r#"{"method":"GET","path":"/a/*"}"#,
+            r#"{"method":"GET","path":"/a/{1bad}"}"#,
+        ] {
+            assert!(
+                !admin_artifact(&admin_manifest(r#"["admin_api"]"#, &format!("[{route}]"))),
+                "expected {route} to fail"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_admin_routes() {
+        assert!(!admin_artifact(&admin_manifest(
+            r#"["admin_api"]"#,
+            r#"[
+                {"method":"GET","path":"/a/{x}"},
+                {"method":"GET","path":"/a/{y}"}
+            ]"#,
+        )));
+    }
+
+    #[test]
+    fn rejects_too_many_admin_routes() {
+        let routes: Vec<_> = (0..=MAX_ADMIN_ROUTES)
+            .map(|index| {
+                serde_json::json!({
+                    "method": "GET",
+                    "path": format!("/route-{index}"),
+                })
+            })
+            .collect();
+        let routes = serde_json::to_string(&routes).unwrap();
+        assert!(!admin_artifact(&admin_manifest(
+            r#"["admin_api"]"#,
+            &routes
+        )));
     }
 }

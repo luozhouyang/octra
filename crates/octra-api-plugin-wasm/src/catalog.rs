@@ -28,6 +28,10 @@ impl WasmPluginCatalog {
     pub fn contains(&self, name: &str) -> bool {
         self.factories.read().contains_key(name)
     }
+
+    pub fn get(&self, name: &str) -> Option<Arc<WasmPluginFactory>> {
+        self.factories.read().get(name).cloned()
+    }
 }
 
 impl PluginFactoryResolver for WasmPluginCatalog {

@@ -132,6 +132,7 @@ pub enum Capability {
     Secret,
     StorageEntities,
     Auth,
+    AdminApi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +249,10 @@ pub struct PluginManifest {
     pub entities: Vec<EntitySpec>,
     #[serde(default)]
     pub migrations: Vec<MigrationSpec>,
+    /// Custom Admin API routes served by the plugin. Paths are relative to
+    /// `/admin/plugins/{name}/api` and require the `admin_api` capability.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admin_routes: Vec<AdminRouteSpec>,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -264,6 +269,194 @@ pub struct MigrationSpec {
     pub file: String,
     #[serde(default)]
     pub destructive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminRouteSpec {
+    pub method: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Maximum number of custom Admin API routes a plugin may declare.
+pub const MAX_ADMIN_ROUTES: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminPathSegment {
+    Literal(String),
+    Param(String),
+}
+
+/// Parses a manifest-declared Admin API path into literal and `{param}`
+/// segments. Paths are relative to the plugin's Admin API mount.
+pub fn parse_admin_route(path: &str) -> Result<Vec<AdminPathSegment>, String> {
+    if !path.starts_with('/') {
+        return Err("admin route path must start with '/'".to_string());
+    }
+    if path == "/" {
+        return Ok(Vec::new());
+    }
+    if path.ends_with('/') {
+        return Err("admin route path must not end with '/'".to_string());
+    }
+
+    let mut segments = Vec::new();
+    let mut params = std::collections::HashSet::new();
+    for raw in path[1..].split('/') {
+        if raw.is_empty() {
+            return Err(format!("admin route path '{path}' has an empty segment"));
+        }
+        if raw == "." || raw == ".." {
+            return Err(format!(
+                "admin route path '{path}' contains a relative segment"
+            ));
+        }
+        if raw.contains('*') {
+            return Err(format!(
+                "admin route path '{path}' does not support wildcards"
+            ));
+        }
+        if raw.starts_with('{') || raw.ends_with('}') {
+            let name = raw
+                .strip_prefix('{')
+                .and_then(|value| value.strip_suffix('}'))
+                .ok_or_else(|| format!("admin route path '{path}' has a malformed parameter"))?;
+            if !is_param_name(name) {
+                return Err(format!(
+                    "admin route path '{path}' has an invalid parameter name"
+                ));
+            }
+            if !params.insert(name.to_string()) {
+                return Err(format!(
+                    "admin route path '{path}' repeats parameter '{name}'"
+                ));
+            }
+            segments.push(AdminPathSegment::Param(name.to_string()));
+        } else {
+            if raw.contains('{') || raw.contains('}') {
+                return Err(format!(
+                    "admin route path '{path}' has a malformed parameter"
+                ));
+            }
+            segments.push(AdminPathSegment::Literal(raw.to_string()));
+        }
+    }
+    Ok(segments)
+}
+
+/// Canonical form used to detect duplicate route declarations; parameters
+/// normalize to `{}`.
+pub fn canonical_admin_path(segments: &[AdminPathSegment]) -> String {
+    if segments.is_empty() {
+        return "/".to_string();
+    }
+    let parts: Vec<&str> = segments
+        .iter()
+        .map(|segment| match segment {
+            AdminPathSegment::Literal(value) => value.as_str(),
+            AdminPathSegment::Param(_) => "{}",
+        })
+        .collect();
+    format!("/{}", parts.join("/"))
+}
+
+fn is_param_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|value| value.is_ascii_alphanumeric() || value == '_')
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminRouteMatch {
+    Found {
+        index: usize,
+        params: Vec<(String, String)>,
+    },
+    MethodNotAllowed,
+    NotFound,
+}
+
+/// Matches a request against declared Admin API routes. Paths are compared
+/// exactly and case-sensitively; methods case-insensitively. When several
+/// declarations match a path, the one with more literal segments wins, with
+/// declaration order as the tie-breaker.
+pub fn match_admin_route(routes: &[AdminRouteSpec], method: &str, path: &str) -> AdminRouteMatch {
+    struct Candidate {
+        index: usize,
+        literals: usize,
+        params: Vec<(String, String)>,
+    }
+
+    let request_segments = split_request_path(path);
+    let mut best: Option<Candidate> = None;
+    let mut path_matched = false;
+
+    for (index, route) in routes.iter().enumerate() {
+        let Ok(pattern) = parse_admin_route(&route.path) else {
+            continue;
+        };
+        if pattern.len() != request_segments.len() {
+            continue;
+        }
+        let mut params = Vec::new();
+        let mut literals = 0;
+        let mut matched = true;
+        for (segment, value) in pattern.iter().zip(&request_segments) {
+            match segment {
+                AdminPathSegment::Literal(expected) => {
+                    if expected != value {
+                        matched = false;
+                        break;
+                    }
+                    literals += 1;
+                }
+                AdminPathSegment::Param(name) => params.push((name.clone(), value.clone())),
+            }
+        }
+        if !matched {
+            continue;
+        }
+        path_matched = true;
+        if !route.method.eq_ignore_ascii_case(method) {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|current| literals > current.literals)
+        {
+            best = Some(Candidate {
+                index,
+                literals,
+                params,
+            });
+        }
+    }
+
+    match best {
+        Some(candidate) => AdminRouteMatch::Found {
+            index: candidate.index,
+            params: candidate.params,
+        },
+        None if path_matched => AdminRouteMatch::MethodNotAllowed,
+        None => AdminRouteMatch::NotFound,
+    }
+}
+
+fn split_request_path(path: &str) -> Vec<String> {
+    if path.is_empty() || path == "/" {
+        return Vec::new();
+    }
+    path.trim_start_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -594,4 +787,126 @@ pub trait PluginFactoryResolver: Send + Sync {
 /// Builds the host handle passed to a factory for one configured instance.
 pub trait PluginHostProvider: Send + Sync {
     fn host_for(&self, instance: &PluginInstance) -> Arc<dyn PluginHost>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn route(method: &str, path: &str) -> AdminRouteSpec {
+        AdminRouteSpec {
+            method: method.to_string(),
+            path: path.to_string(),
+            summary: None,
+            description: None,
+        }
+    }
+
+    #[test]
+    fn parses_admin_route_paths() {
+        assert_eq!(
+            parse_admin_route("/status").unwrap(),
+            vec![AdminPathSegment::Literal("status".to_string())]
+        );
+        assert_eq!(
+            parse_admin_route("/consumers/{consumer}/usage").unwrap(),
+            vec![
+                AdminPathSegment::Literal("consumers".to_string()),
+                AdminPathSegment::Param("consumer".to_string()),
+                AdminPathSegment::Literal("usage".to_string()),
+            ]
+        );
+        assert!(parse_admin_route("/").unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_admin_route_paths() {
+        for path in [
+            "",
+            "status",
+            "/status/",
+            "/a//b",
+            "/a/../b",
+            "/a/.",
+            "/a/*",
+            "/a/{1bad}",
+            "/a/{bad-name}",
+            "/a/{x}/{x}",
+            "/a/{x",
+            "/a/x}",
+        ] {
+            assert!(
+                parse_admin_route(path).is_err(),
+                "expected '{path}' to fail"
+            );
+        }
+    }
+
+    #[test]
+    fn canonicalizes_parameter_segments() {
+        let segments = parse_admin_route("/consumers/{consumer}/usage").unwrap();
+        assert_eq!(canonical_admin_path(&segments), "/consumers/{}/usage");
+        assert_eq!(canonical_admin_path(&[]), "/");
+    }
+
+    #[test]
+    fn matches_literal_and_parameter_routes() {
+        let routes = vec![
+            route("GET", "/status"),
+            route("GET", "/consumers/{consumer}/usage"),
+        ];
+        assert_eq!(
+            match_admin_route(&routes, "GET", "/status"),
+            AdminRouteMatch::Found {
+                index: 0,
+                params: Vec::new()
+            }
+        );
+        assert_eq!(
+            match_admin_route(&routes, "get", "/consumers/c-1/usage"),
+            AdminRouteMatch::Found {
+                index: 1,
+                params: vec![("consumer".to_string(), "c-1".to_string())]
+            }
+        );
+        assert_eq!(
+            match_admin_route(&routes, "DELETE", "/status"),
+            AdminRouteMatch::MethodNotAllowed
+        );
+        assert_eq!(
+            match_admin_route(&routes, "GET", "/unknown"),
+            AdminRouteMatch::NotFound
+        );
+    }
+
+    #[test]
+    fn prefers_literal_segments_over_parameters() {
+        let routes = vec![route("GET", "/{id}"), route("GET", "/status")];
+        assert_eq!(
+            match_admin_route(&routes, "GET", "/status"),
+            AdminRouteMatch::Found {
+                index: 1,
+                params: Vec::new()
+            }
+        );
+        assert_eq!(
+            match_admin_route(&routes, "GET", "/other"),
+            AdminRouteMatch::Found {
+                index: 0,
+                params: vec![("id".to_string(), "other".to_string())]
+            }
+        );
+    }
+
+    #[test]
+    fn prefers_a_route_with_the_matching_method() {
+        let routes = vec![route("GET", "/items"), route("POST", "/items")];
+        assert_eq!(
+            match_admin_route(&routes, "POST", "/items"),
+            AdminRouteMatch::Found {
+                index: 1,
+                params: Vec::new()
+            }
+        );
+    }
 }

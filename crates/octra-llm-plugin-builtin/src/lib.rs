@@ -65,5 +65,6 @@ pub(crate) fn manifest(name: &str, description: &str) -> PluginManifest {
         api_version: "1".to_string(),
         entities: Vec::new(),
         migrations: Vec::new(),
+        admin_routes: Vec::new(),
     }
 }

@@ -412,6 +412,50 @@ pub mod octra {
                         .finish()
                 }
             }
+            #[derive(Clone)]
+            pub struct AdminRequest {
+                pub request_id: _rt::String,
+                pub method: _rt::String,
+                pub path: _rt::String,
+                pub query: _rt::String,
+                pub headers: _rt::Vec<(_rt::String, _rt::String)>,
+                pub params: _rt::Vec<(_rt::String, _rt::String)>,
+                pub body: _rt::Vec<u8>,
+            }
+            impl ::core::fmt::Debug for AdminRequest {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("AdminRequest")
+                        .field("request-id", &self.request_id)
+                        .field("method", &self.method)
+                        .field("path", &self.path)
+                        .field("query", &self.query)
+                        .field("headers", &self.headers)
+                        .field("params", &self.params)
+                        .field("body", &self.body)
+                        .finish()
+                }
+            }
+            #[derive(Clone)]
+            pub struct AdminResponse {
+                pub status: u16,
+                pub headers: _rt::Vec<(_rt::String, _rt::String)>,
+                pub body: _rt::Vec<u8>,
+            }
+            impl ::core::fmt::Debug for AdminResponse {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("AdminResponse")
+                        .field("status", &self.status)
+                        .field("headers", &self.headers)
+                        .field("body", &self.body)
+                        .finish()
+                }
+            }
         }
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod host {
@@ -1679,6 +1723,8 @@ pub mod exports {
                 pub type BodyAction = super::super::super::super::octra::api_plugin::types::BodyAction;
                 pub type ErrorInfo = super::super::super::super::octra::api_plugin::types::ErrorInfo;
                 pub type ErrorAction = super::super::super::super::octra::api_plugin::types::ErrorAction;
+                pub type AdminRequest = super::super::super::super::octra::api_plugin::types::AdminRequest;
+                pub type AdminResponse = super::super::super::super::octra::api_plugin::types::AdminResponse;
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub unsafe fn _export_configure_cabi<T: Guest>(
@@ -1724,6 +1770,254 @@ pub mod exports {
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<usize>();
                             _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_on_admin_request_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: *mut u8,
+                    arg5: usize,
+                    arg6: *mut u8,
+                    arg7: usize,
+                    arg8: *mut u8,
+                    arg9: usize,
+                    arg10: *mut u8,
+                    arg11: usize,
+                    arg12: *mut u8,
+                    arg13: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
+                    let len2 = arg5;
+                    let bytes2 = _rt::Vec::from_raw_parts(arg4.cast(), len2, len2);
+                    let len3 = arg7;
+                    let bytes3 = _rt::Vec::from_raw_parts(arg6.cast(), len3, len3);
+                    let base10 = arg8;
+                    let len10 = arg9;
+                    let mut result10 = _rt::Vec::with_capacity(len10);
+                    for i in 0..len10 {
+                        let base = base10
+                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                        let e10 = {
+                            let l4 = *base.add(0).cast::<*mut u8>();
+                            let l5 = *base
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let len6 = l5;
+                            let bytes6 = _rt::Vec::from_raw_parts(l4.cast(), len6, len6);
+                            let l7 = *base
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l8 = *base
+                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let len9 = l8;
+                            let bytes9 = _rt::Vec::from_raw_parts(l7.cast(), len9, len9);
+                            (_rt::string_lift(bytes6), _rt::string_lift(bytes9))
+                        };
+                        result10.push(e10);
+                    }
+                    _rt::cabi_dealloc(
+                        base10,
+                        len10 * (4 * ::core::mem::size_of::<*const u8>()),
+                        ::core::mem::size_of::<*const u8>(),
+                    );
+                    let base17 = arg10;
+                    let len17 = arg11;
+                    let mut result17 = _rt::Vec::with_capacity(len17);
+                    for i in 0..len17 {
+                        let base = base17
+                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                        let e17 = {
+                            let l11 = *base.add(0).cast::<*mut u8>();
+                            let l12 = *base
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let len13 = l12;
+                            let bytes13 = _rt::Vec::from_raw_parts(
+                                l11.cast(),
+                                len13,
+                                len13,
+                            );
+                            let l14 = *base
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l15 = *base
+                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let len16 = l15;
+                            let bytes16 = _rt::Vec::from_raw_parts(
+                                l14.cast(),
+                                len16,
+                                len16,
+                            );
+                            (_rt::string_lift(bytes13), _rt::string_lift(bytes16))
+                        };
+                        result17.push(e17);
+                    }
+                    _rt::cabi_dealloc(
+                        base17,
+                        len17 * (4 * ::core::mem::size_of::<*const u8>()),
+                        ::core::mem::size_of::<*const u8>(),
+                    );
+                    let len18 = arg13;
+                    let result19 = T::on_admin_request(super::super::super::super::octra::api_plugin::types::AdminRequest {
+                        request_id: _rt::string_lift(bytes0),
+                        method: _rt::string_lift(bytes1),
+                        path: _rt::string_lift(bytes2),
+                        query: _rt::string_lift(bytes3),
+                        headers: result10,
+                        params: result17,
+                        body: _rt::Vec::from_raw_parts(arg12.cast(), len18, len18),
+                    });
+                    let ptr20 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result19 {
+                        Ok(e) => {
+                            *ptr20.add(0).cast::<u8>() = (0i32) as u8;
+                            let super::super::super::super::octra::api_plugin::types::AdminResponse {
+                                status: status21,
+                                headers: headers21,
+                                body: body21,
+                            } = e;
+                            *ptr20
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<u16>() = (_rt::as_i32(status21)) as u16;
+                            let vec25 = headers21;
+                            let len25 = vec25.len();
+                            let layout25 = _rt::alloc::Layout::from_size_align_unchecked(
+                                vec25.len() * (4 * ::core::mem::size_of::<*const u8>()),
+                                ::core::mem::size_of::<*const u8>(),
+                            );
+                            let result25 = if layout25.size() != 0 {
+                                let ptr = _rt::alloc::alloc(layout25).cast::<u8>();
+                                if ptr.is_null() {
+                                    _rt::alloc::handle_alloc_error(layout25);
+                                }
+                                ptr
+                            } else {
+                                ::core::ptr::null_mut()
+                            };
+                            for (i, e) in vec25.into_iter().enumerate() {
+                                let base = result25
+                                    .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                {
+                                    let (t22_0, t22_1) = e;
+                                    let vec23 = (t22_0.into_bytes()).into_boxed_slice();
+                                    let ptr23 = vec23.as_ptr().cast::<u8>();
+                                    let len23 = vec23.len();
+                                    ::core::mem::forget(vec23);
+                                    *base
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len23;
+                                    *base.add(0).cast::<*mut u8>() = ptr23.cast_mut();
+                                    let vec24 = (t22_1.into_bytes()).into_boxed_slice();
+                                    let ptr24 = vec24.as_ptr().cast::<u8>();
+                                    let len24 = vec24.len();
+                                    ::core::mem::forget(vec24);
+                                    *base
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len24;
+                                    *base
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr24.cast_mut();
+                                }
+                            }
+                            *ptr20
+                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len25;
+                            *ptr20
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = result25;
+                            let vec26 = (body21).into_boxed_slice();
+                            let ptr26 = vec26.as_ptr().cast::<u8>();
+                            let len26 = vec26.len();
+                            ::core::mem::forget(vec26);
+                            *ptr20
+                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len26;
+                            *ptr20
+                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr26.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr20.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec27 = (e.into_bytes()).into_boxed_slice();
+                            let ptr27 = vec27.as_ptr().cast::<u8>();
+                            let len27 = vec27.len();
+                            ::core::mem::forget(vec27);
+                            *ptr20
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len27;
+                            *ptr20
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr27.cast_mut();
+                        }
+                    };
+                    ptr20
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_on_admin_request<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base7 = l1;
+                            let len7 = l2;
+                            for i in 0..len7 {
+                                let base = base7
+                                    .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                {
+                                    let l3 = *base.add(0).cast::<*mut u8>();
+                                    let l4 = *base
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    _rt::cabi_dealloc(l3, l4, 1);
+                                    let l5 = *base
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l6 = *base
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    _rt::cabi_dealloc(l5, l6, 1);
+                                }
+                            }
+                            _rt::cabi_dealloc(
+                                base7,
+                                len7 * (4 * ::core::mem::size_of::<*const u8>()),
+                                ::core::mem::size_of::<*const u8>(),
+                            );
+                            let l8 = *arg0
+                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l9 = *arg0
+                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base10 = l8;
+                            let len10 = l9;
+                            _rt::cabi_dealloc(base10, len10 * 1, 1);
+                        }
+                        _ => {
+                            let l11 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l12 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l11, l12, 1);
                         }
                     }
                 }
@@ -5096,6 +5390,9 @@ pub mod exports {
                 }
                 pub trait Guest {
                     fn configure(config_json: _rt::String) -> Result<(), _rt::String>;
+                    fn on_admin_request(
+                        req: AdminRequest,
+                    ) -> Result<AdminResponse, _rt::String>;
                     fn on_rewrite(req: Request) -> Result<Action, _rt::String>;
                     fn on_request(req: Request) -> Result<Action, _rt::String>;
                     fn on_request_body(
@@ -5131,10 +5428,23 @@ pub mod exports {
                         extern "C" fn _post_return_configure(arg0 : * mut u8,) { unsafe {
                         $($path_to_types)*:: __post_return_configure::<$ty > (arg0) } }
                         #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@1.0.0#on-rewrite")] unsafe extern
-                        "C" fn export_on_rewrite(arg0 : * mut u8,) -> * mut u8 { unsafe {
-                        $($path_to_types)*:: _export_on_rewrite_cabi::<$ty > (arg0) } }
-                        #[unsafe (export_name =
+                        "octra:api-plugin/plugin-api@1.0.0#on-admin-request")] unsafe
+                        extern "C" fn export_on_admin_request(arg0 : * mut u8, arg1 :
+                        usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
+                        usize, arg6 : * mut u8, arg7 : usize, arg8 : * mut u8, arg9 :
+                        usize, arg10 : * mut u8, arg11 : usize, arg12 : * mut u8, arg13 :
+                        usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_on_admin_request_cabi::<$ty > (arg0, arg1, arg2, arg3,
+                        arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13) }
+                        } #[unsafe (export_name =
+                        "cabi_post_octra:api-plugin/plugin-api@1.0.0#on-admin-request")]
+                        unsafe extern "C" fn _post_return_on_admin_request(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_on_admin_request::<$ty > (arg0) } } #[unsafe
+                        (export_name = "octra:api-plugin/plugin-api@1.0.0#on-rewrite")]
+                        unsafe extern "C" fn export_on_rewrite(arg0 : * mut u8,) -> * mut
+                        u8 { unsafe { $($path_to_types)*:: _export_on_rewrite_cabi::<$ty
+                        > (arg0) } } #[unsafe (export_name =
                         "cabi_post_octra:api-plugin/plugin-api@1.0.0#on-rewrite")] unsafe
                         extern "C" fn _post_return_on_rewrite(arg0 : * mut u8,) { unsafe
                         { $($path_to_types)*:: __post_return_on_rewrite::<$ty > (arg0) }
@@ -5395,14 +5705,12 @@ macro_rules! __export_plugin_impl {
 #[doc(inline)]
 pub(crate) use __export_plugin_impl as export;
 #[cfg(target_arch = "wasm32")]
-#[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:octra:api-plugin@1.0.0:plugin:encoded world"
-)]
+#[unsafe(link_section = "component-type:wit-bindgen:0.41.0:octra:api-plugin@1.0.0:plugin:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 2852] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa7\x15\x01A\x02\x01\
-A\x13\x01B(\x01m\x05\x05trace\x05debug\x04info\x04warn\x05error\x04\0\x09log-lev\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3099] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x9e\x17\x01A\x02\x01\
+A\x15\x01B,\x01m\x05\x05trace\x05debug\x04info\x04warn\x05error\x04\0\x09log-lev\
 el\x03\0\0\x01o\x02ss\x01p\x02\x01ks\x01r\x09\x0arequest-ids\x06methods\x04paths\
 \x05querys\x07headers\x03\x09client-ip\x04\x0bconsumer-id\x04\x08route-ids\x0ase\
 rvice-ids\x04\0\x07request\x03\0\x05\x01p}\x01r\x03\x06status{\x07headers\x03\x04\
@@ -5426,44 +5734,49 @@ eaders\x03\x0bconsumer-id\x04\x08route-ids\x0aservice-ids\x0atarget-urls\x07mess
 ages\x04\0\x0aerror-info\x03\0\"\x01q\x02\x08continue\0\0\x07respond\x01\x09\0\x04\
 \0\x0cerror-action\x03\0$\x01r\x05\x0bconsumer-id\x04\x11consumer-username\x04\x12\
 consumer-custom-id\x04\x0dcredential-id\x04\x0fcredential-type\x04\x04\0\x0dauth\
--identity\x03\0&\x03\0\x1coctra:api-plugin/types@1.0.0\x05\0\x02\x03\0\0\x09log-\
-level\x02\x03\0\0\x0dauth-identity\x01B*\x02\x03\x02\x01\x01\x04\0\x09log-level\x03\
-\0\0\x02\x03\x02\x01\x02\x04\0\x0dauth-identity\x03\0\x02\x01@\x02\x05level\x01\x07\
-messages\x01\0\x04\0\x03log\x01\x04\x01@\0\0x\x04\0\x08now-unix\x01\x05\x01@\0\0\
-s\x04\0\x0binstance-id\x01\x06\x01j\0\x01s\x01@\x01\x08identity\x03\0\x07\x04\0\x0c\
-authenticate\x01\x08\x01@\0\0\x7f\x04\0\x0dauthenticated\x01\x09\x01k\x03\x01@\0\
-\0\x0a\x04\0\x0ccurrent-auth\x01\x0b\x01ks\x01j\x01\x0c\x01s\x01@\x01\x03keys\0\x0d\
-\x04\0\x06kv-get\x01\x0e\x01ky\x01@\x03\x03keys\x05values\x0bttl-seconds\x0f\0\x07\
-\x04\0\x06kv-put\x01\x10\x01j\x01\x7f\x01s\x01@\x01\x03keys\0\x11\x04\0\x09kv-de\
-lete\x01\x12\x01j\x01x\x01s\x01@\x03\x03keys\x05deltax\x0bttl-seconds\x0f\0\x13\x04\
-\0\x07kv-incr\x01\x14\x01@\x02\x06entitys\x08key-jsons\0\x0d\x04\0\x0aentity-get\
-\x01\x15\x01@\x02\x06entitys\x0bvalues-jsons\0\x07\x04\0\x0dentity-upsert\x01\x16\
-\x01@\x05\x06entitys\x08key-jsons\x05fields\x05deltax\x0aextra-json\x0c\0\x13\x04\
-\0\x10entity-increment\x01\x17\x01@\x02\x06entitys\x08key-jsons\0\x11\x04\0\x0de\
-ntity-delete\x01\x18\x01j\x01s\x01s\x01@\x02\x06entitys\x0aquery-jsons\0\x19\x04\
-\0\x0centity-query\x01\x1a\x03\0\x1boctra:api-plugin/host@1.0.0\x05\x03\x02\x03\0\
-\0\x07request\x02\x03\0\0\x08response\x02\x03\0\0\x06action\x02\x03\0\0\x0frespo\
-nse-action\x02\x03\0\0\x09log-entry\x02\x03\0\0\x10upstream-request\x02\x03\0\0\x09\
-body-info\x02\x03\0\0\x13request-body-action\x02\x03\0\0\x0bbody-action\x02\x03\0\
-\0\x0aerror-info\x02\x03\0\0\x0cerror-action\x01B0\x02\x03\x02\x01\x04\x04\0\x07\
-request\x03\0\0\x02\x03\x02\x01\x05\x04\0\x08response\x03\0\x02\x02\x03\x02\x01\x06\
-\x04\0\x06action\x03\0\x04\x02\x03\x02\x01\x07\x04\0\x0fresponse-action\x03\0\x06\
-\x02\x03\x02\x01\x08\x04\0\x09log-entry\x03\0\x08\x02\x03\x02\x01\x09\x04\0\x10u\
-pstream-request\x03\0\x0a\x02\x03\x02\x01\x0a\x04\0\x09body-info\x03\0\x0c\x02\x03\
-\x02\x01\x0b\x04\0\x13request-body-action\x03\0\x0e\x02\x03\x02\x01\x0c\x04\0\x0b\
-body-action\x03\0\x10\x02\x03\x02\x01\x0d\x04\0\x0aerror-info\x03\0\x12\x02\x03\x02\
-\x01\x0e\x04\0\x0cerror-action\x03\0\x14\x01j\0\x01s\x01@\x01\x0bconfig-jsons\0\x16\
-\x04\0\x09configure\x01\x17\x01j\x01\x05\x01s\x01@\x01\x03req\x01\0\x18\x04\0\x0a\
-on-rewrite\x01\x19\x04\0\x0aon-request\x01\x19\x01p}\x01j\x01\x0f\x01s\x01@\x02\x03\
-req\x01\x04body\x1a\0\x1b\x04\0\x0fon-request-body\x01\x1c\x01@\x01\x03req\x0b\0\
-\x18\x04\0\x13on-upstream-request\x01\x1d\x01j\x01\x07\x01s\x01@\x01\x04resp\x03\
-\0\x1e\x04\0\x0bon-response\x01\x1f\x01j\x01\x11\x01s\x01@\x02\x04resp\x03\x04bo\
-dy\x1a\0\x20\x04\0\x12on-response-buffer\x01!\x01@\x02\x04info\x0d\x05chunk\x1a\0\
-\x20\x04\0\x11on-response-chunk\x01\"\x01j\x01\x15\x01s\x01@\x01\x03err\x13\0#\x04\
-\0\x08on-error\x01$\x01@\x01\x05entry\x09\x01\0\x04\0\x06on-log\x01%\x04\0!octra\
-:api-plugin/plugin-api@1.0.0\x05\x0f\x04\0\x1doctra:api-plugin/plugin@1.0.0\x04\0\
-\x0b\x0c\x01\0\x06plugin\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-\
-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+-identity\x03\0&\x01r\x07\x0arequest-ids\x06methods\x04paths\x05querys\x07header\
+s\x03\x06params\x03\x04body\x07\x04\0\x0dadmin-request\x03\0(\x01r\x03\x06status\
+{\x07headers\x03\x04body\x07\x04\0\x0eadmin-response\x03\0*\x03\0\x1coctra:api-p\
+lugin/types@1.0.0\x05\0\x02\x03\0\0\x09log-level\x02\x03\0\0\x0dauth-identity\x01\
+B*\x02\x03\x02\x01\x01\x04\0\x09log-level\x03\0\0\x02\x03\x02\x01\x02\x04\0\x0da\
+uth-identity\x03\0\x02\x01@\x02\x05level\x01\x07messages\x01\0\x04\0\x03log\x01\x04\
+\x01@\0\0x\x04\0\x08now-unix\x01\x05\x01@\0\0s\x04\0\x0binstance-id\x01\x06\x01j\
+\0\x01s\x01@\x01\x08identity\x03\0\x07\x04\0\x0cauthenticate\x01\x08\x01@\0\0\x7f\
+\x04\0\x0dauthenticated\x01\x09\x01k\x03\x01@\0\0\x0a\x04\0\x0ccurrent-auth\x01\x0b\
+\x01ks\x01j\x01\x0c\x01s\x01@\x01\x03keys\0\x0d\x04\0\x06kv-get\x01\x0e\x01ky\x01\
+@\x03\x03keys\x05values\x0bttl-seconds\x0f\0\x07\x04\0\x06kv-put\x01\x10\x01j\x01\
+\x7f\x01s\x01@\x01\x03keys\0\x11\x04\0\x09kv-delete\x01\x12\x01j\x01x\x01s\x01@\x03\
+\x03keys\x05deltax\x0bttl-seconds\x0f\0\x13\x04\0\x07kv-incr\x01\x14\x01@\x02\x06\
+entitys\x08key-jsons\0\x0d\x04\0\x0aentity-get\x01\x15\x01@\x02\x06entitys\x0bva\
+lues-jsons\0\x07\x04\0\x0dentity-upsert\x01\x16\x01@\x05\x06entitys\x08key-jsons\
+\x05fields\x05deltax\x0aextra-json\x0c\0\x13\x04\0\x10entity-increment\x01\x17\x01\
+@\x02\x06entitys\x08key-jsons\0\x11\x04\0\x0dentity-delete\x01\x18\x01j\x01s\x01\
+s\x01@\x02\x06entitys\x0aquery-jsons\0\x19\x04\0\x0centity-query\x01\x1a\x03\0\x1b\
+octra:api-plugin/host@1.0.0\x05\x03\x02\x03\0\0\x07request\x02\x03\0\0\x08respon\
+se\x02\x03\0\0\x06action\x02\x03\0\0\x0fresponse-action\x02\x03\0\0\x09log-entry\
+\x02\x03\0\0\x10upstream-request\x02\x03\0\0\x09body-info\x02\x03\0\0\x13request\
+-body-action\x02\x03\0\0\x0bbody-action\x02\x03\0\0\x0aerror-info\x02\x03\0\0\x0c\
+error-action\x02\x03\0\0\x0dadmin-request\x02\x03\0\0\x0eadmin-response\x01B7\x02\
+\x03\x02\x01\x04\x04\0\x07request\x03\0\0\x02\x03\x02\x01\x05\x04\0\x08response\x03\
+\0\x02\x02\x03\x02\x01\x06\x04\0\x06action\x03\0\x04\x02\x03\x02\x01\x07\x04\0\x0f\
+response-action\x03\0\x06\x02\x03\x02\x01\x08\x04\0\x09log-entry\x03\0\x08\x02\x03\
+\x02\x01\x09\x04\0\x10upstream-request\x03\0\x0a\x02\x03\x02\x01\x0a\x04\0\x09bo\
+dy-info\x03\0\x0c\x02\x03\x02\x01\x0b\x04\0\x13request-body-action\x03\0\x0e\x02\
+\x03\x02\x01\x0c\x04\0\x0bbody-action\x03\0\x10\x02\x03\x02\x01\x0d\x04\0\x0aerr\
+or-info\x03\0\x12\x02\x03\x02\x01\x0e\x04\0\x0cerror-action\x03\0\x14\x02\x03\x02\
+\x01\x0f\x04\0\x0dadmin-request\x03\0\x16\x02\x03\x02\x01\x10\x04\0\x0eadmin-res\
+ponse\x03\0\x18\x01j\0\x01s\x01@\x01\x0bconfig-jsons\0\x1a\x04\0\x09configure\x01\
+\x1b\x01j\x01\x19\x01s\x01@\x01\x03req\x17\0\x1c\x04\0\x10on-admin-request\x01\x1d\
+\x01j\x01\x05\x01s\x01@\x01\x03req\x01\0\x1e\x04\0\x0aon-rewrite\x01\x1f\x04\0\x0a\
+on-request\x01\x1f\x01p}\x01j\x01\x0f\x01s\x01@\x02\x03req\x01\x04body\x20\0!\x04\
+\0\x0fon-request-body\x01\"\x01@\x01\x03req\x0b\0\x1e\x04\0\x13on-upstream-reque\
+st\x01#\x01j\x01\x07\x01s\x01@\x01\x04resp\x03\0$\x04\0\x0bon-response\x01%\x01j\
+\x01\x11\x01s\x01@\x02\x04resp\x03\x04body\x20\0&\x04\0\x12on-response-buffer\x01\
+'\x01@\x02\x04info\x0d\x05chunk\x20\0&\x04\0\x11on-response-chunk\x01(\x01j\x01\x15\
+\x01s\x01@\x01\x03err\x13\0)\x04\0\x08on-error\x01*\x01@\x01\x05entry\x09\x01\0\x04\
+\0\x06on-log\x01+\x04\0!octra:api-plugin/plugin-api@1.0.0\x05\x11\x04\0\x1doctra\
+:api-plugin/plugin@1.0.0\x04\0\x0b\x0c\x01\0\x06plugin\x03\0\0\0G\x09producers\x01\
+\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

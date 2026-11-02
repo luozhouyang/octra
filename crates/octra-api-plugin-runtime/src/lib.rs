@@ -1096,6 +1096,7 @@ mod tests {
             api_version: "1".to_string(),
             entities: Vec::new(),
             migrations: Vec::new(),
+            admin_routes: Vec::new(),
         }
     }
 

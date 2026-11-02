@@ -28,6 +28,18 @@ pub struct WasmApiGatewayPlugin {
     inner: Arc<WasmPluginInner>,
 }
 
+/// A request routed to a plugin-declared Admin API endpoint.
+#[derive(Debug, Clone)]
+pub struct AdminDispatch {
+    pub request_id: String,
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<(String, String)>,
+    pub params: Vec<(String, String)>,
+    pub body: Bytes,
+}
+
 struct WasmPluginInner {
     manifest: PluginManifest,
     component: Arc<Component>,
@@ -75,6 +87,13 @@ impl WasmCallError {
             Self::Unavailable => PluginError::fail_closed("wasm plugin instance is unavailable"),
         }
     }
+
+    fn into_fail_closed(self) -> PluginError {
+        match self {
+            Self::Plugin(message) | Self::Trap(message) => PluginError::fail_closed(message),
+            Self::Unavailable => PluginError::fail_closed("wasm plugin instance is unavailable"),
+        }
+    }
 }
 
 impl WasmApiGatewayPlugin {
@@ -111,6 +130,44 @@ impl WasmApiGatewayPlugin {
             )));
         }
         Ok(())
+    }
+
+    /// Dispatches a request to a plugin-declared Admin API route. Unlike
+    /// data-plane hooks this does not record plugin metrics, and any failure
+    /// is fail-closed.
+    pub async fn dispatch_admin(&self, request: AdminDispatch) -> Result<Response, PluginError> {
+        if !self
+            .inner
+            .host
+            .capabilities()
+            .contains(&Capability::AdminApi)
+        {
+            return Err(PluginError::fail_closed(
+                "plugin does not have the admin_api capability",
+            ));
+        }
+        let body = request.body.to_vec();
+        self.ensure_body_size(body.len())?;
+        let dto = wit::AdminRequest {
+            request_id: request.request_id,
+            method: request.method,
+            path: request.path,
+            query: request.query,
+            headers: request.headers,
+            params: request.params,
+            body,
+        };
+        let inner = self.inner.clone();
+        let timeout = self.inner.limits.timeout + Duration::from_millis(50);
+        let result = tokio::time::timeout(timeout, spawn_blocking(move || inner.call_admin(dto)))
+            .await
+            .map_err(|_| PluginError::fail_closed("admin plugin call timed out"))?
+            .map_err(|error| {
+                PluginError::fail_closed(format!("wasm plugin task failed: {error}"))
+            })?;
+        let response = result.map_err(WasmCallError::into_fail_closed)?;
+        self.ensure_body_size(response.body.len())?;
+        build_admin_response(response)
     }
 
     async fn dispatch<T, F>(&self, call: F) -> Result<T, PluginError>
@@ -516,6 +573,16 @@ impl WasmPluginInner {
             bindings
                 .octra_api_plugin_plugin_api()
                 .call_on_error(store, &error)
+        })
+    }
+
+    fn call_admin(&self, request: wit::AdminRequest) -> Result<wit::AdminResponse, WasmCallError> {
+        let _permit = self.gate.acquire();
+        let request_id = request.request_id.clone();
+        self.invoke(&request_id, |store, bindings| {
+            bindings
+                .octra_api_plugin_plugin_api()
+                .call_on_admin_request(store, &request)
         })
     }
 
@@ -1085,6 +1152,37 @@ fn apply_response_mutation(
     Ok(())
 }
 
+fn build_admin_response(response: wit::AdminResponse) -> Result<Response, PluginError> {
+    let status = parse_status(response.status)?;
+    let mut result = Response::new(Body::from(response.body));
+    *result.status_mut() = status;
+    for (name, value) in response.headers {
+        let name = parse_header_name(&name)?;
+        if is_host_managed_header(&name) {
+            continue;
+        }
+        let value = HeaderValue::from_str(&value).map_err(|error| {
+            PluginError::fail_closed(format!("plugin returned an invalid header value: {error}"))
+        })?;
+        result.headers_mut().append(name, value);
+    }
+    Ok(result)
+}
+
+fn is_host_managed_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "content-length"
+            | "keep-alive"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    ) || name.as_str().starts_with("proxy-")
+}
+
 fn build_reject(reject: wit::Reject) -> Result<Response, PluginError> {
     let status = parse_status(reject.status)?;
     let mut response = Response::new(Body::from(reject.body));
@@ -1431,5 +1529,48 @@ mod tests {
         assert_eq!(current.consumer_id.as_deref(), Some("c1"));
         assert_eq!(current.consumer_username.as_deref(), Some("alice"));
         assert_eq!(current.credential_id.as_deref(), Some("secret-1"));
+    }
+
+    #[test]
+    fn builds_admin_responses_and_drops_host_managed_headers() {
+        let response = build_admin_response(wit::AdminResponse {
+            status: 200,
+            headers: vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("transfer-encoding".to_string(), "chunked".to_string()),
+                ("content-length".to_string(), "999".to_string()),
+                ("x-plugin".to_string(), "yes".to_string()),
+            ],
+            body: b"{}".to_vec(),
+        })
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert!(response.headers().get("transfer-encoding").is_none());
+        assert!(response.headers().get("content-length").is_none());
+        assert_eq!(response.headers().get("x-plugin").unwrap(), "yes");
+    }
+
+    #[test]
+    fn rejects_invalid_admin_responses() {
+        assert!(
+            build_admin_response(wit::AdminResponse {
+                status: 99,
+                headers: Vec::new(),
+                body: Vec::new(),
+            })
+            .is_err()
+        );
+        assert!(
+            build_admin_response(wit::AdminResponse {
+                status: 200,
+                headers: vec![("bad header".to_string(), "value".to_string())],
+                body: Vec::new(),
+            })
+            .is_err()
+        );
     }
 }

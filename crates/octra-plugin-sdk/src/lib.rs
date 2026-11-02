@@ -200,6 +200,44 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
+/// A request to a plugin-declared Admin API route.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdminRequest {
+    pub request_id: String,
+    pub method: String,
+    /// Relative to `/admin/plugins/{name}/api`, always starting with `/`.
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<(String, String)>,
+    /// Parameters captured from `{param}` path segments.
+    pub params: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl AdminRequest {
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.params
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    pub fn now_unix(&self) -> i64 {
+        host().now_unix()
+    }
+
+    pub fn storage(&self) -> Storage {
+        Storage
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestMutation {
     pub path: Option<String>,
@@ -779,6 +817,14 @@ impl Storage {
 pub trait ApiPlugin: Sized + Send + 'static {
     fn configure(config: Value) -> Result<Self, Error>;
 
+    fn on_admin_request(&self, _request: &AdminRequest) -> Result<Response, Error> {
+        Ok(Response {
+            status: 404,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: br#"{"message":"admin route not implemented"}"#.to_vec(),
+        })
+    }
+
     fn on_rewrite(&self, _context: &mut RequestContext) -> Result<Decision, Error> {
         Ok(Decision::Continue)
     }
@@ -957,6 +1003,35 @@ macro_rules! export_plugin {
                     .map_err(|_| "plugin state lock poisoned".to_string())?;
                 *state = ::std::option::Option::Some(plugin);
                 ::std::result::Result::Ok(())
+            }
+
+            fn on_admin_request(
+                request: $bindings::octra::api_plugin::types::AdminRequest,
+            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::AdminResponse, ::std::string::String> {
+                let request = $crate::AdminRequest {
+                    request_id: request.request_id,
+                    method: request.method,
+                    path: request.path,
+                    query: request.query,
+                    headers: request.headers,
+                    params: request.params,
+                    body: request.body,
+                };
+                let response = {
+                    let state = __OCTRA_PLUGIN_STATE
+                        .lock()
+                        .map_err(|_| "plugin state lock poisoned".to_string())?;
+                    let plugin = state
+                        .as_ref()
+                        .ok_or_else(|| "plugin is not configured".to_string())?;
+                    <$plugin as $crate::ApiPlugin>::on_admin_request(plugin, &request)
+                        .map_err(|error| error.to_string())?
+                };
+                ::std::result::Result::Ok($bindings::octra::api_plugin::types::AdminResponse {
+                    status: response.status,
+                    headers: response.headers,
+                    body: response.body,
+                })
             }
 
             fn on_request(

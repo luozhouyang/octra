@@ -340,10 +340,7 @@ fn factory(
 }
 
 fn is_auth_plugin(factory: &dyn ApiGatewayPluginFactory) -> bool {
-    factory
-        .manifest()
-        .capabilities
-        .contains(&Capability::Auth)
+    factory.manifest().capabilities.contains(&Capability::Auth)
 }
 
 fn validate_config(state: &ApiControlState, name: &str, config: &Value) -> AdminResult<()> {
