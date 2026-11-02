@@ -62,9 +62,7 @@ pub(crate) fn build_uds_client(
     (client, readiness)
 }
 
-pub fn build_client(
-    record: &LlmPiiEngineRecord,
-) -> Result<Arc<dyn PiiDetectorClient>, String> {
+pub fn build_client(record: &LlmPiiEngineRecord) -> Result<Arc<dyn PiiDetectorClient>, String> {
     let settings = EngineSettings::from_record(record);
     match record.transport.as_str() {
         "http_loopback" => {
@@ -98,7 +96,10 @@ pub fn build_client(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "uds_jsonl engine requires `endpoint`".to_string())?;
-            let path = endpoint.strip_prefix("unix:").unwrap_or(endpoint).to_string();
+            let path = endpoint
+                .strip_prefix("unix:")
+                .unwrap_or(endpoint)
+                .to_string();
             if !path.starts_with('/') {
                 return Err("uds_jsonl `endpoint` must be an absolute socket path".to_string());
             }
@@ -202,10 +203,7 @@ fn kind_from_label(label: &str) -> PiiKind {
     }
 }
 
-fn decode_entities(
-    response: WireResponse,
-    text: &str,
-) -> Result<Vec<Detection>, PiiEngineError> {
+fn decode_entities(response: WireResponse, text: &str) -> Result<Vec<Detection>, PiiEngineError> {
     let mut detections = Vec::with_capacity(response.entities.len());
     for entity in response.entities {
         if entity.start >= entity.end
@@ -316,16 +314,12 @@ impl PiiDetectorClient for UdsEngineClient {
                 })?;
             let mut reader = BufReader::new(stream);
             let mut response = String::new();
-            reader
-                .get_mut()
-                .write_all(&line)
-                .await
-                .map_err(|error| {
-                    PiiEngineError::new(
-                        PiiEngineErrorKind::Unavailable,
-                        format!("cannot write to PII engine socket: {error}"),
-                    )
-                })?;
+            reader.get_mut().write_all(&line).await.map_err(|error| {
+                PiiEngineError::new(
+                    PiiEngineErrorKind::Unavailable,
+                    format!("cannot write to PII engine socket: {error}"),
+                )
+            })?;
             reader.read_line(&mut response).await.map_err(|error| {
                 PiiEngineError::new(
                     PiiEngineErrorKind::Unavailable,
@@ -443,10 +437,8 @@ mod tests {
                 .unwrap();
         });
 
-        let (client, readiness) = build_uds_client(
-            path.to_string_lossy().into_owned(),
-            Duration::from_secs(2),
-        );
+        let (client, readiness) =
+            build_uds_client(path.to_string_lossy().into_owned(), Duration::from_secs(2));
         readiness.store(readiness_code(EngineReadiness::Ready), Ordering::Relaxed);
         let detections = client
             .detect(DetectRequest {

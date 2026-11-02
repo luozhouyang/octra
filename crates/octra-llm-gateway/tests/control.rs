@@ -901,8 +901,13 @@ async fn pii_engine_crud_and_status() {
     assert_eq!(status, StatusCode::OK, "body: {updated}");
     assert_eq!(updated["enabled"], false);
 
-    let (status, status_body) =
-        call(&harness, Method::GET, &format!("{PII_ENGINES}/{id}/status"), None).await;
+    let (status, status_body) = call(
+        &harness,
+        Method::GET,
+        &format!("{PII_ENGINES}/{id}/status"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(status_body["status"]["readiness"], "disabled");
 
@@ -953,7 +958,11 @@ async fn pii_engine_rejects_invalid_configuration() {
     ];
     for body in invalid {
         let (status, response) = create(&harness, PII_ENGINES, body.clone()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body} -> {response}");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "body: {body} -> {response}"
+        );
     }
 
     let (status, body) = create(

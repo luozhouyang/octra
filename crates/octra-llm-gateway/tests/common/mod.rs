@@ -335,9 +335,7 @@ impl Harness {
         let plugins = Arc::new(
             LlmPluginRuntime::bootstrap(
                 storage.clone(),
-                Arc::new(octra_llm_plugin_builtin::registry_with(Some(
-                    pii.clone(),
-                ))),
+                Arc::new(octra_llm_plugin_builtin::registry_with(Some(pii.clone()))),
             )
             .await
             .unwrap(),

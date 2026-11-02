@@ -10,20 +10,19 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::{Router, extract};
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use octra_llm_core::Protocol;
 use octra_llm_plugin_types::LlmScope;
 use octra_storage::plugins::{PluginConfigRecord, PluginRecord};
 use octra_storage::{
-    LlmModelInput, LlmModelRecord, LlmPiiEngineInput, LlmPiiEngineRecord,
-    LlmProviderAccountInput, LlmProviderAccountRecord,
-    LlmProviderInput, LlmProviderRecord, LlmRouteRecord, LlmRoutingGroupRecord,
-    LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmStorageError, LlmUsageRecord,
-    LlmVirtualKeyInput, LlmVirtualKeyRecord,
+    LlmModelInput, LlmModelRecord, LlmPiiEngineInput, LlmPiiEngineRecord, LlmProviderAccountInput,
+    LlmProviderAccountRecord, LlmProviderInput, LlmProviderRecord, LlmRouteRecord,
+    LlmRoutingGroupRecord, LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmStorageError,
+    LlmUsageRecord, LlmVirtualKeyInput, LlmVirtualKeyRecord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 use crate::keys;
 use crate::pii::EngineStatus;
@@ -121,22 +120,13 @@ pub fn router(state: LlmControlState) -> Router {
                 .put(update_pii_engine)
                 .delete(delete_pii_engine),
         )
-        .route(
-            "/admin/llm/pii-engines/{id}/status",
-            get(pii_engine_status),
-        )
+        .route("/admin/llm/pii-engines/{id}/status", get(pii_engine_status))
         .route(
             "/admin/llm/pii-engines/{id}/reload",
             post(reload_pii_engine),
         )
-        .route(
-            "/admin/llm/pii-engines/{id}/start",
-            post(start_pii_engine),
-        )
-        .route(
-            "/admin/llm/pii-engines/{id}/stop",
-            post(stop_pii_engine),
-        )
+        .route("/admin/llm/pii-engines/{id}/start", post(start_pii_engine))
+        .route("/admin/llm/pii-engines/{id}/stop", post(stop_pii_engine))
         .route(
             "/admin/llm/pii-engines/{id}/restart",
             post(restart_pii_engine),
@@ -2198,10 +2188,7 @@ impl PiiEngineBody {
             .or_else(|| existing.map(|record| record.mode.clone()))
             .unwrap_or_else(|| "external".to_string());
         if !matches!(mode.as_str(), "external" | "managed") {
-            return Err(ApiError::bad_request(
-                "`mode` must be external or managed",
-            )
-            .field("mode"));
+            return Err(ApiError::bad_request("`mode` must be external or managed").field("mode"));
         }
         let transport = self
             .transport
@@ -2209,10 +2196,10 @@ impl PiiEngineBody {
             .or_else(|| existing.map(|record| record.transport.clone()))
             .unwrap_or_else(|| "http_loopback".to_string());
         if !matches!(transport.as_str(), "http_loopback" | "uds_jsonl") {
-            return Err(ApiError::bad_request(
-                "`transport` must be http_loopback or uds_jsonl",
-            )
-            .field("transport"));
+            return Err(
+                ApiError::bad_request("`transport` must be http_loopback or uds_jsonl")
+                    .field("transport"),
+            );
         }
         let endpoint = non_empty(
             self.endpoint
@@ -2244,8 +2231,9 @@ impl PiiEngineBody {
             "command",
         )?;
         if mode == "managed" && command.is_none() {
-            return Err(ApiError::bad_request("managed PII engines require `command`")
-                .field("command"));
+            return Err(
+                ApiError::bad_request("managed PII engines require `command`").field("command"),
+            );
         }
         let args = self
             .args
@@ -2258,9 +2246,10 @@ impl PiiEngineBody {
             .env_allow
             .or_else(|| existing.map(|record| record.env_allow.clone()))
             .unwrap_or_default();
-        if env_allow.iter().any(|name| {
-            name.trim().is_empty() || name.contains('=') || name.contains('\0')
-        }) {
+        if env_allow
+            .iter()
+            .any(|name| name.trim().is_empty() || name.contains('=') || name.contains('\0'))
+        {
             return Err(ApiError::bad_request(
                 "`env_allow` entries must be plain environment variable names",
             )
@@ -2278,8 +2267,7 @@ impl PiiEngineBody {
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "{}".to_string()),
             Some(_) => {
-                return Err(ApiError::bad_request("`config` must be a JSON object")
-                    .field("config"));
+                return Err(ApiError::bad_request("`config` must be a JSON object").field("config"));
             }
             None => existing
                 .map(|record| record.config_json.clone())
@@ -2409,7 +2397,10 @@ async fn create_pii_engine(
         .pii
         .as_ref()
         .and_then(|pii| pii.get_status(&record.name));
-    Ok((StatusCode::CREATED, extract::Json(PiiEngineView::new(&record, status))))
+    Ok((
+        StatusCode::CREATED,
+        extract::Json(PiiEngineView::new(&record, status)),
+    ))
 }
 
 async fn update_pii_engine(

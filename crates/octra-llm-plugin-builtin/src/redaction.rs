@@ -12,15 +12,15 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use aho_corasick::AhoCorasick;
 use async_trait::async_trait;
+use futures_util::future::BoxFuture;
 use octra_api_plugin_types::{Capability, FailPolicy, PluginError, PluginManifest};
 use octra_llm_core::{AssistantContent, ChatRequest, ContentPart, Message, StreamEvent};
 use octra_llm_plugin_types::{
     LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmProviderRequestContext,
     LlmRequestContext, LlmResponseContext, LlmStreamAction, LlmStreamContext, LlmStreamResult,
 };
-use aho_corasick::AhoCorasick;
-use futures_util::future::BoxFuture;
 use octra_pii_types::{
     DetectRequest, Detection, EngineReadiness, PiiDetector, PiiDetectorClient, PiiEngineResolver,
     PiiKind,
@@ -270,9 +270,7 @@ fn compile_dictionary(config: &Value) -> Result<Option<AhoCorasick>, PluginError
         .ascii_case_insensitive(case_insensitive)
         .build(&terms)
         .map(Some)
-        .map_err(|error| {
-            PluginError::fail_closed(format!("invalid PII dictionary: {error}"))
-        })
+        .map_err(|error| PluginError::fail_closed(format!("invalid PII dictionary: {error}")))
 }
 
 fn push_dictionary_term(
@@ -541,7 +539,11 @@ impl RedactionFactory {
                 "llm-pii-redaction `detector.max_bytes` must be positive",
             ));
         }
-        let binding = match self.engines.as_ref().and_then(|engines| engines.resolve(name)) {
+        let binding = match self
+            .engines
+            .as_ref()
+            .and_then(|engines| engines.resolve(name))
+        {
             Some(client) => EngineBinding::Client {
                 name: name.to_string(),
                 client,
@@ -1335,10 +1337,7 @@ mod tests {
             name: "fake",
             engine: engine.clone(),
         });
-        let plugin = plugin_with(
-            Some(resolver),
-            json!({"detector": {"engine": "fake"}}),
-        );
+        let plugin = plugin_with(Some(resolver), json!({"detector": {"engine": "fake"}}));
         let mut request = text_request(text);
         let mut state = Value::Null;
         mask_request(&plugin, &mut request, &mut state).await;
@@ -1385,10 +1384,7 @@ mod tests {
             name: "fake",
             engine,
         });
-        let plugin = plugin_with(
-            Some(resolver),
-            json!({"detector": {"engine": "fake"}}),
-        );
+        let plugin = plugin_with(Some(resolver), json!({"detector": {"engine": "fake"}}));
         let mut request = text_request("hello");
         let mut state = Value::Null;
         let meta = meta();
@@ -1444,10 +1440,8 @@ mod tests {
 
     #[tokio::test]
     async fn dictionary_file_ignores_comments_and_matches_case_insensitively() {
-        let path = std::env::temp_dir().join(format!(
-            "octra-pii-dictionary-{}.txt",
-            uuid::Uuid::new_v4()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("octra-pii-dictionary-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&path, "# comment\n\n Acme Corp \n").unwrap();
         let plugin = plugin(json!({
             "dictionary_file": path.to_str().unwrap(),
@@ -1458,7 +1452,10 @@ mod tests {
         mask_request(&plugin, &mut request, &mut state).await;
         let masked = request_text(&request);
         let _ = std::fs::remove_file(&path);
-        assert!(!masked.to_ascii_lowercase().contains("acme corp"), "{masked}");
+        assert!(
+            !masked.to_ascii_lowercase().contains("acme corp"),
+            "{masked}"
+        );
         assert!(masked.contains(PLACEHOLDER_PREFIX), "{masked}");
     }
 
@@ -1504,7 +1501,11 @@ mod tests {
 
     #[test]
     fn rejects_bad_configuration() {
-        assert!(RedactionFactory::new(None).create(json!({"mode": "maybe"})).is_err());
+        assert!(
+            RedactionFactory::new(None)
+                .create(json!({"mode": "maybe"}))
+                .is_err()
+        );
         assert!(
             RedactionFactory::new(None)
                 .create(json!({"custom_patterns": [{"name": "x", "regex": "("}]}))

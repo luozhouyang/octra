@@ -1601,9 +1601,8 @@ fn pii_engine_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmPiiEngineRecord {
 
 impl LlmStore {
     pub async fn list_pii_engines(&self) -> LlmResult<Vec<LlmPiiEngineRecord>> {
-        let sql = format!(
-            "SELECT {PII_ENGINE_COLUMNS} FROM llm_pii_engines ORDER BY name ASC, id ASC"
-        );
+        let sql =
+            format!("SELECT {PII_ENGINE_COLUMNS} FROM llm_pii_engines ORDER BY name ASC, id ASC");
         let rows = sqlx::query(&sql)
             .fetch_all(self.pool())
             .await
@@ -1651,9 +1650,11 @@ impl LlmStore {
         .bind(&input.transport)
         .bind(&input.endpoint)
         .bind(&input.command)
-        .bind(serde_json::to_string(&input.args).map_err(|error| {
-            LlmStorageError::Backend(format!("cannot encode args: {error}"))
-        })?)
+        .bind(
+            serde_json::to_string(&input.args).map_err(|error| {
+                LlmStorageError::Backend(format!("cannot encode args: {error}"))
+            })?,
+        )
         .bind(serde_json::to_string(&input.env_allow).map_err(|error| {
             LlmStorageError::Backend(format!("cannot encode env_allow: {error}"))
         })?)
@@ -1673,31 +1674,32 @@ impl LlmStore {
         id: &str,
         input: &LlmPiiEngineInput,
     ) -> LlmResult<LlmPiiEngineRecord> {
-        let result = sqlx::query(
-            "UPDATE llm_pii_engines SET
+        let result =
+            sqlx::query(
+                "UPDATE llm_pii_engines SET
                 name = ?, mode = ?, transport = ?, endpoint = ?, command = ?,
                 args_json = ?, env_allow_json = ?, model_dir = ?, config_json = ?,
                 enabled = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?",
-        )
-        .bind(&input.name)
-        .bind(&input.mode)
-        .bind(&input.transport)
-        .bind(&input.endpoint)
-        .bind(&input.command)
-        .bind(serde_json::to_string(&input.args).map_err(|error| {
-            LlmStorageError::Backend(format!("cannot encode args: {error}"))
-        })?)
-        .bind(serde_json::to_string(&input.env_allow).map_err(|error| {
-            LlmStorageError::Backend(format!("cannot encode env_allow: {error}"))
-        })?)
-        .bind(&input.model_dir)
-        .bind(&input.config_json)
-        .bind(i64::from(input.enabled))
-        .bind(id)
-        .execute(self.pool())
-        .await
-        .map_err(conflict)?;
+            )
+            .bind(&input.name)
+            .bind(&input.mode)
+            .bind(&input.transport)
+            .bind(&input.endpoint)
+            .bind(&input.command)
+            .bind(serde_json::to_string(&input.args).map_err(|error| {
+                LlmStorageError::Backend(format!("cannot encode args: {error}"))
+            })?)
+            .bind(serde_json::to_string(&input.env_allow).map_err(|error| {
+                LlmStorageError::Backend(format!("cannot encode env_allow: {error}"))
+            })?)
+            .bind(&input.model_dir)
+            .bind(&input.config_json)
+            .bind(i64::from(input.enabled))
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(conflict)?;
         if result.rows_affected() == 0 {
             return Err(not_found("pii engine", id));
         }

@@ -5,9 +5,9 @@
 //! and updates the shared readiness signal the plugin observes.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -20,9 +20,7 @@ use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::client::{
-    build_client, build_uds_client, readiness_code, validate_endpoint,
-};
+use super::client::{build_client, build_uds_client, readiness_code, validate_endpoint};
 
 type StatusMap = Arc<RwLock<HashMap<String, EngineStatus>>>;
 
@@ -105,12 +103,7 @@ impl PiiEngineRuntime {
                         engines.insert(record.name.clone(), client);
                     }
                     Err(error) => {
-                        set_status(
-                            &self.status,
-                            &record.name,
-                            "failed",
-                            Some(error.clone()),
-                        );
+                        set_status(&self.status, &record.name, "failed", Some(error.clone()));
                         warnings.push(format!(
                             "PII engine '{}' could not be built: {error}",
                             record.name
@@ -123,12 +116,7 @@ impl PiiEngineRuntime {
                         managers.insert(record.name.clone(), handle);
                     }
                     Err(error) => {
-                        set_status(
-                            &self.status,
-                            &record.name,
-                            "failed",
-                            Some(error.clone()),
-                        );
+                        set_status(&self.status, &record.name, "failed", Some(error.clone()));
                         warnings.push(format!(
                             "PII engine '{}' could not be started: {error}",
                             record.name
@@ -263,9 +251,7 @@ impl PiiEngineRuntime {
             .unwrap_or_else(|error| error.into_inner())
     }
 
-    fn write_managers(
-        &self,
-    ) -> std::sync::RwLockWriteGuard<'_, HashMap<String, ManagedHandle>> {
+    fn write_managers(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, ManagedHandle>> {
         self.managers
             .write()
             .unwrap_or_else(|error| error.into_inner())
@@ -362,8 +348,7 @@ impl ManagedSpec {
                     .replace("{model_dir}", &model_dir),
             );
         }
-        let config: Value =
-            serde_json::from_str(&record.config_json).unwrap_or(Value::Null);
+        let config: Value = serde_json::from_str(&record.config_json).unwrap_or(Value::Null);
         let startup_timeout = config
             .get("startup_timeout_ms")
             .and_then(Value::as_u64)
@@ -480,12 +465,7 @@ async fn supervise(
     }
 }
 
-fn set_status(
-    status: &StatusMap,
-    name: &str,
-    readiness: &'static str,
-    error: Option<String>,
-) {
+fn set_status(status: &StatusMap, name: &str, readiness: &'static str, error: Option<String>) {
     if let Some(entry) = status
         .write()
         .unwrap_or_else(|error| error.into_inner())
@@ -514,9 +494,10 @@ async fn spawn_and_wait(
         match tokio::net::UnixStream::connect(&spec.socket).await {
             Ok(_) => return Ok(Some(child)),
             Err(_) => {
-                if let Some(status) = child.try_wait().map_err(|error| {
-                    format!("cannot inspect PII engine process: {error}")
-                })? {
+                if let Some(status) = child
+                    .try_wait()
+                    .map_err(|error| format!("cannot inspect PII engine process: {error}"))?
+                {
                     return Err(format!(
                         "engine exited before its socket became ready: {status}"
                     ));
