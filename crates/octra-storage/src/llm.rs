@@ -518,7 +518,7 @@ impl LlmStore {
         .map_err(|err| Error::Storage(format!("cannot load policies: {err}")))?;
         let policies = policy_rows
             .iter()
-            .map(crate::api_gateway::map_policy)
+            .map(crate::api::map_policy)
             .collect::<Result<Vec<Policy>>>()?;
         Ok(LlmRuntimeData {
             providers,

@@ -14,7 +14,7 @@ use octra_api_core::{
 };
 use octra_core::{Result, SnapshotCounts, SnapshotInfo};
 use octra_storage::Storage;
-use octra_storage::api_gateway::ApiRuntimeData;
+use octra_storage::api::ApiRuntimeData;
 use tokio::sync::RwLock;
 
 pub mod balancer;
