@@ -378,8 +378,11 @@ impl PluginChain {
             if !entry.phases.contains(&PluginPhase::Request) {
                 continue;
             }
-            let action =
-                run_stage(entry, PluginPhase::Request, entry.plugin.on_request(cx)).await?;
+            let action = if entry.auth {
+                run_auth_stage(entry, entry.plugin.on_request(cx)).await?
+            } else {
+                run_stage(entry, PluginPhase::Request, entry.plugin.on_request(cx)).await?
+            };
             if let PluginAction::ShortCircuit(response) = action {
                 return Ok(Some(response));
             }
@@ -488,10 +491,10 @@ impl PluginChain {
         cx: &mut ErrorContext<'_>,
     ) -> std::result::Result<Option<Response>, PluginError> {
         for entry in &self.entries {
-            if !entry.phases.contains(&PluginPhase::Log) {
+            if !entry.phases.contains(&PluginPhase::Error) {
                 continue;
             }
-            let action = run_stage(entry, PluginPhase::Log, entry.plugin.on_error(cx)).await?;
+            let action = run_stage(entry, PluginPhase::Error, entry.plugin.on_error(cx)).await?;
             if let PluginAction::ShortCircuit(response) = action {
                 return Ok(Some(response));
             }
@@ -536,6 +539,32 @@ where
             let error = PluginError::fail_closed(format!("plugin '{}' timed out", entry.name));
             tracing::warn!(plugin = %entry.name, "plugin timed out");
             Err(error)
+        }
+    }
+}
+
+/// Auth plugins run in the request (access) phase like Kong, but their
+/// failures never fail open: continuing unauthenticated would silently
+/// bypass the plugin.
+async fn run_auth_stage<F>(
+    entry: &PluginEntry,
+    future: F,
+) -> std::result::Result<PluginAction, PluginError>
+where
+    F: std::future::Future<Output = std::result::Result<PluginAction, PluginError>>,
+{
+    match tokio::time::timeout(entry.timeout, future).await {
+        Ok(Ok(action)) => Ok(action),
+        Ok(Err(error)) => {
+            tracing::warn!(plugin = %entry.name, error = %error, "auth plugin failed");
+            Err(PluginError::fail_closed(error.message))
+        }
+        Err(_) => {
+            tracing::warn!(plugin = %entry.name, "auth plugin timed out");
+            Err(PluginError::fail_closed(format!(
+                "plugin '{}' timed out",
+                entry.name
+            )))
         }
     }
 }
@@ -611,7 +640,7 @@ impl PluginChains {
                 } else {
                     plugin.protocols.clone()
                 },
-                auth: factory.auth(),
+                auth: manifest.capabilities.contains(&Capability::Auth),
                 ordering: plugin.ordering.clone(),
                 service_id: plugin.service_id.clone(),
                 route_id: plugin.route_id.clone(),
@@ -1000,5 +1029,184 @@ impl PluginRuntime {
 
     pub fn has_plugins(&self) -> bool {
         self.chains.read().has_any
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use http::Method;
+    use octra_api_core::{Route, Service};
+    use octra_api_plugin_types::{
+        ApiGatewayPlugin, Capability, ConsumerInfo, FailPolicy, GatewayState, PluginAction,
+        PluginError, PluginKind, PluginManifest, PluginPhase, PluginResult, PluginRuntimeKind,
+    };
+
+    use super::{PluginChain, PluginEntry};
+
+    enum Behaviour {
+        Authenticate,
+        FailOpen,
+    }
+
+    struct StubAuth {
+        manifest: PluginManifest,
+        behaviour: Behaviour,
+    }
+
+    #[async_trait]
+    impl ApiGatewayPlugin for StubAuth {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn on_request(
+            &self,
+            cx: &mut octra_api_plugin_types::RequestContext<'_>,
+        ) -> PluginResult {
+            match self.behaviour {
+                Behaviour::Authenticate => {
+                    cx.state.consumer = Some(ConsumerInfo {
+                        id: "consumer-1".to_string(),
+                        ..ConsumerInfo::default()
+                    });
+                    Ok(PluginAction::Continue)
+                }
+                Behaviour::FailOpen => Err(PluginError::fail_open("boom")),
+            }
+        }
+    }
+
+    fn manifest() -> PluginManifest {
+        PluginManifest {
+            name: "stub-auth".to_string(),
+            version: "1.0.0".to_string(),
+            kind: PluginKind::Api,
+            runtime: PluginRuntimeKind::Builtin,
+            priority: 0,
+            description: String::new(),
+            timeout_ms: 100,
+            fail_policy: FailPolicy::Open,
+            phases: vec![PluginPhase::Request],
+            capabilities: vec![Capability::Auth],
+            config_schema: None,
+            api_version: "1".to_string(),
+            entities: Vec::new(),
+            migrations: Vec::new(),
+        }
+    }
+
+    fn chain(behaviour: Behaviour) -> PluginChain {
+        PluginChain {
+            entries: vec![PluginEntry {
+                id: "stub-auth".to_string(),
+                name: "stub-auth".to_string(),
+                instance_name: None,
+                priority: 0,
+                timeout: Duration::from_millis(100),
+                phases: vec![PluginPhase::Request],
+                capabilities: vec![Capability::Auth],
+                protocols: Vec::new(),
+                auth: true,
+                ordering: None,
+                service_id: None,
+                route_id: None,
+                consumer_id: None,
+                consumer_group_id: None,
+                plugin: Arc::new(StubAuth {
+                    manifest: manifest(),
+                    behaviour,
+                }),
+            }],
+        }
+    }
+
+    fn route() -> Route {
+        Route {
+            id: "route".to_string(),
+            name: None,
+            protocols: Vec::new(),
+            methods: Vec::new(),
+            hosts: Vec::new(),
+            paths: vec!["/".to_string()],
+            headers: Default::default(),
+            strip_path: false,
+            preserve_host: false,
+            request_buffering: true,
+            response_buffering: true,
+            regex_priority: 0,
+            service_id: None,
+            enabled: true,
+            tags: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn service() -> Service {
+        Service {
+            id: "service".to_string(),
+            name: "service".to_string(),
+            protocol: "http".to_string(),
+            host: "localhost".to_string(),
+            port: 80,
+            path: None,
+            retries: 0,
+            connect_timeout: 0,
+            write_timeout: 0,
+            read_timeout: 0,
+            enabled: true,
+            description: String::new(),
+            tags: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    type AuthRun = (
+        Result<Option<axum::response::Response>, PluginError>,
+        Option<String>,
+    );
+
+    async fn run(behaviour: Behaviour) -> AuthRun {
+        let mut uri = "/".parse().unwrap();
+        let mut headers = http::HeaderMap::new();
+        let mut state = GatewayState::default();
+        let route = route();
+        let service = service();
+        let method = Method::GET;
+        let mut cx = octra_api_plugin_types::RequestContext {
+            request_id: "req",
+            state: &mut state,
+            matched_path: "/",
+            method: &method,
+            uri: &mut uri,
+            headers: &mut headers,
+            client_ip: None,
+            consumer_id: None,
+            credential_id: None,
+            route: &route,
+            service: &service,
+        };
+        let result = chain(behaviour).on_request(&mut cx).await;
+        (result, state.consumer.map(|consumer| consumer.id))
+    }
+
+    #[tokio::test]
+    async fn auth_entries_run_in_the_request_phase() {
+        let (result, consumer) = run(Behaviour::Authenticate).await;
+        assert!(result.unwrap().is_none());
+        assert_eq!(consumer.as_deref(), Some("consumer-1"));
+    }
+
+    #[tokio::test]
+    async fn auth_errors_fail_closed_even_when_the_policy_is_open() {
+        let (result, consumer) = run(Behaviour::FailOpen).await;
+        let error = result.unwrap_err();
+        assert_eq!(error.fail_policy, FailPolicy::Closed);
+        assert!(consumer.is_none());
     }
 }

@@ -506,13 +506,7 @@ fn verify_signature(
 
 fn ensure_capabilities(manifest: &PluginManifest, approved: &[Capability]) -> AdminResult<()> {
     for capability in &manifest.capabilities {
-        if matches!(
-            capability,
-            Capability::Network
-                | Capability::Secret
-                | Capability::RequestBody
-                | Capability::ResponseBody
-        ) {
+        if matches!(capability, Capability::Network | Capability::Secret) {
             return Err(AdminError::schema(format!(
                 "capability {capability:?} is not supported by the wasm runtime"
             )));

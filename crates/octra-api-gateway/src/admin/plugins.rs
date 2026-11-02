@@ -5,7 +5,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use octra_api_core::{CreatePluginInstance, PluginInstance, UpdatePluginInstance};
-use octra_api_plugin_types::ApiGatewayPluginFactory;
+use octra_api_plugin_types::{ApiGatewayPluginFactory, Capability};
 use serde_json::{Value, json};
 
 use crate::ApiControlState;
@@ -267,7 +267,7 @@ async fn apply_update(state: &ApiControlState, id: &str, body: Value) -> AdminRe
             "plugin cannot be scoped to both consumer and consumer_group",
         ));
     }
-    if factory.auth() && (consumer_id.is_some() || consumer_group_id.is_some()) {
+    if is_auth_plugin(factory.as_ref()) && (consumer_id.is_some() || consumer_group_id.is_some()) {
         return Err(AdminError::schema(
             "authentication plugins cannot be scoped to consumers or consumer groups",
         ));
@@ -307,7 +307,9 @@ async fn create_instance(state: &ApiControlState, body: Value) -> AdminResult<Pl
     let input: CreatePluginInstance = deserialize(body)?;
     input.validate()?;
     let factory = factory(state, &input.name)?;
-    if factory.auth() && (input.consumer_id.is_some() || input.consumer_group_id.is_some()) {
+    if is_auth_plugin(factory.as_ref())
+        && (input.consumer_id.is_some() || input.consumer_group_id.is_some())
+    {
         return Err(AdminError::schema(
             "authentication plugins cannot be scoped to consumers or consumer groups",
         ));
@@ -335,6 +337,13 @@ fn factory(
         .plugins
         .factory(name)
         .ok_or_else(|| AdminError::not_found(format!("plugin '{name}' not found")))
+}
+
+fn is_auth_plugin(factory: &dyn ApiGatewayPluginFactory) -> bool {
+    factory
+        .manifest()
+        .capabilities
+        .contains(&Capability::Auth)
 }
 
 fn validate_config(state: &ApiControlState, name: &str, config: &Value) -> AdminResult<()> {

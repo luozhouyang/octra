@@ -44,6 +44,7 @@ impl ApiGatewayPluginFactory for CircuitBreakerFactory {
         vec![
             octra_api_plugin_types::PluginPhase::Request,
             octra_api_plugin_types::PluginPhase::Response,
+            octra_api_plugin_types::PluginPhase::Error,
             octra_api_plugin_types::PluginPhase::Log,
         ]
     }

@@ -155,6 +155,7 @@ pub(crate) fn manifest(
         description: description.to_string(),
         timeout_ms: 250,
         fail_policy: octra_api_plugin_types::FailPolicy::Open,
+        phases: Vec::new(),
         capabilities,
         config_schema: Some(config_schema),
         api_version: "1".to_string(),

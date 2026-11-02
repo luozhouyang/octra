@@ -131,6 +131,7 @@ pub enum Capability {
     Network,
     Secret,
     StorageEntities,
+    Auth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +155,7 @@ pub enum PluginPhase {
     UpstreamRequest,
     Response,
     ResponseBody,
+    Error,
     Log,
 }
 
@@ -232,6 +234,10 @@ pub struct PluginManifest {
     pub timeout_ms: u64,
     #[serde(default)]
     pub fail_policy: FailPolicy,
+    /// Phases the plugin participates in. Empty means the WASM default
+    /// (request, response, log); built-in factories declare their own set.
+    #[serde(default)]
+    pub phases: Vec<PluginPhase>,
     #[serde(default)]
     pub capabilities: Vec<Capability>,
     #[serde(default)]
@@ -570,10 +576,6 @@ pub trait ApiGatewayPluginFactory: Send + Sync {
 
     fn phases(&self) -> Vec<PluginPhase> {
         vec![PluginPhase::Request, PluginPhase::Log]
-    }
-
-    fn auth(&self) -> bool {
-        false
     }
 
     fn validate(&self, config: &Value) -> Result<(), PluginError> {

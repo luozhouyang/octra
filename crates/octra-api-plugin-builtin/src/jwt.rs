@@ -22,7 +22,7 @@ impl ApiGatewayPluginFactory for JwtFactory {
         manifest(
             "jwt",
             1005,
-            vec![Capability::RequestHeaders],
+            vec![Capability::RequestHeaders, Capability::Auth],
             "Authenticates clients with a JWT",
             json!({
                 "type": "object",
@@ -57,10 +57,6 @@ impl ApiGatewayPluginFactory for JwtFactory {
 
     fn phases(&self) -> Vec<PluginPhase> {
         vec![PluginPhase::Request, PluginPhase::Log]
-    }
-
-    fn auth(&self) -> bool {
-        true
     }
 }
 

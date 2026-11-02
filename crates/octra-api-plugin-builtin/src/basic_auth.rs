@@ -21,7 +21,7 @@ impl ApiGatewayPluginFactory for BasicAuthFactory {
         manifest(
             "basic-auth",
             1100,
-            vec![Capability::RequestHeaders],
+            vec![Capability::RequestHeaders, Capability::Auth],
             "Authenticates clients with HTTP Basic credentials",
             json!({
                 "type": "object",
@@ -46,10 +46,6 @@ impl ApiGatewayPluginFactory for BasicAuthFactory {
 
     fn phases(&self) -> Vec<PluginPhase> {
         vec![PluginPhase::Request, PluginPhase::Log]
-    }
-
-    fn auth(&self) -> bool {
-        true
     }
 }
 

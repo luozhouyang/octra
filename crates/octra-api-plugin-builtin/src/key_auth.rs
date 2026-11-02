@@ -27,7 +27,11 @@ impl ApiGatewayPluginFactory for KeyAuthFactory {
         manifest(
             "key-auth",
             1250,
-            vec![Capability::RequestHeaders, Capability::RequestBody],
+            vec![
+                Capability::RequestHeaders,
+                Capability::RequestBody,
+                Capability::Auth,
+            ],
             "Authenticates clients with an API key",
             json!({
                 "type": "object",
@@ -57,10 +61,6 @@ impl ApiGatewayPluginFactory for KeyAuthFactory {
 
     fn phases(&self) -> Vec<PluginPhase> {
         vec![PluginPhase::Request, PluginPhase::Log]
-    }
-
-    fn auth(&self) -> bool {
-        true
     }
 }
 

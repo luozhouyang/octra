@@ -4,10 +4,13 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::response::Response;
+use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use octra_api_plugin_types::{
-    ApiGatewayPlugin, Capability, LogContext, PluginAction, PluginError, PluginHost,
-    PluginManifest, PluginResult, RequestContext, ResponseContext,
+    ApiGatewayPlugin, BodyContext, Capability, ConsumerInfo, CredentialInfo, ErrorContext,
+    GatewayState, LogContext, PluginAction, PluginError, PluginHost, PluginManifest, PluginResult,
+    RequestBodyContext, RequestContext, ResponseBodyContext, ResponseContext,
+    UpstreamRequestContext,
 };
 use parking_lot::Mutex;
 use tokio::task::spawn_blocking;
@@ -99,6 +102,46 @@ impl WasmApiGatewayPlugin {
         inner.ensure_instance()?;
         Ok(Self { inner })
     }
+
+    fn ensure_body_size(&self, len: usize) -> Result<(), PluginError> {
+        if len > self.inner.limits.max_body_bytes {
+            return Err(PluginError::fail_closed(format!(
+                "plugin body of {len} bytes exceeds the {} byte limit",
+                self.inner.limits.max_body_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    async fn dispatch<T, F>(&self, call: F) -> Result<T, PluginError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<WasmPluginInner>) -> Result<(T, Outcome), WasmCallError> + Send + 'static,
+    {
+        let started = Instant::now();
+        let inner = self.inner.clone();
+        match spawn_blocking(move || call(inner)).await {
+            Ok(Ok((value, outcome))) => {
+                self.inner.stats.record(outcome, started.elapsed());
+                Ok(value)
+            }
+            Ok(Err(error)) => {
+                let timeout = error.is_timeout();
+                self.inner
+                    .stats
+                    .record(Outcome::Failure { timeout }, started.elapsed());
+                Err(error.into_plugin_error(&self.inner.manifest))
+            }
+            Err(error) => {
+                self.inner
+                    .stats
+                    .record(Outcome::Failure { timeout: false }, started.elapsed());
+                Err(PluginError::fail_closed(format!(
+                    "wasm plugin task failed: {error}"
+                )))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -110,26 +153,31 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
     async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let started = Instant::now();
         let request = request_dto(cx);
+        let auth = current_identity(cx.state);
+        let authenticated = is_authenticated(cx.state);
         let inner = self.inner.clone();
-        let result = match spawn_blocking(move || inner.call_request(request)).await {
-            Ok(result) => result,
-            Err(error) => {
-                self.inner
-                    .stats
-                    .record(Outcome::Failure { timeout: false }, started.elapsed());
-                return Err(PluginError::fail_closed(format!(
-                    "wasm plugin task failed: {error}"
-                )));
-            }
-        };
+        let result =
+            match spawn_blocking(move || inner.call_request(request, auth, authenticated)).await {
+                Ok(result) => result,
+                Err(error) => {
+                    self.inner
+                        .stats
+                        .record(Outcome::Failure { timeout: false }, started.elapsed());
+                    return Err(PluginError::fail_closed(format!(
+                        "wasm plugin task failed: {error}"
+                    )));
+                }
+            };
         match result {
-            Ok(action) => {
+            Ok((action, pending)) => {
                 let outcome = if matches!(&action, wit::Action::Reject(_)) {
                     Outcome::Reject
                 } else {
                     Outcome::Continue
                 };
-                let applied = apply_request_action(cx, action, self.inner.host.capabilities());
+                let applied = apply_request_auth(cx, pending).and_then(|()| {
+                    apply_request_action(cx, action, self.inner.host.capabilities())
+                });
                 let outcome = if applied.is_ok() {
                     outcome
                 } else {
@@ -187,6 +235,126 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
                 Err(error.into_plugin_error(&self.inner.manifest))
             }
         }
+    }
+
+    async fn on_rewrite(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+        let request = request_dto(cx);
+        let action = self
+            .dispatch(move |inner| {
+                inner.call_rewrite(request).map(|action| {
+                    let outcome = classify_action(&action);
+                    (action, outcome)
+                })
+            })
+            .await?;
+        apply_request_action(cx, action, self.inner.host.capabilities())
+    }
+
+    async fn on_upstream_request(&self, cx: &mut UpstreamRequestContext<'_>) -> PluginResult {
+        let request = upstream_request_dto(cx);
+        let action = self
+            .dispatch(move |inner| {
+                inner.call_upstream_request(request).map(|action| {
+                    let outcome = classify_action(&action);
+                    (action, outcome)
+                })
+            })
+            .await?;
+        apply_upstream_action(cx, action, self.inner.host.capabilities())
+    }
+
+    async fn on_request_buffer(
+        &self,
+        cx: &mut RequestBodyContext<'_>,
+        body: Bytes,
+    ) -> Result<Bytes, PluginError> {
+        if !self
+            .inner
+            .host
+            .capabilities()
+            .contains(&Capability::RequestBody)
+        {
+            return Ok(body);
+        }
+        self.ensure_body_size(body.len())?;
+        let request = request_body_dto(cx);
+        let body = body.to_vec();
+        let action = self
+            .dispatch(move |inner| {
+                inner.call_request_body(request, body).map(|action| {
+                    let outcome = classify_request_body(&action);
+                    (action, outcome)
+                })
+            })
+            .await?;
+        apply_request_body_action(cx, action, self.inner.host.capabilities())
+    }
+
+    async fn on_response_buffer(
+        &self,
+        cx: &mut ResponseBodyContext<'_>,
+        body: Bytes,
+    ) -> Result<Bytes, PluginError> {
+        if !self
+            .inner
+            .host
+            .capabilities()
+            .contains(&Capability::ResponseBody)
+        {
+            return Ok(body);
+        }
+        self.ensure_body_size(body.len())?;
+        let response = response_body_dto(cx);
+        let body = body.to_vec();
+        let action = self
+            .dispatch(move |inner| {
+                inner.call_response_buffer(response, body).map(|action| {
+                    let outcome = classify_body(&action);
+                    (action, outcome)
+                })
+            })
+            .await?;
+        apply_body_action(action, self.inner.host.capabilities())
+    }
+
+    async fn on_response_body(
+        &self,
+        cx: &BodyContext<'_>,
+        chunk: Bytes,
+    ) -> Result<Bytes, PluginError> {
+        if !self
+            .inner
+            .host
+            .capabilities()
+            .contains(&Capability::ResponseBody)
+        {
+            return Ok(chunk);
+        }
+        self.ensure_body_size(chunk.len())?;
+        let info = body_info(cx);
+        let chunk = chunk.to_vec();
+        let action = self
+            .dispatch(move |inner| {
+                inner.call_response_chunk(info, chunk).map(|action| {
+                    let outcome = classify_body(&action);
+                    (action, outcome)
+                })
+            })
+            .await?;
+        apply_body_action(action, self.inner.host.capabilities())
+    }
+
+    async fn on_error(&self, cx: &mut ErrorContext<'_>) -> PluginResult {
+        let error = error_dto(cx);
+        let action = self
+            .dispatch(move |inner| {
+                inner.call_error(error).map(|action| {
+                    let outcome = classify_error(&action);
+                    (action, outcome)
+                })
+            })
+            .await?;
+        apply_error_action(action)
     }
 
     async fn on_log(&self, cx: &LogContext<'_>) {
@@ -261,7 +429,102 @@ impl WasmPluginInner {
         Ok(())
     }
 
-    fn call_request(&self, request: wit::Request) -> Result<wit::Action, WasmCallError> {
+    fn invoke<T>(
+        &self,
+        request_id: &str,
+        call: impl FnOnce(&mut Store<HostState>, &Plugin) -> wasmtime::Result<Result<T, String>>,
+    ) -> Result<T, WasmCallError> {
+        let mut guard = self.instance.lock();
+        let Some(instance) = guard.as_mut() else {
+            return Err(WasmCallError::Unavailable);
+        };
+        arm(&mut instance.store, &self.limits)?;
+        instance.store.data_mut().request_id = request_id.to_string();
+        match call(&mut instance.store, &instance.bindings) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(message)) => Err(WasmCallError::Plugin(message)),
+            Err(error) => {
+                *guard = None;
+                Err(WasmCallError::Trap(error.to_string()))
+            }
+        }
+    }
+
+    fn call_rewrite(&self, request: wit::Request) -> Result<wit::Action, WasmCallError> {
+        let request_id = request.request_id.clone();
+        self.invoke(&request_id, |store, bindings| {
+            bindings
+                .octra_api_plugin_plugin_api()
+                .call_on_rewrite(store, &request)
+        })
+    }
+
+    fn call_upstream_request(
+        &self,
+        request: wit::UpstreamRequest,
+    ) -> Result<wit::Action, WasmCallError> {
+        let request_id = request.request_id.clone();
+        self.invoke(&request_id, |store, bindings| {
+            bindings
+                .octra_api_plugin_plugin_api()
+                .call_on_upstream_request(store, &request)
+        })
+    }
+
+    fn call_request_body(
+        &self,
+        request: wit::Request,
+        body: Vec<u8>,
+    ) -> Result<wit::RequestBodyAction, WasmCallError> {
+        let request_id = request.request_id.clone();
+        self.invoke(&request_id, |store, bindings| {
+            bindings
+                .octra_api_plugin_plugin_api()
+                .call_on_request_body(store, &request, &body)
+        })
+    }
+
+    fn call_response_buffer(
+        &self,
+        response: wit::Response,
+        body: Vec<u8>,
+    ) -> Result<wit::BodyAction, WasmCallError> {
+        let request_id = response.request_id.clone();
+        self.invoke(&request_id, |store, bindings| {
+            bindings
+                .octra_api_plugin_plugin_api()
+                .call_on_response_buffer(store, &response, &body)
+        })
+    }
+
+    fn call_response_chunk(
+        &self,
+        info: wit::BodyInfo,
+        chunk: Vec<u8>,
+    ) -> Result<wit::BodyAction, WasmCallError> {
+        let request_id = info.request_id.clone();
+        self.invoke(&request_id, |store, bindings| {
+            bindings
+                .octra_api_plugin_plugin_api()
+                .call_on_response_chunk(store, &info, &chunk)
+        })
+    }
+
+    fn call_error(&self, error: wit::ErrorInfo) -> Result<wit::ErrorAction, WasmCallError> {
+        let request_id = error.request_id.clone();
+        self.invoke(&request_id, |store, bindings| {
+            bindings
+                .octra_api_plugin_plugin_api()
+                .call_on_error(store, &error)
+        })
+    }
+
+    fn call_request(
+        &self,
+        request: wit::Request,
+        auth: Option<wit::AuthIdentity>,
+        authenticated: bool,
+    ) -> Result<(wit::Action, Option<wit::AuthIdentity>), WasmCallError> {
         let _permit = self.gate.acquire();
         let mut guard = self.instance.lock();
         let result = {
@@ -269,16 +532,22 @@ impl WasmPluginInner {
                 return Err(WasmCallError::Unavailable);
             };
             arm(&mut instance.store, &self.limits)?;
-            instance.store.data_mut().request_id = request.request_id.clone();
-            instance
+            {
+                let data = instance.store.data_mut();
+                data.request_id = request.request_id.clone();
+                data.begin_auth(auth, authenticated);
+            }
+            let result = instance
                 .bindings
                 .octra_api_plugin_plugin_api()
-                .call_on_request(&mut instance.store, &request)
+                .call_on_request(&mut instance.store, &request);
+            let pending = instance.store.data_mut().take_pending_auth();
+            (result, pending)
         };
         match result {
-            Ok(Ok(action)) => Ok(action),
-            Ok(Err(message)) => Err(WasmCallError::Plugin(message)),
-            Err(error) => {
+            (Ok(Ok(action)), pending) => Ok((action, pending)),
+            (Ok(Err(message)), _) => Err(WasmCallError::Plugin(message)),
+            (Err(error), _) => {
                 *guard = None;
                 Err(WasmCallError::Trap(error.to_string()))
             }
@@ -394,6 +663,320 @@ fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
                 .map(|value| (name.as_str().to_string(), value.to_string()))
         })
         .collect()
+}
+
+fn upstream_request_dto(cx: &UpstreamRequestContext<'_>) -> wit::UpstreamRequest {
+    wit::UpstreamRequest {
+        request_id: cx.request_id.to_string(),
+        method: cx.method.as_str().to_string(),
+        path: cx.uri.path().to_string(),
+        query: cx.uri.query().unwrap_or("").to_string(),
+        headers: header_pairs(cx.headers),
+        consumer_id: cx.consumer_id.map(str::to_string),
+        route_id: cx.route.id.clone(),
+        service_id: cx.service.id.clone(),
+        target_url: cx.target_url.to_string(),
+    }
+}
+
+fn request_body_dto(cx: &RequestBodyContext<'_>) -> wit::Request {
+    wit::Request {
+        request_id: cx.request_id.to_string(),
+        method: cx.method.as_str().to_string(),
+        path: cx.uri.path().to_string(),
+        query: cx.uri.query().unwrap_or("").to_string(),
+        headers: header_pairs(cx.headers),
+        client_ip: None,
+        consumer_id: cx.consumer_id.map(str::to_string),
+        route_id: cx.route.id.clone(),
+        service_id: cx.service.id.clone(),
+    }
+}
+
+fn response_body_dto(cx: &ResponseBodyContext<'_>) -> wit::Response {
+    wit::Response {
+        request_id: cx.request_id.to_string(),
+        status: cx.status.as_u16(),
+        headers: header_pairs(cx.headers),
+        consumer_id: cx.consumer_id.map(str::to_string),
+        route_id: cx.route.id.clone(),
+        service_id: cx.service.id.clone(),
+    }
+}
+
+fn body_info(cx: &BodyContext<'_>) -> wit::BodyInfo {
+    wit::BodyInfo {
+        request_id: cx.request_id.to_string(),
+        route_id: cx.route.id.clone(),
+        service_id: cx.service.id.clone(),
+        target_url: cx.target_url.to_string(),
+    }
+}
+
+fn error_dto(cx: &ErrorContext<'_>) -> wit::ErrorInfo {
+    wit::ErrorInfo {
+        request_id: cx.request_id.to_string(),
+        method: cx.method.as_str().to_string(),
+        path: cx.uri.path().to_string(),
+        query: cx.uri.query().unwrap_or("").to_string(),
+        headers: header_pairs(cx.headers),
+        consumer_id: cx.consumer_id.map(str::to_string),
+        route_id: cx.route.id.clone(),
+        service_id: cx.service.id.clone(),
+        target_url: cx.target_url.to_string(),
+        message: cx.error.to_string(),
+    }
+}
+
+fn classify_action(action: &wit::Action) -> Outcome {
+    match action {
+        wit::Action::Reject(_) => Outcome::Reject,
+        wit::Action::Continue(_) => Outcome::Continue,
+    }
+}
+
+fn classify_request_body(action: &wit::RequestBodyAction) -> Outcome {
+    match action {
+        wit::RequestBodyAction::Reject(_) => Outcome::Reject,
+        wit::RequestBodyAction::Continue(_) => Outcome::Continue,
+    }
+}
+
+fn classify_body(action: &wit::BodyAction) -> Outcome {
+    match action {
+        wit::BodyAction::Reject(_) => Outcome::Reject,
+        wit::BodyAction::Continue(_) => Outcome::Continue,
+    }
+}
+
+fn classify_error(action: &wit::ErrorAction) -> Outcome {
+    match action {
+        wit::ErrorAction::Respond(_) => Outcome::Reject,
+        wit::ErrorAction::Continue => Outcome::Continue,
+    }
+}
+
+fn is_authenticated(state: &GatewayState) -> bool {
+    state.consumer.is_some() && !state.anonymous
+}
+
+fn current_identity(state: &GatewayState) -> Option<wit::AuthIdentity> {
+    let consumer = state.consumer.as_ref()?;
+    Some(wit::AuthIdentity {
+        consumer_id: Some(consumer.id.clone()),
+        consumer_username: consumer.username.clone(),
+        consumer_custom_id: consumer.custom_id.clone(),
+        credential_id: state
+            .credential
+            .as_ref()
+            .map(|credential| credential.id.clone()),
+        credential_type: state
+            .credential
+            .as_ref()
+            .map(|credential| credential.kind.clone()),
+    })
+}
+
+fn apply_request_auth(
+    cx: &mut RequestContext<'_>,
+    pending: Option<wit::AuthIdentity>,
+) -> Result<(), PluginError> {
+    if let Some(identity) = pending {
+        let (consumer, credential) = resolve_auth_identity(cx.state, identity)?;
+        cx.state.consumer = Some(consumer);
+        cx.state.credential = credential;
+        cx.state.anonymous = false;
+    }
+    Ok(())
+}
+
+fn resolve_auth_identity(
+    state: &GatewayState,
+    identity: wit::AuthIdentity,
+) -> Result<(ConsumerInfo, Option<CredentialInfo>), PluginError> {
+    let mut consumer_id = None;
+    if let Some(id) = identity.consumer_id {
+        if !state.consumers.contains_key(&id) {
+            return Err(identity_error(format!(
+                "auth plugin returned an unknown consumer id '{id}'"
+            )));
+        }
+        consumer_id = Some(id);
+    }
+    if let Some(username) = identity.consumer_username {
+        let id = state.consumer_by_username.get(&username).ok_or_else(|| {
+            identity_error(format!(
+                "auth plugin returned an unknown consumer username '{username}'"
+            ))
+        })?;
+        merge_consumer_id(&mut consumer_id, id)?;
+    }
+    if let Some(custom_id) = identity.consumer_custom_id {
+        let id = state.consumer_by_custom_id.get(&custom_id).ok_or_else(|| {
+            identity_error(format!(
+                "auth plugin returned an unknown consumer custom id '{custom_id}'"
+            ))
+        })?;
+        merge_consumer_id(&mut consumer_id, id)?;
+    }
+
+    let consumer_id = consumer_id.ok_or_else(|| {
+        identity_error("auth plugin authenticated the request without a consumer identity")
+    })?;
+    let consumer = state.consumers.get(&consumer_id).cloned().ok_or_else(|| {
+        identity_error(format!(
+            "auth plugin returned an unknown consumer id '{consumer_id}'"
+        ))
+    })?;
+    let credential = identity.credential_id.map(|id| CredentialInfo {
+        identifier: id.clone(),
+        id,
+        kind: identity
+            .credential_type
+            .filter(|kind| !kind.trim().is_empty())
+            .unwrap_or_else(|| "plugin".to_string()),
+    });
+    Ok((consumer, credential))
+}
+
+fn merge_consumer_id(current: &mut Option<String>, candidate: &str) -> Result<(), PluginError> {
+    match current {
+        Some(existing) if existing != candidate => Err(identity_error(format!(
+            "auth plugin returned conflicting consumer identities '{existing}' and '{candidate}'"
+        ))),
+        Some(_) => Ok(()),
+        None => {
+            *current = Some(candidate.to_string());
+            Ok(())
+        }
+    }
+}
+
+fn identity_error(message: impl Into<String>) -> PluginError {
+    PluginError::fail_closed(message.into())
+}
+
+fn apply_upstream_action(
+    cx: &mut UpstreamRequestContext<'_>,
+    action: wit::Action,
+    capabilities: &[Capability],
+) -> PluginResult {
+    match action {
+        wit::Action::Continue(mutation) => {
+            apply_upstream_mutation(cx, mutation, capabilities)?;
+            Ok(PluginAction::Continue)
+        }
+        wit::Action::Reject(reject) => Ok(PluginAction::ShortCircuit(build_reject(reject)?)),
+    }
+}
+
+fn apply_upstream_mutation(
+    cx: &mut UpstreamRequestContext<'_>,
+    mutation: wit::RequestMutation,
+    capabilities: &[Capability],
+) -> Result<(), PluginError> {
+    let mutates = mutation.path.is_some()
+        || mutation.query.is_some()
+        || !mutation.set_headers.is_empty()
+        || !mutation.remove_headers.is_empty();
+    if mutates && !capabilities.contains(&Capability::RequestHeaders) {
+        return Err(PluginError::fail_closed(
+            "plugin mutated the upstream request without the request_headers capability",
+        ));
+    }
+
+    if mutation.path.is_some() || mutation.query.is_some() {
+        let path = mutation.path.unwrap_or_else(|| cx.uri.path().to_string());
+        let query = mutation
+            .query
+            .unwrap_or_else(|| cx.uri.query().unwrap_or("").to_string());
+        let path_and_query = if query.is_empty() {
+            path
+        } else {
+            format!("{path}?{query}")
+        };
+        let uri: Uri = path_and_query.parse().map_err(|error| {
+            PluginError::fail_closed(format!("plugin returned an invalid URI: {error}"))
+        })?;
+        *cx.uri = uri;
+    }
+
+    apply_headers(cx.headers, mutation.set_headers, mutation.remove_headers)
+}
+
+fn apply_request_body_action(
+    cx: &mut RequestBodyContext<'_>,
+    action: wit::RequestBodyAction,
+    capabilities: &[Capability],
+) -> Result<Bytes, PluginError> {
+    match action {
+        wit::RequestBodyAction::Continue(result) => {
+            if !capabilities.contains(&Capability::RequestBody) {
+                return Err(PluginError::fail_closed(
+                    "plugin read the request body without the request_body capability",
+                ));
+            }
+            if (!result.set_headers.is_empty() || !result.remove_headers.is_empty())
+                && !capabilities.contains(&Capability::RequestHeaders)
+            {
+                return Err(PluginError::fail_closed(
+                    "plugin mutated request headers without the request_headers capability",
+                ));
+            }
+            apply_headers(cx.headers, result.set_headers, result.remove_headers)?;
+            Ok(Bytes::from(result.body))
+        }
+        wit::RequestBodyAction::Reject(reject) => Err(PluginError::fail_closed(format!(
+            "plugin rejected the request body with status {}",
+            reject.status
+        ))),
+    }
+}
+
+fn apply_body_action(
+    action: wit::BodyAction,
+    capabilities: &[Capability],
+) -> Result<Bytes, PluginError> {
+    match action {
+        wit::BodyAction::Continue(body) => {
+            if !capabilities.contains(&Capability::ResponseBody) {
+                return Err(PluginError::fail_closed(
+                    "plugin read the response body without the response_body capability",
+                ));
+            }
+            Ok(Bytes::from(body))
+        }
+        wit::BodyAction::Reject(reject) => Err(PluginError::fail_closed(format!(
+            "plugin rejected the response body with status {}",
+            reject.status
+        ))),
+    }
+}
+
+fn apply_error_action(action: wit::ErrorAction) -> PluginResult {
+    match action {
+        wit::ErrorAction::Continue => Ok(PluginAction::Continue),
+        wit::ErrorAction::Respond(reject) => Ok(PluginAction::ShortCircuit(build_reject(reject)?)),
+    }
+}
+
+fn apply_headers(
+    headers: &mut HeaderMap,
+    set: Vec<(String, String)>,
+    remove: Vec<String>,
+) -> Result<(), PluginError> {
+    for (name, value) in set {
+        let name = parse_header_name(&name)?;
+        let value = HeaderValue::from_str(&value).map_err(|error| {
+            PluginError::fail_closed(format!("plugin returned an invalid header value: {error}"))
+        })?;
+        headers.insert(name, value);
+    }
+    for name in remove {
+        let name = parse_header_name(&name)?;
+        headers.remove(&name);
+    }
+    Ok(())
 }
 
 fn apply_request_action(
@@ -697,5 +1280,156 @@ mod tests {
     fn adapter_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<WasmApiGatewayPlugin>();
+    }
+
+    fn auth_state() -> GatewayState {
+        let mut state = GatewayState::default();
+        state.consumers.insert(
+            "c1".to_string(),
+            ConsumerInfo {
+                id: "c1".to_string(),
+                username: Some("alice".to_string()),
+                custom_id: Some("alice-1".to_string()),
+                ..ConsumerInfo::default()
+            },
+        );
+        state.consumers.insert(
+            "c2".to_string(),
+            ConsumerInfo {
+                id: "c2".to_string(),
+                username: Some("bob".to_string()),
+                ..ConsumerInfo::default()
+            },
+        );
+        state
+            .consumer_by_username
+            .insert("alice".to_string(), "c1".to_string());
+        state
+            .consumer_by_username
+            .insert("bob".to_string(), "c2".to_string());
+        state
+            .consumer_by_custom_id
+            .insert("alice-1".to_string(), "c1".to_string());
+        state
+    }
+
+    fn empty_identity() -> wit::AuthIdentity {
+        wit::AuthIdentity {
+            consumer_id: None,
+            consumer_username: None,
+            consumer_custom_id: None,
+            credential_id: None,
+            credential_type: None,
+        }
+    }
+
+    #[test]
+    fn resolves_auth_identity_by_id_and_credential() {
+        let state = auth_state();
+        let identity = wit::AuthIdentity {
+            consumer_id: Some("c1".to_string()),
+            credential_id: Some("secret-1".to_string()),
+            credential_type: Some("key-auth".to_string()),
+            ..empty_identity()
+        };
+        let (consumer, credential) = resolve_auth_identity(&state, identity).unwrap();
+        assert_eq!(consumer.id, "c1");
+        let credential = credential.unwrap();
+        assert_eq!(credential.id, "secret-1");
+        assert_eq!(credential.kind, "key-auth");
+        assert_eq!(credential.identifier, "secret-1");
+    }
+
+    #[test]
+    fn resolves_auth_identity_by_username_and_custom_id() {
+        let state = auth_state();
+        let identity = wit::AuthIdentity {
+            consumer_username: Some("alice".to_string()),
+            ..empty_identity()
+        };
+        assert_eq!(resolve_auth_identity(&state, identity).unwrap().0.id, "c1");
+
+        let identity = wit::AuthIdentity {
+            consumer_custom_id: Some("alice-1".to_string()),
+            ..empty_identity()
+        };
+        assert_eq!(resolve_auth_identity(&state, identity).unwrap().0.id, "c1");
+    }
+
+    #[test]
+    fn rejects_unknown_auth_identities() {
+        let state = auth_state();
+        let identity = wit::AuthIdentity {
+            consumer_id: Some("missing".to_string()),
+            ..empty_identity()
+        };
+        assert!(resolve_auth_identity(&state, identity).is_err());
+
+        let identity = wit::AuthIdentity {
+            consumer_username: Some("missing".to_string()),
+            ..empty_identity()
+        };
+        assert!(resolve_auth_identity(&state, identity).is_err());
+    }
+
+    #[test]
+    fn rejects_conflicting_auth_identities() {
+        let state = auth_state();
+        let identity = wit::AuthIdentity {
+            consumer_id: Some("c1".to_string()),
+            consumer_username: Some("bob".to_string()),
+            ..empty_identity()
+        };
+        assert!(resolve_auth_identity(&state, identity).is_err());
+    }
+
+    #[test]
+    fn rejects_authentication_without_a_consumer() {
+        let state = auth_state();
+        let identity = wit::AuthIdentity {
+            credential_id: Some("secret-1".to_string()),
+            ..empty_identity()
+        };
+        assert!(resolve_auth_identity(&state, identity).is_err());
+    }
+
+    #[test]
+    fn applies_pending_auth_identity() {
+        let mut uri: Uri = "/".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        let mut state = auth_state();
+        let route = route();
+        let service = service();
+        let method = Method::GET;
+        let mut cx = RequestContext {
+            request_id: "req",
+            state: &mut state,
+            matched_path: "/",
+            method: &method,
+            uri: &mut uri,
+            headers: &mut headers,
+            client_ip: None,
+            consumer_id: None,
+            credential_id: None,
+            route: &route,
+            service: &service,
+        };
+
+        let identity = wit::AuthIdentity {
+            consumer_id: Some("c1".to_string()),
+            credential_id: Some("secret-1".to_string()),
+            credential_type: Some("key-auth".to_string()),
+            ..empty_identity()
+        };
+        apply_request_auth(&mut cx, Some(identity)).unwrap();
+        assert_eq!(cx.state.consumer.as_ref().unwrap().id, "c1");
+        assert_eq!(cx.state.credential.as_ref().unwrap().id, "secret-1");
+        assert!(!cx.state.anonymous);
+        assert!(is_authenticated(cx.state));
+
+        let current = current_identity(cx.state).unwrap();
+        assert_eq!(current.consumer_id.as_deref(), Some("c1"));
+        assert_eq!(current.consumer_username.as_deref(), Some("alice"));
+        assert_eq!(current.credential_id.as_deref(), Some("secret-1"));
     }
 }

@@ -104,6 +104,8 @@ pub struct PluginsConfig {
     pub max_plugin_db_bytes: u64,
     pub max_fuel: u64,
     pub max_memory_bytes: usize,
+    /// Largest request or response body handed to a WASM plugin.
+    pub max_body_bytes: usize,
     pub max_inflight: usize,
     pub default_timeout_ms: u64,
 }
@@ -202,6 +204,7 @@ impl Default for PluginsConfig {
             max_plugin_db_bytes: 64 * 1024 * 1024,
             max_fuel: 10_000_000,
             max_memory_bytes: 64 * 1024 * 1024,
+            max_body_bytes: 1024 * 1024,
             max_inflight: 64,
             default_timeout_ms: 100,
         }

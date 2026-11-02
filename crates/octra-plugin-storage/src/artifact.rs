@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use octra_api_plugin_types::{PluginKind, PluginManifest, PluginRuntimeKind};
+use octra_api_plugin_types::{PluginKind, PluginManifest, PluginPhase, PluginRuntimeKind};
 use sha2::{Digest, Sha256};
 
 use crate::entity;
@@ -107,6 +107,11 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginStorageError
     if manifest.runtime != PluginRuntimeKind::Wasm {
         return Err(PluginStorageError::InvalidManifest(
             "artifact runtime must be wasm".to_string(),
+        ));
+    }
+    if manifest.phases.contains(&PluginPhase::Certificate) {
+        return Err(PluginStorageError::InvalidManifest(
+            "the certificate phase is not supported by wasm plugins".to_string(),
         ));
     }
     for spec in &manifest.entities {
@@ -220,5 +225,46 @@ mod tests {
         )
         .unwrap();
         assert!(validate_artifact_dir(dir.path()).is_err());
+    }
+
+    fn capability_manifest(capabilities: &str) -> String {
+        format!(
+            r#"{{
+                "api_version": "1",
+                "name": "demo-plugin",
+                "version": "1.0.0",
+                "kind": "api",
+                "runtime": "wasm",
+                "priority": 100,
+                "description": "demo",
+                "capabilities": {capabilities},
+                "migrations": []
+            }}"#
+        )
+    }
+
+    #[test]
+    fn accepts_manifests_declaring_the_auth_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        artifact(dir.path(), &capability_manifest(r#"["auth"]"#), None);
+        let layout = validate_artifact_dir(dir.path()).unwrap();
+        assert!(
+            layout
+                .manifest
+                .capabilities
+                .contains(&octra_api_plugin_types::Capability::Auth)
+        );
+    }
+
+    #[test]
+    fn ignores_the_legacy_auth_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = capability_manifest(r#"["auth"]"#).replacen(
+            r#""capabilities""#,
+            r#""auth": true, "capabilities""#,
+            1,
+        );
+        artifact(dir.path(), &legacy, None);
+        assert!(validate_artifact_dir(dir.path()).is_ok());
     }
 }

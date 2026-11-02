@@ -71,14 +71,84 @@ interface types {
         route-id: string,
         service-id: string,
     }
+
+    record upstream-request {
+        request-id: string,
+        method: string,
+        path: string,
+        query: string,
+        headers: list<tuple<string, string>>,
+        consumer-id: option<string>,
+        route-id: string,
+        service-id: string,
+        target-url: string,
+    }
+
+    record body-info {
+        request-id: string,
+        route-id: string,
+        service-id: string,
+        target-url: string,
+    }
+
+    record request-body-result {
+        body: list<u8>,
+        set-headers: list<tuple<string, string>>,
+        remove-headers: list<string>,
+    }
+
+    variant request-body-action {
+        continue(request-body-result),
+        reject(reject),
+    }
+
+    variant body-action {
+        continue(list<u8>),
+        reject(reject),
+    }
+
+    record error-info {
+        request-id: string,
+        method: string,
+        path: string,
+        query: string,
+        headers: list<tuple<string, string>>,
+        consumer-id: option<string>,
+        route-id: string,
+        service-id: string,
+        target-url: string,
+        message: string,
+    }
+
+    variant error-action {
+        continue,
+        respond(reject),
+    }
+
+    record auth-identity {
+        consumer-id: option<string>,
+        consumer-username: option<string>,
+        consumer-custom-id: option<string>,
+        credential-id: option<string>,
+        credential-type: option<string>,
+    }
 }
 
 interface host {
-    use types.{log-level};
+    use types.{log-level, auth-identity};
 
     log: func(level: log-level, message: string);
     now-unix: func() -> s64;
     instance-id: func() -> string;
+
+    /// Authenticates the current request as `identity`, like Kong's
+    /// `kong.client.authenticate`. The consumer must be known to the gateway;
+    /// an unresolvable identity fails the request with a 500.
+    authenticate: func(identity: auth-identity) -> result<_, string>;
+    /// Whether an auth plugin has already authenticated this request.
+    authenticated: func() -> bool;
+    /// The identity that is currently authenticated, if any.
+    current-auth: func() -> option<auth-identity>;
 
     kv-get: func(key: string) -> result<option<string>, string>;
     kv-put: func(key: string, value: string, ttl-seconds: option<u32>) -> result<_, string>;
@@ -99,11 +169,29 @@ interface host {
 }
 
 interface plugin-api {
-    use types.{request, response, action, response-action, log-entry};
+    use types.{
+        request,
+        response,
+        action,
+        response-action,
+        log-entry,
+        upstream-request,
+        body-info,
+        request-body-action,
+        body-action,
+        error-info,
+        error-action,
+    };
 
     configure: func(config-json: string) -> result<_, string>;
+    on-rewrite: func(req: request) -> result<action, string>;
     on-request: func(req: request) -> result<action, string>;
+    on-request-body: func(req: request, body: list<u8>) -> result<request-body-action, string>;
+    on-upstream-request: func(req: upstream-request) -> result<action, string>;
     on-response: func(resp: response) -> result<response-action, string>;
+    on-response-buffer: func(resp: response, body: list<u8>) -> result<body-action, string>;
+    on-response-chunk: func(info: body-info, chunk: list<u8>) -> result<body-action, string>;
+    on-error: func(err: error-info) -> result<error-action, string>;
     on-log: func(entry: log-entry);
 }
 

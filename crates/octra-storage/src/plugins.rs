@@ -652,6 +652,7 @@ mod tests {
             description: "demo".to_string(),
             timeout_ms: 50,
             fail_policy: FailPolicy::Closed,
+            phases: Vec::new(),
             capabilities: vec![Capability::StorageEntities],
             config_schema: None,
             api_version: "1".to_string(),

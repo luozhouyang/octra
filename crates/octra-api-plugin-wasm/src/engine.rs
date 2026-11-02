@@ -17,6 +17,8 @@ pub struct WasmLimits {
     pub max_fuel: u64,
     pub max_memory_bytes: usize,
     pub timeout: Duration,
+    /// Largest request or response body handed to the component.
+    pub max_body_bytes: usize,
     /// Concurrent invocations across every plugin; zero means unbounded.
     pub max_inflight: usize,
 }
@@ -27,6 +29,7 @@ impl Default for WasmLimits {
             max_fuel: 10_000_000,
             max_memory_bytes: 64 * 1024 * 1024,
             timeout: Duration::from_millis(250),
+            max_body_bytes: 1024 * 1024,
             max_inflight: 64,
         }
     }

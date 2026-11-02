@@ -59,6 +59,7 @@ pub(crate) fn manifest(name: &str, description: &str) -> PluginManifest {
         description: description.to_string(),
         timeout_ms: 100,
         fail_policy: FailPolicy::Open,
+        phases: Vec::new(),
         capabilities: vec![Capability::RequestBody],
         config_schema: None,
         api_version: "1".to_string(),

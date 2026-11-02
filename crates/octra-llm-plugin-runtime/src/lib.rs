@@ -1059,6 +1059,7 @@ mod tests {
             description: String::new(),
             timeout_ms: 100,
             fail_policy: FailPolicy::Open,
+            phases: Vec::new(),
             capabilities: Vec::<Capability>::new(),
             config_schema: None,
             api_version: "1".to_string(),
