@@ -158,10 +158,22 @@ async fn main() -> anyhow::Result<()> {
         )
     };
 
+    let pii_engines = Arc::new(octra_llm_gateway::pii::PiiEngineRuntime::new());
+    let pii_records = storage
+        .llm
+        .list_pii_engines()
+        .await
+        .context("cannot load PII engine definitions")?;
+    for warning in pii_engines.reload(&pii_records) {
+        tracing::warn!(%warning, "PII engine unavailable");
+    }
+
     let llm_plugin_runtime = Arc::new(
         LlmPluginRuntime::bootstrap(
             storage.clone(),
-            Arc::new(octra_llm_plugin_builtin::registry()),
+            Arc::new(octra_llm_plugin_builtin::registry_with(Some(
+                pii_engines.clone(),
+            ))),
         )
         .await
         .context("cannot build the LLM plugin runtime")?,
