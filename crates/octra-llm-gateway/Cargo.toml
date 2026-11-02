@@ -29,6 +29,10 @@ sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+tokio-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true

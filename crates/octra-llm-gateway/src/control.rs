@@ -128,6 +128,18 @@ pub fn router(state: LlmControlState) -> Router {
         .route(
             "/admin/llm/pii-engines/{id}/reload",
             post(reload_pii_engine),
+        )
+        .route(
+            "/admin/llm/pii-engines/{id}/start",
+            post(start_pii_engine),
+        )
+        .route(
+            "/admin/llm/pii-engines/{id}/stop",
+            post(stop_pii_engine),
+        )
+        .route(
+            "/admin/llm/pii-engines/{id}/restart",
+            post(restart_pii_engine),
         );
     Router::new()
         .merge(providers)
@@ -2207,7 +2219,19 @@ impl PiiEngineBody {
                 .or_else(|| existing.and_then(|record| record.endpoint.clone())),
             "endpoint",
         )?;
-        if mode == "external" {
+        if mode == "managed" {
+            if transport != "uds_jsonl" {
+                return Err(ApiError::bad_request(
+                    "managed PII engines require the uds_jsonl transport",
+                )
+                .field("transport"));
+            }
+            let endpoint_value = endpoint.as_deref().ok_or_else(|| {
+                ApiError::bad_request("managed PII engines require `endpoint`").field("endpoint")
+            })?;
+            crate::pii::validate_endpoint(&transport, endpoint_value)
+                .map_err(|message| ApiError::bad_request(message).field("endpoint"))?;
+        } else if mode == "external" {
             let endpoint_value = endpoint.as_deref().ok_or_else(|| {
                 ApiError::bad_request("external PII engines require `endpoint`").field("endpoint")
             })?;
@@ -2457,4 +2481,92 @@ async fn reload_pii_engine(
 ) -> ApiResult<extract::Json<Value>> {
     reload_pii_engines(&state).await?;
     Ok(extract::Json(json!({ "status": "reloaded" })))
+}
+
+async fn start_pii_engine(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<extract::Json<Value>> {
+    let record = state
+        .storage
+        .llm
+        .get_pii_engine(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("pii engine", &id))?;
+    let pii = state.pii.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PII engine runtime is not enabled",
+        )
+    })?;
+    pii.start(&record)
+        .map_err(|message| ApiError::bad_request(message))?;
+    if let Some(plugins) = &state.plugins {
+        plugins.reload().await.map_err(ApiError::internal)?;
+    }
+    Ok(extract::Json(json!({
+        "status": "started",
+        "engine": pii.get_status(&record.name),
+    })))
+}
+
+async fn stop_pii_engine(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<extract::Json<Value>> {
+    let record = state
+        .storage
+        .llm
+        .get_pii_engine(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("pii engine", &id))?;
+    let pii = state.pii.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PII engine runtime is not enabled",
+        )
+    })?;
+    pii.stop(&record.name);
+    if let Some(plugins) = &state.plugins {
+        plugins.reload().await.map_err(ApiError::internal)?;
+    }
+    Ok(extract::Json(json!({
+        "status": "stopped",
+        "engine": pii.get_status(&record.name),
+    })))
+}
+
+async fn restart_pii_engine(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<extract::Json<Value>> {
+    let record = state
+        .storage
+        .llm
+        .get_pii_engine(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("pii engine", &id))?;
+    let pii = state.pii.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PII engine runtime is not enabled",
+        )
+    })?;
+    pii.stop(&record.name);
+    if let Err(message) = pii.start(&record) {
+        if let Some(plugins) = &state.plugins {
+            plugins.reload().await.map_err(ApiError::internal)?;
+        }
+        return Err(ApiError::bad_request(message));
+    }
+    if let Some(plugins) = &state.plugins {
+        plugins.reload().await.map_err(ApiError::internal)?;
+    }
+    Ok(extract::Json(json!({
+        "status": "restarted",
+        "engine": pii.get_status(&record.name),
+    })))
 }

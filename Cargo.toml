@@ -39,6 +39,7 @@ http = "1"
 http-body = "1"
 http-body-util = "0.1"
 mime = "0.3"
+nix = { version = "0.29", features = ["signal", "process"] }
 once_cell = "1"
 parking_lot = "0.12"
 rand = "0.8"

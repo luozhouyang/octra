@@ -36,6 +36,32 @@ impl EngineSettings {
     }
 }
 
+pub(crate) fn readiness_code(readiness: EngineReadiness) -> u8 {
+    readiness as u8
+}
+
+pub(crate) fn readiness_from_code(value: u8) -> EngineReadiness {
+    match value {
+        1 => EngineReadiness::Starting,
+        2 => EngineReadiness::Degraded,
+        3 => EngineReadiness::Failed,
+        _ => EngineReadiness::Ready,
+    }
+}
+
+pub(crate) fn build_uds_client(
+    path: String,
+    timeout: Duration,
+) -> (Arc<dyn PiiDetectorClient>, Arc<AtomicU8>) {
+    let readiness = Arc::new(AtomicU8::new(readiness_code(EngineReadiness::Starting)));
+    let client = Arc::new(UdsEngineClient {
+        path,
+        timeout,
+        readiness: readiness.clone(),
+    });
+    (client, readiness)
+}
+
 pub fn build_client(
     record: &LlmPiiEngineRecord,
 ) -> Result<Arc<dyn PiiDetectorClient>, String> {
@@ -62,7 +88,7 @@ pub fn build_client(
                 client,
                 endpoint: endpoint.trim_end_matches('/').to_string(),
                 timeout: settings.timeout,
-                readiness: AtomicU8::new(EngineReadiness::Ready as u8),
+                readiness: AtomicU8::new(readiness_code(EngineReadiness::Ready)),
             }))
         }
         "uds_jsonl" => {
@@ -78,10 +104,9 @@ pub fn build_client(
             }
             #[cfg(unix)]
             {
-                Ok(Arc::new(UdsEngineClient {
-                    path,
-                    timeout: settings.timeout,
-                }))
+                let (client, readiness) = build_uds_client(path, settings.timeout);
+                readiness.store(readiness_code(EngineReadiness::Ready), Ordering::Relaxed);
+                Ok(client)
             }
             #[cfg(not(unix))]
             {
@@ -214,12 +239,7 @@ struct HttpEngineClient {
 #[async_trait]
 impl PiiDetectorClient for HttpEngineClient {
     fn readiness(&self) -> EngineReadiness {
-        match self.readiness.load(Ordering::Relaxed) {
-            1 => EngineReadiness::Starting,
-            2 => EngineReadiness::Degraded,
-            3 => EngineReadiness::Failed,
-            _ => EngineReadiness::Ready,
-        }
+        readiness_from_code(self.readiness.load(Ordering::Relaxed))
     }
 
     async fn detect(&self, request: DetectRequest<'_>) -> Result<Vec<Detection>, PiiEngineError> {
@@ -262,13 +282,14 @@ impl PiiDetectorClient for HttpEngineClient {
 struct UdsEngineClient {
     path: String,
     timeout: Duration,
+    readiness: Arc<AtomicU8>,
 }
 
 #[cfg(unix)]
 #[async_trait]
 impl PiiDetectorClient for UdsEngineClient {
     fn readiness(&self) -> EngineReadiness {
-        EngineReadiness::Ready
+        readiness_from_code(self.readiness.load(Ordering::Relaxed))
     }
 
     async fn detect(&self, request: DetectRequest<'_>) -> Result<Vec<Detection>, PiiEngineError> {
@@ -392,6 +413,54 @@ mod tests {
         assert_eq!(detections[0].kind, PiiKind::Custom("person".into()));
         assert_eq!(detections[0].start, 3);
         assert_eq!(detections[0].end, 8);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uds_engine_exchanges_json_lines() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let path = std::path::PathBuf::from(format!(
+            "/tmp/octra-pii-{}.sock",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let value: Value = serde_json::from_str(line.trim()).unwrap();
+            let text = value["text"].as_str().unwrap();
+            let start = text.find("Alice").unwrap();
+            let response = json!({
+                "entities": [{"kind": "person", "start": start, "end": start + 5}]
+            });
+            reader
+                .get_mut()
+                .write_all(format!("{}\n", response).as_bytes())
+                .await
+                .unwrap();
+        });
+
+        let (client, readiness) = build_uds_client(
+            path.to_string_lossy().into_owned(),
+            Duration::from_secs(2),
+        );
+        readiness.store(readiness_code(EngineReadiness::Ready), Ordering::Relaxed);
+        let detections = client
+            .detect(DetectRequest {
+                text: "hi Alice",
+                locale: None,
+                kinds: &[],
+                max_bytes: 1024,
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].kind, PiiKind::Custom("person".into()));
     }
 
     #[test]

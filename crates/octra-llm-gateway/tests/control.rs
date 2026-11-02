@@ -938,6 +938,18 @@ async fn pii_engine_rejects_invalid_configuration() {
             "transport": "tcp",
             "endpoint": "http://127.0.0.1:6553"
         }),
+        json!({
+            "name": "managed-http",
+            "mode": "managed",
+            "transport": "http_loopback",
+            "endpoint": "http://127.0.0.1:6553",
+            "command": "engine"
+        }),
+        json!({
+            "name": "managed-no-endpoint",
+            "mode": "managed",
+            "command": "engine"
+        }),
     ];
     for body in invalid {
         let (status, response) = create(&harness, PII_ENGINES, body.clone()).await;
