@@ -40,7 +40,6 @@ pub async fn list(
 pub async fn enabled(State(state): State<ApiControlState>) -> Json<Value> {
     let mut names: Vec<String> = state
         .plugins
-        .registry()
         .manifests()
         .into_iter()
         .map(|manifest| manifest.name)
@@ -334,7 +333,6 @@ fn factory(
 ) -> AdminResult<std::sync::Arc<dyn ApiGatewayPluginFactory>> {
     state
         .plugins
-        .registry()
         .factory(name)
         .ok_or_else(|| AdminError::not_found(format!("plugin '{name}' not found")))
 }
@@ -342,7 +340,6 @@ fn factory(
 fn validate_config(state: &ApiControlState, name: &str, config: &Value) -> AdminResult<()> {
     state
         .plugins
-        .registry()
         .validate(name, config)
         .map_err(|error| AdminError::schema(error.message))
 }

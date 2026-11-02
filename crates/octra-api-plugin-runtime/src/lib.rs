@@ -12,9 +12,10 @@ use axum::response::Response;
 use bytes::Bytes;
 use octra_api_core::PluginInstance;
 use octra_api_plugin_types::{
-    ApiGatewayPlugin, ApiGatewayPluginFactory, BodyContext, Capability, ErrorContext, FailPolicy,
-    LogContext, PluginAction, PluginError, PluginManifest, PluginPhase, RequestBodyContext,
-    RequestContext, ResponseBodyContext, ResponseContext, UpstreamRequestContext,
+    ApiGatewayPlugin, ApiGatewayPluginFactory, BodyContext, Capability, EntityQuery, ErrorContext,
+    FailPolicy, LogContext, LogLevel, PluginAction, PluginError, PluginHost, PluginManifest,
+    PluginPhase, PluginStorage, RequestBodyContext, RequestContext, ResponseBodyContext,
+    ResponseContext, StorageError, UpstreamRequestContext,
 };
 use octra_core::Result;
 use parking_lot::{Mutex, RwLock};
@@ -60,6 +61,138 @@ impl PluginRegistry {
         self.factory(name)
             .ok_or_else(|| PluginError::fail_closed(format!("unknown plugin '{name}'")))?
             .validate(config)
+    }
+}
+
+/// Resolves plugin factories from one or more catalogs. The daemon uses a
+/// composite resolver (built-ins plus installed WASM artifacts); tests and
+/// early boot can use the registry directly.
+pub trait PluginFactoryResolver: Send + Sync {
+    fn factory(&self, name: &str) -> Option<Arc<dyn ApiGatewayPluginFactory>>;
+    fn manifests(&self) -> Vec<PluginManifest>;
+}
+
+impl PluginFactoryResolver for PluginRegistry {
+    fn factory(&self, name: &str) -> Option<Arc<dyn ApiGatewayPluginFactory>> {
+        PluginRegistry::factory(self, name)
+    }
+
+    fn manifests(&self) -> Vec<PluginManifest> {
+        PluginRegistry::manifests(self)
+    }
+}
+
+/// Builds the host handle passed to a factory for one configured instance.
+pub trait PluginHostProvider: Send + Sync {
+    fn host_for(&self, instance: &PluginInstance) -> Arc<dyn PluginHost>;
+}
+
+/// Used by built-in-only runtimes; built-in factories ignore the host.
+#[derive(Default)]
+pub struct NoopPluginHostProvider;
+
+impl PluginHostProvider for NoopPluginHostProvider {
+    fn host_for(&self, instance: &PluginInstance) -> Arc<dyn PluginHost> {
+        Arc::new(NoopPluginHost {
+            plugin_name: instance.name.clone(),
+            instance_id: instance.id.clone(),
+        })
+    }
+}
+
+struct NoopPluginHost {
+    plugin_name: String,
+    instance_id: String,
+}
+
+static NOOP_PLUGIN_STORAGE: NoopPluginStorage = NoopPluginStorage;
+
+impl PluginHost for NoopPluginHost {
+    fn plugin_name(&self) -> &str {
+        &self.plugin_name
+    }
+
+    fn plugin_instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    fn capabilities(&self) -> &[Capability] {
+        &[]
+    }
+
+    fn storage(&self) -> &dyn PluginStorage {
+        &NOOP_PLUGIN_STORAGE
+    }
+
+    fn log(&self, level: LogLevel, message: &str) {
+        match level {
+            LogLevel::Trace => tracing::trace!(plugin = %self.plugin_name, "{message}"),
+            LogLevel::Debug => tracing::debug!(plugin = %self.plugin_name, "{message}"),
+            LogLevel::Info => tracing::info!(plugin = %self.plugin_name, "{message}"),
+            LogLevel::Warn => tracing::warn!(plugin = %self.plugin_name, "{message}"),
+            LogLevel::Error => tracing::error!(plugin = %self.plugin_name, "{message}"),
+        }
+    }
+}
+
+struct NoopPluginStorage;
+
+impl PluginStorage for NoopPluginStorage {
+    fn kv_get(&self, _key: &str) -> std::result::Result<Option<Vec<u8>>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    fn kv_put(
+        &self,
+        _key: &str,
+        _value: &[u8],
+        _ttl: Option<Duration>,
+    ) -> std::result::Result<(), StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    fn kv_incr(
+        &self,
+        _key: &str,
+        _delta: i64,
+        _ttl: Option<Duration>,
+    ) -> std::result::Result<i64, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    fn get(
+        &self,
+        _entity: &str,
+        _key: &Value,
+    ) -> std::result::Result<Option<Value>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    fn upsert(&self, _entity: &str, _values: &Value) -> std::result::Result<(), StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    fn increment(
+        &self,
+        _entity: &str,
+        _key: &Value,
+        _field: &str,
+        _delta: i64,
+        _extra: Option<&Value>,
+    ) -> std::result::Result<i64, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    fn delete(&self, _entity: &str, _key: &Value) -> std::result::Result<bool, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    fn query(
+        &self,
+        _entity: &str,
+        _query: &EntityQuery,
+    ) -> std::result::Result<Vec<Value>, StorageError> {
+        Err(StorageError::Unavailable)
     }
 }
 
@@ -411,17 +544,22 @@ struct PluginChains {
 }
 
 impl PluginChains {
-    fn compile(plugins: Vec<PluginInstance>, registry: &PluginRegistry) -> Result<Self> {
+    fn compile(
+        plugins: Vec<PluginInstance>,
+        resolver: &dyn PluginFactoryResolver,
+        host_provider: &dyn PluginHostProvider,
+    ) -> Result<Self> {
         let mut entries = Vec::new();
         for plugin in plugins {
             if !plugin.enabled {
                 continue;
             }
-            let Some(factory) = registry.factory(&plugin.name) else {
+            let Some(factory) = resolver.factory(&plugin.name) else {
                 tracing::warn!(plugin = %plugin.name, "plugin is not registered; skipping config");
                 continue;
             };
-            let instance = match factory.create(&plugin.id, plugin.config.clone()) {
+            let host = host_provider.host_for(&plugin);
+            let instance = match factory.create_with_host(host, &plugin.id, plugin.config.clone()) {
                 Ok(instance) => instance,
                 Err(error) => {
                     tracing::warn!(plugin = %plugin.name, %error, "invalid plugin config; skipping");
@@ -720,6 +858,8 @@ fn apply_ordering(entries: &mut Vec<PluginEntry>) {
 
 pub struct PluginRuntime {
     registry: Arc<PluginRegistry>,
+    resolver: Arc<dyn PluginFactoryResolver>,
+    host_provider: Arc<dyn PluginHostProvider>,
     chains: RwLock<Arc<PluginChains>>,
 }
 
@@ -735,8 +875,27 @@ impl PluginRuntime {
     }
 
     pub fn new(registry: Arc<PluginRegistry>) -> Self {
+        let resolver: Arc<dyn PluginFactoryResolver> = registry.clone();
         Self {
             registry,
+            resolver,
+            host_provider: Arc::new(NoopPluginHostProvider),
+            chains: RwLock::new(Arc::new(PluginChains::default())),
+        }
+    }
+
+    /// Builds a runtime whose factory lookup consults `resolver` (for example
+    /// built-ins plus installed WASM plugins) while keeping the static
+    /// registry available for admin schema endpoints.
+    pub fn with_resolver(
+        registry: Arc<PluginRegistry>,
+        resolver: Arc<dyn PluginFactoryResolver>,
+        host_provider: Arc<dyn PluginHostProvider>,
+    ) -> Self {
+        Self {
+            registry,
+            resolver,
+            host_provider,
             chains: RwLock::new(Arc::new(PluginChains::default())),
         }
     }
@@ -756,8 +915,28 @@ impl PluginRuntime {
         &self.registry
     }
 
+    pub fn factory(&self, name: &str) -> Option<Arc<dyn ApiGatewayPluginFactory>> {
+        self.resolver.factory(name)
+    }
+
+    pub fn manifests(&self) -> Vec<PluginManifest> {
+        let mut manifests = self.resolver.manifests();
+        manifests.sort_by(|left, right| left.name.cmp(&right.name));
+        manifests
+    }
+
+    pub fn validate(
+        &self,
+        name: &str,
+        config: &Value,
+    ) -> std::result::Result<(), PluginError> {
+        self.factory(name)
+            .ok_or_else(|| PluginError::fail_closed(format!("unknown plugin '{name}'")))?
+            .validate(config)
+    }
+
     pub fn reload(&self, plugins: Vec<PluginInstance>) -> Result<()> {
-        let chains = PluginChains::compile(plugins, &self.registry)?;
+        let chains = PluginChains::compile(plugins, &*self.resolver, &*self.host_provider)?;
         *self.chains.write() = Arc::new(chains);
         Ok(())
     }

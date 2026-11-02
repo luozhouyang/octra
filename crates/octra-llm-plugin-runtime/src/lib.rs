@@ -1061,6 +1061,9 @@ mod tests {
             fail_policy: FailPolicy::Open,
             capabilities: Vec::<Capability>::new(),
             config_schema: None,
+            api_version: "1".to_string(),
+            entities: Vec::new(),
+            migrations: Vec::new(),
         }
     }
 
