@@ -4,6 +4,8 @@ use octra_llm_core::Protocol;
 use octra_storage::{LlmProviderRecord, LlmRuntimeData};
 use serde_json::{Map, Value};
 
+use crate::cli::CliConfig;
+
 /// How the upstream authenticates the gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthType {
@@ -150,6 +152,9 @@ pub struct ProviderConfig {
     pub headers: Vec<(String, String)>,
     pub anthropic_version: String,
     pub oauth: Option<OAuthProfile>,
+    /// Set when the provider is reached by spawning a local CLI instead of
+    /// making an HTTP request.
+    pub cli: Option<CliConfig>,
 }
 
 #[derive(Debug)]
@@ -215,6 +220,13 @@ impl ProviderConfig {
             None => None,
         };
 
+        let cli = match config.get("cli") {
+            Some(value) => Some(CliConfig::from_value(value).map_err(|message| {
+                ProviderConfigError::Invalid(format!("provider {}: {message}", record.name))
+            })?),
+            None => None,
+        };
+
         let mut headers = Vec::new();
         if let Some(map) = config.get("headers").and_then(Value::as_object) {
             for (name, value) in map {
@@ -242,11 +254,12 @@ impl ProviderConfig {
                 .unwrap_or(ANTHROPIC_VERSION)
                 .to_string(),
             oauth,
+            cli,
         })
     }
 
     pub fn requires_secret(&self) -> bool {
-        self.auth != AuthType::None
+        self.cli.is_none() && self.auth != AuthType::None
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -380,6 +393,28 @@ mod tests {
             vec![("x-extra".to_string(), "1".to_string())]
         );
         assert_eq!(config.protocol, Protocol::Anthropic);
+    }
+
+    #[test]
+    fn cli_transport_needs_no_secret() {
+        let config = ProviderConfig::from_record(&record(
+            "openai",
+            "bearer",
+            None,
+            r#"{"cli":{"kind":"claude_code"}}"#,
+        ))
+        .unwrap();
+        let cli = config.cli.as_ref().expect("cli config is parsed");
+        assert_eq!(cli.command, "claude");
+        assert!(!config.requires_secret());
+
+        let broken = ProviderConfig::from_record(&record(
+            "openai",
+            "bearer",
+            None,
+            r#"{"cli":{"kind":"unknown"}}"#,
+        ));
+        assert!(broken.is_err());
     }
 
     #[test]

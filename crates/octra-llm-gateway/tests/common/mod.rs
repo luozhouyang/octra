@@ -142,6 +142,38 @@ pub fn json_status(status: StatusCode, value: Value) -> Response {
 }
 
 // ---------------------------------------------------------------------------
+// Fake CLI binaries
+
+/// A temporary executable script used to stand in for a local agent CLI.
+pub struct FakeCli {
+    pub path: String,
+    dir: std::path::PathBuf,
+}
+
+impl Drop for FakeCli {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[cfg(unix)]
+pub fn fake_cli(script: &str) -> FakeCli {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("octra-cli-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("cli.sh");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    FakeCli {
+        path: path.to_string_lossy().into_owned(),
+        dir,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // OAuth token endpoint mock
 
 #[derive(Clone)]

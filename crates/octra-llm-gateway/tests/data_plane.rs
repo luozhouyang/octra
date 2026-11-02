@@ -2375,3 +2375,160 @@ async fn oauth_401_refreshes_and_retries_once() {
     assert!(forms[0].contains("grant_type=refresh_token"));
     assert!(forms[0].contains("refresh_token="));
 }
+
+// ---------------------------------------------------------------------------
+// CLI providers
+
+#[cfg(unix)]
+async fn cli_harness(script: &str, cli: serde_json::Value) -> (Harness, common::FakeCli) {
+    let harness = Harness::new().await;
+    let binary = common::fake_cli(script);
+    let mut cli = cli;
+    cli["command"] = json!(binary.path);
+    let config = json!({"cli": cli}).to_string();
+    let provider = harness
+        .provider_with_config("cli", "openai", "http://127.0.0.1:9/v1", "none", 0, &config)
+        .await;
+    harness.route_to("octra-cli", &[(provider, 0, 1)]).await;
+    (harness, binary)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_provider_answers_non_streaming_and_streaming() {
+    let script = r#"cat >/dev/null
+echo '{"type":"text_delta","text":"Hello from CLI"}'
+echo '{"type":"usage","input_tokens":3,"output_tokens":4}'
+echo '{"type":"done"}'"#;
+    let (harness, _binary) =
+        cli_harness(script, json!({"kind": "generic", "prompt_mode": "stdin"})).await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-cli", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "Hello from CLI");
+    assert_eq!(body["usage"]["prompt_tokens"], 3);
+    assert_eq!(body["usage"]["completion_tokens"], 4);
+
+    let (status, _, stream) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[("content-type", "application/json")],
+        Some(openai_body("octra-cli", true)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(stream.contains("Hello from CLI"), "stream: {stream}");
+    assert!(stream.contains("data: [DONE]"), "stream: {stream}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_provider_failures_surface_in_ingress_shape() {
+    let (harness, _binary) = cli_harness(
+        "echo 'token expired' >&2\nexit 3",
+        json!({"kind": "generic", "prompt_mode": "stdin"}),
+    )
+    .await;
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-cli", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body: {body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("token expired"),
+        "body: {body}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_provider_enforces_timeout_and_output_cap() {
+    let (harness, _binary) = cli_harness(
+        "sleep 5\necho '{\"type\":\"done\"}'",
+        json!({"kind": "generic", "prompt_mode": "stdin", "timeout_secs": 1}),
+    )
+    .await;
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-cli", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "body: {body}");
+    assert_eq!(body["error"]["code"], "cli_timeout");
+
+    let (harness, _binary) = cli_harness(
+        "yes hello | head -c 5000",
+        json!({"kind": "generic", "prompt_mode": "stdin", "max_output_bytes": 1024}),
+    )
+    .await;
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-cli", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body: {body}");
+    assert_eq!(body["error"]["code"], "cli_output_limit");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_account_config_dir_is_per_account() {
+    let dir = std::env::temp_dir().join(format!(
+        "octra-cli-configs-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let script = r#"cat >/dev/null
+echo "{\"type\":\"text_delta\",\"text\":\"$OCTRA_CLI_CONFIG_DIR\"}"
+echo '{"type":"done"}'"#;
+    let (harness, _binary) = cli_harness(
+        script,
+        json!({
+            "kind": "generic",
+            "prompt_mode": "stdin",
+            "config_dir": format!("{}/{{account_id}}", dir.display())
+        }),
+    )
+    .await;
+    let provider = harness
+        .storage
+        .llm
+        .list_providers()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .id;
+    let account = harness.account(&provider, "acct", 0, 1, None, 0).await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-cli", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        format!("{}/{account}", dir.display())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

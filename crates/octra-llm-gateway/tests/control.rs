@@ -1162,3 +1162,80 @@ async fn oauth_requires_provider_configuration() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+// ---------------------------------------------------------------------------
+// CLI providers
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_probe_and_config_validation() {
+    let harness = Harness::new().await;
+    let binary = common::fake_cli("echo 'fake-cli 1.2.3'");
+
+    let mut body = provider_body("cli-main", "http://127.0.0.1:9/v1");
+    body["auth_type"] = json!("none");
+    body["config"] = json!({
+        "cli": {"kind": "generic", "command": binary.path, "prompt_mode": "stdin"}
+    });
+    let (status, provider) = create(&harness, PROVIDERS, body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {provider}");
+    let id = provider["id"].as_str().unwrap();
+
+    let (status, probe) = call(
+        &harness,
+        Method::POST,
+        &format!("{PROVIDERS}/{id}/cli/probe"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {probe}");
+    assert_eq!(probe["ok"], true);
+    assert_eq!(probe["version"], "fake-cli 1.2.3");
+
+    // A provider without CLI configuration cannot be probed.
+    let (_, plain) = create(
+        &harness,
+        PROVIDERS,
+        provider_body("plain", "https://api.openai.com/v1"),
+    )
+    .await;
+    let plain_id = plain["id"].as_str().unwrap();
+    let (status, _) = call(
+        &harness,
+        Method::POST,
+        &format!("{PROVIDERS}/{plain_id}/cli/probe"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Invalid CLI configuration is rejected before it is stored.
+    let mut invalid = provider_body("bad-cli", "http://127.0.0.1:9/v1");
+    invalid["config"] = json!({"cli": {"kind": "nope", "command": "x"}});
+    let (status, error) = create(&harness, PROVIDERS, invalid).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {error}");
+    assert_eq!(error["field"], "config.cli");
+
+    // Missing binary surfaces as ok=false, not an HTTP failure.
+    let mut missing = provider_body("missing-cli", "http://127.0.0.1:9/v1");
+    missing["auth_type"] = json!("none");
+    missing["config"] = json!({"cli": {"command": "/nonexistent/octra-fake-cli"}});
+    let (status, provider) = create(&harness, PROVIDERS, missing).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {provider}");
+    let missing_id = provider["id"].as_str().unwrap();
+    let (status, probe) = call(
+        &harness,
+        Method::POST,
+        &format!("{PROVIDERS}/{missing_id}/cli/probe"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(probe["ok"], false);
+    assert!(
+        probe["error"]
+            .as_str()
+            .unwrap()
+            .contains("/nonexistent/octra-fake-cli")
+    );
+}

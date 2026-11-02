@@ -13,7 +13,9 @@ use axum::http::{HeaderValue, header};
 use axum::response::Response;
 use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
-use octra_llm_core::{ChatRequest, ContentPart, GatewayError, Protocol, Usage, estimate_tokens};
+use octra_llm_core::{
+    ChatRequest, ChatResponse, ContentPart, GatewayError, Protocol, Usage, estimate_tokens,
+};
 use octra_llm_plugin_runtime::LlmPluginChain;
 use octra_llm_plugin_types::{LlmLogEvent, LlmProviderInfo, LlmRequestMeta, LlmRequestState};
 use octra_llm_protocol::decode_request;
@@ -1139,6 +1141,49 @@ fn is_unauthorized(error: &GatewayError) -> bool {
     error.status == 401
 }
 
+fn stream_meta(
+    meta: &LlmRequestMeta<'_>,
+    target: &Target,
+    provider: &ProviderConfig,
+    ingress: Protocol,
+) -> stream::StreamMeta {
+    stream::StreamMeta {
+        request_id: meta.request_id.to_string(),
+        model: target.model_id.clone(),
+        provider_id: provider.id.clone(),
+        provider_name: provider.name.clone(),
+        ingress,
+        consumer_id: meta.consumer_id.map(str::to_string),
+        virtual_key_id: meta.virtual_key_id.map(str::to_string),
+        session_id: meta.session_id.map(str::to_string),
+        client_ip: meta.client_ip,
+        user_agent: meta.user_agent.map(str::to_string),
+        intent: meta.intent.map(str::to_string),
+    }
+}
+
+async fn apply_response_chain(
+    chain: Option<&Arc<LlmPluginChain>>,
+    meta: &LlmRequestMeta<'_>,
+    requested_model: &str,
+    response: &mut ChatResponse,
+    request_state: &mut LlmRequestState,
+) -> LlmResult<()> {
+    if let Some(chain) = chain {
+        let mut usage = response.usage.clone();
+        match chain
+            .on_response(meta, requested_model, response, &mut usage, request_state)
+            .await
+        {
+            Ok(None) => {}
+            Ok(Some(error)) => return Err(error),
+            Err(error) => return Err(chain_error(error)),
+        }
+        response.usage = usage;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn try_attempt(
     state: &LlmDataState,
@@ -1168,6 +1213,44 @@ async fn try_attempt(
         }
     }
     apply_model_limits(snapshot, provider, target, &mut ir);
+
+    if let Some(cli) = provider.cli.as_ref() {
+        let runner = crate::cli::CliRunner::new(cli.clone());
+        let account_record = account.map(|account| &account.record);
+        if ir.stream == Some(true) {
+            let events = runner.stream(ir.clone(), account_record)?;
+            let response = stream::start_events(
+                &state.config,
+                events,
+                ingress,
+                ir.include_usage.unwrap_or(false),
+                state.storage.clone(),
+                tracker.clone(),
+                account.cloned(),
+                chain.cloned(),
+                stream_meta(meta, target, provider, ingress),
+                std::mem::take(request_state),
+            );
+            return Ok(AttemptOutcome {
+                response,
+                usage: Usage::default(),
+                finish_reason: octra_llm_core::FinishReason::Stop,
+                streaming: true,
+            });
+        }
+        let mut response = runner.execute(ir.clone(), account_record).await?;
+        response.model = requested_model.to_string();
+        apply_response_chain(chain, meta, requested_model, &mut response, request_state).await?;
+        let usage = response.usage.clone();
+        let finish_reason = response.finish_reason;
+        let body = translate::encode_response(ingress, &response)?;
+        return Ok(AttemptOutcome {
+            response: json_response(body),
+            usage,
+            finish_reason,
+            streaming: false,
+        });
+    }
 
     let mut body = translate::encode_request(target.protocol, &ir)?;
     if target.protocol != Protocol::Gemini {
@@ -1222,19 +1305,7 @@ async fn try_attempt(
             tracker.clone(),
             account.cloned(),
             chain.cloned(),
-            stream::StreamMeta {
-                request_id: meta.request_id.to_string(),
-                model: target.model_id.clone(),
-                provider_id: provider.id.clone(),
-                provider_name: provider.name.clone(),
-                ingress,
-                consumer_id: meta.consumer_id.map(str::to_string),
-                virtual_key_id: meta.virtual_key_id.map(str::to_string),
-                session_id: meta.session_id.map(str::to_string),
-                client_ip: meta.client_ip,
-                user_agent: meta.user_agent.map(str::to_string),
-                intent: meta.intent.map(str::to_string),
-            },
+            stream_meta(meta, target, provider, ingress),
             std::mem::take(request_state),
         );
         return Ok(AttemptOutcome {
@@ -1276,24 +1347,7 @@ async fn try_attempt(
     // Clients see the model name they asked for, not the routed provider
     // model, so a model alias stays opaque.
     response.model = requested_model.to_string();
-    if let Some(chain) = chain {
-        let mut usage = response.usage.clone();
-        match chain
-            .on_response(
-                meta,
-                requested_model,
-                &mut response,
-                &mut usage,
-                request_state,
-            )
-            .await
-        {
-            Ok(None) => {}
-            Ok(Some(error)) => return Err(error),
-            Err(error) => return Err(chain_error(error)),
-        }
-        response.usage = usage;
-    }
+    apply_response_chain(chain, meta, requested_model, &mut response, request_state).await?;
     let usage = response.usage.clone();
     let finish_reason = response.finish_reason;
     let body = translate::encode_response(ingress, &response)?;

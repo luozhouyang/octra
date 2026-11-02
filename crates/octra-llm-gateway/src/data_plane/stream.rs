@@ -13,7 +13,7 @@ use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use futures_util::stream::unfold;
+use futures_util::stream::{BoxStream, StreamExt, unfold};
 use octra_config::OctraConfig;
 use octra_data_plane::sse::SseDecoder;
 use octra_llm_core::{GatewayError, Protocol, StreamEvent, Usage};
@@ -300,57 +300,269 @@ impl BridgeState {
     }
 
     async fn record(&mut self, error: Option<GatewayError>) {
-        let mut tracker = self.tracker.clone();
-        tracker.record.usage = self.usage.clone();
-        match error {
-            Some(error) => {
-                tracker.record.error = Some(error.message);
-                tracker.finish_with_status(error.status);
-            }
-            None => tracker.finish_with_status(200),
+        record_stream(
+            &self.storage,
+            &self.tracker,
+            &self.account,
+            &self.plugins,
+            &self.meta,
+            &mut self.plugin_state,
+            &self.usage,
+            error,
+        )
+        .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_stream(
+    storage: &Arc<Storage>,
+    tracker: &UsageTracker,
+    account: &Option<Arc<AccountRuntime>>,
+    plugins: &Option<Arc<LlmPluginChain>>,
+    meta: &StreamMeta,
+    plugin_state: &mut LlmRequestState,
+    usage: &Usage,
+    error: Option<GatewayError>,
+) {
+    let mut tracker = tracker.clone();
+    tracker.record.usage = usage.clone();
+    match error {
+        Some(error) => {
+            tracker.record.error = Some(error.message);
+            tracker.finish_with_status(error.status);
         }
-        if let Some(account) = &self.account {
-            match tracker.record.error {
-                Some(_) => account.observe_failure(),
-                None => account.observe_success(tracker.record.latency_ms.unwrap_or_default()),
-            }
-            let usage = &tracker.record.usage;
-            let tokens = usage
-                .input_tokens
-                .saturating_add(usage.output_tokens)
-                .min(i64::MAX as u64) as i64;
-            let cost = tracker
-                .record
-                .pricing
-                .as_ref()
-                .and_then(|pricing| crate::cost::compute(usage, pricing))
-                .map(|cost| cost.micros)
-                .unwrap_or(0);
-            account.consume(1, tokens, cost);
+        None => tracker.finish_with_status(200),
+    }
+    if let Some(account) = account {
+        match tracker.record.error {
+            Some(_) => account.observe_failure(),
+            None => account.observe_success(tracker.record.latency_ms.unwrap_or_default()),
         }
-        if let Some(chain) = self.plugins.clone() {
-            let meta = self.meta.as_meta();
-            let event = LlmLogEvent {
-                model: &self.meta.model,
-                provider_id: Some(&self.meta.provider_id),
-                provider_name: Some(&self.meta.provider_name),
-                account_id: self
-                    .account
-                    .as_ref()
-                    .map(|account| account.record.id.as_str()),
-                account_name: self
-                    .account
-                    .as_ref()
-                    .map(|account| account.record.name.as_str()),
-                status: tracker.record.status_code.unwrap_or(200),
-                latency_ms: tracker.record.latency_ms.unwrap_or_default(),
-                usage: &tracker.record.usage,
-                finish_reason: tracker.record.finish_reason.as_deref(),
-                streaming: true,
-                error: tracker.record.error.as_deref(),
+        let usage = &tracker.record.usage;
+        let tokens = usage
+            .input_tokens
+            .saturating_add(usage.output_tokens)
+            .min(i64::MAX as u64) as i64;
+        let cost = tracker
+            .record
+            .pricing
+            .as_ref()
+            .and_then(|pricing| crate::cost::compute(usage, pricing))
+            .map(|cost| cost.micros)
+            .unwrap_or(0);
+        account.consume(1, tokens, cost);
+    }
+    if let Some(chain) = plugins.clone() {
+        let request_meta = meta.as_meta();
+        let event = LlmLogEvent {
+            model: &meta.model,
+            provider_id: Some(&meta.provider_id),
+            provider_name: Some(&meta.provider_name),
+            account_id: account.as_ref().map(|account| account.record.id.as_str()),
+            account_name: account.as_ref().map(|account| account.record.name.as_str()),
+            status: tracker.record.status_code.unwrap_or(200),
+            latency_ms: tracker.record.latency_ms.unwrap_or_default(),
+            usage: &tracker.record.usage,
+            finish_reason: tracker.record.finish_reason.as_deref(),
+            streaming: true,
+            error: tracker.record.error.as_deref(),
+        };
+        chain.on_log(&request_meta, &event, plugin_state).await;
+    }
+    usage::spawn_record(storage.clone(), tracker.record);
+}
+
+/// Bridges canonical events (a CLI process, a synthetic source) to SSE.
+///
+/// The status is already 200; failures become in-stream error events, the
+/// same contract as the HTTP bridge.
+#[allow(clippy::too_many_arguments)]
+pub fn start_events(
+    config: &OctraConfig,
+    events: BoxStream<'static, Result<StreamEvent, GatewayError>>,
+    ingress: Protocol,
+    include_usage: bool,
+    storage: Arc<Storage>,
+    tracker: UsageTracker,
+    account: Option<Arc<AccountRuntime>>,
+    plugins: Option<Arc<LlmPluginChain>>,
+    meta: StreamMeta,
+    plugin_state: LlmRequestState,
+) -> Response {
+    let idle = Duration::from_secs(config.llm.stream_idle_timeout_secs.max(1));
+    let state = EventBridgeState {
+        source: events,
+        encoder: octra_llm_protocol::stream_encoder_with_usage(ingress, include_usage),
+        ingress,
+        storage,
+        tracker,
+        account,
+        plugins,
+        meta,
+        plugin_state,
+        idle,
+        finished: false,
+        saw_finish: false,
+        usage: Usage::default(),
+    };
+
+    let body_stream = unfold(state, |mut state| async move {
+        state
+            .next_chunk()
+            .await
+            .map(|bytes| (Ok::<_, Infallible>(bytes), state))
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot build stream response",
+            )
+                .into_response()
+        })
+}
+
+struct EventBridgeState {
+    source: BoxStream<'static, Result<StreamEvent, GatewayError>>,
+    encoder: Box<dyn StreamEncoder + Send>,
+    ingress: Protocol,
+    storage: Arc<Storage>,
+    tracker: UsageTracker,
+    account: Option<Arc<AccountRuntime>>,
+    plugins: Option<Arc<LlmPluginChain>>,
+    meta: StreamMeta,
+    plugin_state: LlmRequestState,
+    idle: Duration,
+    finished: bool,
+    saw_finish: bool,
+    usage: Usage,
+}
+
+impl EventBridgeState {
+    async fn next_chunk(&mut self) -> Option<Bytes> {
+        loop {
+            if self.finished {
+                return None;
+            }
+            match tokio::time::timeout(self.idle, self.source.next()).await {
+                Err(_) => {
+                    let error = GatewayError::timeout("event stream idle timeout exceeded")
+                        .with_code("stream_idle_timeout");
+                    return Some(Bytes::from(self.fail(error).await));
+                }
+                Ok(None) => return Some(Bytes::from(self.finish().await)),
+                Ok(Some(Err(error))) => return Some(Bytes::from(self.fail(error).await)),
+                Ok(Some(Ok(StreamEvent::Error(error)))) => {
+                    return Some(Bytes::from(self.fail(error).await));
+                }
+                Ok(Some(Ok(event))) => {
+                    let mut out = Vec::new();
+                    let events = vec![event];
+                    let events = match self.plugins.clone() {
+                        Some(chain) => {
+                            let meta = self.meta.as_meta();
+                            match chain
+                                .on_stream_events(&meta, events, &mut self.plugin_state)
+                                .await
+                            {
+                                Ok(events) => events,
+                                Err(error) => {
+                                    let error = crate::error::chain_error(error);
+                                    return Some(Bytes::from(self.fail(error).await));
+                                }
+                            }
+                        }
+                        None => events,
+                    };
+                    for event in &events {
+                        self.encode(event, &mut out);
+                    }
+                    if !out.is_empty() {
+                        return Some(Bytes::from(out));
+                    }
+                }
+            }
+        }
+    }
+
+    fn encode(&mut self, event: &StreamEvent, out: &mut Vec<u8>) {
+        if let StreamEvent::Usage(usage) = event {
+            self.usage = usage.clone();
+        }
+        if let StreamEvent::Finish { .. } = event {
+            self.saw_finish = true;
+        }
+        for frame in self.encoder.encode(event).unwrap_or_default() {
+            out.extend(frame.to_bytes());
+        }
+    }
+
+    async fn finish(&mut self) -> Vec<u8> {
+        self.finished = true;
+        let mut out = Vec::new();
+        if !self.saw_finish {
+            let events = vec![StreamEvent::Finish {
+                reason: octra_llm_core::FinishReason::Stop,
+            }];
+            let events = match self.plugins.clone() {
+                Some(chain) => {
+                    let meta = self.meta.as_meta();
+                    match chain
+                        .on_stream_events(&meta, events, &mut self.plugin_state)
+                        .await
+                    {
+                        Ok(events) => events,
+                        Err(error) => {
+                            let error = crate::error::chain_error(error);
+                            let out = self.fail(error).await;
+                            return out;
+                        }
+                    }
+                }
+                None => events,
             };
-            chain.on_log(&meta, &event, &mut self.plugin_state).await;
+            for event in &events {
+                self.encode(event, &mut out);
+            }
         }
-        usage::spawn_record(self.storage.clone(), tracker.record);
+        if !self.usage.is_empty() {
+            self.encode(&StreamEvent::Usage(self.usage.clone()), &mut out);
+        }
+        for frame in self.encoder.finish().unwrap_or_default() {
+            out.extend(frame.to_bytes());
+        }
+        self.record(None).await;
+        out
+    }
+
+    async fn fail(&mut self, error: GatewayError) -> Vec<u8> {
+        self.finished = true;
+        let mut out = Vec::new();
+        for frame in octra_llm_protocol::encode_stream_error(self.ingress, &error) {
+            out.extend(frame.to_bytes());
+        }
+        self.record(Some(error)).await;
+        out
+    }
+
+    async fn record(&mut self, error: Option<GatewayError>) {
+        record_stream(
+            &self.storage,
+            &self.tracker,
+            &self.account,
+            &self.plugins,
+            &self.meta,
+            &mut self.plugin_state,
+            &self.usage,
+            error,
+        )
+        .await;
     }
 }

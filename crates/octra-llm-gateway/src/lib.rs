@@ -12,14 +12,15 @@
 
 pub mod accounts;
 pub mod adapter;
+pub mod cli;
 pub mod config;
 pub mod control;
-pub mod pii;
 pub mod cost;
 pub mod credentials;
 pub mod data_plane;
 pub mod error;
 pub mod keys;
+pub mod pii;
 pub mod routing;
 pub mod runtime;
 pub mod upstream;

@@ -41,6 +41,7 @@ pub fn router(state: LlmControlState) -> Router {
                 .put(update_provider)
                 .delete(delete_provider),
         )
+        .route("/admin/llm/providers/{id}/cli/probe", post(cli_probe))
         .route(
             "/admin/llm/providers/{id}/accounts",
             get(list_provider_accounts).post(create_account),
@@ -340,6 +341,12 @@ impl ProviderBody {
                 ));
             }
         };
+        if let Ok(value) = serde_json::from_str::<Value>(&config_json)
+            && let Some(cli) = value.get("cli")
+        {
+            crate::cli::CliConfig::from_value(cli)
+                .map_err(|message| ApiError::bad_request(message).field("config.cli"))?;
+        }
         Ok(LlmProviderInput {
             name,
             kind,
@@ -839,6 +846,38 @@ async fn delete_provider(
     }
     reload_now(&state).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Runs the configured CLI binary's version command so an operator can verify
+/// a machine before sending traffic to it. Always 200: `ok` carries the result.
+async fn cli_probe(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<extract::Json<Value>> {
+    let record = state
+        .storage
+        .llm
+        .get_provider(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("provider", &id))?;
+    let provider = ProviderConfig::from_record(&record)
+        .map_err(|error| ApiError::bad_request(format!("{error:?}")))?;
+    let Some(cli) = provider.cli else {
+        return Err(ApiError::bad_request("provider has no `cli` configuration"));
+    };
+    Ok(extract::Json(match crate::cli::probe(&cli).await {
+        Ok(version) => json!({
+            "ok": true,
+            "command": cli.command,
+            "version": version,
+        }),
+        Err(error) => json!({
+            "ok": false,
+            "command": cli.command,
+            "error": error,
+        }),
+    }))
 }
 
 // ---------------------------------------------------------------------------
