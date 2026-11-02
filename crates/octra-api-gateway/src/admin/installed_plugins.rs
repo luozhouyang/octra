@@ -13,7 +13,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use octra_api_plugin_types::{
     Capability, EntityQuery, PluginError, PluginManifest, PluginRuntimeKind,
 };
-use octra_api_plugin_wasm::WasmPluginFactory;
+use octra_api_plugin_wasm::{PluginStatsSnapshot, WasmPluginFactory};
 use octra_plugin_storage::{copy_artifact, validate_artifact_dir};
 use octra_storage::{PluginArtifactInput, PluginArtifactRecord};
 use serde::Deserialize;
@@ -296,6 +296,63 @@ pub async fn uninstall(
         "uninstalled": true,
         "purged": input.purge_data,
     })))
+}
+
+pub async fn health(
+    State(state): State<ApiControlState>,
+    Path(name): Path<String>,
+) -> AdminResult<Json<Value>> {
+    let wasm = wasm(&state)?;
+    let record = state
+        .storage
+        .llm
+        .get_plugin_by_name(&name)
+        .await?
+        .ok_or_else(|| AdminError::not_found(format!("plugin '{name}' is not installed")))?;
+    let installed = record.source == "wasm";
+    let in_catalog = wasm.catalog.contains(&name);
+    let in_host = wasm.host_provider.contains(&name);
+    let healthy = installed && record.enabled && in_catalog && in_host;
+    Ok(Json(json!({
+        "name": name,
+        "installed": installed,
+        "enabled": record.enabled,
+        "catalog": in_catalog,
+        "host": in_host,
+        "storage_bytes": wasm.host_provider.storage_bytes(&name),
+        "healthy": healthy,
+    })))
+}
+
+pub async fn metrics(
+    State(state): State<ApiControlState>,
+    Path(name): Path<String>,
+) -> AdminResult<Json<Value>> {
+    let wasm = wasm(&state)?;
+    if let Some(metrics) = wasm.engine.metrics().snapshot(&name) {
+        return Ok(Json(json!({ "name": name, "metrics": metrics })));
+    }
+    if state.storage.llm.get_plugin_by_name(&name).await?.is_none() {
+        return Err(AdminError::not_found(format!(
+            "plugin '{name}' is not installed"
+        )));
+    }
+    Ok(Json(json!({
+        "name": name,
+        "metrics": PluginStatsSnapshot::default(),
+    })))
+}
+
+pub async fn all_metrics(State(state): State<ApiControlState>) -> AdminResult<Json<Value>> {
+    let wasm = wasm(&state)?;
+    let data = wasm
+        .engine
+        .metrics()
+        .snapshots()
+        .into_iter()
+        .map(|(name, metrics)| json!({ "name": name, "metrics": metrics }))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "data": data })))
 }
 
 pub async fn migrations(

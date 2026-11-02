@@ -10,12 +10,14 @@ use wasmtime::component::Component;
 use crate::WasmApiGatewayPlugin;
 use crate::engine::{WasmEngine, WasmLimits};
 use crate::gate::InflightGate;
+use crate::metrics::PluginStats;
 
 pub struct WasmPluginFactory {
     manifest: PluginManifest,
     component: Arc<Component>,
     limits: WasmLimits,
     gate: Arc<InflightGate>,
+    stats: Arc<PluginStats>,
 }
 
 impl WasmPluginFactory {
@@ -31,11 +33,13 @@ impl WasmPluginFactory {
             })?;
         let mut limits = engine.limits().clone();
         limits.timeout = layout.manifest.timeout();
+        let stats = engine.metrics().stats(&layout.manifest.name);
         Ok(Self {
             manifest: layout.manifest,
             component,
             limits,
             gate: engine.gate(),
+            stats,
         })
     }
 }
@@ -67,6 +71,7 @@ impl ApiGatewayPluginFactory for WasmPluginFactory {
             config_json,
             self.limits.clone(),
             self.gate.clone(),
+            self.stats.clone(),
         )?;
         Ok(Arc::new(plugin))
     }

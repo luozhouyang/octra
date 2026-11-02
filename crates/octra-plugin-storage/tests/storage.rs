@@ -254,6 +254,16 @@ fn entity_crud_and_query() {
 }
 
 #[test]
+fn enforces_the_database_quota() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.db");
+    let store = PluginStore::open("consumer-quota", &path, Vec::new(), Some(64 * 1024)).unwrap();
+    let big = vec![0u8; 256 * 1024];
+    assert!(store.kv_put("big", &big, None).is_err());
+    assert!(store.size_bytes().unwrap() <= 64 * 1024 + 4096);
+}
+
+#[test]
 fn rejects_undeclared_entities_and_fields() {
     let store = PluginStore::open_in_memory("consumer-quota", vec![spec()]).unwrap();
     let error = store

@@ -16,6 +16,7 @@ octra-api-plugin-runtime.workspace = true
 octra-api-plugin-types.workspace = true
 octra-plugin-storage.workspace = true
 parking_lot.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

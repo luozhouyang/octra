@@ -58,6 +58,20 @@ impl WasmHostProvider {
         self.stores.lock().remove(&name);
     }
 
+    pub fn contains(&self, name: &str) -> bool {
+        self.installed.read().contains_key(name)
+    }
+
+    /// Current on-disk database size, if the plugin is installed and openable.
+    pub fn storage_bytes(&self, name: &str) -> Option<u64> {
+        let installed = self.installed.read();
+        let plugin = installed.get(name)?;
+        let entities = plugin.entities.clone();
+        drop(installed);
+        let store = self.store(name, &entities)?;
+        store.size_bytes().ok()
+    }
+
     pub fn uninstall(&self, name: &str, purge_data: bool) -> Result<(), PluginStorageError> {
         self.installed.write().remove(name);
         self.stores.lock().remove(name);

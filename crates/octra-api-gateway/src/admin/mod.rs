@@ -156,6 +156,15 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/plugin-artifacts/{id}",
             get(installed_plugins::get_artifact),
         )
+        .route("/admin/plugin-metrics", get(installed_plugins::all_metrics))
+        .route(
+            "/admin/plugins/{name}/health",
+            get(installed_plugins::health),
+        )
+        .route(
+            "/admin/plugins/{name}/metrics",
+            get(installed_plugins::metrics),
+        )
         .route(
             "/admin/plugins/{name}/install",
             post(installed_plugins::install),

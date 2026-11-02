@@ -273,4 +273,12 @@ async fn consumer_quota_enforces_the_limit_end_to_end() {
         }
         PluginAction::Continue => panic!("quota was not enforced"),
     }
+
+    let metrics = engine
+        .metrics()
+        .snapshot("consumer-quota")
+        .expect("metrics recorded");
+    assert_eq!(metrics.calls, 2);
+    assert_eq!(metrics.rejections, 1);
+    assert_eq!(metrics.failures, 0);
 }

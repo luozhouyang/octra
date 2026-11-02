@@ -11,12 +11,14 @@ mod factory;
 mod gate;
 mod host;
 mod host_provider;
+mod metrics;
 
 pub use adapter::WasmApiGatewayPlugin;
 pub use catalog::WasmPluginCatalog;
 pub use engine::{WasmEngine, WasmLimits};
 pub use factory::WasmPluginFactory;
 pub use host_provider::{InstalledWasmPlugin, WasmHostProvider};
+pub use metrics::{PluginMetrics, PluginStatsSnapshot};
 
 wasmtime::component::bindgen!({
     path: "wit",

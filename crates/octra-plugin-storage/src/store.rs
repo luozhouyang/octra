@@ -30,11 +30,21 @@ CREATE INDEX IF NOT EXISTS idx_octra_kv_expiry ON _octra_kv(expires_at);
 
 pub struct PluginStorageRoot {
     root: PathBuf,
+    max_db_bytes: Option<u64>,
 }
 
 impl PluginStorageRoot {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            max_db_bytes: None,
+        }
+    }
+
+    /// Caps every plugin database; zero leaves the databases unbounded.
+    pub fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_db_bytes = (max_bytes > 0).then_some(max_bytes);
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -53,7 +63,7 @@ impl PluginStorageRoot {
     ) -> Result<PluginStore, PluginStorageError> {
         let directory = self.plugin_dir(name)?;
         std::fs::create_dir_all(&directory)?;
-        PluginStore::open(name, directory.join("data.db"), entities)
+        PluginStore::open(name, directory.join("data.db"), entities, self.max_db_bytes)
     }
 }
 
@@ -69,6 +79,7 @@ impl PluginStore {
         name: &str,
         db_path: impl Into<PathBuf>,
         entities: Vec<EntitySpec>,
+        max_db_bytes: Option<u64>,
     ) -> Result<Self, PluginStorageError> {
         validate_plugin_name(name)?;
         let db_path = db_path.into();
@@ -77,6 +88,9 @@ impl PluginStore {
         }
         let connection = Connection::open(&db_path)?;
         configure(&connection, true)?;
+        if let Some(max_bytes) = max_db_bytes {
+            apply_quota(&connection, max_bytes)?;
+        }
         connection.execute_batch(HOST_SCHEMA)?;
         let entities = index_entities(entities)?;
         Ok(Self {
@@ -114,6 +128,13 @@ impl PluginStore {
 
     pub fn entity_specs(&self) -> impl Iterator<Item = &EntitySpec> {
         self.entities.values()
+    }
+
+    pub fn size_bytes(&self) -> Result<u64, PluginStorageError> {
+        let connection = self.connection.lock();
+        let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let page_size: i64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        Ok(u64::try_from(pages.max(0)).unwrap_or(0) * u64::try_from(page_size.max(0)).unwrap_or(0))
     }
 
     pub fn apply_migrations(
@@ -197,6 +218,16 @@ impl PluginStorage for PluginStore {
         let connection = self.connection.lock();
         entity::query(&connection, spec, query).map_err(Into::into)
     }
+}
+
+/// Lets SQLite itself reject writes past the quota with `SQLITE_FULL`.
+fn apply_quota(connection: &Connection, max_bytes: u64) -> Result<(), PluginStorageError> {
+    let page_size: i64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    let page_size = u64::try_from(page_size).unwrap_or(0).max(1);
+    let max_pages = (max_bytes / page_size).max(1);
+    let max_pages = i64::try_from(max_pages).unwrap_or(i64::MAX);
+    connection.pragma_update(None, "max_page_count", max_pages)?;
+    Ok(())
 }
 
 fn configure(connection: &Connection, file_backed: bool) -> Result<(), PluginStorageError> {

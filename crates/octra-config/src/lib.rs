@@ -85,6 +85,8 @@ pub struct PluginsConfig {
     /// Base64-encoded Ed25519 public keys. Empty disables signature checks.
     pub trusted_keys: Vec<String>,
     pub max_artifact_bytes: usize,
+    /// Per-plugin database cap; zero leaves databases unbounded.
+    pub max_plugin_db_bytes: u64,
     pub max_fuel: u64,
     pub max_memory_bytes: usize,
     pub max_inflight: usize,
@@ -166,6 +168,7 @@ impl Default for PluginsConfig {
             allow_unsigned: false,
             trusted_keys: Vec::new(),
             max_artifact_bytes: 16 * 1024 * 1024,
+            max_plugin_db_bytes: 64 * 1024 * 1024,
             max_fuel: 10_000_000,
             max_memory_bytes: 64 * 1024 * 1024,
             max_inflight: 64,

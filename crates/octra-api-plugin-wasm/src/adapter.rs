@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -18,6 +18,7 @@ use crate::Plugin;
 use crate::engine::WasmLimits;
 use crate::gate::InflightGate;
 use crate::host::HostState;
+use crate::metrics::{Outcome, PluginStats};
 use crate::octra::api_plugin::types as wit;
 
 pub struct WasmApiGatewayPlugin {
@@ -31,6 +32,7 @@ struct WasmPluginInner {
     config_json: String,
     limits: WasmLimits,
     gate: Arc<InflightGate>,
+    stats: Arc<PluginStats>,
     instance: Mutex<Option<RuntimeInstance>>,
 }
 
@@ -47,6 +49,19 @@ enum WasmCallError {
 }
 
 impl WasmCallError {
+    fn is_timeout(&self) -> bool {
+        match self {
+            Self::Trap(message) => {
+                let message = message.to_ascii_lowercase();
+                message.contains("fuel")
+                    || message.contains("epoch")
+                    || message.contains("interrupted")
+                    || message.contains("deadline")
+            }
+            Self::Plugin(_) | Self::Unavailable => false,
+        }
+    }
+
     fn into_plugin_error(self, manifest: &PluginManifest) -> PluginError {
         match self {
             Self::Plugin(message) => PluginError {
@@ -67,6 +82,7 @@ impl WasmApiGatewayPlugin {
         config_json: String,
         limits: WasmLimits,
         gate: Arc<InflightGate>,
+        stats: Arc<PluginStats>,
     ) -> Result<Self, PluginError> {
         let mut limits = limits;
         limits.timeout = manifest.timeout();
@@ -77,6 +93,7 @@ impl WasmApiGatewayPlugin {
             config_json,
             limits,
             gate,
+            stats,
             instance: Mutex::new(None),
         });
         inner.ensure_instance()?;
@@ -91,42 +108,107 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
     }
 
     async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+        let started = Instant::now();
         let request = request_dto(cx);
         let inner = self.inner.clone();
-        let result = spawn_blocking(move || inner.call_request(request))
-            .await
-            .map_err(|error| {
-                PluginError::fail_closed(format!("wasm plugin task failed: {error}"))
-            })?;
+        let result = match spawn_blocking(move || inner.call_request(request)).await {
+            Ok(result) => result,
+            Err(error) => {
+                self.inner
+                    .stats
+                    .record(Outcome::Failure { timeout: false }, started.elapsed());
+                return Err(PluginError::fail_closed(format!(
+                    "wasm plugin task failed: {error}"
+                )));
+            }
+        };
         match result {
-            Ok(action) => apply_request_action(cx, action, self.inner.host.capabilities()),
-            Err(error) => Err(error.into_plugin_error(&self.inner.manifest)),
+            Ok(action) => {
+                let outcome = if matches!(&action, wit::Action::Reject(_)) {
+                    Outcome::Reject
+                } else {
+                    Outcome::Continue
+                };
+                let applied = apply_request_action(cx, action, self.inner.host.capabilities());
+                let outcome = if applied.is_ok() {
+                    outcome
+                } else {
+                    Outcome::Failure { timeout: false }
+                };
+                self.inner.stats.record(outcome, started.elapsed());
+                applied
+            }
+            Err(error) => {
+                let timeout = error.is_timeout();
+                self.inner
+                    .stats
+                    .record(Outcome::Failure { timeout }, started.elapsed());
+                Err(error.into_plugin_error(&self.inner.manifest))
+            }
         }
     }
 
     async fn on_response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
+        let started = Instant::now();
         let response = response_dto(cx);
         let inner = self.inner.clone();
-        let result = spawn_blocking(move || inner.call_response(response))
-            .await
-            .map_err(|error| {
-                PluginError::fail_closed(format!("wasm plugin task failed: {error}"))
-            })?;
+        let result = match spawn_blocking(move || inner.call_response(response)).await {
+            Ok(result) => result,
+            Err(error) => {
+                self.inner
+                    .stats
+                    .record(Outcome::Failure { timeout: false }, started.elapsed());
+                return Err(PluginError::fail_closed(format!(
+                    "wasm plugin task failed: {error}"
+                )));
+            }
+        };
         match result {
-            Ok(action) => apply_response_action(cx, action, self.inner.host.capabilities()),
-            Err(error) => Err(error.into_plugin_error(&self.inner.manifest)),
+            Ok(action) => {
+                let outcome = if matches!(&action, wit::ResponseAction::Reject(_)) {
+                    Outcome::Reject
+                } else {
+                    Outcome::Continue
+                };
+                let applied = apply_response_action(cx, action, self.inner.host.capabilities());
+                let outcome = if applied.is_ok() {
+                    outcome
+                } else {
+                    Outcome::Failure { timeout: false }
+                };
+                self.inner.stats.record(outcome, started.elapsed());
+                applied
+            }
+            Err(error) => {
+                let timeout = error.is_timeout();
+                self.inner
+                    .stats
+                    .record(Outcome::Failure { timeout }, started.elapsed());
+                Err(error.into_plugin_error(&self.inner.manifest))
+            }
         }
     }
 
     async fn on_log(&self, cx: &LogContext<'_>) {
+        let started = Instant::now();
         let entry = log_dto(cx);
         let inner = self.inner.clone();
         match spawn_blocking(move || inner.call_log(entry)).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => self
+                .inner
+                .stats
+                .record(Outcome::Continue, started.elapsed()),
             Ok(Err(error)) => {
+                let timeout = error.is_timeout();
+                self.inner
+                    .stats
+                    .record(Outcome::Failure { timeout }, started.elapsed());
                 tracing::warn!(plugin = %self.inner.manifest.name, ?error, "wasm log hook failed");
             }
             Err(error) => {
+                self.inner
+                    .stats
+                    .record(Outcome::Failure { timeout: false }, started.elapsed());
                 tracing::warn!(plugin = %self.inner.manifest.name, %error, "wasm log task failed");
             }
         }

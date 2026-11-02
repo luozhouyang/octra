@@ -3232,6 +3232,7 @@ dependencies = [
  "octra-api-plugin-types",
  "octra-plugin-storage",
  "parking_lot",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",

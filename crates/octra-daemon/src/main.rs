@@ -78,7 +78,10 @@ async fn main() -> anyhow::Result<()> {
             })
             .context("cannot create the wasm plugin engine")?,
         );
-        let storage_root = Arc::new(PluginStorageRoot::new(workspace.plugin_dir(&config)));
+        let storage_root = Arc::new(
+            PluginStorageRoot::new(workspace.plugin_dir(&config))
+                .with_max_bytes(config.plugins.max_plugin_db_bytes),
+        );
         let catalog = Arc::new(WasmPluginCatalog::new());
         let mut installed = Vec::new();
 

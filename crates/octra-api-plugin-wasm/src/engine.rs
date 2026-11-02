@@ -10,6 +10,7 @@ use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
 
 use crate::gate::InflightGate;
+use crate::metrics::PluginMetrics;
 
 #[derive(Debug, Clone)]
 pub struct WasmLimits {
@@ -41,6 +42,7 @@ pub struct WasmEngine {
     inner: Arc<EngineInner>,
     components: RwLock<HashMap<String, Arc<Component>>>,
     limits: WasmLimits,
+    metrics: Arc<PluginMetrics>,
 }
 
 impl WasmEngine {
@@ -73,11 +75,16 @@ impl WasmEngine {
             inner,
             components: RwLock::new(HashMap::new()),
             limits,
+            metrics: Arc::new(PluginMetrics::default()),
         })
     }
 
     pub fn limits(&self) -> &WasmLimits {
         &self.limits
+    }
+
+    pub fn metrics(&self) -> &Arc<PluginMetrics> {
+        &self.metrics
     }
 
     pub(crate) fn gate(&self) -> Arc<InflightGate> {
