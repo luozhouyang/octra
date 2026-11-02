@@ -74,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
                 max_fuel: config.plugins.max_fuel,
                 max_memory_bytes: config.plugins.max_memory_bytes,
                 timeout: Duration::from_millis(config.plugins.default_timeout_ms),
+                max_inflight: config.plugins.max_inflight,
             })
             .context("cannot create the wasm plugin engine")?,
         );

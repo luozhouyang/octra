@@ -9,11 +9,15 @@ use parking_lot::RwLock;
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
 
+use crate::gate::InflightGate;
+
 #[derive(Debug, Clone)]
 pub struct WasmLimits {
     pub max_fuel: u64,
     pub max_memory_bytes: usize,
     pub timeout: Duration,
+    /// Concurrent invocations across every plugin; zero means unbounded.
+    pub max_inflight: usize,
 }
 
 impl Default for WasmLimits {
@@ -22,6 +26,7 @@ impl Default for WasmLimits {
             max_fuel: 10_000_000,
             max_memory_bytes: 64 * 1024 * 1024,
             timeout: Duration::from_millis(250),
+            max_inflight: 64,
         }
     }
 }
@@ -29,6 +34,7 @@ impl Default for WasmLimits {
 struct EngineInner {
     engine: Engine,
     stop: AtomicBool,
+    gate: Arc<InflightGate>,
 }
 
 pub struct WasmEngine {
@@ -47,6 +53,7 @@ impl WasmEngine {
         let inner = Arc::new(EngineInner {
             engine,
             stop: AtomicBool::new(false),
+            gate: InflightGate::new(limits.max_inflight),
         });
         let weak = Arc::downgrade(&inner);
         std::thread::Builder::new()
@@ -71,6 +78,10 @@ impl WasmEngine {
 
     pub fn limits(&self) -> &WasmLimits {
         &self.limits
+    }
+
+    pub(crate) fn gate(&self) -> Arc<InflightGate> {
+        self.inner.gate.clone()
     }
 
     pub fn engine(&self) -> &Engine {

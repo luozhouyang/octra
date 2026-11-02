@@ -8,6 +8,7 @@ mod adapter;
 mod catalog;
 mod engine;
 mod factory;
+mod gate;
 mod host;
 mod host_provider;
 

@@ -16,6 +16,7 @@ use wasmtime::component::{Component, HasSelf, Linker};
 
 use crate::Plugin;
 use crate::engine::WasmLimits;
+use crate::gate::InflightGate;
 use crate::host::HostState;
 use crate::octra::api_plugin::types as wit;
 
@@ -29,6 +30,7 @@ struct WasmPluginInner {
     host: Arc<dyn PluginHost>,
     config_json: String,
     limits: WasmLimits,
+    gate: Arc<InflightGate>,
     instance: Mutex<Option<RuntimeInstance>>,
 }
 
@@ -58,12 +60,13 @@ impl WasmCallError {
 }
 
 impl WasmApiGatewayPlugin {
-    pub fn new(
+    pub(crate) fn new(
         manifest: PluginManifest,
         component: Arc<Component>,
         host: Arc<dyn PluginHost>,
         config_json: String,
         limits: WasmLimits,
+        gate: Arc<InflightGate>,
     ) -> Result<Self, PluginError> {
         let mut limits = limits;
         limits.timeout = manifest.timeout();
@@ -73,6 +76,7 @@ impl WasmApiGatewayPlugin {
             host,
             config_json,
             limits,
+            gate,
             instance: Mutex::new(None),
         });
         inner.ensure_instance()?;
@@ -176,6 +180,7 @@ impl WasmPluginInner {
     }
 
     fn call_request(&self, request: wit::Request) -> Result<wit::Action, WasmCallError> {
+        let _permit = self.gate.acquire();
         let mut guard = self.instance.lock();
         let result = {
             let Some(instance) = guard.as_mut() else {
@@ -199,6 +204,7 @@ impl WasmPluginInner {
     }
 
     fn call_response(&self, response: wit::Response) -> Result<wit::ResponseAction, WasmCallError> {
+        let _permit = self.gate.acquire();
         let mut guard = self.instance.lock();
         let result = {
             let Some(instance) = guard.as_mut() else {
@@ -222,6 +228,7 @@ impl WasmPluginInner {
     }
 
     fn call_log(&self, entry: wit::LogEntry) -> Result<(), WasmCallError> {
+        let _permit = self.gate.acquire();
         let mut guard = self.instance.lock();
         let result = {
             let Some(instance) = guard.as_mut() else {

@@ -9,22 +9,16 @@ use wasmtime::component::Component;
 
 use crate::WasmApiGatewayPlugin;
 use crate::engine::{WasmEngine, WasmLimits};
+use crate::gate::InflightGate;
 
 pub struct WasmPluginFactory {
     manifest: PluginManifest,
     component: Arc<Component>,
     limits: WasmLimits,
+    gate: Arc<InflightGate>,
 }
 
 impl WasmPluginFactory {
-    pub fn new(manifest: PluginManifest, component: Arc<Component>, limits: WasmLimits) -> Self {
-        Self {
-            manifest,
-            component,
-            limits,
-        }
-    }
-
     pub fn from_artifact(engine: &WasmEngine, artifact_dir: &Path) -> Result<Self, PluginError> {
         let layout =
             octra_plugin_storage::validate_artifact_dir(artifact_dir).map_err(|error| {
@@ -41,6 +35,7 @@ impl WasmPluginFactory {
             manifest: layout.manifest,
             component,
             limits,
+            gate: engine.gate(),
         })
     }
 }
@@ -71,6 +66,7 @@ impl ApiGatewayPluginFactory for WasmPluginFactory {
             host,
             config_json,
             self.limits.clone(),
+            self.gate.clone(),
         )?;
         Ok(Arc::new(plugin))
     }
