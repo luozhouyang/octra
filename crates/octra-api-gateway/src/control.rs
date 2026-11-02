@@ -134,6 +134,7 @@ pub fn router(state: ApiControlState) -> Router {
                 .put(update_plugin_instance)
                 .delete(delete_plugin_instance),
         )
+        .merge(crate::admin::router())
         .with_state(state)
 }
 

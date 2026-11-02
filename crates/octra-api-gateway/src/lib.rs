@@ -7,6 +7,7 @@
 //! * [`control_router`] exposes CRUD endpoints for the gateway configuration on
 //!   the control plane. The daemon protects it with the shared bearer token.
 
+pub mod admin;
 pub mod audit;
 pub mod control;
 pub mod data;
