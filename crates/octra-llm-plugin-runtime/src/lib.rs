@@ -18,9 +18,9 @@ use octra_core::{Error, Result};
 use octra_llm_core::{GatewayError, StreamEvent};
 use octra_llm_plugin_types::{
     LLM_PLUGIN_API_VERSION, LlmAction, LlmErrorContext, LlmLogContext, LlmLogEvent, LlmPlugin,
-    LlmPluginFactory, LlmPluginResult, LlmProviderInfo, LlmProviderRequestContext,
-    LlmRequestContext, LlmRequestMeta, LlmRequestState, LlmResponseContext, LlmScope,
-    LlmStreamAction, LlmStreamContext, LlmStreamResult,
+    LlmPluginCreateContext, LlmPluginFactory, LlmPluginResult, LlmPluginStateStore,
+    LlmProviderInfo, LlmProviderRequestContext, LlmRequestContext, LlmRequestMeta, LlmRequestState,
+    LlmResponseContext, LlmScope, LlmStreamAction, LlmStreamContext, LlmStreamResult,
 };
 use octra_storage::Storage;
 use octra_storage::plugins::{PluginConfigRecord, PluginData, PluginRecord};
@@ -579,6 +579,75 @@ fn timeout_error(entry: &LlmEntry) -> std::result::Result<LlmAction, LlmChainErr
     }
 }
 
+/// In-memory plugin state, shared across chain reloads in one process.
+#[derive(Debug, Default)]
+pub struct MemoryPluginStateStore {
+    values: RwLock<HashMap<String, Value>>,
+}
+
+impl LlmPluginStateStore for MemoryPluginStateStore {
+    fn get(&self, key: &str) -> Option<Value> {
+        self.values.read().get(key).cloned()
+    }
+
+    fn put(&self, key: &str, value: Value) {
+        self.values.write().insert(key.to_string(), value);
+    }
+}
+
+/// State store that keeps writes in memory and flushes them to SQLite on a
+/// fixed interval. The in-memory copy stays authoritative between flushes.
+struct PersistentPluginStateStore {
+    values: RwLock<HashMap<String, Value>>,
+    dirty: Mutex<HashSet<String>>,
+    storage: Arc<Storage>,
+}
+
+impl PersistentPluginStateStore {
+    fn new(storage: Arc<Storage>) -> Self {
+        Self {
+            values: RwLock::new(HashMap::new()),
+            dirty: Mutex::new(HashSet::new()),
+            storage,
+        }
+    }
+
+    fn seed(&self, rows: Vec<(String, Value)>) {
+        let mut values = self.values.write();
+        for (key, value) in rows {
+            values.insert(key, value);
+        }
+    }
+
+    async fn flush(&self) -> Result<()> {
+        let keys: Vec<String> = {
+            let mut dirty = self.dirty.lock();
+            dirty.drain().collect()
+        };
+        for key in keys {
+            let Some(value) = self.values.read().get(&key).cloned() else {
+                continue;
+            };
+            self.storage
+                .llm
+                .upsert_plugin_state(&key, &value.to_string())
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+impl LlmPluginStateStore for PersistentPluginStateStore {
+    fn get(&self, key: &str) -> Option<Value> {
+        self.values.read().get(key).cloned()
+    }
+
+    fn put(&self, key: &str, value: Value) {
+        self.values.write().insert(key.to_string(), value);
+        self.dirty.lock().insert(key.to_string());
+    }
+}
+
 #[derive(Default)]
 struct LlmPluginChains {
     by_scope: HashMap<ScopeKey, Vec<LlmEntry>>,
@@ -590,13 +659,15 @@ struct LlmPluginChains {
 impl LlmPluginChains {
     #[cfg(test)]
     fn compile(data: PluginData, registry: &LlmPluginRegistry) -> Result<Self> {
-        Self::compile_with(data, registry, &LlmPluginMetrics::default())
+        let state: Arc<dyn LlmPluginStateStore> = Arc::new(MemoryPluginStateStore::default());
+        Self::compile_with(data, registry, &LlmPluginMetrics::default(), &state)
     }
 
     fn compile_with(
         data: PluginData,
         registry: &LlmPluginRegistry,
         metrics: &LlmPluginMetrics,
+        state: &Arc<dyn LlmPluginStateStore>,
     ) -> Result<Self> {
         let plugins: HashMap<&str, &PluginRecord> = data
             .plugins
@@ -606,7 +677,8 @@ impl LlmPluginChains {
             .collect();
         let mut by_scope: HashMap<ScopeKey, Vec<LlmEntry>> = HashMap::new();
         for config in &data.configs {
-            if let Some((key, entry)) = compile_config(config, &plugins, registry, metrics)? {
+            if let Some((key, entry)) = compile_config(config, &plugins, registry, metrics, state)?
+            {
                 by_scope.entry(key).or_default().push(entry);
             }
         }
@@ -749,6 +821,7 @@ fn compile_config(
     plugins: &HashMap<&str, &PluginRecord>,
     registry: &LlmPluginRegistry,
     metrics: &LlmPluginMetrics,
+    state: &Arc<dyn LlmPluginStateStore>,
 ) -> Result<Option<(ScopeKey, LlmEntry)>> {
     if !config.enabled {
         return Ok(None);
@@ -766,9 +839,6 @@ fn compile_config(
     let mut value: Value = serde_json::from_str(&config.config_json).unwrap_or(Value::Null);
     resolve_secret_refs(&mut value)
         .map_err(|error| Error::Runtime(format!("LLM plugin '{}': {error}", plugin.name)))?;
-    let instance = factory
-        .create(value)
-        .map_err(|error| Error::Runtime(format!("LLM plugin '{}': {error}", plugin.name)))?;
     let scope = LlmScope::parse(&config.scope)
         .ok_or_else(|| Error::Runtime(format!("unknown LLM plugin scope '{}'", config.scope)))?;
     if scope != LlmScope::Global && config.scope_id.trim().is_empty() {
@@ -777,6 +847,16 @@ fn compile_config(
             plugin.name
         )));
     }
+    let context = LlmPluginCreateContext {
+        instance_key: &config.id,
+        plugin_name: &plugin.name,
+        scope: scope.as_str(),
+        scope_id: &config.scope_id,
+        state: state.clone(),
+    };
+    let instance = factory
+        .create_with(value, &context)
+        .map_err(|error| Error::Runtime(format!("LLM plugin '{}': {error}", plugin.name)))?;
     let manifest = instance.manifest();
     Ok(Some((
         (scope, config.scope_id.clone()),
@@ -798,6 +878,8 @@ pub struct LlmPluginRuntime {
     registry: Arc<LlmPluginRegistry>,
     chains: RwLock<Arc<LlmPluginChains>>,
     metrics: LlmPluginMetrics,
+    state: Arc<dyn LlmPluginStateStore>,
+    persistent: Option<Arc<PersistentPluginStateStore>>,
 }
 
 impl Default for LlmPluginRuntime {
@@ -813,6 +895,8 @@ impl LlmPluginRuntime {
             registry: Arc::new(LlmPluginRegistry::default()),
             chains: RwLock::new(Arc::new(LlmPluginChains::default())),
             metrics: LlmPluginMetrics::default(),
+            state: Arc::new(MemoryPluginStateStore::default()),
+            persistent: None,
         }
     }
 
@@ -823,11 +907,26 @@ impl LlmPluginRuntime {
         for manifest in registry.manifests() {
             storage.llm.upsert_plugin(&manifest).await?;
         }
+        let persistent = Arc::new(PersistentPluginStateStore::new(storage.clone()));
+        persistent.seed(storage.llm.load_plugin_state().await?);
+        let flusher = persistent.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) = flusher.flush().await {
+                    tracing::warn!(%error, "cannot flush LLM plugin state");
+                }
+            }
+        });
         let runtime = Self {
             storage: Some(storage),
             registry,
             chains: RwLock::new(Arc::new(LlmPluginChains::default())),
             metrics: LlmPluginMetrics::default(),
+            state: persistent.clone(),
+            persistent: Some(persistent),
         };
         runtime.reload().await?;
         Ok(runtime)
@@ -842,12 +941,22 @@ impl LlmPluginRuntime {
             return Ok(());
         };
         let data = storage.llm.load_plugin_data().await?;
-        let chains = LlmPluginChains::compile_with(data, &self.registry, &self.metrics)?;
+        let chains =
+            LlmPluginChains::compile_with(data, &self.registry, &self.metrics, &self.state)?;
         for manifest in self.registry.manifests() {
             self.metrics.stats(&manifest.name);
         }
         *self.chains.write() = Arc::new(chains);
         Ok(())
+    }
+
+    /// Flushes dirty plugin state to storage. The periodic flusher calls this
+    /// automatically; tests and graceful shutdown may call it directly.
+    pub async fn flush_plugin_state(&self) -> Result<()> {
+        match &self.persistent {
+            Some(persistent) => persistent.flush().await,
+            None => Ok(()),
+        }
     }
 
     /// Chain for the client-facing request and response stages.
@@ -1398,7 +1507,8 @@ mod tests {
             configs: vec![config("c1", "p1", "global", "")],
         };
         let metrics = LlmPluginMetrics::default();
-        let chains = LlmPluginChains::compile_with(data, &registry, &metrics).unwrap();
+        let state: Arc<dyn LlmPluginStateStore> = Arc::new(MemoryPluginStateStore::default());
+        let chains = LlmPluginChains::compile_with(data, &registry, &metrics, &state).unwrap();
         let chain = chains.chain_for(None, None, "m", None);
         let mut request = ChatRequest::new("m", Vec::new());
         let mut state = LlmRequestState::new();

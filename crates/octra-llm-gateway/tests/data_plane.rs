@@ -1688,6 +1688,69 @@ async fn budget_guard_rejects_after_the_request_limit() {
 }
 
 #[tokio::test]
+async fn budget_survives_a_plugin_reload() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("budget-reload", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+    harness
+        .plugin_config(
+            "llm-budget-guard",
+            "global",
+            None,
+            json!({"requests": 1, "period": "day"}),
+        )
+        .await;
+
+    let first = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK, "body: {}", first.2);
+
+    harness.plugins.reload().await.unwrap();
+
+    let second = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(
+        second.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "body: {}",
+        second.2
+    );
+    assert_eq!(second.2["error"]["code"], "budget_exceeded");
+}
+
+#[tokio::test]
+async fn plugin_state_round_trips_through_storage() {
+    let harness = Harness::new().await;
+    let key = "budget:round-trip";
+    let value = json!({"ends_at_ms": 10, "requests": 3, "tokens": 7});
+    harness
+        .storage
+        .llm
+        .upsert_plugin_state(key, &value.to_string())
+        .await
+        .unwrap();
+    let rows = harness.storage.llm.load_plugin_state().await.unwrap();
+    let row = rows
+        .iter()
+        .find(|(name, _)| name == key)
+        .expect("persisted plug state");
+    assert_eq!(row.1, value);
+}
+
+#[tokio::test]
 async fn audit_plugin_keeps_streaming_output_intact() {
     let harness = Harness::new().await;
     let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;

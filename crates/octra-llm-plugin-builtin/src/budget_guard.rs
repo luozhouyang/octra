@@ -2,19 +2,22 @@
 //!
 //! The guard is a policy at the edge: it rejects early with a stable error
 //! code, while authoritative account quota stays in the core account pool.
-//! Counters live in the plugin instance and reset on chain reload; a rolling
+//! Counters live in host state keyed by the configured instance, so they
+//! survive chain reloads and are flushed to storage for restarts. A rolling
 //! window starts at the first admitted request.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use octra_api_plugin_types::{Capability, PluginError, PluginManifest};
 use octra_llm_core::{GatewayError, estimate_tokens};
 use octra_llm_plugin_types::{
-    LlmAction, LlmLogContext, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext,
+    LlmAction, LlmLogContext, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory, LlmPluginResult,
+    LlmPluginStateStore, LlmRequestContext,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::manifest;
@@ -24,22 +27,50 @@ const DEFAULT_STATUS: u16 = 429;
 const DEFAULT_PERIOD_MS: i64 = 86_400_000;
 const TOKEN_RESERVATION: &str = "tokens";
 
-#[derive(Debug)]
 pub struct BudgetGuard {
     manifest: PluginManifest,
+    key: String,
     requests: Option<u64>,
     tokens: Option<u64>,
     period_ms: i64,
     code: String,
     status: u16,
-    window: Mutex<Window>,
+    window: Arc<Mutex<Window>>,
+    state: Arc<dyn LlmPluginStateStore>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct Window {
     ends_at_ms: i64,
     requests: u64,
     tokens: u64,
+}
+
+/// Windows are shared by stable instance key so a reload reuses the live
+/// counter instead of starting from zero.
+fn windows() -> &'static Mutex<HashMap<String, Arc<Mutex<Window>>>> {
+    static WINDOWS: OnceLock<Mutex<HashMap<String, Arc<Mutex<Window>>>>> = OnceLock::new();
+    WINDOWS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn state_key(instance_key: &str) -> String {
+    format!("budget:{instance_key}")
+}
+
+fn shared_window(instance_key: &str, state: &Arc<dyn LlmPluginStateStore>) -> Arc<Mutex<Window>> {
+    let mut windows = windows()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(window) = windows.get(instance_key) {
+        return window.clone();
+    }
+    let window = state
+        .get(&state_key(instance_key))
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    let window = Arc::new(Mutex::new(window));
+    windows.insert(instance_key.to_string(), window.clone());
+    window
 }
 
 impl Window {
@@ -67,7 +98,12 @@ struct Config {
 pub struct BudgetGuardFactory;
 
 impl BudgetGuardFactory {
-    fn build(&self, config: Value) -> Result<BudgetGuard, PluginError> {
+    fn build(
+        &self,
+        config: Value,
+        instance_key: &str,
+        state: Arc<dyn LlmPluginStateStore>,
+    ) -> Result<BudgetGuard, PluginError> {
         let config: Config = serde_json::from_value(config).map_err(|error| {
             PluginError::fail_closed(format!("invalid budget guard config: {error}"))
         })?;
@@ -107,12 +143,14 @@ impl BudgetGuardFactory {
             .to_string();
         Ok(BudgetGuard {
             manifest: self.manifest(),
+            key: instance_key.to_string(),
             requests: config.requests,
             tokens: config.tokens,
             period_ms,
             code,
             status,
-            window: Mutex::new(Window::default()),
+            window: shared_window(instance_key, &state),
+            state,
         })
     }
 }
@@ -128,7 +166,52 @@ impl LlmPluginFactory for BudgetGuardFactory {
     }
 
     fn create(&self, config: Value) -> Result<Arc<dyn LlmPlugin>, PluginError> {
-        Ok(Arc::new(self.build(config)?))
+        // Direct construction (tests, embeddings) has no host state; give the
+        // instance a key derived from its configuration.
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        config.to_string().hash(&mut hasher);
+        let key = format!("adhoc:{:x}", hasher.finish());
+        Ok(Arc::new(self.build(
+            config,
+            &key,
+            Arc::new(MemoryStateStore::default()),
+        )?))
+    }
+
+    fn create_with(
+        &self,
+        config: Value,
+        context: &LlmPluginCreateContext<'_>,
+    ) -> Result<Arc<dyn LlmPlugin>, PluginError> {
+        Ok(Arc::new(self.build(
+            config,
+            context.instance_key,
+            context.state.clone(),
+        )?))
+    }
+}
+
+/// Minimal store used when no host store is supplied.
+#[derive(Debug, Default)]
+struct MemoryStateStore {
+    values: Mutex<HashMap<String, Value>>,
+}
+
+impl LlmPluginStateStore for MemoryStateStore {
+    fn get(&self, key: &str) -> Option<Value> {
+        self.values
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .cloned()
+    }
+
+    fn put(&self, key: &str, value: Value) {
+        self.values
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.to_string(), value);
     }
 }
 
@@ -141,7 +224,7 @@ impl LlmPlugin for BudgetGuard {
     async fn on_request(&self, cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
         let estimate = estimate_tokens(cx.request);
         let now = now_ms();
-        let (rejected, code) = {
+        let (rejected, code, snapshot) = {
             let mut window = self
                 .window
                 .lock()
@@ -151,14 +234,14 @@ impl LlmPlugin for BudgetGuard {
             let tokens_exceeded = self
                 .tokens
                 .is_some_and(|limit| window.tokens.saturating_add(estimate) > limit);
-            if requests_exceeded || tokens_exceeded {
-                (true, self.code.clone())
-            } else {
+            let rejected = requests_exceeded || tokens_exceeded;
+            if !rejected {
                 window.requests = window.requests.saturating_add(1);
                 window.tokens = window.tokens.saturating_add(estimate);
-                (false, String::new())
             }
+            (rejected, self.code.clone(), window.clone())
         };
+        self.persist(&snapshot);
         if rejected {
             tracing::debug!(
                 request_id = %cx.meta.request_id,
@@ -183,16 +266,28 @@ impl LlmPlugin for BudgetGuard {
             .usage
             .input_tokens
             .saturating_add(cx.event.usage.output_tokens);
-        let mut window = self
-            .window
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        window.roll(now_ms(), self.period_ms);
-        window.tokens = window
-            .tokens
-            .saturating_sub(reserved)
-            .saturating_add(actual);
+        let snapshot = {
+            let mut window = self
+                .window
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            window.roll(now_ms(), self.period_ms);
+            window.tokens = window
+                .tokens
+                .saturating_sub(reserved)
+                .saturating_add(actual);
+            window.clone()
+        };
+        self.persist(&snapshot);
         *cx.state = Value::Null;
+    }
+}
+
+impl BudgetGuard {
+    fn persist(&self, window: &Window) {
+        if let Ok(value) = serde_json::to_value(window) {
+            self.state.put(&state_key(&self.key), value);
+        }
     }
 }
 
@@ -223,7 +318,34 @@ mod tests {
     }
 
     fn guard(config: Value) -> BudgetGuard {
-        BudgetGuardFactory.build(config).unwrap()
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let key = format!("test-instance-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        BudgetGuardFactory
+            .build(config, &key, Arc::new(MemoryStateStore::default()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn counters_survive_instance_recreation() {
+        let state: Arc<dyn LlmPluginStateStore> = Arc::new(MemoryStateStore::default());
+        let first = BudgetGuardFactory
+            .build(json!({"requests": 1}), "reload-instance", state.clone())
+            .unwrap();
+        assert!(matches!(
+            request(&first, "hello").await.unwrap(),
+            LlmAction::Continue
+        ));
+
+        // Simulates a chain reload: a new instance with the same key reuses
+        // the live window.
+        let second = BudgetGuardFactory
+            .build(json!({"requests": 1}), "reload-instance", state)
+            .unwrap();
+        assert!(matches!(
+            request(&second, "hello").await.unwrap(),
+            LlmAction::Reject(_)
+        ));
     }
 
     async fn request(plugin: &BudgetGuard, text: &str) -> LlmPluginResult {

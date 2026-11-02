@@ -86,7 +86,7 @@ pub type LlmStreamResult = Result<LlmStreamAction, PluginError>;
 
 /// Contract version a factory must implement to be registered. Bumped when a
 /// context or trait signature changes incompatibly.
-pub const LLM_PLUGIN_API_VERSION: u32 = 2;
+pub const LLM_PLUGIN_API_VERSION: u32 = 3;
 
 /// Read-only request metadata shared by every stage. Headers other than the
 /// user agent are not exposed, so credentials and cookies cannot leak into a
@@ -222,6 +222,23 @@ pub trait LlmPlugin: Send + Sync {
     async fn on_log(&self, _cx: &mut LlmLogContext<'_>) {}
 }
 
+/// Host-provided plugin state shared across chain reloads and, when backed by
+/// storage, across process restarts.
+pub trait LlmPluginStateStore: Send + Sync {
+    fn get(&self, key: &str) -> Option<Value>;
+    fn put(&self, key: &str, value: Value);
+}
+
+/// Identity and host services available when one configured instance is
+/// created. `instance_key` stays stable across reloads of the same config.
+pub struct LlmPluginCreateContext<'a> {
+    pub instance_key: &'a str,
+    pub plugin_name: &'a str,
+    pub scope: &'a str,
+    pub scope_id: &'a str,
+    pub state: std::sync::Arc<dyn LlmPluginStateStore>,
+}
+
 /// Creates configured LLM plugin instances. Configuration is validated once
 /// when chains compile, never on the request path.
 pub trait LlmPluginFactory: Send + Sync {
@@ -232,6 +249,16 @@ pub trait LlmPluginFactory: Send + Sync {
     }
 
     fn create(&self, config: Value) -> Result<std::sync::Arc<dyn LlmPlugin>, PluginError>;
+
+    /// Preferred constructor: receives the stable instance identity and the
+    /// host state store. Defaults to [`Self::create`] for stateless plugins.
+    fn create_with(
+        &self,
+        config: Value,
+        _context: &LlmPluginCreateContext<'_>,
+    ) -> Result<std::sync::Arc<dyn LlmPlugin>, PluginError> {
+        self.create(config)
+    }
 
     fn validate(&self, config: &Value) -> Result<(), PluginError> {
         self.create(config.clone()).map(|_| ())
