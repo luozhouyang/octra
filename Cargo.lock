@@ -2767,6 +2767,7 @@ dependencies = [
  "octra-api-plugin-runtime",
  "octra-api-plugin-types",
  "parking_lot",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

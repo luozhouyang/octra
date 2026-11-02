@@ -1,4 +1,4 @@
-//! CORS preflight short-circuiting and response headers.
+//! Kong-compatible CORS preflight handling and response headers.
 
 use std::sync::Arc;
 
@@ -8,23 +8,32 @@ use axum::response::Response;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use octra_api_plugin_types::{
     ApiGatewayPlugin, ApiGatewayPluginFactory, Capability, PluginAction, PluginError,
-    PluginManifest, PluginResult, RequestContext, ResponseContext,
+    PluginManifest, PluginPhase, PluginResult, RequestContext, ResponseContext,
 };
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use url::Url;
 
 use crate::manifest;
 
 const HEADER_ORIGIN: &str = "origin";
 const HEADER_REQUEST_METHOD: &str = "access-control-request-method";
 const HEADER_REQUEST_HEADERS: &str = "access-control-request-headers";
+const HEADER_REQUEST_PRIVATE_NETWORK: &str = "access-control-request-private-network";
 const HEADER_ALLOW_ORIGIN: &str = "access-control-allow-origin";
 const HEADER_ALLOW_METHODS: &str = "access-control-allow-methods";
 const HEADER_ALLOW_HEADERS: &str = "access-control-allow-headers";
 const HEADER_EXPOSE_HEADERS: &str = "access-control-expose-headers";
 const HEADER_ALLOW_CREDENTIALS: &str = "access-control-allow-credentials";
+const HEADER_ALLOW_PRIVATE_NETWORK: &str = "access-control-allow-private-network";
 const HEADER_MAX_AGE: &str = "access-control-max-age";
 const HEADER_VARY: &str = "vary";
+const STATE_SKIP: &str = "cors-skip-response-headers";
+
+const DEFAULT_METHODS: [&str; 9] = [
+    "GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS", "TRACE", "CONNECT",
+];
 
 pub struct CorsFactory;
 
@@ -38,75 +47,203 @@ impl ApiGatewayPluginFactory for CorsFactory {
             json!({
                 "type": "object",
                 "properties": {
-                    "allow_origins": { "type": "array", "items": { "type": "string" } },
-                    "allow_methods": { "type": "array", "items": { "type": "string" } },
-                    "allow_headers": { "type": "array", "items": { "type": "string" } },
-                    "expose_headers": { "type": "array", "items": { "type": "string" } },
-                    "allow_credentials": { "type": "boolean" },
-                    "max_age": { "type": "integer", "minimum": 0 }
+                    "origins": { "type": "array", "items": { "type": "string" } },
+                    "headers": { "type": "array", "items": { "type": "string" } },
+                    "exposed_headers": { "type": "array", "items": { "type": "string" } },
+                    "methods": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": DEFAULT_METHODS }
+                    },
+                    "max_age": { "type": "number", "minimum": 0 },
+                    "credentials": { "type": "boolean", "default": false },
+                    "private_network": { "type": "boolean", "default": false },
+                    "preflight_continue": { "type": "boolean", "default": false },
+                    "allow_origin_absent": { "type": "boolean", "default": true }
                 }
             }),
         )
     }
 
-    fn phases(&self) -> Vec<octra_api_plugin_types::PluginPhase> {
-        vec![
-            octra_api_plugin_types::PluginPhase::Request,
-            octra_api_plugin_types::PluginPhase::Response,
-            octra_api_plugin_types::PluginPhase::Log,
-        ]
-    }
-
     fn create(&self, _id: &str, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
-        let config: CorsConfig = serde_json::from_value(config)
+        let mut config: Config = serde_json::from_value(config)
             .map_err(|error| PluginError::fail_closed(format!("invalid cors config: {error}")))?;
-        if config.allow_origins.is_empty() {
+        let rules = compile_origins(&config.origins)?;
+        config.methods = config
+            .methods
+            .iter()
+            .map(|method| method.to_uppercase())
+            .collect();
+        for method in &config.methods {
+            if !DEFAULT_METHODS.contains(&method.as_str()) {
+                return Err(PluginError::fail_closed(format!(
+                    "unsupported CORS method '{method}'"
+                )));
+            }
+        }
+        if config
+            .max_age
+            .is_some_and(|age| !age.is_finite() || age < 0.0)
+        {
             return Err(PluginError::fail_closed(
-                "cors.allow_origins must not be empty",
+                "cors.max_age must be non-negative",
             ));
         }
         Ok(Arc::new(CorsPlugin {
             manifest: self.manifest(),
             config,
+            origins: rules,
         }))
+    }
+
+    fn phases(&self) -> Vec<PluginPhase> {
+        vec![
+            PluginPhase::Request,
+            PluginPhase::Response,
+            PluginPhase::Log,
+        ]
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-struct CorsConfig {
-    allow_origins: Vec<String>,
-    allow_methods: Vec<String>,
-    allow_headers: Vec<String>,
-    expose_headers: Vec<String>,
-    allow_credentials: bool,
-    max_age: Option<u64>,
+struct Config {
+    origins: Vec<String>,
+    headers: Vec<String>,
+    exposed_headers: Vec<String>,
+    methods: Vec<String>,
+    max_age: Option<f64>,
+    credentials: bool,
+    private_network: bool,
+    preflight_continue: bool,
+    allow_origin_absent: bool,
 }
 
-impl Default for CorsConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
-            allow_origins: vec!["*".to_string()],
-            allow_methods: vec![
-                "GET".to_string(),
-                "POST".to_string(),
-                "PUT".to_string(),
-                "PATCH".to_string(),
-                "DELETE".to_string(),
-                "HEAD".to_string(),
-                "OPTIONS".to_string(),
-            ],
-            allow_headers: vec!["*".to_string()],
-            expose_headers: Vec::new(),
-            allow_credentials: false,
-            max_age: Some(600),
+            origins: Vec::new(),
+            headers: Vec::new(),
+            exposed_headers: Vec::new(),
+            methods: DEFAULT_METHODS.iter().map(|m| m.to_string()).collect(),
+            max_age: None,
+            credentials: false,
+            private_network: false,
+            preflight_continue: false,
+            allow_origin_absent: true,
         }
     }
 }
 
+enum OriginRule {
+    Wildcard,
+    Plain { normalized: String },
+    Regex { regex: Regex, host_only: bool },
+}
+
+enum OriginMatch {
+    Wildcard,
+    Matched(String),
+    Denied,
+}
+
 struct CorsPlugin {
     manifest: PluginManifest,
-    config: CorsConfig,
+    config: Config,
+    origins: Vec<OriginRule>,
+}
+
+fn compile_origins(origins: &[String]) -> Result<Vec<OriginRule>, PluginError> {
+    let mut rules = Vec::with_capacity(origins.len());
+    for origin in origins {
+        if origin == "*" {
+            rules.push(OriginRule::Wildcard);
+            continue;
+        }
+        if is_regex(origin) {
+            let pattern = format!("{}$", origin.trim_start_matches('^'));
+            let regex = Regex::new(&pattern).map_err(|error| {
+                PluginError::fail_closed(format!("invalid CORS origin regex '{origin}': {error}"))
+            })?;
+            rules.push(OriginRule::Regex {
+                regex,
+                host_only: !origin.contains(':'),
+            });
+        } else {
+            rules.push(OriginRule::Plain {
+                normalized: normalize_origin(origin),
+            });
+        }
+    }
+    Ok(rules)
+}
+
+fn is_regex(origin: &str) -> bool {
+    origin
+        .chars()
+        .any(|value| !(value.is_ascii_alphanumeric() || matches!(value, '.' | ':' | '/' | '-')))
+}
+
+impl CorsPlugin {
+    fn match_origin(&self, origin: Option<&str>) -> OriginMatch {
+        if self.origins.is_empty()
+            || self
+                .origins
+                .iter()
+                .any(|rule| matches!(rule, OriginRule::Wildcard))
+        {
+            return OriginMatch::Wildcard;
+        }
+        let Some(origin) = origin else {
+            return OriginMatch::Denied;
+        };
+        let normalized = normalize_origin(origin);
+        let host = origin_host(origin);
+        for rule in &self.origins {
+            match rule {
+                OriginRule::Wildcard => return OriginMatch::Wildcard,
+                OriginRule::Plain {
+                    normalized: expected,
+                } => {
+                    if expected == &normalized {
+                        return OriginMatch::Matched(normalized);
+                    }
+                }
+                OriginRule::Regex { regex, host_only } => {
+                    let subject = if *host_only { &host } else { &normalized };
+                    if regex.is_match(subject) {
+                        return OriginMatch::Matched(normalized);
+                    }
+                }
+            }
+        }
+        OriginMatch::Denied
+    }
+
+    fn apply_origin(&self, headers: &mut HeaderMap, matched: &OriginMatch, origin: Option<&str>) {
+        match matched {
+            OriginMatch::Wildcard => {
+                if self.config.credentials
+                    && let Some(origin) = origin
+                {
+                    insert_str(headers, HEADER_ALLOW_ORIGIN, origin);
+                    append_vary(headers, "Origin");
+                    insert_str(headers, HEADER_ALLOW_CREDENTIALS, "true");
+                } else {
+                    insert_str(headers, HEADER_ALLOW_ORIGIN, "*");
+                }
+            }
+            OriginMatch::Matched(value) => {
+                insert_str(headers, HEADER_ALLOW_ORIGIN, value);
+                append_vary(headers, "Origin");
+                if self.config.credentials {
+                    insert_str(headers, HEADER_ALLOW_CREDENTIALS, "true");
+                }
+            }
+            OriginMatch::Denied => {
+                headers.remove(HEADER_ALLOW_ORIGIN);
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -122,106 +259,100 @@ impl ApiGatewayPlugin for CorsPlugin {
         let Some(origin) = header_str(cx.headers, HEADER_ORIGIN) else {
             return Ok(PluginAction::Continue);
         };
+        if origin.is_empty() {
+            return Ok(PluginAction::Continue);
+        }
         let Some(request_method) = header_str(cx.headers, HEADER_REQUEST_METHOD) else {
             return Ok(PluginAction::Continue);
         };
-        if !self.origin_allowed(origin) {
-            return Ok(PluginAction::ShortCircuit(
-                Response::builder()
-                    .status(StatusCode::FORBIDDEN)
-                    .body(Body::empty())
-                    .unwrap_or_else(|_| Response::new(Body::empty())),
-            ));
+
+        cx.state.values.insert(STATE_SKIP.into(), Value::Bool(true));
+        if self.config.preflight_continue {
+            return Ok(PluginAction::Continue);
         }
 
+        let matched = self.match_origin(Some(origin));
         let mut response = Response::new(Body::empty());
-        *response.status_mut() = StatusCode::NO_CONTENT;
-        self.write_common_headers(response.headers_mut(), origin);
-        if !self.config.allow_methods.is_empty() {
-            insert_joined(
+        *response.status_mut() = StatusCode::OK;
+        self.apply_origin(response.headers_mut(), &matched, Some(origin));
+
+        if !self.config.methods.is_empty() {
+            insert_str(
                 response.headers_mut(),
                 HEADER_ALLOW_METHODS,
-                &self.config.allow_methods,
+                &self.config.methods.join(","),
             );
         } else {
             insert_str(response.headers_mut(), HEADER_ALLOW_METHODS, request_method);
         }
-        if self.config.allow_headers.iter().any(|value| value == "*") {
-            if let Some(requested) = header_str(cx.headers, HEADER_REQUEST_HEADERS) {
-                insert_str(response.headers_mut(), HEADER_ALLOW_HEADERS, requested);
-                append_vary(response.headers_mut(), HEADER_REQUEST_HEADERS);
-            }
-        } else {
-            insert_joined(
+
+        if !self.config.headers.is_empty() {
+            insert_str(
                 response.headers_mut(),
                 HEADER_ALLOW_HEADERS,
-                &self.config.allow_headers,
+                &self.config.headers.join(","),
+            );
+        } else if let Some(requested) = header_str(cx.headers, HEADER_REQUEST_HEADERS) {
+            insert_str(response.headers_mut(), HEADER_ALLOW_HEADERS, requested);
+            append_vary(response.headers_mut(), "Access-Control-Request-Headers");
+        }
+
+        if let Some(max_age) = self.config.max_age {
+            insert_str(response.headers_mut(), HEADER_MAX_AGE, &number(max_age));
+        }
+
+        if self.config.private_network
+            && header_str(cx.headers, HEADER_REQUEST_PRIVATE_NETWORK) == Some("true")
+        {
+            insert_str(response.headers_mut(), HEADER_ALLOW_PRIVATE_NETWORK, "true");
+            append_vary(
+                response.headers_mut(),
+                "Access-Control-Request-Private-Network",
             );
         }
-        if let Some(max_age) = self.config.max_age {
-            insert_str(response.headers_mut(), HEADER_MAX_AGE, &max_age.to_string());
-        }
+
         Ok(PluginAction::ShortCircuit(response))
     }
 
     async fn on_response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
-        let Some(origin) = header_str(cx.request_headers, HEADER_ORIGIN) else {
-            return Ok(PluginAction::Continue);
-        };
-        if !self.origin_allowed(origin) {
+        if cx
+            .state
+            .values
+            .get(STATE_SKIP)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             return Ok(PluginAction::Continue);
         }
-        self.write_common_headers(cx.headers, origin);
-        if !self.config.expose_headers.is_empty() {
-            insert_joined(
+
+        let origin = header_str(cx.request_headers, HEADER_ORIGIN);
+        if origin.is_none() && !self.config.allow_origin_absent {
+            return Ok(PluginAction::Continue);
+        }
+        let matched = self.match_origin(origin);
+        self.apply_origin(cx.headers, &matched, origin);
+
+        if !self.config.exposed_headers.is_empty() {
+            insert_str(
                 cx.headers,
                 HEADER_EXPOSE_HEADERS,
-                &self.config.expose_headers,
+                &self.config.exposed_headers.join(","),
             );
         }
         Ok(PluginAction::Continue)
     }
 }
 
-impl CorsPlugin {
-    fn origin_allowed(&self, origin: &str) -> bool {
-        self.config
-            .allow_origins
-            .iter()
-            .any(|allowed| allowed == "*" || allowed.eq_ignore_ascii_case(origin))
-    }
-
-    fn write_common_headers(&self, headers: &mut HeaderMap, origin: &str) {
-        // `*` is invalid together with credentials, so those responses echo the
-        // origin. Explicit allowlists echo as well to keep `Vary: Origin`
-        // meaningful for caches.
-        let wildcard = self.config.allow_origins.iter().any(|value| value == "*");
-        let allow_origin = if self.config.allow_credentials || !wildcard {
-            origin
-        } else {
-            "*"
-        };
-        insert_str(headers, HEADER_ALLOW_ORIGIN, allow_origin);
-        append_vary(headers, HEADER_ORIGIN);
-        if self.config.allow_credentials {
-            insert_str(headers, HEADER_ALLOW_CREDENTIALS, "true");
-        }
-    }
-}
-
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name).and_then(|value| value.to_str().ok())
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
 }
 
 fn insert_str(headers: &mut HeaderMap, name: &'static str, value: &str) {
     if let Ok(value) = HeaderValue::from_str(value) {
         headers.insert(HeaderName::from_static(name), value);
-    }
-}
-
-fn insert_joined(headers: &mut HeaderMap, name: &'static str, values: &[String]) {
-    if !values.is_empty() {
-        insert_str(headers, name, &values.join(", "));
     }
 }
 
@@ -247,30 +378,53 @@ fn append_vary(headers: &mut HeaderMap, token: &str) {
     }
 }
 
+fn normalize_origin(origin: &str) -> String {
+    match Url::parse(origin) {
+        Ok(url) => {
+            let host = url.host_str().unwrap_or_default();
+            match url.port() {
+                Some(port) => format!("{}://{host}:{port}", url.scheme()),
+                None => format!("{}://{host}", url.scheme()),
+            }
+        }
+        Err(_) => origin.trim_end_matches('/').to_ascii_lowercase(),
+    }
+}
+
+fn origin_host(origin: &str) -> String {
+    Url::parse(origin)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn plugin(config: Value) -> Arc<dyn ApiGatewayPlugin> {
-        CorsFactory.create("test", config).unwrap()
+    fn plugin(config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
+        CorsFactory.create("test", config)
     }
 
     #[test]
-    fn wildcard_and_explicit_origins() {
-        let wildcard = plugin(json!({})).manifest().name.clone();
-        assert_eq!(wildcard, "cors");
-
-        let explicit = CorsFactory
-            .create("test", json!({"allow_origins": ["https://app.test"]}))
-            .unwrap();
-        assert_eq!(explicit.manifest().name, "cors");
+    fn accepts_kong_style_origins() {
+        assert!(plugin(json!({})).is_ok());
+        assert!(plugin(json!({"origins": ["*"]})).is_ok());
+        assert!(plugin(json!({"origins": ["https://app.test"]})).is_ok());
+        assert!(plugin(json!({"origins": ["https://.*\\.example\\.com"]})).is_ok());
     }
 
     #[test]
-    fn rejects_empty_origins() {
-        let Err(error) = CorsFactory.create("test", json!({"allow_origins": []})) else {
-            panic!("expected an error");
-        };
-        assert!(error.message.contains("allow_origins"));
+    fn rejects_bad_methods_and_regex() {
+        assert!(plugin(json!({"methods": ["BREW"]})).is_err());
+        assert!(plugin(json!({"origins": ["["]})).is_err());
     }
 }

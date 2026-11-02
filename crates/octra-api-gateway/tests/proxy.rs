@@ -451,7 +451,7 @@ async fn cors_preflight_short_circuits_before_auth() {
         "cors",
         octra_api_plugin_types::Scope::Global,
         None,
-        serde_json::json!({"allow_origins": ["https://app.test"]}),
+        serde_json::json!({"origins": ["https://app.test"]}),
     )
     .await;
     gateway.reload().await;
@@ -469,7 +469,7 @@ async fn cors_preflight_short_circuits_before_auth() {
     );
 
     let (status, headers, _) = gateway.send(preflight).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
         headers.get("access-control-allow-origin").unwrap(),
         "https://app.test"
@@ -492,7 +492,7 @@ async fn cors_preflight_short_circuits_before_auth() {
             .unwrap()
             .to_str()
             .unwrap()
-            .contains("origin")
+            .contains("Origin")
     );
 
     // Authentication is still enforced for real requests.
