@@ -636,6 +636,30 @@ impl Harness {
         self.runtime.reload().await.unwrap();
         record.id
     }
+
+    pub async fn key_with_permissions(
+        &self,
+        name: &str,
+        plaintext: &str,
+        permissions: Value,
+    ) -> String {
+        let record = self
+            .storage
+            .llm
+            .create_virtual_key(&octra_storage::LlmVirtualKeyInput {
+                name: name.to_string(),
+                key_prefix: plaintext.chars().take(12).collect(),
+                key_hash: octra_llm_gateway::keys::hash_key(plaintext),
+                consumer_id: None,
+                enabled: true,
+                expires_at: None,
+                permissions_json: permissions.to_string(),
+            })
+            .await
+            .unwrap();
+        self.runtime.reload().await.unwrap();
+        record.id
+    }
 }
 
 /// Sends a request through a router and returns status, headers and body.

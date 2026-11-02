@@ -22,6 +22,7 @@ pub mod routing;
 pub mod runtime;
 pub mod upstream;
 pub mod usage;
+pub mod vk_policy;
 
 pub use runtime::{LlmControlState, LlmDataState, LlmRuntime, RuntimeSnapshot};
 pub use upstream::Upstream as LlmUpstream;

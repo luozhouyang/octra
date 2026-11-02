@@ -160,6 +160,13 @@ pub struct LlmAccountUsage {
     pub cost_micros: i64,
 }
 
+/// Aggregated usage for one virtual key over a limit window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LlmVirtualKeyUsage {
+    pub tokens: i64,
+    pub cost_micros: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmVirtualKeyRecord {
     pub id: String,
@@ -848,6 +855,29 @@ impl LlmStore {
         .map_err(backend)?;
         Ok(LlmAccountUsage {
             requests: row.get::<Option<i64>, _>("requests").unwrap_or(0),
+            tokens: row.get::<Option<i64>, _>("tokens").unwrap_or(0),
+            cost_micros: row.get::<Option<i64>, _>("cost_micros").unwrap_or(0),
+        })
+    }
+
+    /// Aggregates persisted usage for a virtual key since an ISO timestamp.
+    pub async fn virtual_key_usage_since(
+        &self,
+        api_key_id: &str,
+        since: &str,
+    ) -> LlmResult<LlmVirtualKeyUsage> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(input_tokens + output_tokens + COALESCE(cache_write_tokens, 0)), 0) AS tokens,
+                 COALESCE(SUM(COALESCE(cost_micros, 0)), 0) AS cost_micros
+             FROM llm_usage
+             WHERE api_key_id = ? AND created_at >= ?",
+        )
+        .bind(api_key_id)
+        .bind(since)
+        .fetch_one(self.pool())
+        .await
+        .map_err(backend)?;
+        Ok(LlmVirtualKeyUsage {
             tokens: row.get::<Option<i64>, _>("tokens").unwrap_or(0),
             cost_micros: row.get::<Option<i64>, _>("cost_micros").unwrap_or(0),
         })
@@ -1689,6 +1719,7 @@ mod tests {
                 latency_ms: Some(12),
                 input_tokens: 100,
                 output_tokens: 50,
+                cost_micros: Some(42),
                 ..LlmUsageInput::default()
             })
             .await
@@ -1711,6 +1742,21 @@ mod tests {
         assert_eq!(usage.len(), 2);
         assert_eq!(usage[0].request_id, "req-2");
         assert_eq!(usage[1].input_tokens, 100);
+
+        let key_usage = storage
+            .llm
+            .virtual_key_usage_since(&key.id, "2000-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(key_usage.tokens, 150);
+        assert_eq!(key_usage.cost_micros, 42);
+        let future_usage = storage
+            .llm
+            .virtual_key_usage_since(&key.id, "2999-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(future_usage.tokens, 0);
+        assert_eq!(future_usage.cost_micros, 0);
 
         let summary = storage.llm.usage_summary().await.unwrap();
         assert_eq!(summary.len(), 1);

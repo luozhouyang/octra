@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use common::*;
 use octra_api_core::{CreateConsumer, CreatePolicy, UpdatePolicy};
 use octra_llm_gateway::keys::hash_key;
-use octra_storage::LlmVirtualKeyInput;
+use octra_storage::{LlmUsageInput, LlmVirtualKeyInput};
 use serde_json::json;
 
 fn openai_upstream_text(request: Captured) -> axum::response::Response {
@@ -1772,4 +1772,461 @@ async fn audit_plugin_keeps_streaming_output_intact() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(text.contains("Hello from OpenAI"), "body: {text}");
+}
+
+// ---------------------------------------------------------------------------
+// Virtual key governance
+
+const KEY_HEADER: &str = "authorization";
+const KEY_VALUE: &str = "Bearer octra-governance-key-0001";
+
+#[tokio::test]
+async fn virtual_key_model_allow_list_blocks_other_models() {
+    let (harness, upstream) = openai_harness().await;
+    harness
+        .key_with_permissions(
+            "restricted",
+            "octra-governance-key-0001",
+            json!({"allowed_models": ["other-model"]}),
+        )
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "model_forbidden");
+    assert_eq!(upstream.request_count(), 0);
+
+    harness
+        .storage
+        .llm
+        .update_virtual_key(
+            &harness.storage.llm.list_virtual_keys().await.unwrap()[0].id,
+            &LlmVirtualKeyInput {
+                name: "restricted".into(),
+                key_prefix: "octra-govern".into(),
+                key_hash: hash_key("octra-governance-key-0001"),
+                consumer_id: None,
+                enabled: true,
+                expires_at: None,
+                permissions_json: json!({"allowed_models": ["octra-default"]}).to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    harness.runtime.reload().await.unwrap();
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(upstream.request_count(), 1);
+}
+
+#[tokio::test]
+async fn virtual_key_alias_cannot_escape_allow_list() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("alias-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("not-allowed", &[(provider, 0, 1)]).await;
+    harness
+        .plugin_config(
+            "llm-model-map",
+            "global",
+            None,
+            json!({"map": {"octra-default": "not-allowed"}}),
+        )
+        .await;
+    harness
+        .key_with_permissions(
+            "alias",
+            "octra-governance-key-0001",
+            json!({"allowed_models": ["octra-default"]}),
+        )
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "model_forbidden");
+    assert_eq!(upstream.request_count(), 0);
+}
+
+#[tokio::test]
+async fn virtual_key_provider_allow_list_routes_to_allowed_provider() {
+    let harness = Harness::new().await;
+    let upstream_a = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let upstream_b = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider_a = harness
+        .provider("provider-a", "openai", &upstream_a.base_url, "bearer", 0)
+        .await;
+    let provider_b = harness
+        .provider("provider-b", "openai", &upstream_b.base_url, "bearer", 0)
+        .await;
+    harness
+        .route_to(
+            "octra-default",
+            &[(provider_a, 0, 1), (provider_b.clone(), 1, 1)],
+        )
+        .await;
+    harness
+        .key_with_permissions(
+            "providers",
+            "octra-governance-key-0001",
+            json!({"allowed_providers": [provider_b]}),
+        )
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(upstream_a.request_count(), 0);
+    assert_eq!(upstream_b.request_count(), 1);
+}
+
+#[tokio::test]
+async fn virtual_key_provider_allow_list_rejects_disallowed_provider() {
+    let (harness, upstream) = openai_harness().await;
+    harness
+        .key_with_permissions(
+            "providers",
+            "octra-governance-key-0001",
+            json!({"allowed_providers": ["missing-provider"]}),
+        )
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "provider_forbidden");
+    assert_eq!(upstream.request_count(), 0);
+}
+
+#[tokio::test]
+async fn virtual_key_account_allow_list_selects_allowed_account() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("account-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness
+        .route_to("octra-default", &[(provider.clone(), 0, 1)])
+        .await;
+    harness
+        .account_with_config(&provider, "account-a", 0, 1, "{}")
+        .await;
+    let account_b = harness
+        .account_with_config(&provider, "account-b", 1, 1, "{}")
+        .await;
+    harness
+        .key_with_permissions(
+            "accounts",
+            "octra-governance-key-0001",
+            json!({"allowed_accounts": [account_b]}),
+        )
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let usage = wait_for_usage(&harness.storage, 1).await;
+    assert_eq!(
+        usage[0].account_name.as_deref(),
+        Some("account-b"),
+        "usage: {usage:?}"
+    );
+}
+
+#[tokio::test]
+async fn virtual_key_account_allow_list_rejects_unknown_account() {
+    let (harness, upstream) = openai_harness().await;
+    harness
+        .key_with_permissions(
+            "accounts",
+            "octra-governance-key-0001",
+            json!({"allowed_accounts": ["missing-account"]}),
+        )
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "account_forbidden");
+    assert_eq!(upstream.request_count(), 0);
+}
+
+#[tokio::test]
+async fn virtual_key_token_limit_rejects_before_upstream() {
+    let (harness, upstream) = openai_harness().await;
+    let key_id = harness
+        .key_with_permissions(
+            "limits",
+            "octra-governance-key-0001",
+            json!({"limits": [{"window": "day", "tokens": 10}]}),
+        )
+        .await;
+    harness
+        .storage
+        .llm
+        .insert_usage(&LlmUsageInput {
+            request_id: "seed".into(),
+            virtual_model_id: "octra-default".into(),
+            api_key_id: Some(key_id),
+            input_tokens: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(body["error"]["code"], "virtual_key_limit_exceeded");
+    assert_eq!(upstream.request_count(), 0);
+}
+
+#[tokio::test]
+async fn virtual_key_cost_limit_rejects_before_upstream() {
+    let (harness, upstream) = openai_harness().await;
+    let key_id = harness
+        .key_with_permissions(
+            "limits",
+            "octra-governance-key-0001",
+            json!({"limits": [{"window": "day", "cost_micros": 100}]}),
+        )
+        .await;
+    harness
+        .storage
+        .llm
+        .insert_usage(&LlmUsageInput {
+            request_id: "seed".into(),
+            virtual_model_id: "octra-default".into(),
+            api_key_id: Some(key_id),
+            cost_micros: Some(100),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(body["error"]["code"], "virtual_key_limit_exceeded");
+    assert_eq!(upstream.request_count(), 0);
+}
+
+#[tokio::test]
+async fn virtual_key_limit_allows_usage_below_the_limit() {
+    let (harness, upstream) = openai_harness().await;
+    let key_id = harness
+        .key_with_permissions(
+            "limits",
+            "octra-governance-key-0001",
+            json!({"limits": [{"window": "day", "tokens": 10}]}),
+        )
+        .await;
+    harness
+        .storage
+        .llm
+        .insert_usage(&LlmUsageInput {
+            request_id: "seed".into(),
+            virtual_model_id: "octra-default".into(),
+            api_key_id: Some(key_id),
+            input_tokens: 9,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(upstream.request_count(), 1);
+}
+
+#[tokio::test]
+async fn virtual_key_permissions_combine_with_consumer_policy() {
+    let (harness, upstream) = openai_harness().await;
+    let consumer = harness
+        .storage
+        .api
+        .create_consumer(&CreateConsumer {
+            username: Some("governed-team".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    harness
+        .storage
+        .api
+        .create_policy(&CreatePolicy {
+            name: "allow-octra-default".into(),
+            consumer_id: Some(consumer.id.clone()),
+            document: Some(json!({"allowed_models": ["octra-default"]})),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    harness
+        .storage
+        .llm
+        .create_virtual_key(&LlmVirtualKeyInput {
+            name: "consumer-key".into(),
+            key_prefix: "octra-govern".into(),
+            key_hash: hash_key("octra-governance-key-0001"),
+            consumer_id: Some(consumer.id),
+            enabled: true,
+            expires_at: None,
+            permissions_json: json!({"allowed_models": ["other-model"]}).to_string(),
+        })
+        .await
+        .unwrap();
+    harness.runtime.reload().await.unwrap();
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"]["code"], "model_forbidden");
+    assert_eq!(upstream.request_count(), 0);
+}
+
+#[tokio::test]
+async fn invalid_virtual_key_permissions_fail_closed() {
+    let (harness, upstream) = openai_harness().await;
+    harness
+        .storage
+        .llm
+        .create_virtual_key(&LlmVirtualKeyInput {
+            name: "broken".into(),
+            key_prefix: "octra-govern".into(),
+            key_hash: hash_key("octra-governance-key-0001"),
+            consumer_id: None,
+            enabled: true,
+            expires_at: None,
+            permissions_json: "{not json".into(),
+        })
+        .await
+        .unwrap();
+    harness.runtime.reload().await.unwrap();
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[(KEY_HEADER, KEY_VALUE)],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(upstream.request_count(), 0);
+}
+
+#[tokio::test]
+async fn models_listing_respects_virtual_key_permissions() {
+    let (harness, _upstream) = openai_harness().await;
+    harness
+        .key_with_permissions(
+            "visible",
+            "octra-governance-key-0001",
+            json!({"allowed_models": ["octra-default"]}),
+        )
+        .await;
+
+    let (status, _, text) = send(
+        harness.data_router(),
+        axum::http::Method::GET,
+        "/v1/models",
+        &[(KEY_HEADER, KEY_VALUE)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {text}");
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["id"] == "octra-default")
+    );
+
+    harness
+        .key_with_permissions(
+            "hidden",
+            "octra-governance-key-0002",
+            json!({"allowed_models": ["other-model"]}),
+        )
+        .await;
+    let (status, _, text) = send(
+        harness.data_router(),
+        axum::http::Method::GET,
+        "/v1/models",
+        &[(KEY_HEADER, "Bearer octra-governance-key-0002")],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {text}");
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|model| model["id"] != "octra-default")
+    );
 }

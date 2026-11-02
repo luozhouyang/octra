@@ -357,6 +357,65 @@ async fn virtual_key_is_returned_once_and_authenticates() {
 }
 
 #[tokio::test]
+async fn virtual_key_permissions_are_validated() {
+    let harness = Harness::new().await;
+
+    let (status, created) = create(
+        &harness,
+        KEYS,
+        json!({
+            "name": "restricted",
+            "permissions": {
+                "allowed_models": ["gpt-5"],
+                "allowed_providers": ["openai"],
+                "allowed_accounts": ["acc-1"],
+                "limits": [{"window": "day", "tokens": 1000}]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (status, fetched) = call(&harness, Method::GET, &format!("{KEYS}/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["permissions"]["allowed_models"][0], "gpt-5");
+    assert_eq!(fetched["permissions"]["limits"][0]["window"], "day");
+
+    for bad in [
+        json!({"limits": [{"window": "year", "tokens": 1}]}),
+        json!({"limits": [{"window": "day"}]}),
+        json!({"allowed_models": "gpt-5"}),
+    ] {
+        let (status, body) =
+            create(&harness, KEYS, json!({"name": "bad", "permissions": bad})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert_eq!(body["field"], "permissions");
+    }
+
+    let (status, updated) = call(
+        &harness,
+        Method::PUT,
+        &format!("{KEYS}/{id}"),
+        Some(json!({
+            "permissions": {"limits": [{"window": "day", "cost_micros": 0}]}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {updated}");
+    assert_eq!(updated["field"], "permissions");
+
+    // Unknown keys remain accepted for backward compatibility.
+    let (status, body) = create(
+        &harness,
+        KEYS,
+        json!({"name": "legacy", "permissions": {"chat": true}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+}
+
+#[tokio::test]
 async fn reload_reports_runtime_state() {
     let harness = Harness::new().await;
     let (status, body) = create(&harness, PROVIDERS, provider_body("p", "https://a.test/v1")).await;

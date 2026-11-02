@@ -4,6 +4,7 @@ pub mod remote;
 pub mod stream;
 pub mod translate;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Router;
@@ -29,6 +30,7 @@ use crate::routing::{RoutingIntent, Target, TargetSignal, rank_targets};
 use crate::runtime::{LlmDataState, RuntimeSnapshot};
 use crate::upstream::Upstream;
 use crate::usage::{self, UsageTracker};
+use crate::vk_policy;
 
 use remote::{Incoming, LlmResponse, RemoteBody, json_response};
 
@@ -131,9 +133,16 @@ async fn gemini_count_tokens(
         Err(error) => return protocol_response(Protocol::Gemini, &error),
     };
     let consumer_id = key.as_ref().and_then(|key| key.consumer_id.as_deref());
+    let virtual_key_id = key.as_ref().map(|key| key.id.as_str());
     if !snapshot.permits_model(consumer_id, &model) {
         let error =
             GatewayError::forbidden(format!("consumer is not allowed to use model '{model}'"))
+                .with_code("model_forbidden");
+        return protocol_response(Protocol::Gemini, &error);
+    }
+    if !snapshot.virtual_key_permits_model(virtual_key_id, &model) {
+        let error =
+            GatewayError::forbidden(format!("virtual key is not allowed to use model '{model}'"))
                 .with_code("model_forbidden");
         return protocol_response(Protocol::Gemini, &error);
     }
@@ -159,18 +168,21 @@ async fn gemini_count_tokens(
 async fn gemini_list_models(state: State<LlmDataState>, request: Incoming) -> LlmResponse {
     let state = state.0;
     let snapshot = state.runtime.snapshot().await;
-    let consumer_id = match authorize(&snapshot, &request).await {
+    let (consumer_id, virtual_key_id) = match authorize(&snapshot, &request).await {
         Ok(Some(key)) => {
             touch(&state, &key.id).await;
-            key.consumer_id.clone()
+            (key.consumer_id.clone(), Some(key.id))
         }
-        Ok(None) => None,
+        Ok(None) => (None, None),
         Err(error) => return LlmResponse(protocol_response(Protocol::Gemini, &error)),
     };
     let models: Vec<Value> = snapshot
         .model_listing()
         .into_iter()
-        .filter(|model| snapshot.permits_model(consumer_id.as_deref(), &model.id))
+        .filter(|model| {
+            snapshot.permits_model(consumer_id.as_deref(), &model.id)
+                && snapshot.virtual_key_permits_model(virtual_key_id.as_deref(), &model.id)
+        })
         .map(|model| {
             json!({
                 "name": format!("models/{}", model.id),
@@ -185,12 +197,12 @@ async fn gemini_list_models(state: State<LlmDataState>, request: Incoming) -> Ll
 async fn list_models(state: State<LlmDataState>, request: Incoming) -> LlmResponse {
     let state = state.0;
     let snapshot = state.runtime.snapshot().await;
-    let consumer_id = match authorize(&snapshot, &request).await {
+    let (consumer_id, virtual_key_id) = match authorize(&snapshot, &request).await {
         Ok(Some(key)) => {
             touch(&state, &key.id).await;
-            key.consumer_id.clone()
+            (key.consumer_id.clone(), Some(key.id))
         }
-        Ok(None) => None,
+        Ok(None) => (None, None),
         Err(error) => {
             return LlmResponse(protocol_response(error_protocol(&request), &error));
         }
@@ -199,7 +211,10 @@ async fn list_models(state: State<LlmDataState>, request: Incoming) -> LlmRespon
     let data: Vec<Value> = snapshot
         .model_listing()
         .into_iter()
-        .filter(|model| snapshot.permits_model(consumer_id.as_deref(), &model.id))
+        .filter(|model| {
+            snapshot.permits_model(consumer_id.as_deref(), &model.id)
+                && snapshot.virtual_key_permits_model(virtual_key_id.as_deref(), &model.id)
+        })
         .map(|model| {
             if model_api {
                 json!({
@@ -362,6 +377,65 @@ async fn touch(state: &LlmDataState, key_id: &str) {
     }
 }
 
+/// Rejects before any provider call when a virtual key has spent its token or
+/// cost budget for a window. Usage is read from persisted rows, so limits
+/// survive restarts; concurrent requests may overshoot by roughly one call.
+async fn enforce_virtual_key_limits(
+    state: &LlmDataState,
+    snapshot: &RuntimeSnapshot,
+    key: &octra_storage::LlmVirtualKeyRecord,
+) -> Result<(), GatewayError> {
+    let Some(policy) = snapshot.virtual_key_policy(&key.id) else {
+        return Ok(());
+    };
+    if policy.limits().is_empty() {
+        return Ok(());
+    }
+    let now = Utc::now();
+    let mut usage = BTreeMap::new();
+    for limit in policy.limits() {
+        let since = vk_policy::window_start(limit.window, now);
+        let totals = state
+            .storage
+            .llm
+            .virtual_key_usage_since(&key.id, &since)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    error = ?error,
+                    virtual_key_id = %key.id,
+                    "cannot read virtual key usage"
+                );
+                GatewayError::new(
+                    503,
+                    octra_llm_core::ErrorKind::Config,
+                    "cannot read virtual key usage",
+                )
+                .with_code("virtual_key_usage_unavailable")
+            })?;
+        usage.insert(limit.window, totals);
+    }
+    let Some(exceeded) = policy.exceeded(|window| usage.get(&window).cloned().unwrap_or_default())
+    else {
+        return Ok(());
+    };
+    let message = match exceeded.limit.tokens {
+        Some(tokens) if exceeded.usage.tokens.max(0) as u64 >= tokens => format!(
+            "virtual key {} token limit exceeded (used {} of {})",
+            exceeded.window.as_str(),
+            exceeded.usage.tokens,
+            tokens
+        ),
+        _ => format!(
+            "virtual key {} cost limit exceeded (used {} of {} micros)",
+            exceeded.window.as_str(),
+            exceeded.usage.cost_micros,
+            exceeded.limit.cost_micros.unwrap_or_default()
+        ),
+    };
+    Err(GatewayError::upstream(429, message).with_code("virtual_key_limit_exceeded"))
+}
+
 async fn handle(
     state: LlmDataState,
     request: Incoming,
@@ -405,12 +479,35 @@ async fn handle(
     tracker.record.protocol = Some(ingress.to_string());
     tracker.record.api_key_id = key.as_ref().map(|key| key.id.clone());
     let consumer_id = key.as_ref().and_then(|key| key.consumer_id.as_deref());
+    let virtual_key_id = key.as_ref().map(|key| key.id.clone());
 
-    if !snapshot.permits_model(consumer_id, &requested_model) {
-        let error = GatewayError::forbidden(format!(
-            "consumer is not allowed to use model '{requested_model}'"
-        ))
-        .with_code("model_forbidden");
+    if let Some(key) = &key
+        && let Err(error) = enforce_virtual_key_limits(&state, &snapshot, key).await
+    {
+        tracker.record.error = Some(error.message.clone());
+        tracker.finish_with_status(error.status);
+        usage::spawn_record(state.storage.clone(), tracker.record.clone());
+        return with_request_id(protocol_response(ingress, &error), &request_id);
+    }
+
+    let model_error = if !snapshot.permits_model(consumer_id, &requested_model) {
+        Some(
+            GatewayError::forbidden(format!(
+                "consumer is not allowed to use model '{requested_model}'"
+            ))
+            .with_code("model_forbidden"),
+        )
+    } else if !snapshot.virtual_key_permits_model(virtual_key_id.as_deref(), &requested_model) {
+        Some(
+            GatewayError::forbidden(format!(
+                "virtual key is not allowed to use model '{requested_model}'"
+            ))
+            .with_code("model_forbidden"),
+        )
+    } else {
+        None
+    };
+    if let Some(error) = model_error {
         tracker.record.error = Some(error.message.clone());
         tracker.finish_with_status(error.status);
         usage::spawn_record(state.storage.clone(), tracker.record.clone());
@@ -435,7 +532,6 @@ async fn handle(
         ir.stream = Some(stream);
     }
 
-    let virtual_key_id = key.as_ref().map(|key| key.id.clone());
     let session = header_str(&request, &state.config.llm.session_header).map(str::to_string);
     let user_agent = header_str(&request, "user-agent");
     let intent = header_str(&request, &state.config.llm.intent_header);
@@ -483,12 +579,26 @@ async fn handle(
             usage::spawn_record(state.storage.clone(), tracker.record.clone());
             return with_request_id(protocol_response(ingress, &error), &request_id);
         }
-        if !snapshot.permits_model(consumer_id, &ir.model) {
-            let error = GatewayError::forbidden(format!(
-                "consumer is not allowed to use model '{}'",
-                ir.model
-            ))
-            .with_code("model_forbidden");
+        let effective_error = if !snapshot.permits_model(consumer_id, &ir.model) {
+            Some(
+                GatewayError::forbidden(format!(
+                    "consumer is not allowed to use model '{}'",
+                    ir.model
+                ))
+                .with_code("model_forbidden"),
+            )
+        } else if !snapshot.virtual_key_permits_model(virtual_key_id.as_deref(), &ir.model) {
+            Some(
+                GatewayError::forbidden(format!(
+                    "virtual key is not allowed to use model '{}'",
+                    ir.model
+                ))
+                .with_code("model_forbidden"),
+            )
+        } else {
+            None
+        };
+        if let Some(error) = effective_error {
             log_rejection(
                 chain,
                 &meta,
@@ -614,6 +724,9 @@ async fn execute(
     let mut last_error: Option<GatewayError> = None;
     let mut last_chain: Option<Arc<LlmPluginChain>> = None;
     let mut budget = 0usize;
+    let virtual_key_policy = meta
+        .virtual_key_id
+        .and_then(|id| snapshot.virtual_key_policy(id));
 
     'targets: for target in attempts.iter() {
         if budget >= MAX_ATTEMPTS {
@@ -641,9 +754,33 @@ async fn execute(
             );
             continue;
         }
+        if let Some(policy) = virtual_key_policy
+            && !policy.permits_provider(&provider.id, &provider.name)
+        {
+            last_error = Some(
+                GatewayError::forbidden(format!(
+                    "virtual key is not allowed to use provider '{}'",
+                    provider.name
+                ))
+                .with_code("provider_forbidden"),
+            );
+            continue;
+        }
 
         let accounts = snapshot.accounts_for(&provider.id);
+        let restricted_accounts =
+            virtual_key_policy.is_some_and(|policy| policy.has_account_restrictions());
         let selected: Vec<Option<Arc<AccountRuntime>>> = if accounts.is_empty() {
+            if restricted_accounts {
+                last_error = Some(
+                    GatewayError::forbidden(format!(
+                        "virtual key is not allowed to use provider '{}'",
+                        provider.name
+                    ))
+                    .with_code("account_forbidden"),
+                );
+                continue;
+            }
             // No account pool configured: use the provider credential.
             vec![None]
         } else {
@@ -666,7 +803,27 @@ async fn execute(
                 );
                 continue;
             }
-            candidates.into_iter().map(Some).collect()
+            let mut selected = candidates.into_iter().map(Some).collect::<Vec<_>>();
+            if let Some(policy) = virtual_key_policy
+                && restricted_accounts
+            {
+                selected.retain(|account| {
+                    account.as_ref().is_some_and(|account| {
+                        policy.permits_account(&account.record.id, &account.record.name)
+                    })
+                });
+                if selected.is_empty() {
+                    last_error = Some(
+                        GatewayError::forbidden(format!(
+                            "virtual key is not allowed to use provider '{}' accounts",
+                            provider.name
+                        ))
+                        .with_code("account_forbidden"),
+                    );
+                    continue;
+                }
+            }
+            selected
         };
 
         for account in selected {

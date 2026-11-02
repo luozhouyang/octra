@@ -11,7 +11,7 @@ pub use llm::{
     LlmProviderAccountRecord, LlmProviderInput, LlmProviderRecord, LlmRouteRecord,
     LlmRoutingGroupRecord, LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmRuntimeData,
     LlmStorageError, LlmUsageInput, LlmUsageRecord, LlmUsageSummaryRow, LlmVirtualKeyInput,
-    LlmVirtualKeyRecord,
+    LlmVirtualKeyRecord, LlmVirtualKeyUsage,
 };
 pub use logs::{AuditLog, NewRequestLog, RequestLog};
 

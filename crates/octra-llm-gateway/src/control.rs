@@ -635,6 +635,12 @@ fn parse_expiry(value: Option<String>) -> ApiResult<Option<DateTime<Utc>>> {
     }
 }
 
+fn validate_permissions(permissions: &str) -> ApiResult<()> {
+    crate::vk_policy::VirtualKeyPolicy::parse(permissions)
+        .map(|_| ())
+        .map_err(|error| ApiError::bad_request(error).field("permissions"))
+}
+
 impl VirtualKeyBody {
     fn name(&self) -> ApiResult<String> {
         required(&self.name, "name")
@@ -1469,6 +1475,7 @@ async fn create_virtual_key(
 ) -> ApiResult<(StatusCode, extract::Json<CreatedVirtualKey>)> {
     let name = body.name()?;
     let permissions = body.permissions()?;
+    validate_permissions(&permissions)?;
     let expires_at = parse_expiry(body.expires_at)?;
     let plaintext = keys::generate_key();
     let input = LlmVirtualKeyInput {
@@ -1511,7 +1518,11 @@ async fn update_virtual_key(
         .ok_or_else(|| ApiError::not_found("virtual key", &id))?;
     let permissions = match (body.permissions.clone(), body.permissions_json.clone()) {
         (None, None) => existing.permissions_json,
-        _ => body.permissions()?,
+        _ => {
+            let permissions = body.permissions()?;
+            validate_permissions(&permissions)?;
+            permissions
+        }
     };
     let expires_at = match body.expires_at {
         Some(_) => parse_expiry(body.expires_at)?,

@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 use crate::accounts::{AccountPool, AccountRuntime};
 use crate::config::ProviderConfig;
 use crate::routing::{RoundRobin, RoutePlan};
+use crate::vk_policy::VirtualKeyPolicy;
 
 /// Configuration errors for one provider, reported by the control plane.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -41,6 +42,7 @@ pub struct RuntimeSnapshot {
     pub issues: Vec<ProviderIssue>,
     policy_global: PolicyLimits,
     policy_consumers: BTreeMap<String, PolicyLimits>,
+    virtual_keys: BTreeMap<String, VirtualKeyPolicy>,
 }
 
 /// Model and provider allowances granted by applicable policies. A dimension
@@ -124,6 +126,22 @@ impl RuntimeSnapshot {
             }
         }
 
+        let mut virtual_keys = BTreeMap::new();
+        for record in &data.virtual_keys {
+            let policy = match VirtualKeyPolicy::parse(&record.permissions_json) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    tracing::warn!(
+                        virtual_key_id = %record.id,
+                        %error,
+                        "invalid virtual key permissions; denying all requests"
+                    );
+                    VirtualKeyPolicy::deny_all()
+                }
+            };
+            virtual_keys.insert(record.id.clone(), policy);
+        }
+
         let mut accounts_by_provider: BTreeMap<String, Vec<Arc<AccountRuntime>>> = BTreeMap::new();
         for record in &data.accounts {
             let Some(entry) = pool.get(&record.id) else {
@@ -156,6 +174,7 @@ impl RuntimeSnapshot {
             issues,
             policy_global,
             policy_consumers,
+            virtual_keys,
         }
     }
 
@@ -188,6 +207,33 @@ impl RuntimeSnapshot {
             self.policy_consumers
                 .get(consumer_id)
                 .is_none_or(|limits| permits(&limits.providers, &candidates))
+        })
+    }
+
+    pub fn virtual_key_policy(&self, id: &str) -> Option<&VirtualKeyPolicy> {
+        self.virtual_keys.get(id)
+    }
+
+    /// Whether the virtual key may use a model. Anonymous requests are not
+    /// narrowed; a key with malformed permissions denies everything.
+    pub fn virtual_key_permits_model(&self, virtual_key_id: Option<&str>, model: &str) -> bool {
+        virtual_key_id.is_none_or(|id| {
+            self.virtual_keys
+                .get(id)
+                .is_none_or(|policy| policy.permits_model(model))
+        })
+    }
+
+    pub fn virtual_key_permits_provider(
+        &self,
+        virtual_key_id: Option<&str>,
+        provider_id: &str,
+        provider_name: &str,
+    ) -> bool {
+        virtual_key_id.is_none_or(|id| {
+            self.virtual_keys
+                .get(id)
+                .is_none_or(|policy| policy.permits_provider(provider_id, provider_name))
         })
     }
 
