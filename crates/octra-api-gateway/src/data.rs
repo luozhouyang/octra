@@ -104,6 +104,7 @@ pub async fn proxy(
             .and_then(|index| snapshot.matcher.service(index))
             .cloned(),
         matched_path: matched.matched_path,
+        uri_captures: matched.uri_captures,
     };
 
     let placeholder = placeholder_service();
@@ -363,6 +364,7 @@ pub async fn proxy(
         path: &hash_path,
         client_ip: Some(peer.ip()),
         consumer_id: consumer_id.as_deref(),
+        uri_captures: &dispatch.uri_captures,
     };
     let mut attempts = endpoint.attempts(Some(&hash_input));
     let retry_limit = 1 + usize::try_from(
@@ -837,6 +839,7 @@ struct Dispatch {
     route: CompiledRoute,
     service: Option<CompiledService>,
     matched_path: String,
+    uri_captures: Vec<(String, String)>,
 }
 
 struct ForwardContext<'a> {

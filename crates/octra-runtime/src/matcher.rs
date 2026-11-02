@@ -74,6 +74,9 @@ pub struct RouteMatch {
     pub route_index: usize,
     pub service_index: Option<usize>,
     pub matched_path: String,
+    /// Named groups captured by the matched regex path, in pattern order.
+    /// Empty for prefix paths and for regex paths without named groups.
+    pub uri_captures: Vec<(String, String)>,
 }
 
 /// Compiled route matcher. Build it with [`RouteMatcher::compile`].
@@ -206,10 +209,11 @@ impl RouteMatcher {
                 (route.route.enabled)
                     .then(|| route.matches(input))
                     .flatten()
-                    .map(|matched_path| RouteMatch {
+                    .map(|(matched_path, uri_captures)| RouteMatch {
                         route_index: index,
                         service_index: route.service_index,
                         matched_path,
+                        uri_captures,
                     })
             })
     }
@@ -292,7 +296,7 @@ fn compile_route(route: &Route, service_index: Option<usize>) -> Option<Compiled
 }
 
 impl CompiledRoute {
-    fn matches(&self, input: &MatchInput<'_>) -> Option<String> {
+    fn matches(&self, input: &MatchInput<'_>) -> Option<(String, Vec<(String, String)>)> {
         if !self.protocols.is_empty()
             && !self
                 .protocols
@@ -309,14 +313,25 @@ impl CompiledRoute {
             }
         }
 
-        let matched_path = if self.paths.is_empty() {
-            String::new()
+        let (matched_path, uri_captures) = if self.paths.is_empty() {
+            (String::new(), Vec::new())
         } else {
             self.paths.iter().find_map(|path| match path {
                 CompiledPath::Prefix(prefix) if path_matches_prefix(input.path, prefix) => {
-                    Some(prefix.clone())
+                    Some((prefix.clone(), Vec::new()))
                 }
-                CompiledPath::Regex(_, regex) if regex.is_match(input.path) => Some(String::new()),
+                CompiledPath::Regex(_, regex) => regex.captures(input.path).map(|captures| {
+                    let values = regex
+                        .capture_names()
+                        .flatten()
+                        .filter_map(|name| {
+                            captures
+                                .name(name)
+                                .map(|value| (name.to_string(), value.as_str().to_string()))
+                        })
+                        .collect();
+                    (String::new(), values)
+                }),
                 _ => None,
             })?
         };
@@ -340,7 +355,7 @@ impl CompiledRoute {
             }
         }
 
-        Some(matched_path)
+        Some((matched_path, uri_captures))
     }
 }
 
@@ -490,6 +505,47 @@ mod tests {
             Some("re")
         );
         assert_eq!(matched_id(&matcher, None, "/users", "GET"), None);
+    }
+
+    #[test]
+    fn regex_path_records_named_captures() {
+        let services = vec![service("s1")];
+        let mut r = route("re", Some("s1"));
+        r.paths = vec!["~/tenants/(?<tenant>[^/]+)/items".into()];
+        let matcher = RouteMatcher::compile(&services, &[r]);
+        let headers = HeaderMap::new();
+        let matched = matcher
+            .match_route(&MatchInput {
+                scheme: "http",
+                host: None,
+                path: "/tenants/acme/items",
+                method: "GET",
+                headers: &headers,
+            })
+            .expect("regex route matches");
+        assert_eq!(
+            matched.uri_captures,
+            vec![("tenant".to_string(), "acme".to_string())]
+        );
+    }
+
+    #[test]
+    fn prefix_path_has_no_uri_captures() {
+        let services = vec![service("s1")];
+        let mut r = route("prefix", Some("s1"));
+        r.paths = vec!["/api".into()];
+        let matcher = RouteMatcher::compile(&services, &[r]);
+        let headers = HeaderMap::new();
+        let matched = matcher
+            .match_route(&MatchInput {
+                scheme: "http",
+                host: None,
+                path: "/api/users",
+                method: "GET",
+                headers: &headers,
+            })
+            .expect("prefix route matches");
+        assert!(matched.uri_captures.is_empty());
     }
 
     #[test]

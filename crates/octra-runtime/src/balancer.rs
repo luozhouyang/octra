@@ -430,11 +430,11 @@ impl HashConfig {
             "cookie" => cookie_value(input.headers, &self.hash_on_cookie),
             "path" => Some(input.path.to_string()),
             "query_arg" => query_value(input.path, query_arg),
-            // Route regex captures are not recorded by the matcher yet.
-            "uri_capture" => {
-                let _ = uri_capture;
-                None
-            }
+            "uri_capture" if !uri_capture.is_empty() => input
+                .uri_captures
+                .iter()
+                .find(|(name, _)| name == uri_capture)
+                .map(|(_, value)| value.clone()),
             _ => None,
         };
         value.filter(|value| !value.is_empty())
@@ -448,6 +448,8 @@ pub struct HashInput<'a> {
     pub path: &'a str,
     pub client_ip: Option<IpAddr>,
     pub consumer_id: Option<&'a str>,
+    /// Named groups captured by the matched route regex path.
+    pub uri_captures: &'a [(String, String)],
 }
 
 fn join_header(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -849,6 +851,7 @@ mod tests {
             path: "/",
             client_ip: None,
             consumer_id: None,
+            uri_captures: &[],
         };
         let picks: Vec<String> = (0..5)
             .map(|_| pool.select_with(Some(&input)).unwrap().id.clone())
@@ -879,6 +882,7 @@ mod tests {
             path: "/",
             client_ip: Some("10.0.0.7".parse().unwrap()),
             consumer_id: None,
+            uri_captures: &[],
         };
         assert!(pool.select_with(Some(&input)).is_some());
     }
@@ -927,6 +931,7 @@ mod tests {
             path: "/",
             client_ip: None,
             consumer_id: None,
+            uri_captures: &[],
         };
         assert_eq!(hash.key(&input).as_deref(), Some("tenant-9"));
 
@@ -940,6 +945,22 @@ mod tests {
             path: "/items?tenant=blue",
             client_ip: None,
             consumer_id: None,
+            uri_captures: &[],
+        };
+        assert_eq!(hash.key(&input).as_deref(), Some("blue"));
+
+        let hash = HashConfig {
+            hash_on: "uri_capture".into(),
+            hash_on_uri_capture: "tenant".into(),
+            ..Default::default()
+        };
+        let captures = vec![("tenant".to_string(), "blue".to_string())];
+        let input = HashInput {
+            headers: &HeaderMap::new(),
+            path: "/tenants/blue/items",
+            client_ip: None,
+            consumer_id: None,
+            uri_captures: &captures,
         };
         assert_eq!(hash.key(&input).as_deref(), Some("blue"));
     }

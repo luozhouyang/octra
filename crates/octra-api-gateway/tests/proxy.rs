@@ -1047,3 +1047,86 @@ async fn consistent_hashing_pins_requests_by_header() {
         assert_eq!(seen.len(), 1, "user {user} was not pinned: {seen:?}");
     }
 }
+
+#[tokio::test]
+async fn consistent_hashing_uses_uri_capture() {
+    let (addr_a, _calls_a) = spawn_mock("capture-a").await;
+    let (addr_b, _calls_b) = spawn_mock("capture-b").await;
+    let gateway = gateway().await;
+
+    let service = gateway
+        .storage
+        .api
+        .create_service(&CreateService {
+            id: Some("svc-capture".into()),
+            name: "svc-capture".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let upstream = gateway
+        .storage
+        .api
+        .create_upstream(&CreateUpstream {
+            id: Some("up-capture".into()),
+            name: "svc-capture".into(),
+            algorithm: Some("consistent-hashing".into()),
+            hash_on: Some("uri_capture".into()),
+            hash_on_uri_capture: Some("tenant".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for (id, addr) in [("t-capture-a", addr_a), ("t-capture-b", addr_b)] {
+        gateway
+            .storage
+            .api
+            .create_target(&CreateTarget {
+                id: Some(id.into()),
+                upstream_id: upstream.id.clone(),
+                target: addr.to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    gateway
+        .storage
+        .api
+        .create_route(&CreateRoute {
+            id: Some("r-capture".into()),
+            service_id: Some(service.id),
+            paths: Some(vec!["~/tenants/(?<tenant>[^/]+)/items".into()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    let mut mapping = std::collections::HashMap::new();
+    for index in 0..20 {
+        let tenant = format!("t{index}");
+        let (status, headers, _) = gateway.send(get(&format!("/tenants/{tenant}/items"))).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let upstream = headers
+            .get("x-upstream")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        mapping.insert(tenant, upstream);
+    }
+    let targets: std::collections::HashSet<_> = mapping.values().collect();
+    assert!(targets.len() > 1, "captures were not spread: {mapping:?}");
+
+    let tenant = "t7";
+    let expected = mapping[tenant].clone();
+    for _ in 0..3 {
+        let (status, headers, _) = gateway.send(get(&format!("/tenants/{tenant}/items"))).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            headers.get("x-upstream").unwrap().to_str().unwrap(),
+            expected
+        );
+    }
+}
