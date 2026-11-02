@@ -583,10 +583,10 @@ async fn rate_limit_plugin_rejects_after_burst() {
     .await;
     create_plugin_config(
         &gateway.storage,
-        "rate-limit",
+        "rate-limiting",
         octra_api_plugin_types::Scope::Global,
         None,
-        serde_json::json!({"requests_per_second": 1, "burst": 1, "key": "global"}),
+        serde_json::json!({"day": 1, "limit_by": "ip"}),
     )
     .await;
     gateway.reload().await;
@@ -595,7 +595,7 @@ async fn rate_limit_plugin_rejects_after_burst() {
     assert_eq!(first, StatusCode::CREATED);
     let (second, headers, json) = gateway.send(get("/api/items")).await;
     assert_eq!(second, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(json["error"]["code"], "rate_limited");
+    assert_eq!(json["message"], "API rate limit exceeded");
     assert!(headers.get(header::RETRY_AFTER).is_some());
 }
 
@@ -617,7 +617,7 @@ async fn plugin_configs_crud_via_control_plane() {
         .map(|plugin| plugin["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"cors"));
-    assert!(names.contains(&"rate-limit"));
+    assert!(names.contains(&"rate-limiting"));
 
     let create = Request::builder()
         .method("POST")

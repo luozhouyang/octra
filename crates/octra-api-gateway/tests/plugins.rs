@@ -13,7 +13,7 @@ mod plugins {
     mod ip_restriction;
     mod jwt;
     mod key_auth;
-    mod rate_limit;
+    mod rate_limiting;
     mod request_transformer;
     mod response_transformer;
 }

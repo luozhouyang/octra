@@ -13,7 +13,7 @@ mod header_rewrite;
 mod ip_restriction;
 mod jwt;
 mod key_auth;
-mod rate_limit;
+mod rate_limiting;
 mod request_size_limiting;
 mod request_termination;
 mod request_transformer;
@@ -34,7 +34,7 @@ pub use circuit_breaker::CircuitBreakerFactory;
 pub use correlation_id::CorrelationIdFactory;
 pub use cors::CorsFactory;
 pub use header_rewrite::HeaderRewriteFactory;
-pub use rate_limit::RateLimitFactory;
+pub use rate_limiting::RateLimitingFactory;
 
 pub use acl::AclFactory;
 pub use basic_auth::BasicAuthFactory;
@@ -49,7 +49,7 @@ pub use response_transformer::ResponseTransformerFactory;
 pub fn register(registry: &mut PluginRegistry) {
     registry.register(CorrelationIdFactory);
     registry.register(CorsFactory);
-    registry.register(RateLimitFactory);
+    registry.register(RateLimitingFactory);
     registry.register(CircuitBreakerFactory);
     registry.register(HeaderRewriteFactory);
     registry.register(KeyAuthFactory);
