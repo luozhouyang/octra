@@ -474,6 +474,7 @@ pub struct LlmControlState {
     pub runtime: Arc<LlmRuntime>,
     pub storage: Arc<Storage>,
     pub plugins: Option<Arc<crate::LlmPluginRuntime>>,
+    pub pii: Option<Arc<crate::pii::PiiEngineRuntime>>,
 }
 
 impl LlmControlState {
@@ -482,11 +483,17 @@ impl LlmControlState {
             runtime,
             storage,
             plugins: None,
+            pii: None,
         }
     }
 
     pub fn with_plugins(mut self, plugins: Arc<crate::LlmPluginRuntime>) -> Self {
         self.plugins = Some(plugins);
+        self
+    }
+
+    pub fn with_pii_engines(mut self, pii: Arc<crate::pii::PiiEngineRuntime>) -> Self {
+        self.pii = Some(pii);
         self
     }
 }

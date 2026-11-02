@@ -3342,6 +3342,7 @@ dependencies = [
 name = "octra-llm-gateway"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
  "chrono",
@@ -3358,6 +3359,7 @@ dependencies = [
  "octra-llm-plugin-runtime",
  "octra-llm-plugin-types",
  "octra-llm-protocol",
+ "octra-pii-types",
  "octra-storage",
  "reqwest 0.12.28",
  "serde",

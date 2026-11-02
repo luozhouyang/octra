@@ -1542,6 +1542,183 @@ impl LlmStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PII engines
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmPiiEngineRecord {
+    pub id: String,
+    pub name: String,
+    pub mode: String,
+    pub transport: String,
+    pub endpoint: Option<String>,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env_allow: Vec<String>,
+    pub model_dir: Option<String>,
+    pub config_json: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmPiiEngineInput {
+    pub name: String,
+    pub mode: String,
+    pub transport: String,
+    pub endpoint: Option<String>,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env_allow: Vec<String>,
+    pub model_dir: Option<String>,
+    pub config_json: String,
+    pub enabled: bool,
+}
+
+const PII_ENGINE_COLUMNS: &str = "id, name, mode, transport, endpoint, command, args_json, \
+     env_allow_json, model_dir, config_json, enabled, created_at, updated_at";
+
+fn pii_engine_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmPiiEngineRecord {
+    let args_json: String = row.get("args_json");
+    let env_allow_json: String = row.get("env_allow_json");
+    LlmPiiEngineRecord {
+        id: row.get("id"),
+        name: row.get("name"),
+        mode: row.get("mode"),
+        transport: row.get("transport"),
+        endpoint: row.get("endpoint"),
+        command: row.get("command"),
+        args: serde_json::from_str(&args_json).unwrap_or_default(),
+        env_allow: serde_json::from_str(&env_allow_json).unwrap_or_default(),
+        model_dir: row.get("model_dir"),
+        config_json: row.get("config_json"),
+        enabled: row.get::<i64, _>("enabled") != 0,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+impl LlmStore {
+    pub async fn list_pii_engines(&self) -> LlmResult<Vec<LlmPiiEngineRecord>> {
+        let sql = format!(
+            "SELECT {PII_ENGINE_COLUMNS} FROM llm_pii_engines ORDER BY name ASC, id ASC"
+        );
+        let rows = sqlx::query(&sql)
+            .fetch_all(self.pool())
+            .await
+            .map_err(backend)?;
+        Ok(rows.iter().map(pii_engine_from_row).collect())
+    }
+
+    pub async fn get_pii_engine(&self, id: &str) -> LlmResult<Option<LlmPiiEngineRecord>> {
+        let sql = format!("SELECT {PII_ENGINE_COLUMNS} FROM llm_pii_engines WHERE id = ?");
+        let row = sqlx::query(&sql)
+            .bind(id)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(backend)?;
+        Ok(row.as_ref().map(pii_engine_from_row))
+    }
+
+    pub async fn get_pii_engine_by_name(
+        &self,
+        name: &str,
+    ) -> LlmResult<Option<LlmPiiEngineRecord>> {
+        let sql = format!("SELECT {PII_ENGINE_COLUMNS} FROM llm_pii_engines WHERE name = ?");
+        let row = sqlx::query(&sql)
+            .bind(name)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(backend)?;
+        Ok(row.as_ref().map(pii_engine_from_row))
+    }
+
+    pub async fn create_pii_engine(
+        &self,
+        input: &LlmPiiEngineInput,
+    ) -> LlmResult<LlmPiiEngineRecord> {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO llm_pii_engines
+                (id, name, mode, transport, endpoint, command, args_json, env_allow_json,
+                 model_dir, config_json, enabled)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&input.name)
+        .bind(&input.mode)
+        .bind(&input.transport)
+        .bind(&input.endpoint)
+        .bind(&input.command)
+        .bind(serde_json::to_string(&input.args).map_err(|error| {
+            LlmStorageError::Backend(format!("cannot encode args: {error}"))
+        })?)
+        .bind(serde_json::to_string(&input.env_allow).map_err(|error| {
+            LlmStorageError::Backend(format!("cannot encode env_allow: {error}"))
+        })?)
+        .bind(&input.model_dir)
+        .bind(&input.config_json)
+        .bind(i64::from(input.enabled))
+        .execute(self.pool())
+        .await
+        .map_err(conflict)?;
+        self.get_pii_engine(&id)
+            .await?
+            .ok_or_else(|| LlmStorageError::Backend("PII engine disappeared after insert".into()))
+    }
+
+    pub async fn update_pii_engine(
+        &self,
+        id: &str,
+        input: &LlmPiiEngineInput,
+    ) -> LlmResult<LlmPiiEngineRecord> {
+        let result = sqlx::query(
+            "UPDATE llm_pii_engines SET
+                name = ?, mode = ?, transport = ?, endpoint = ?, command = ?,
+                args_json = ?, env_allow_json = ?, model_dir = ?, config_json = ?,
+                enabled = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?",
+        )
+        .bind(&input.name)
+        .bind(&input.mode)
+        .bind(&input.transport)
+        .bind(&input.endpoint)
+        .bind(&input.command)
+        .bind(serde_json::to_string(&input.args).map_err(|error| {
+            LlmStorageError::Backend(format!("cannot encode args: {error}"))
+        })?)
+        .bind(serde_json::to_string(&input.env_allow).map_err(|error| {
+            LlmStorageError::Backend(format!("cannot encode env_allow: {error}"))
+        })?)
+        .bind(&input.model_dir)
+        .bind(&input.config_json)
+        .bind(i64::from(input.enabled))
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(conflict)?;
+        if result.rows_affected() == 0 {
+            return Err(not_found("pii engine", id));
+        }
+        self.get_pii_engine(id)
+            .await?
+            .ok_or_else(|| not_found("pii engine", id))
+    }
+
+    pub async fn delete_pii_engine(&self, id: &str) -> LlmResult<()> {
+        let result = sqlx::query("DELETE FROM llm_pii_engines WHERE id = ?")
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(backend)?;
+        if result.rows_affected() == 0 {
+            return Err(not_found("pii engine", id));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -861,3 +861,109 @@ async fn redaction_plugin_is_registered_and_validates_config() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
 }
+
+const PII_ENGINES: &str = "/admin/llm/pii-engines";
+
+#[tokio::test]
+async fn pii_engine_crud_and_status() {
+    let harness = Harness::new().await;
+
+    let (status, body) = create(
+        &harness,
+        PII_ENGINES,
+        json!({
+            "name": "pii-local",
+            "mode": "external",
+            "transport": "http_loopback",
+            "endpoint": "http://127.0.0.1:6553",
+            "config": {"timeout_ms": 150}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    assert_eq!(body["status"]["readiness"], "ready");
+
+    let (status, listed) = call(&harness, Method::GET, PII_ENGINES, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+
+    let (status, updated) = call(
+        &harness,
+        Method::PUT,
+        &format!("{PII_ENGINES}/{id}"),
+        Some(json!({
+            "name": "pii-local",
+            "enabled": false
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {updated}");
+    assert_eq!(updated["enabled"], false);
+
+    let (status, status_body) =
+        call(&harness, Method::GET, &format!("{PII_ENGINES}/{id}/status"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status_body["status"]["readiness"], "disabled");
+
+    let (status, _) = call(
+        &harness,
+        Method::DELETE,
+        &format!("{PII_ENGINES}/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn pii_engine_rejects_invalid_configuration() {
+    let harness = Harness::new().await;
+
+    let invalid = [
+        json!({"name": "missing-endpoint", "mode": "external"}),
+        json!({
+            "name": "remote-endpoint",
+            "mode": "external",
+            "endpoint": "https://example.com"
+        }),
+        json!({
+            "name": "bad-mode",
+            "mode": "sometimes",
+            "endpoint": "http://127.0.0.1:6553"
+        }),
+        json!({
+            "name": "bad-transport",
+            "mode": "external",
+            "transport": "tcp",
+            "endpoint": "http://127.0.0.1:6553"
+        }),
+    ];
+    for body in invalid {
+        let (status, response) = create(&harness, PII_ENGINES, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body} -> {response}");
+    }
+
+    let (status, body) = create(
+        &harness,
+        PII_ENGINES,
+        json!({
+            "name": "dup",
+            "mode": "external",
+            "endpoint": "http://127.0.0.1:6553"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let (status, _) = create(
+        &harness,
+        PII_ENGINES,
+        json!({
+            "name": "dup",
+            "mode": "external",
+            "endpoint": "http://127.0.0.1:6553"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}

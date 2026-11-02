@@ -319,6 +319,7 @@ pub struct Harness {
     pub runtime: Arc<LlmRuntime>,
     pub config: Arc<OctraConfig>,
     pub plugins: Arc<LlmPluginRuntime>,
+    pub pii: Arc<octra_llm_gateway::pii::PiiEngineRuntime>,
 }
 
 impl Harness {
@@ -330,10 +331,13 @@ impl Harness {
                 .await
                 .unwrap(),
         );
+        let pii = Arc::new(octra_llm_gateway::pii::PiiEngineRuntime::new());
         let plugins = Arc::new(
             LlmPluginRuntime::bootstrap(
                 storage.clone(),
-                Arc::new(octra_llm_plugin_builtin::registry()),
+                Arc::new(octra_llm_plugin_builtin::registry_with(Some(
+                    pii.clone(),
+                ))),
             )
             .await
             .unwrap(),
@@ -343,6 +347,7 @@ impl Harness {
             runtime,
             config,
             plugins,
+            pii,
         }
     }
 
@@ -361,7 +366,8 @@ impl Harness {
     pub fn control_router(&self) -> Router {
         control_router(
             LlmControlState::new(self.runtime.clone(), self.storage.clone())
-                .with_plugins(self.plugins.clone()),
+                .with_plugins(self.plugins.clone())
+                .with_pii_engines(self.pii.clone()),
         )
     }
 

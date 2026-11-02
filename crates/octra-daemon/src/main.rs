@@ -196,7 +196,8 @@ async fn main() -> anyhow::Result<()> {
         .merge(octra_api_gateway::control_router(api_control))
         .merge(octra_llm_gateway::control_router(
             LlmControlState::new(llm_runtime.clone(), storage.clone())
-                .with_plugins(llm_plugin_runtime.clone()),
+                .with_plugins(llm_plugin_runtime.clone())
+                .with_pii_engines(pii_engines.clone()),
         ))
         .merge(octra_mcp_gateway::control_router(McpControlState::new(
             mcp_runtime.clone(),

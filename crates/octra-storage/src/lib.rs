@@ -9,7 +9,8 @@ pub mod plugins;
 
 pub use llm::{
     LlmAccountUsage, LlmModelInput, LlmModelRecord, LlmProviderAccountInput,
-    LlmProviderAccountRecord, LlmProviderInput, LlmProviderRecord, LlmRouteRecord,
+    LlmPiiEngineInput, LlmPiiEngineRecord, LlmProviderAccountRecord, LlmProviderInput,
+    LlmProviderRecord, LlmRouteRecord,
     LlmRoutingGroupRecord, LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmRuntimeData,
     LlmStorageError, LlmUsageInput, LlmUsageRecord, LlmUsageSummaryRow, LlmVirtualKeyInput,
     LlmVirtualKeyRecord, LlmVirtualKeyUsage, canonical_timestamp,

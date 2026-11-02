@@ -10,12 +10,14 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::{Router, extract};
+use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use octra_llm_core::Protocol;
 use octra_llm_plugin_types::LlmScope;
 use octra_storage::plugins::{PluginConfigRecord, PluginRecord};
 use octra_storage::{
-    LlmModelInput, LlmModelRecord, LlmProviderAccountInput, LlmProviderAccountRecord,
+    LlmModelInput, LlmModelRecord, LlmPiiEngineInput, LlmPiiEngineRecord,
+    LlmProviderAccountInput, LlmProviderAccountRecord,
     LlmProviderInput, LlmProviderRecord, LlmRouteRecord, LlmRoutingGroupRecord,
     LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmStorageError, LlmUsageRecord,
     LlmVirtualKeyInput, LlmVirtualKeyRecord,
@@ -24,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::keys;
+use crate::pii::EngineStatus;
 use crate::runtime::{LlmControlState, LlmRuntime};
 
 pub fn router(state: LlmControlState) -> Router {
@@ -107,6 +110,25 @@ pub fn router(state: LlmControlState) -> Router {
             "/admin/llm/plugin-configs/{id}",
             put(update_plugin_config).delete(delete_plugin_config),
         );
+    let pii = Router::new()
+        .route(
+            "/admin/llm/pii-engines",
+            get(list_pii_engines).post(create_pii_engine),
+        )
+        .route(
+            "/admin/llm/pii-engines/{id}",
+            get(get_pii_engine)
+                .put(update_pii_engine)
+                .delete(delete_pii_engine),
+        )
+        .route(
+            "/admin/llm/pii-engines/{id}/status",
+            get(pii_engine_status),
+        )
+        .route(
+            "/admin/llm/pii-engines/{id}/reload",
+            post(reload_pii_engine),
+        );
     Router::new()
         .merge(providers)
         .merge(models)
@@ -114,6 +136,7 @@ pub fn router(state: LlmControlState) -> Router {
         .merge(routes)
         .merge(keys)
         .merge(plugins)
+        .merge(pii)
         .route("/admin/llm/reload", post(reload))
         .route("/admin/llm/usage", get(usage))
         .with_state(state)
@@ -1640,6 +1663,25 @@ async fn plugin_effective_chain(
 }
 
 /// Reloads after a mutation so the next data plane request sees the change.
+async fn reload_pii_engines(state: &LlmControlState) -> ApiResult<()> {
+    let Some(pii) = &state.pii else {
+        return Ok(());
+    };
+    let records = state
+        .storage
+        .llm
+        .list_pii_engines()
+        .await
+        .map_err(ApiError::from_storage)?;
+    for warning in pii.reload(&records) {
+        tracing::warn!("{warning}");
+    }
+    if let Some(plugins) = &state.plugins {
+        plugins.reload().await.map_err(ApiError::internal)?;
+    }
+    Ok(())
+}
+
 async fn reload_now(state: &LlmControlState) -> ApiResult<()> {
     state.runtime.reload().await.map_err(ApiError::internal)?;
     if let Some(plugins) = &state.plugins {
@@ -2110,4 +2152,309 @@ async fn usage(
             .collect(),
         recent: recent.into_iter().map(UsageRecordView::from).collect(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// PII engines
+
+#[derive(Debug, Deserialize)]
+pub struct PiiEngineBody {
+    pub name: Option<String>,
+    pub mode: Option<String>,
+    pub transport: Option<String>,
+    pub endpoint: Option<String>,
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub env_allow: Option<Vec<String>>,
+    pub model_dir: Option<String>,
+    pub config: Option<Value>,
+    pub enabled: Option<bool>,
+}
+
+impl PiiEngineBody {
+    fn into_input(self, existing: Option<&LlmPiiEngineRecord>) -> ApiResult<LlmPiiEngineInput> {
+        let name = required(
+            &self
+                .name
+                .clone()
+                .or_else(|| existing.map(|record| record.name.clone())),
+            "name",
+        )?;
+        let mode = self
+            .mode
+            .clone()
+            .or_else(|| existing.map(|record| record.mode.clone()))
+            .unwrap_or_else(|| "external".to_string());
+        if !matches!(mode.as_str(), "external" | "managed") {
+            return Err(ApiError::bad_request(
+                "`mode` must be external or managed",
+            )
+            .field("mode"));
+        }
+        let transport = self
+            .transport
+            .clone()
+            .or_else(|| existing.map(|record| record.transport.clone()))
+            .unwrap_or_else(|| "http_loopback".to_string());
+        if !matches!(transport.as_str(), "http_loopback" | "uds_jsonl") {
+            return Err(ApiError::bad_request(
+                "`transport` must be http_loopback or uds_jsonl",
+            )
+            .field("transport"));
+        }
+        let endpoint = non_empty(
+            self.endpoint
+                .or_else(|| existing.and_then(|record| record.endpoint.clone())),
+            "endpoint",
+        )?;
+        if mode == "external" {
+            let endpoint_value = endpoint.as_deref().ok_or_else(|| {
+                ApiError::bad_request("external PII engines require `endpoint`").field("endpoint")
+            })?;
+            crate::pii::validate_endpoint(&transport, endpoint_value)
+                .map_err(|message| ApiError::bad_request(message).field("endpoint"))?;
+        }
+        let command = non_empty(
+            self.command
+                .or_else(|| existing.and_then(|record| record.command.clone())),
+            "command",
+        )?;
+        if mode == "managed" && command.is_none() {
+            return Err(ApiError::bad_request("managed PII engines require `command`")
+                .field("command"));
+        }
+        let args = self
+            .args
+            .or_else(|| existing.map(|record| record.args.clone()))
+            .unwrap_or_default();
+        if args.iter().any(|arg| arg.trim().is_empty()) {
+            return Err(ApiError::bad_request("`args` entries must not be empty").field("args"));
+        }
+        let env_allow = self
+            .env_allow
+            .or_else(|| existing.map(|record| record.env_allow.clone()))
+            .unwrap_or_default();
+        if env_allow.iter().any(|name| {
+            name.trim().is_empty() || name.contains('=') || name.contains('\0')
+        }) {
+            return Err(ApiError::bad_request(
+                "`env_allow` entries must be plain environment variable names",
+            )
+            .field("env_allow"));
+        }
+        let model_dir = non_empty(
+            self.model_dir
+                .or_else(|| existing.and_then(|record| record.model_dir.clone())),
+            "model_dir",
+        )?;
+        let config_json = match self.config {
+            Some(Value::Object(_)) => self
+                .config
+                .clone()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "{}".to_string()),
+            Some(_) => {
+                return Err(ApiError::bad_request("`config` must be a JSON object")
+                    .field("config"));
+            }
+            None => existing
+                .map(|record| record.config_json.clone())
+                .unwrap_or_else(|| "{}".to_string()),
+        };
+        let enabled = self
+            .enabled
+            .or_else(|| existing.map(|record| record.enabled))
+            .unwrap_or(true);
+        Ok(LlmPiiEngineInput {
+            name,
+            mode,
+            transport,
+            endpoint,
+            command,
+            args,
+            env_allow,
+            model_dir,
+            config_json,
+            enabled,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PiiEngineView {
+    pub id: String,
+    pub name: String,
+    pub mode: String,
+    pub transport: String,
+    pub endpoint: Option<String>,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env_allow: Vec<String>,
+    pub model_dir: Option<String>,
+    pub config: Value,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<EngineStatus>,
+}
+
+impl PiiEngineView {
+    fn new(record: &LlmPiiEngineRecord, status: Option<EngineStatus>) -> Self {
+        Self {
+            id: record.id.clone(),
+            name: record.name.clone(),
+            mode: record.mode.clone(),
+            transport: record.transport.clone(),
+            endpoint: record.endpoint.clone(),
+            command: record.command.clone(),
+            args: record.args.clone(),
+            env_allow: record.env_allow.clone(),
+            model_dir: record.model_dir.clone(),
+            config: serde_json::from_str(&record.config_json).unwrap_or_else(|_| json!({})),
+            enabled: record.enabled,
+            created_at: record.created_at.clone(),
+            updated_at: record.updated_at.clone(),
+            status,
+        }
+    }
+}
+
+fn pii_status_map(state: &LlmControlState) -> HashMap<String, EngineStatus> {
+    state
+        .pii
+        .as_ref()
+        .map(|pii| {
+            pii.statuses()
+                .into_iter()
+                .map(|status| (status.name.clone(), status))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn list_pii_engines(
+    State(state): State<LlmControlState>,
+) -> ApiResult<extract::Json<Vec<PiiEngineView>>> {
+    let records = state
+        .storage
+        .llm
+        .list_pii_engines()
+        .await
+        .map_err(ApiError::from_storage)?;
+    let statuses = pii_status_map(&state);
+    Ok(extract::Json(
+        records
+            .iter()
+            .map(|record| PiiEngineView::new(record, statuses.get(&record.name).cloned()))
+            .collect(),
+    ))
+}
+
+async fn get_pii_engine(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<extract::Json<PiiEngineView>> {
+    let record = state
+        .storage
+        .llm
+        .get_pii_engine(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("pii engine", &id))?;
+    let status = state
+        .pii
+        .as_ref()
+        .and_then(|pii| pii.get_status(&record.name));
+    Ok(extract::Json(PiiEngineView::new(&record, status)))
+}
+
+async fn create_pii_engine(
+    State(state): State<LlmControlState>,
+    extract::Json(body): extract::Json<PiiEngineBody>,
+) -> ApiResult<(StatusCode, extract::Json<PiiEngineView>)> {
+    let input = body.into_input(None)?;
+    let record = state
+        .storage
+        .llm
+        .create_pii_engine(&input)
+        .await
+        .map_err(ApiError::from_storage)?;
+    reload_pii_engines(&state).await?;
+    let status = state
+        .pii
+        .as_ref()
+        .and_then(|pii| pii.get_status(&record.name));
+    Ok((StatusCode::CREATED, extract::Json(PiiEngineView::new(&record, status))))
+}
+
+async fn update_pii_engine(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+    extract::Json(body): extract::Json<PiiEngineBody>,
+) -> ApiResult<extract::Json<PiiEngineView>> {
+    let existing = state
+        .storage
+        .llm
+        .get_pii_engine(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("pii engine", &id))?;
+    let input = body.into_input(Some(&existing))?;
+    let record = state
+        .storage
+        .llm
+        .update_pii_engine(&id, &input)
+        .await
+        .map_err(ApiError::from_storage)?;
+    reload_pii_engines(&state).await?;
+    let status = state
+        .pii
+        .as_ref()
+        .and_then(|pii| pii.get_status(&record.name));
+    Ok(extract::Json(PiiEngineView::new(&record, status)))
+}
+
+async fn delete_pii_engine(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state
+        .storage
+        .llm
+        .delete_pii_engine(&id)
+        .await
+        .map_err(ApiError::from_storage)?;
+    reload_pii_engines(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pii_engine_status(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<extract::Json<Value>> {
+    let record = state
+        .storage
+        .llm
+        .get_pii_engine(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("pii engine", &id))?;
+    let status = state
+        .pii
+        .as_ref()
+        .and_then(|pii| pii.get_status(&record.name));
+    Ok(extract::Json(json!({
+        "id": record.id,
+        "name": record.name,
+        "status": status,
+    })))
+}
+
+async fn reload_pii_engine(
+    State(state): State<LlmControlState>,
+    Path(_id): Path<String>,
+) -> ApiResult<extract::Json<Value>> {
+    reload_pii_engines(&state).await?;
+    Ok(extract::Json(json!({ "status": "reloaded" })))
 }
