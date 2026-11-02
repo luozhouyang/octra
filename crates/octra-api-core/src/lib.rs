@@ -318,6 +318,37 @@ pub struct UpdateConsumer {
     pub tags: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConsumerGroup {
+    pub id: String,
+    pub name: String,
+    pub tags: Vec<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CreateConsumerGroup {
+    pub id: Option<String>,
+    pub name: String,
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct UpdateConsumerGroup {
+    pub name: Option<String>,
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConsumerGroupMember {
+    pub consumer_id: String,
+    pub consumer_group_id: String,
+    pub created_at: i64,
+}
+
 /// A policy document used by the LLM gateway for model/routing authorization.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Policy {
@@ -365,6 +396,7 @@ pub struct PluginInstance {
     pub service_id: Option<String>,
     pub route_id: Option<String>,
     pub consumer_id: Option<String>,
+    pub consumer_group_id: Option<String>,
     pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -383,6 +415,7 @@ pub struct CreatePluginInstance {
     pub service_id: Option<String>,
     pub route_id: Option<String>,
     pub consumer_id: Option<String>,
+    pub consumer_group_id: Option<String>,
     pub tags: Option<Vec<String>>,
 }
 
@@ -413,6 +446,12 @@ pub struct UpdatePluginInstance {
         with = "double_option"
     )]
     pub consumer_id: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "double_option"
+    )]
+    pub consumer_group_id: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
 }
 
@@ -866,6 +905,21 @@ impl UpdateConsumer {
     }
 }
 
+impl CreateConsumerGroup {
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_name(&self.name)
+    }
+}
+
+impl UpdateConsumerGroup {
+    pub fn validate(&self) -> Result<(), Error> {
+        if let Some(name) = &self.name {
+            validate_name(name)?;
+        }
+        Ok(())
+    }
+}
+
 fn validate_identity(username: Option<&String>, custom_id: Option<&String>) -> Result<(), Error> {
     validate_optional_name(username, "username")?;
     validate_optional_name(custom_id, "custom_id")?;
@@ -887,8 +941,14 @@ impl CreatePluginInstance {
         if self.service_id.as_deref().is_some_and(str::is_empty)
             || self.route_id.as_deref().is_some_and(str::is_empty)
             || self.consumer_id.as_deref().is_some_and(str::is_empty)
+            || self.consumer_group_id.as_deref().is_some_and(str::is_empty)
         {
             return Err(invalid("plugin scope ids must not be empty"));
+        }
+        if self.consumer_id.is_some() && self.consumer_group_id.is_some() {
+            return Err(invalid(
+                "plugin cannot be scoped to both consumer and consumer_group",
+            ));
         }
         Ok(())
     }
@@ -901,6 +961,24 @@ impl UpdatePluginInstance {
         }
         if let Some(protocols) = &self.protocols {
             validate_protocols(protocols)?;
+        }
+        if self
+            .consumer_id
+            .as_ref()
+            .is_some_and(|id| id.as_deref().is_some_and(str::is_empty))
+            || self
+                .consumer_group_id
+                .as_ref()
+                .is_some_and(|id| id.as_deref().is_some_and(str::is_empty))
+        {
+            return Err(invalid("plugin scope ids must not be empty"));
+        }
+        if matches!(self.consumer_id, Some(Some(_)))
+            && matches!(self.consumer_group_id, Some(Some(_)))
+        {
+            return Err(invalid(
+                "plugin cannot be scoped to both consumer and consumer_group",
+            ));
         }
         Ok(())
     }

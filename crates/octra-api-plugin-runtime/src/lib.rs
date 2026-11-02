@@ -76,12 +76,29 @@ struct PluginEntry {
     service_id: Option<String>,
     route_id: Option<String>,
     consumer_id: Option<String>,
+    consumer_group_id: Option<String>,
     plugin: Arc<dyn ApiGatewayPlugin>,
 }
 
+#[derive(Clone, Copy)]
+struct ConsumerGroupRef<'a> {
+    id: &'a str,
+    name: &'a str,
+}
+
 impl PluginEntry {
-    fn has_consumer_scope(&self) -> bool {
-        self.consumer_id.is_some()
+    fn has_post_auth_scope(&self) -> bool {
+        self.consumer_id.is_some() || self.consumer_group_id.is_some()
+    }
+
+    fn route_service_matches(&self, route_id: Option<&str>, service_id: Option<&str>) -> bool {
+        self.route_id
+            .as_deref()
+            .is_none_or(|expected| route_id == Some(expected))
+            && self
+                .service_id
+                .as_deref()
+                .is_none_or(|expected| service_id == Some(expected))
     }
 
     fn applies(
@@ -89,6 +106,7 @@ impl PluginEntry {
         route_id: Option<&str>,
         service_id: Option<&str>,
         consumer_id: Option<&str>,
+        groups: &[ConsumerGroupRef<'_>],
     ) -> Option<i32> {
         if let Some(expected) = &self.route_id
             && route_id != Some(expected.as_str())
@@ -105,19 +123,30 @@ impl PluginEntry {
         {
             return None;
         }
+        if let Some(expected) = &self.consumer_group_id
+            && !groups.iter().any(|group| group.id == expected)
+        {
+            return None;
+        }
         let has_r = self.route_id.is_some();
         let has_s = self.service_id.is_some();
         let has_c = self.consumer_id.is_some();
+        let has_g = self.consumer_group_id.is_some();
 
-        Some(match (has_c, has_r, has_s) {
-            (true, true, true) => 8,
-            (true, true, false) => 7,
-            (true, false, true) => 6,
-            (false, true, true) => 5,
-            (true, false, false) => 4,
-            (false, true, false) => 3,
-            (false, false, true) => 2,
-            (false, false, false) => 1,
+        Some(match (has_c, has_g, has_r, has_s) {
+            (true, false, true, true) => 12,
+            (false, true, true, true) => 11,
+            (true, false, true, false) => 10,
+            (true, false, false, true) => 9,
+            (false, true, true, false) => 8,
+            (false, true, false, true) => 7,
+            (false, false, true, true) => 6,
+            (true, false, false, false) => 5,
+            (false, true, false, false) => 4,
+            (false, false, true, false) => 3,
+            (false, false, false, true) => 2,
+            (false, false, false, false) => 1,
+            _ => return None,
         })
     }
 }
@@ -368,7 +397,7 @@ where
 struct PluginChains {
     entries: Vec<PluginEntry>,
     pre_cache: Mutex<HashMap<(String, String), Arc<PluginChain>>>,
-    post_cache: Mutex<HashMap<(String, String, String), Arc<PluginChain>>>,
+    post_cache: Mutex<HashMap<String, Arc<PluginChain>>>,
     empty: Arc<PluginChain>,
     has_any: bool,
 }
@@ -404,6 +433,7 @@ impl PluginChains {
                 service_id: plugin.service_id.clone(),
                 route_id: plugin.route_id.clone(),
                 consumer_id: plugin.consumer_id.clone(),
+                consumer_group_id: plugin.consumer_group_id.clone(),
                 plugin: instance,
             });
         }
@@ -436,62 +466,109 @@ impl PluginChains {
             return chain.clone();
         }
         let chain = Arc::new(PluginChain {
-            entries: resolve(
-                &self.entries,
-                route_id,
-                service_id,
-                None,
-                false,
-                &HashSet::new(),
-            ),
+            entries: self.pre_auth_entries(route_id, service_id),
         });
         self.pre_cache.lock().insert(key, chain.clone());
         chain
+    }
+
+    fn pre_auth_entries(
+        &self,
+        route_id: Option<&str>,
+        service_id: Option<&str>,
+    ) -> Vec<PluginEntry> {
+        let deferred = self.deferred_names(route_id, service_id);
+        let mut selected = resolve(
+            &self.entries,
+            route_id,
+            service_id,
+            None,
+            &[],
+            &HashSet::new(),
+        );
+        selected.retain(|entry| !deferred.contains(entry.name.as_str()));
+        selected
+    }
+
+    /// Plugin names with a consumer or consumer-group scoped instance for this
+    /// route/service are resolved after authentication instead, so that the
+    /// scoped instance can replace a less specific one as Kong does.
+    fn deferred_names(&self, route_id: Option<&str>, service_id: Option<&str>) -> HashSet<&str> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                !entry.auth
+                    && entry.has_post_auth_scope()
+                    && entry.route_service_matches(route_id, service_id)
+            })
+            .map(|entry| entry.name.as_str())
+            .collect()
     }
 
     fn post_auth(
         &self,
         route_id: Option<&str>,
         service_id: Option<&str>,
-        consumer_id: &str,
+        consumer_id: Option<&str>,
+        group_ids: &[String],
+        group_names: &[String],
     ) -> Arc<PluginChain> {
         if !self.has_any {
             return self.empty.clone();
         }
-        let key = (
-            route_id.unwrap_or_default().to_string(),
-            service_id.unwrap_or_default().to_string(),
-            consumer_id.to_string(),
-        );
+        let groups: Vec<ConsumerGroupRef<'_>> = group_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| ConsumerGroupRef {
+                id,
+                name: group_names.get(index).map(String::as_str).unwrap_or(id),
+            })
+            .collect();
+        let key = post_cache_key(route_id, service_id, consumer_id, &groups);
         if let Some(chain) = self.post_cache.lock().get(&key) {
             return chain.clone();
         }
 
         let mut seen = HashSet::new();
-        for entry in resolve(
-            &self.entries,
-            route_id,
-            service_id,
-            None,
-            false,
-            &HashSet::new(),
-        ) {
+        for entry in self.pre_auth_entries(route_id, service_id) {
             seen.insert(entry.name);
         }
 
-        let chain = Arc::new(PluginChain {
-            entries: resolve(
-                &self.entries,
-                route_id,
-                service_id,
-                Some(consumer_id),
-                true,
-                &seen,
-            ),
-        });
+        let entries = resolve(
+            &self.entries,
+            route_id,
+            service_id,
+            consumer_id,
+            &groups,
+            &seen,
+        )
+        .into_iter()
+        .filter(|entry| !entry.auth)
+        .collect();
+        let chain = Arc::new(PluginChain { entries });
         self.post_cache.lock().insert(key, chain.clone());
         chain
     }
+}
+
+fn post_cache_key(
+    route_id: Option<&str>,
+    service_id: Option<&str>,
+    consumer_id: Option<&str>,
+    groups: &[ConsumerGroupRef<'_>],
+) -> String {
+    let mut groups: Vec<String> = groups
+        .iter()
+        .map(|group| format!("{}={}", group.name, group.id))
+        .collect();
+    groups.sort();
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        route_id.unwrap_or_default(),
+        service_id.unwrap_or_default(),
+        consumer_id.unwrap_or_default(),
+        groups.join(",")
+    )
 }
 
 fn resolve(
@@ -499,25 +576,28 @@ fn resolve(
     route_id: Option<&str>,
     service_id: Option<&str>,
     consumer_id: Option<&str>,
-    consumer_scoped_only: bool,
+    groups: &[ConsumerGroupRef<'_>],
     exclude: &HashSet<String>,
 ) -> Vec<PluginEntry> {
     let mut best: HashMap<&str, (i32, &PluginEntry)> = HashMap::new();
     for entry in entries {
-        if consumer_scoped_only && !entry.has_consumer_scope() {
-            continue;
-        }
         if exclude.contains(&entry.name) {
             continue;
         }
-        let Some(score) = entry.applies(route_id, service_id, consumer_id) else {
+        let Some(score) = entry.applies(route_id, service_id, consumer_id, groups) else {
             continue;
         };
-        match best.get(entry.name.as_str()) {
-            Some((current, _)) if *current >= score => {}
-            _ => {
-                best.insert(entry.name.as_str(), (score, entry));
+        let replace = match best.get(entry.name.as_str()) {
+            None => true,
+            Some((current, current_entry)) => {
+                score > *current
+                    || (score == *current
+                        && (group_name(entry, groups), entry.id.as_str())
+                            < (group_name(current_entry, groups), current_entry.id.as_str()))
             }
+        };
+        if replace {
+            best.insert(entry.name.as_str(), (score, entry));
         }
     }
 
@@ -531,6 +611,15 @@ fn resolve(
     });
     apply_ordering(&mut selected);
     selected
+}
+
+fn group_name<'a>(entry: &PluginEntry, groups: &[ConsumerGroupRef<'a>]) -> &'a str {
+    entry
+        .consumer_group_id
+        .as_deref()
+        .and_then(|id| groups.iter().find(|group| group.id == id))
+        .map(|group| group.name)
+        .unwrap_or("")
 }
 
 /// Applies `ordering.before` / `ordering.after` constraints while keeping the
@@ -642,10 +731,12 @@ impl PluginRuntime {
         &self,
         route_id: Option<&str>,
         service_id: Option<&str>,
-        consumer_id: &str,
+        consumer_id: Option<&str>,
+        group_ids: &[String],
+        group_names: &[String],
     ) -> Arc<PluginChain> {
         let chains = self.chains.read().clone();
-        chains.post_auth(route_id, service_id, consumer_id)
+        chains.post_auth(route_id, service_id, consumer_id, group_ids, group_names)
     }
 
     pub fn has_plugins(&self) -> bool {

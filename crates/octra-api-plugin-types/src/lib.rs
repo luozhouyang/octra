@@ -152,6 +152,8 @@ pub struct ConsumerInfo {
     pub username: Option<String>,
     pub custom_id: Option<String>,
     pub acl_groups: Vec<String>,
+    pub group_ids: Vec<String>,
+    pub groups: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]

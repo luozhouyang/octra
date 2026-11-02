@@ -9,10 +9,11 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use octra_api_core::{
-    Acl, BasicauthCredential, Consumer, CreateAcl, CreateBasicauthCredential, CreateConsumer,
-    CreateJwtSecret, CreateKeyauthCredential, CreatePluginInstance, CreateRoute, CreateService,
-    CreateTarget, CreateUpstream, JwtSecret, KeyauthCredential, PluginInstance, Route, Service,
-    Target, UpdateAcl, UpdateBasicauthCredential, UpdateConsumer, UpdateJwtSecret,
+    Acl, BasicauthCredential, Consumer, ConsumerGroup, ConsumerGroupMember, CreateAcl,
+    CreateBasicauthCredential, CreateConsumer, CreateConsumerGroup, CreateJwtSecret,
+    CreateKeyauthCredential, CreatePluginInstance, CreateRoute, CreateService, CreateTarget,
+    CreateUpstream, JwtSecret, KeyauthCredential, PluginInstance, Route, Service, Target,
+    UpdateAcl, UpdateBasicauthCredential, UpdateConsumer, UpdateConsumerGroup, UpdateJwtSecret,
     UpdateKeyauthCredential, UpdatePluginInstance, UpdateRoute, UpdateService, UpdateTarget,
     UpdateUpstream, Upstream,
 };
@@ -62,6 +63,28 @@ pub fn router(state: ApiControlState) -> Router {
             get(get_consumer)
                 .put(update_consumer)
                 .delete(delete_consumer),
+        )
+        .route(
+            "/api/v1/consumers/{id}/consumer-groups",
+            get(list_consumer_groups_for_consumer),
+        )
+        .route(
+            "/api/v1/consumer-groups",
+            get(list_consumer_groups).post(create_consumer_group),
+        )
+        .route(
+            "/api/v1/consumer-groups/{id}",
+            get(get_consumer_group)
+                .put(update_consumer_group)
+                .delete(delete_consumer_group),
+        )
+        .route(
+            "/api/v1/consumer-groups/{id}/consumers",
+            get(list_consumer_group_consumers).post(add_consumer_group_consumer),
+        )
+        .route(
+            "/api/v1/consumer-groups/{id}/consumers/{consumer_id}",
+            axum::routing::delete(remove_consumer_group_consumer),
         )
         .route(
             "/api/v1/credentials",
@@ -216,10 +239,15 @@ pub async fn create_plugin_instance(
     let mut input = read_json(payload).await?;
     input.name = name.clone();
     input.validate()?;
-    if state.plugins.registry().factory(&name).is_none() {
-        return Err(ControlError::not_found(format!(
-            "plugin '{name}' not found"
-        )));
+    let factory = state
+        .plugins
+        .registry()
+        .factory(&name)
+        .ok_or_else(|| ControlError::not_found(format!("plugin '{name}' not found")))?;
+    if factory.auth() && (input.consumer_id.is_some() || input.consumer_group_id.is_some()) {
+        return Err(ControlError::bad_request(
+            "authentication plugins cannot be scoped to consumers or consumer groups",
+        ));
     }
     let config = input.config.clone().unwrap_or_else(|| json!({}));
     validate_plugin_config(&state, &name, &config).await?;
@@ -256,6 +284,27 @@ pub async fn update_plugin_instance(
         .get_plugin_instance(&id)
         .await?
         .ok_or_else(|| ControlError::not_found(format!("plugin instance '{id}' not found")))?;
+    let consumer_id = input
+        .consumer_id
+        .clone()
+        .unwrap_or_else(|| existing.consumer_id.clone());
+    let consumer_group_id = input
+        .consumer_group_id
+        .clone()
+        .unwrap_or_else(|| existing.consumer_group_id.clone());
+    if consumer_id.is_some() && consumer_group_id.is_some() {
+        return Err(ControlError::bad_request(
+            "plugin cannot be scoped to both consumer and consumer_group",
+        ));
+    }
+    if let Some(factory) = state.plugins.registry().factory(&existing.name)
+        && factory.auth()
+        && (consumer_id.is_some() || consumer_group_id.is_some())
+    {
+        return Err(ControlError::bad_request(
+            "authentication plugins cannot be scoped to consumers or consumer groups",
+        ));
+    }
     if let Some(config) = &input.config {
         validate_plugin_config(&state, &existing.name, config).await?;
     }
@@ -399,7 +448,7 @@ pub async fn delete_service(
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
     state.storage.api.delete_service(&id).await?;
-    reload_runtime(&state).await?;
+    reload_all(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -465,7 +514,7 @@ pub async fn delete_route(
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
     state.storage.api.delete_route(&id).await?;
-    reload_runtime(&state).await?;
+    reload_all(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -635,8 +684,147 @@ pub async fn delete_consumer(
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
     state.storage.api.delete_consumer(&id).await?;
-    reload_runtime(&state).await?;
+    reload_all(&state).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// Consumer groups
+
+pub async fn list_consumer_groups(
+    State(state): State<ApiControlState>,
+) -> ControlResult<Json<Vec<ConsumerGroup>>> {
+    Ok(Json(state.storage.api.list_consumer_groups().await?))
+}
+
+pub async fn get_consumer_group(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+) -> ControlResult<Json<ConsumerGroup>> {
+    Ok(Json(resolve_consumer_group(&state, &id).await?))
+}
+
+pub async fn create_consumer_group(
+    State(state): State<ApiControlState>,
+    payload: Result<Json<CreateConsumerGroup>, JsonRejection>,
+) -> ControlResult<(StatusCode, Json<ConsumerGroup>)> {
+    let input = read_json(payload).await?;
+    input.validate()?;
+    let group = state.storage.api.create_consumer_group(&input).await?;
+    reload_all(&state).await?;
+    Ok((StatusCode::CREATED, Json(group)))
+}
+
+pub async fn update_consumer_group(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<UpdateConsumerGroup>, JsonRejection>,
+) -> ControlResult<Json<ConsumerGroup>> {
+    let input = read_json(payload).await?;
+    input.validate()?;
+    let group = resolve_consumer_group(&state, &id).await?;
+    let group = state
+        .storage
+        .api
+        .update_consumer_group(&group.id, &input)
+        .await?;
+    reload_all(&state).await?;
+    Ok(Json(group))
+}
+
+pub async fn delete_consumer_group(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+) -> ControlResult<StatusCode> {
+    let group = resolve_consumer_group(&state, &id).await?;
+    state.storage.api.delete_consumer_group(&group.id).await?;
+    reload_all(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn list_consumer_group_consumers(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+) -> ControlResult<Json<Vec<Consumer>>> {
+    let group = resolve_consumer_group(&state, &id).await?;
+    Ok(Json(
+        state
+            .storage
+            .api
+            .list_consumer_group_members(&group.id)
+            .await?,
+    ))
+}
+
+pub async fn list_consumer_groups_for_consumer(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+) -> ControlResult<Json<Vec<ConsumerGroup>>> {
+    require_consumer(&state, &id).await?;
+    Ok(Json(
+        state
+            .storage
+            .api
+            .list_consumer_groups_for_consumer(&id)
+            .await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddConsumerGroupMember {
+    pub consumer_id: String,
+}
+
+pub async fn add_consumer_group_consumer(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<AddConsumerGroupMember>, JsonRejection>,
+) -> ControlResult<(StatusCode, Json<ConsumerGroupMember>)> {
+    let input = read_json(payload).await?;
+    if input.consumer_id.trim().is_empty() {
+        return Err(ControlError::bad_request("consumer_id must not be empty"));
+    }
+    let group = resolve_consumer_group(&state, &id).await?;
+    let member = state
+        .storage
+        .api
+        .add_consumer_group_member(&group.id, &input.consumer_id)
+        .await?;
+    reload_all(&state).await?;
+    Ok((StatusCode::CREATED, Json(member)))
+}
+
+pub async fn remove_consumer_group_consumer(
+    State(state): State<ApiControlState>,
+    Path((id, consumer_id)): Path<(String, String)>,
+) -> ControlResult<StatusCode> {
+    let group = resolve_consumer_group(&state, &id).await?;
+    state
+        .storage
+        .api
+        .remove_consumer_group_member(&group.id, &consumer_id)
+        .await?;
+    reload_all(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn resolve_consumer_group(
+    state: &ApiControlState,
+    id_or_name: &str,
+) -> ControlResult<ConsumerGroup> {
+    if let Some(group) = state.storage.api.get_consumer_group(id_or_name).await? {
+        return Ok(group);
+    }
+    state
+        .storage
+        .api
+        .get_consumer_group_by_name(id_or_name)
+        .await?
+        .ok_or_else(|| ControlError::not_found(format!("consumer group '{id_or_name}' not found")))
+}
+
+async fn reload_all(state: &ApiControlState) -> ControlResult<()> {
+    reload_runtime(state).await?;
+    reload_plugin_runtime(state).await
 }
 
 // Key-auth credentials

@@ -38,6 +38,8 @@ pub struct ConsumerRecord {
     pub username: Option<String>,
     pub custom_id: Option<String>,
     pub acl_groups: Vec<String>,
+    pub group_ids: Vec<String>,
+    pub groups: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,11 +132,13 @@ impl RuntimeSnapshot {
         let endpoints = compile_endpoints(&data.services, &data.upstreams, &data.targets);
 
         let acl_groups = group_acls(&data.acls);
+        let consumer_groups =
+            group_consumer_groups(&data.consumer_groups, &data.consumer_group_members);
         let mut consumers = HashMap::new();
         let mut consumer_by_username = HashMap::new();
         let mut consumer_by_custom_id = HashMap::new();
         for consumer in &data.consumers {
-            let record = consumer_record(consumer, &acl_groups);
+            let record = consumer_record(consumer, &acl_groups, &consumer_groups);
             if let Some(username) = &record.username {
                 consumer_by_username.insert(username.clone(), record.id.clone());
             }
@@ -301,13 +305,44 @@ fn compile_endpoints(
 fn consumer_record(
     consumer: &Consumer,
     acl_groups: &HashMap<String, Vec<String>>,
+    consumer_groups: &HashMap<String, Vec<(String, String)>>,
 ) -> ConsumerRecord {
+    let groups = consumer_groups
+        .get(&consumer.id)
+        .cloned()
+        .unwrap_or_default();
     ConsumerRecord {
         id: consumer.id.clone(),
         username: consumer.username.clone(),
         custom_id: consumer.custom_id.clone(),
         acl_groups: acl_groups.get(&consumer.id).cloned().unwrap_or_default(),
+        group_ids: groups.iter().map(|(id, _)| id.clone()).collect(),
+        groups: groups.iter().map(|(_, name)| name.clone()).collect(),
     }
+}
+
+fn group_consumer_groups(
+    groups: &[octra_api_core::ConsumerGroup],
+    members: &[octra_api_core::ConsumerGroupMember],
+) -> HashMap<String, Vec<(String, String)>> {
+    let names: HashMap<&str, &str> = groups
+        .iter()
+        .map(|group| (group.id.as_str(), group.name.as_str()))
+        .collect();
+    let mut memberships: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for member in members {
+        let Some(name) = names.get(member.consumer_group_id.as_str()) else {
+            continue;
+        };
+        memberships
+            .entry(member.consumer_id.clone())
+            .or_default()
+            .push((member.consumer_group_id.clone(), (*name).to_string()));
+    }
+    for groups in memberships.values_mut() {
+        groups.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+    }
+    memberships
 }
 
 fn group_acls(acls: &[Acl]) -> HashMap<String, Vec<String>> {
@@ -473,5 +508,55 @@ mod tests {
             snapshot.endpoint_for_service("svc-pool"),
             Some(ServiceEndpoint::Pool(_))
         ));
+    }
+
+    #[test]
+    fn snapshot_compiles_consumer_group_membership_sorted_by_name() {
+        let data = ApiRuntimeData {
+            consumers: vec![Consumer {
+                id: "c".into(),
+                username: Some("alice".into()),
+                custom_id: None,
+                tags: Vec::new(),
+                created_at: 0,
+                updated_at: 0,
+            }],
+            consumer_groups: vec![
+                octra_api_core::ConsumerGroup {
+                    id: "g2".into(),
+                    name: "operators".into(),
+                    tags: Vec::new(),
+                    created_at: 0,
+                    updated_at: 0,
+                },
+                octra_api_core::ConsumerGroup {
+                    id: "g1".into(),
+                    name: "admins".into(),
+                    tags: Vec::new(),
+                    created_at: 0,
+                    updated_at: 0,
+                },
+            ],
+            consumer_group_members: vec![
+                octra_api_core::ConsumerGroupMember {
+                    consumer_id: "c".into(),
+                    consumer_group_id: "g2".into(),
+                    created_at: 0,
+                },
+                octra_api_core::ConsumerGroupMember {
+                    consumer_id: "c".into(),
+                    consumer_group_id: "g1".into(),
+                    created_at: 0,
+                },
+            ],
+            ..Default::default()
+        };
+        let snapshot = RuntimeSnapshot::compile(data);
+        let record = snapshot.consumer("c").unwrap();
+        assert_eq!(
+            record.groups,
+            vec!["admins".to_string(), "operators".into()]
+        );
+        assert_eq!(record.group_ids, vec!["g1".to_string(), "g2".into()]);
     }
 }

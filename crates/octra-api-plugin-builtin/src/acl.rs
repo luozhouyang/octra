@@ -27,7 +27,8 @@ impl ApiGatewayPluginFactory for AclFactory {
                 "properties": {
                     "allow": { "type": "array", "items": { "type": "string" } },
                     "deny": { "type": "array", "items": { "type": "string" } },
-                    "hide_groups_header": { "type": "boolean" }
+                    "hide_groups_header": { "type": "boolean" },
+                    "include_consumer_groups": { "type": "boolean" }
                 }
             }),
         )
@@ -58,6 +59,7 @@ struct Config {
     allow: Vec<String>,
     deny: Vec<String>,
     hide_groups_header: bool,
+    include_consumer_groups: bool,
 }
 
 struct AclPlugin {
@@ -80,6 +82,11 @@ impl ApiGatewayPlugin for AclPlugin {
         };
 
         let mut groups = consumer.acl_groups.clone();
+        if self.config.include_consumer_groups {
+            groups.extend(consumer.groups.iter().cloned());
+        }
+        groups.sort();
+        groups.dedup();
 
         let denied = if !self.config.allow.is_empty() {
             !groups.iter().any(|group| self.config.allow.contains(group))
@@ -96,10 +103,8 @@ impl ApiGatewayPlugin for AclPlugin {
             )));
         }
 
-        if !self.config.hide_groups_header {
-            groups.sort();
-            groups.dedup();
-            if let Ok(value) = HeaderValue::from_str(&groups.join(",")) {
+        if !self.config.hide_groups_header && !groups.is_empty() {
+            if let Ok(value) = HeaderValue::from_str(&groups.join(", ")) {
                 cx.headers
                     .insert(HeaderName::from_static("x-consumer-groups"), value);
             }

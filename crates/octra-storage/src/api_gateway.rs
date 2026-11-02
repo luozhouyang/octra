@@ -4,10 +4,11 @@
 use std::collections::BTreeMap;
 
 use octra_api_core::{
-    Acl, BasicauthCredential, Consumer, CreateAcl, CreateBasicauthCredential, CreateConsumer,
-    CreateJwtSecret, CreateKeyauthCredential, CreatePluginInstance, CreateRoute, CreateService,
-    CreateTarget, CreateUpstream, JwtSecret, KeyauthCredential, LoadBalanceAlgorithm,
-    PluginInstance, Route, Service, Target, UpdateAcl, UpdateBasicauthCredential, UpdateConsumer,
+    Acl, BasicauthCredential, Consumer, ConsumerGroup, ConsumerGroupMember, CreateAcl,
+    CreateBasicauthCredential, CreateConsumer, CreateConsumerGroup, CreateJwtSecret,
+    CreateKeyauthCredential, CreatePluginInstance, CreateRoute, CreateService, CreateTarget,
+    CreateUpstream, JwtSecret, KeyauthCredential, LoadBalanceAlgorithm, PluginInstance, Route,
+    Service, Target, UpdateAcl, UpdateBasicauthCredential, UpdateConsumer, UpdateConsumerGroup,
     UpdateJwtSecret, UpdateKeyauthCredential, UpdatePluginInstance, UpdateRoute, UpdateService,
     UpdateTarget, UpdateUpstream, Upstream,
 };
@@ -25,7 +26,9 @@ const UPSTREAM_COLUMNS: &str = "id, name, algorithm, hash_on, hash_fallback, slo
 const TARGET_COLUMNS: &str = "id, upstream_id, target, weight, tags, created_at, updated_at";
 const CONSUMER_COLUMNS: &str = "id, username, custom_id, tags, created_at, updated_at";
 const PLUGIN_COLUMNS: &str = "id, name, instance_name, config, enabled, protocols, ordering, \
-     service_id, route_id, consumer_id, tags, created_at, updated_at";
+     service_id, route_id, consumer_id, consumer_group_id, tags, created_at, updated_at";
+const CONSUMER_GROUP_COLUMNS: &str = "id, name, tags, created_at, updated_at";
+const CONSUMER_GROUP_MEMBER_COLUMNS: &str = "consumer_id, consumer_group_id, created_at";
 const KEYAUTH_COLUMNS: &str = "id, consumer_id, key, ttl, tags, created_at";
 const BASICAUTH_COLUMNS: &str = "id, consumer_id, username, password, tags, created_at";
 const JWT_COLUMNS: &str =
@@ -44,6 +47,8 @@ pub struct ApiRuntimeData {
     pub upstreams: Vec<Upstream>,
     pub targets: Vec<Target>,
     pub consumers: Vec<Consumer>,
+    pub consumer_groups: Vec<ConsumerGroup>,
+    pub consumer_group_members: Vec<ConsumerGroupMember>,
     pub keyauth: Vec<KeyauthCredential>,
     pub basicauth: Vec<BasicauthCredential>,
     pub jwt: Vec<JwtSecret>,
@@ -249,6 +254,27 @@ fn map_consumer(row: &SqliteRow) -> Result<Consumer> {
     })
 }
 
+fn map_consumer_group(row: &SqliteRow) -> Result<ConsumerGroup> {
+    Ok(ConsumerGroup {
+        id: decode(row.try_get("id"), "consumer group")?,
+        name: decode(row.try_get("name"), "consumer group")?,
+        tags: decode_json_or_default(
+            row.try_get::<Option<String>, _>("tags").ok().flatten(),
+            "tags",
+        )?,
+        created_at: decode(row.try_get("created_at"), "consumer group")?,
+        updated_at: decode(row.try_get("updated_at"), "consumer group")?,
+    })
+}
+
+fn map_consumer_group_member(row: &SqliteRow) -> Result<ConsumerGroupMember> {
+    Ok(ConsumerGroupMember {
+        consumer_id: decode(row.try_get("consumer_id"), "consumer group member")?,
+        consumer_group_id: decode(row.try_get("consumer_group_id"), "consumer group member")?,
+        created_at: decode(row.try_get("created_at"), "consumer group member")?,
+    })
+}
+
 fn map_plugin(row: &SqliteRow) -> Result<PluginInstance> {
     Ok(PluginInstance {
         id: decode(row.try_get("id"), "plugin")?,
@@ -271,6 +297,7 @@ fn map_plugin(row: &SqliteRow) -> Result<PluginInstance> {
         service_id: decode(row.try_get("service_id"), "plugin")?,
         route_id: decode(row.try_get("route_id"), "plugin")?,
         consumer_id: decode(row.try_get("consumer_id"), "plugin")?,
+        consumer_group_id: decode(row.try_get("consumer_group_id"), "plugin")?,
         tags: decode_json_or_default(
             row.try_get::<Option<String>, _>("tags").ok().flatten(),
             "tags",
@@ -1005,6 +1032,189 @@ impl ApiStore {
         affected(result.rows_affected(), "consumer")
     }
 
+    // Consumer groups
+
+    pub async fn list_consumer_groups(&self) -> Result<Vec<ConsumerGroup>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {CONSUMER_GROUP_COLUMNS} FROM consumer_groups ORDER BY name ASC, id ASC"
+        ))
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "consumer groups"))?;
+        rows.iter().map(map_consumer_group).collect()
+    }
+
+    pub async fn get_consumer_group(&self, id: &str) -> Result<Option<ConsumerGroup>> {
+        let row = sqlx::query(&format!(
+            "SELECT {CONSUMER_GROUP_COLUMNS} FROM consumer_groups WHERE id = ?"
+        ))
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "consumer group"))?;
+        row.as_ref().map(map_consumer_group).transpose()
+    }
+
+    pub async fn get_consumer_group_by_name(&self, name: &str) -> Result<Option<ConsumerGroup>> {
+        let row = sqlx::query(&format!(
+            "SELECT {CONSUMER_GROUP_COLUMNS} FROM consumer_groups WHERE name = ?"
+        ))
+        .bind(name)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "consumer group"))?;
+        row.as_ref().map(map_consumer_group).transpose()
+    }
+
+    pub async fn create_consumer_group(
+        &self,
+        input: &CreateConsumerGroup,
+    ) -> Result<ConsumerGroup> {
+        let id = input.id.clone().unwrap_or_else(|| new_id("cg"));
+        sqlx::query(&format!(
+            "INSERT INTO consumer_groups (id, name, tags, created_at, updated_at) \
+             VALUES (?, ?, ?, {now}, {now})",
+            now = epoch_now()
+        ))
+        .bind(&id)
+        .bind(&input.name)
+        .bind(encode_json(&input.tags.clone().unwrap_or_default())?)
+        .execute(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "consumer group"))?;
+
+        self.get_consumer_group(&id)
+            .await?
+            .ok_or_else(|| Error::Storage("consumer group disappeared after insert".into()))
+    }
+
+    pub async fn update_consumer_group(
+        &self,
+        id: &str,
+        input: &UpdateConsumerGroup,
+    ) -> Result<ConsumerGroup> {
+        let result = sqlx::query(&format!(
+            "UPDATE consumer_groups SET \
+                name = COALESCE(?, name), \
+                tags = COALESCE(?, tags), \
+                updated_at = {now} \
+             WHERE id = ?",
+            now = epoch_now()
+        ))
+        .bind(&input.name)
+        .bind(input.tags.as_ref().map(encode_json).transpose()?)
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "consumer group"))?;
+        affected(result.rows_affected(), "consumer group")?;
+        self.get_consumer_group(id)
+            .await?
+            .ok_or_else(|| Error::Storage("not_found: consumer group not found".into()))
+    }
+
+    pub async fn delete_consumer_group(&self, id: &str) -> Result<()> {
+        let result = sqlx::query("DELETE FROM consumer_groups WHERE id = ?")
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(|e| map_db_error(e, "consumer group"))?;
+        affected(result.rows_affected(), "consumer group")
+    }
+
+    pub async fn list_consumer_group_members(
+        &self,
+        consumer_group_id: &str,
+    ) -> Result<Vec<Consumer>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {CONSUMER_COLUMNS} FROM consumers \
+             WHERE id IN (SELECT consumer_id FROM consumer_group_consumers \
+                          WHERE consumer_group_id = ?) \
+             ORDER BY username ASC, id ASC"
+        ))
+        .bind(consumer_group_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "consumer group members"))?;
+        rows.iter().map(map_consumer).collect()
+    }
+
+    pub async fn list_consumer_groups_for_consumer(
+        &self,
+        consumer_id: &str,
+    ) -> Result<Vec<ConsumerGroup>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {CONSUMER_GROUP_COLUMNS} FROM consumer_groups \
+             WHERE id IN (SELECT consumer_group_id FROM consumer_group_consumers \
+                          WHERE consumer_id = ?) \
+             ORDER BY name ASC, id ASC"
+        ))
+        .bind(consumer_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "consumer groups"))?;
+        rows.iter().map(map_consumer_group).collect()
+    }
+
+    pub async fn add_consumer_group_member(
+        &self,
+        consumer_group_id: &str,
+        consumer_id: &str,
+    ) -> Result<ConsumerGroupMember> {
+        self.ensure_parent("consumer_groups", consumer_group_id, "consumer group")
+            .await?;
+        self.ensure_parent("consumers", consumer_id, "consumer")
+            .await?;
+        sqlx::query(&format!(
+            "INSERT INTO consumer_group_consumers \
+                (consumer_id, consumer_group_id, created_at) VALUES (?, ?, {now})",
+            now = epoch_now()
+        ))
+        .bind(consumer_id)
+        .bind(consumer_group_id)
+        .execute(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "consumer group member"))?;
+
+        self.get_consumer_group_member(consumer_group_id, consumer_id)
+            .await?
+            .ok_or_else(|| Error::Storage("consumer group member disappeared after insert".into()))
+    }
+
+    pub async fn get_consumer_group_member(
+        &self,
+        consumer_group_id: &str,
+        consumer_id: &str,
+    ) -> Result<Option<ConsumerGroupMember>> {
+        let row = sqlx::query(&format!(
+            "SELECT {CONSUMER_GROUP_MEMBER_COLUMNS} FROM consumer_group_consumers \
+             WHERE consumer_group_id = ? AND consumer_id = ?"
+        ))
+        .bind(consumer_group_id)
+        .bind(consumer_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "consumer group member"))?;
+        row.as_ref().map(map_consumer_group_member).transpose()
+    }
+
+    pub async fn remove_consumer_group_member(
+        &self,
+        consumer_group_id: &str,
+        consumer_id: &str,
+    ) -> Result<()> {
+        let result = sqlx::query(
+            "DELETE FROM consumer_group_consumers \
+             WHERE consumer_group_id = ? AND consumer_id = ?",
+        )
+        .bind(consumer_group_id)
+        .bind(consumer_id)
+        .execute(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "consumer group member"))?;
+        affected(result.rows_affected(), "consumer group member")
+    }
+
     // Plugin instances
 
     pub async fn list_plugin_instances(&self) -> Result<Vec<PluginInstance>> {
@@ -1036,6 +1246,11 @@ impl ApiStore {
             ("services", input.service_id.as_deref(), "service"),
             ("routes", input.route_id.as_deref(), "route"),
             ("consumers", input.consumer_id.as_deref(), "consumer"),
+            (
+                "consumer_groups",
+                input.consumer_group_id.as_deref(),
+                "consumer group",
+            ),
         ] {
             if let Some(id) = id {
                 self.ensure_parent(table, id, entity).await?;
@@ -1049,8 +1264,9 @@ impl ApiStore {
             .unwrap_or_else(|| vec!["http".into(), "https".into()]);
         sqlx::query(&format!(
             "INSERT INTO plugin_instances (id, name, instance_name, config, enabled, protocols, \
-             ordering, service_id, route_id, consumer_id, tags, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now}, {now})",
+             ordering, service_id, route_id, consumer_id, consumer_group_id, tags, created_at, \
+             updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now}, {now})",
             now = epoch_now()
         ))
         .bind(&id)
@@ -1065,6 +1281,7 @@ impl ApiStore {
         .bind(&input.service_id)
         .bind(&input.route_id)
         .bind(&input.consumer_id)
+        .bind(&input.consumer_group_id)
         .bind(encode_json(&input.tags.clone().unwrap_or_default())?)
         .execute(self.pool())
         .await
@@ -1083,6 +1300,7 @@ impl ApiStore {
         let service_set = input.service_id.is_some();
         let route_set = input.route_id.is_some();
         let consumer_set = input.consumer_id.is_some();
+        let consumer_group_set = input.consumer_group_id.is_some();
 
         let result = sqlx::query(&format!(
             "UPDATE plugin_instances SET \
@@ -1095,6 +1313,7 @@ impl ApiStore {
                 service_id = CASE WHEN ? THEN ? ELSE service_id END, \
                 route_id = CASE WHEN ? THEN ? ELSE route_id END, \
                 consumer_id = CASE WHEN ? THEN ? ELSE consumer_id END, \
+                consumer_group_id = CASE WHEN ? THEN ? ELSE consumer_group_id END, \
                 tags = COALESCE(?, tags), \
                 updated_at = {now} \
              WHERE id = ?",
@@ -1112,6 +1331,8 @@ impl ApiStore {
         .bind(input.route_id.clone().flatten())
         .bind(consumer_set)
         .bind(input.consumer_id.clone().flatten())
+        .bind(consumer_group_set)
+        .bind(input.consumer_group_id.clone().flatten())
         .bind(input.tags.as_ref().map(encode_json).transpose()?)
         .bind(id)
         .execute(self.pool())
@@ -1473,6 +1694,24 @@ impl ApiStore {
         let targets = fetch_rows::<Target>(&mut tx, "targets", TARGET_COLUMNS, map_target).await?;
         let consumers =
             fetch_rows::<Consumer>(&mut tx, "consumers", CONSUMER_COLUMNS, map_consumer).await?;
+        let consumer_groups = fetch_rows::<ConsumerGroup>(
+            &mut tx,
+            "consumer_groups",
+            CONSUMER_GROUP_COLUMNS,
+            map_consumer_group,
+        )
+        .await?;
+        let member_rows = sqlx::query(&format!(
+            "SELECT {CONSUMER_GROUP_MEMBER_COLUMNS} FROM consumer_group_consumers \
+             ORDER BY consumer_group_id ASC, consumer_id ASC"
+        ))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| map_db_error(e, "consumer group members"))?;
+        let consumer_group_members = member_rows
+            .iter()
+            .map(map_consumer_group_member)
+            .collect::<Result<Vec<_>>>()?;
         let keyauth = fetch_rows::<KeyauthCredential>(
             &mut tx,
             "keyauth_credentials",
@@ -1497,6 +1736,7 @@ impl ApiStore {
                 (SELECT COUNT(*) FROM upstreams) AS upstreams,
                 (SELECT COUNT(*) FROM targets) AS targets,
                 (SELECT COUNT(*) FROM consumers) AS consumers,
+                (SELECT COUNT(*) FROM consumer_groups) AS consumer_groups,
                 (SELECT COUNT(*) FROM keyauth_credentials) AS credentials,
                 (SELECT COUNT(*) FROM plugin_instances) AS plugins",
         )
@@ -1514,6 +1754,8 @@ impl ApiStore {
             upstreams,
             targets,
             consumers,
+            consumer_groups,
+            consumer_group_members,
             keyauth,
             basicauth,
             jwt,
@@ -1773,5 +2015,117 @@ mod tests {
         assert_eq!(data.targets.len(), 1);
         assert_eq!(data.consumers.len(), 1);
         assert_eq!(data.keyauth.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn consumer_groups_and_membership() {
+        let storage = setup().await;
+        let group = storage
+            .api
+            .create_consumer_group(&CreateConsumerGroup {
+                name: "admins".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let consumer = storage
+            .api
+            .create_consumer(&CreateConsumer {
+                username: Some("alice".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .api
+                .get_consumer_group_by_name("admins")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            group.id
+        );
+
+        storage
+            .api
+            .add_consumer_group_member(&group.id, &consumer.id)
+            .await
+            .unwrap();
+        let duplicate = storage
+            .api
+            .add_consumer_group_member(&group.id, &consumer.id)
+            .await;
+        assert!(matches!(duplicate, Err(Error::Storage(ref m)) if m.contains("conflict")));
+
+        let members = storage
+            .api
+            .list_consumer_group_members(&group.id)
+            .await
+            .unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].username.as_deref(), Some("alice"));
+        assert_eq!(
+            storage
+                .api
+                .list_consumer_groups_for_consumer(&consumer.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let plugin = storage
+            .api
+            .create_plugin_instance(&CreatePluginInstance {
+                name: "rate-limiting".into(),
+                consumer_group_id: Some(group.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(plugin.consumer_group_id.as_deref(), Some(group.id.as_str()));
+
+        let data = storage.api.load_runtime_data().await.unwrap();
+        assert_eq!(data.consumer_groups.len(), 1);
+        assert_eq!(data.consumer_group_members.len(), 1);
+
+        storage
+            .api
+            .remove_consumer_group_member(&group.id, &consumer.id)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .api
+                .list_consumer_group_members(&group.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let renamed = storage
+            .api
+            .update_consumer_group(
+                &group.id,
+                &UpdateConsumerGroup {
+                    name: Some("operators".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed.name, "operators");
+
+        storage.api.delete_consumer_group(&group.id).await.unwrap();
+        assert!(
+            storage
+                .api
+                .list_plugin_instances()
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

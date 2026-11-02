@@ -227,71 +227,72 @@ pub async fn proxy(
         .consumer
         .as_ref()
         .map(|consumer| consumer.id.clone());
+    let (group_ids, groups) = auth_state
+        .consumer
+        .as_ref()
+        .map(|consumer| (consumer.group_ids.as_slice(), consumer.groups.as_slice()))
+        .unwrap_or_default();
+    let post_chain = state.plugins.post_auth_chain(
+        Some(&route_id),
+        service_id.as_deref(),
+        consumer_id.as_deref(),
+        group_ids,
+        groups,
+    );
 
-    let post_chain = consumer_id
-        .as_deref()
-        .map(|consumer_id| {
-            state
-                .plugins
-                .post_auth_chain(Some(&route_id), service_id.as_deref(), consumer_id)
-        })
-        .unwrap_or_else(|| Arc::new(PluginChain::default()));
-
-    if let Some(consumer_id) = consumer_id.as_deref() {
-        let credential_id = auth_state.credential.as_ref().map(|c| c.id.clone());
-        let mut post_cx = RequestContext {
-            request_id: &request_id,
-            state: &mut auth_state,
-            matched_path: &matched_path,
-            method: &parts.method,
-            uri: &mut parts.uri,
-            headers: &mut parts.headers,
-            client_ip: Some(peer.ip()),
-            consumer_id: Some(consumer_id),
-            credential_id: credential_id.as_deref(),
-            route,
-            service,
-        };
-        match post_chain.on_request(&mut post_cx).await {
-            Ok(None) => {}
-            Ok(Some(response)) => {
-                let elapsed = started.elapsed();
-                state.metrics.record(response.status().as_u16(), elapsed, 0);
-                let request_headers = parts.headers.clone();
-                let response = match apply_response_plugins(
-                    &[pre_chain.as_ref(), post_chain.as_ref()],
-                    &request_id,
-                    &mut auth_state,
-                    &request_headers,
-                    Some(consumer_id),
-                    route,
-                    service,
-                    "",
-                    response,
-                )
-                .await
-                {
-                    Ok(response) => response,
-                    Err(error) => return failed_plugin(&state, &subject, started, error),
-                };
-                return complete(
-                    &state,
-                    &pre_chain,
-                    &post_chain,
-                    &subject,
-                    &mut auth_state,
-                    Finish {
-                        latency: elapsed,
-                        target: None,
-                        error: None,
-                    },
-                    response,
-                )
-                .await;
-            }
-            Err(error) => {
-                return failed_plugin(&state, &subject, started, error);
-            }
+    let credential_id = auth_state.credential.as_ref().map(|c| c.id.clone());
+    let mut post_cx = RequestContext {
+        request_id: &request_id,
+        state: &mut auth_state,
+        matched_path: &matched_path,
+        method: &parts.method,
+        uri: &mut parts.uri,
+        headers: &mut parts.headers,
+        client_ip: Some(peer.ip()),
+        consumer_id: consumer_id.as_deref(),
+        credential_id: credential_id.as_deref(),
+        route,
+        service,
+    };
+    match post_chain.on_request(&mut post_cx).await {
+        Ok(None) => {}
+        Ok(Some(response)) => {
+            let elapsed = started.elapsed();
+            state.metrics.record(response.status().as_u16(), elapsed, 0);
+            let request_headers = parts.headers.clone();
+            let response = match apply_response_plugins(
+                &[pre_chain.as_ref(), post_chain.as_ref()],
+                &request_id,
+                &mut auth_state,
+                &request_headers,
+                consumer_id.as_deref(),
+                route,
+                service,
+                "",
+                response,
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => return failed_plugin(&state, &subject, started, error),
+            };
+            return complete(
+                &state,
+                &pre_chain,
+                &post_chain,
+                &subject,
+                &mut auth_state,
+                Finish {
+                    latency: elapsed,
+                    target: None,
+                    error: None,
+                },
+                response,
+            )
+            .await;
+        }
+        Err(error) => {
+            return failed_plugin(&state, &subject, started, error);
         }
     }
 
@@ -714,6 +715,8 @@ fn build_gateway_state(auth: AuthSnapshot) -> GatewayState {
                     username: consumer.username,
                     custom_id: consumer.custom_id,
                     acl_groups: consumer.acl_groups,
+                    group_ids: consumer.group_ids,
+                    groups: consumer.groups,
                 },
             )
         })
