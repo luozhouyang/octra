@@ -98,7 +98,7 @@ Environment variables: `OCTRA_HOME`, `OCTRA_CONTROL_BIND`, `OCTRA_GATEWAY_BIND`,
 - WASM plugin runtime (the native plugin system and built-ins are implemented).
 - OS Keychain integration for secrets.
 - Request/response body transformation.
-- Separate telemetry database and retention workers.
+- Separate telemetry database (hourly usage rollups and retention workers are implemented).
 - Cross-platform packaging, signing, and notarization.
 
 ## Security boundaries

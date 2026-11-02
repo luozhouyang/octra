@@ -61,6 +61,21 @@ pub struct McpConfig {
 #[serde(default)]
 pub struct StorageConfig {
     pub path: String,
+    pub retention: RetentionConfig,
+}
+
+/// Append-only data retention. A window of `0` keeps rows forever.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetentionConfig {
+    pub enabled: bool,
+    pub llm_usage_days: u32,
+    pub request_logs_days: u32,
+    pub mcp_invocations_days: u32,
+    pub audit_logs_days: u32,
+    pub usage_rollup_days: u32,
+    pub interval_secs: u64,
+    pub batch_size: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +137,22 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             path: "octra.db".to_string(),
+            retention: RetentionConfig::default(),
+        }
+    }
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            llm_usage_days: 90,
+            request_logs_days: 30,
+            mcp_invocations_days: 90,
+            audit_logs_days: 365,
+            usage_rollup_days: 400,
+            interval_secs: 3_600,
+            batch_size: 5_000,
         }
     }
 }
@@ -280,6 +311,33 @@ fn validate(config: &OctraConfig) -> Result<()> {
         return Err(Error::Config("storage.path must not be empty".into()));
     }
 
+    let retention = &config.storage.retention;
+    if !(60..=86_400).contains(&retention.interval_secs) {
+        return Err(Error::Config(
+            "storage.retention.interval_secs must be between 60 and 86400".into(),
+        ));
+    }
+    if !(1..=100_000).contains(&retention.batch_size) {
+        return Err(Error::Config(
+            "storage.retention.batch_size must be between 1 and 100000".into(),
+        ));
+    }
+    if retention.llm_usage_days != 0 && retention.llm_usage_days < 32 {
+        return Err(Error::Config(
+            "storage.retention.llm_usage_days must be 0 or at least 32 to cover a monthly virtual key limit"
+                .into(),
+        ));
+    }
+    if retention.usage_rollup_days != 0
+        && retention.llm_usage_days != 0
+        && retention.usage_rollup_days < retention.llm_usage_days
+    {
+        return Err(Error::Config(
+            "storage.retention.usage_rollup_days must be 0 or no shorter than llm_usage_days"
+                .into(),
+        ));
+    }
+
     if config.logging.level.trim().is_empty() {
         return Err(Error::Config("logging.level must not be empty".into()));
     }
@@ -314,6 +372,26 @@ mod tests {
     fn rejects_invalid_gateway_bind() {
         let mut config = OctraConfig::default();
         config.gateway.listen_bind = "not-an-address".into();
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_retention_windows() {
+        let mut config = OctraConfig::default();
+        config.storage.retention.interval_secs = 0;
+        assert!(validate(&config).is_err());
+
+        let mut config = OctraConfig::default();
+        config.storage.retention.batch_size = 0;
+        assert!(validate(&config).is_err());
+
+        let mut config = OctraConfig::default();
+        config.storage.retention.llm_usage_days = 1;
+        assert!(validate(&config).is_err());
+
+        let mut config = OctraConfig::default();
+        config.storage.retention.llm_usage_days = 90;
+        config.storage.retention.usage_rollup_days = 30;
         assert!(validate(&config).is_err());
     }
 
