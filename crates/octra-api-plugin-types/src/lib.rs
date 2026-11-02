@@ -130,6 +130,17 @@ pub enum Capability {
     KeyValue,
     Network,
     Secret,
+    StorageEntities,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
 }
 
 /// Plugin metadata stored in the catalog and carried by every instance.
@@ -225,10 +236,46 @@ pub struct PluginManifest {
     pub capabilities: Vec<Capability>,
     #[serde(default)]
     pub config_schema: Option<Value>,
+    #[serde(default = "default_api_version")]
+    pub api_version: String,
+    #[serde(default)]
+    pub entities: Vec<EntitySpec>,
+    #[serde(default)]
+    pub migrations: Vec<MigrationSpec>,
 }
 
 fn default_timeout_ms() -> u64 {
     250
+}
+
+fn default_api_version() -> String {
+    "1".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationSpec {
+    pub version: String,
+    pub file: String,
+    #[serde(default)]
+    pub destructive: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntitySpec {
+    pub name: String,
+    pub primary_key: Vec<String>,
+    pub fields: Vec<EntityFieldSpec>,
+    #[serde(default)]
+    pub unique: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityFieldSpec {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
+    #[serde(default)]
+    pub nullable: bool,
 }
 
 impl PluginManifest {
@@ -266,6 +313,18 @@ impl PluginError {
             fail_policy: FailPolicy::Closed,
         }
     }
+}
+
+#[derive(Debug, Error)]
+pub enum StorageError {
+    #[error("plugin storage is unavailable")]
+    Unavailable,
+    #[error("entity '{0}' is not declared by this plugin")]
+    NotDeclared(String),
+    #[error("invalid storage request: {0}")]
+    InvalidRequest(String),
+    #[error("storage backend error: {0}")]
+    Backend(String),
 }
 
 pub enum PluginAction {
@@ -422,12 +481,92 @@ pub trait ApiGatewayPlugin: Send + Sync {
     async fn on_log(&self, _cx: &LogContext<'_>) {}
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityQuery {
+    #[serde(default)]
+    pub filters: Vec<EntityFilter>,
+    #[serde(default)]
+    pub order_by: Vec<EntityOrder>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityFilter {
+    pub field: String,
+    pub op: FilterOp,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterOp {
+    Eq,
+    Ne,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    In,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityOrder {
+    pub field: String,
+    #[serde(default)]
+    pub descending: bool,
+}
+
+/// Host-side view of one configured plugin instance. Built-in factories ignore
+/// it; WASM factories use it for storage, logging, and capability checks.
+pub trait PluginHost: Send + Sync {
+    fn plugin_name(&self) -> &str;
+    fn plugin_instance_id(&self) -> &str;
+    fn capabilities(&self) -> &[Capability];
+    fn storage(&self) -> &dyn PluginStorage;
+    fn log(&self, level: LogLevel, message: &str);
+}
+
+/// Narrow, synchronous storage API exposed to plugins. Entity operations only
+/// accept names declared by the plugin manifest; the host generates SQL.
+pub trait PluginStorage: Send + Sync {
+    fn kv_get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError>;
+    fn kv_put(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), StorageError>;
+    fn kv_delete(&self, key: &str) -> Result<bool, StorageError>;
+    fn kv_incr(&self, key: &str, delta: i64, ttl: Option<Duration>) -> Result<i64, StorageError>;
+
+    fn get(&self, entity: &str, key: &Value) -> Result<Option<Value>, StorageError>;
+    fn upsert(&self, entity: &str, values: &Value) -> Result<(), StorageError>;
+    fn increment(
+        &self,
+        entity: &str,
+        key: &Value,
+        field: &str,
+        delta: i64,
+        extra: Option<&Value>,
+    ) -> Result<i64, StorageError>;
+    fn delete(&self, entity: &str, key: &Value) -> Result<bool, StorageError>;
+    fn query(&self, entity: &str, query: &EntityQuery) -> Result<Vec<Value>, StorageError>;
+}
+
 /// Creates configured plugin instances. A factory validates the JSON config
 /// once at chain-compile time, so the hot path never parses configuration.
 pub trait ApiGatewayPluginFactory: Send + Sync {
     fn manifest(&self) -> PluginManifest;
 
     fn create(&self, id: &str, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError>;
+
+    fn create_with_host(
+        &self,
+        host: Arc<dyn PluginHost>,
+        id: &str,
+        config: Value,
+    ) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
+        let _ = host;
+        self.create(id, config)
+    }
 
     fn phases(&self) -> Vec<PluginPhase> {
         vec![PluginPhase::Request, PluginPhase::Log]

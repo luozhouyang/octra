@@ -16,6 +16,9 @@ pub use llm::{
 };
 pub use logs::{AuditLog, NewRequestLog, RequestLog};
 pub use maintenance::{PruneReport, RetentionPolicy};
+pub use plugins::{
+    PluginArtifactInput, PluginArtifactRecord, PluginConfigRecord, PluginData, PluginRecord,
+};
 
 use std::path::Path;
 use std::time::Duration;

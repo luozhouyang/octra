@@ -17,7 +17,7 @@ pub async fn status(State(state): State<ApiControlState>) -> Json<Value> {
         },
         "configuration": {
             "database": "sqlite",
-            "plugins": state.plugins.registry().manifests().len(),
+            "plugins": state.plugins.manifests().len(),
         },
     }))
 }

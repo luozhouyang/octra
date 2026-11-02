@@ -1,0 +1,42 @@
+{
+  "api_version": "1",
+  "name": "consumer-quota",
+  "version": "1.0.0",
+  "kind": "api",
+  "runtime": "wasm",
+  "priority": 1200,
+  "description": "Per-consumer fixed-window quota backed by plugin-owned SQLite storage",
+  "timeout_ms": 50,
+  "fail_policy": "closed",
+  "capabilities": ["request_headers", "log", "storage_entities"],
+  "entities": [
+    {
+      "name": "quota_usage",
+      "primary_key": ["consumer_id", "window_start"],
+      "fields": [
+        { "name": "consumer_id", "type": "string" },
+        { "name": "window_start", "type": "integer" },
+        { "name": "count", "type": "integer" },
+        { "name": "updated_at", "type": "integer" }
+      ]
+    }
+  ],
+  "migrations": [
+    { "version": "000_base", "file": "migrations/000_base.sql" }
+  ],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "limit": { "type": "integer", "minimum": 1, "default": 1000 },
+      "window_seconds": { "type": "integer", "minimum": 1, "default": 60 },
+      "anonymous_limit": { "type": "integer", "minimum": 0 },
+      "reject_status": {
+        "type": "integer",
+        "minimum": 400,
+        "maximum": 599,
+        "default": 429
+      }
+    },
+    "required": ["limit", "window_seconds"]
+  }
+}

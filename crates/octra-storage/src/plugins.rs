@@ -1,12 +1,13 @@
 //! Plugin catalog and per-scope configuration repositories.
 
-use octra_api_plugin_types::{PluginManifest, Scope};
+use octra_api_plugin_types::{Capability, PluginManifest, Scope};
 use octra_core::{Error, Result};
+use serde::Serialize;
 use sqlx::Row;
 
 use super::llm::LlmStore;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PluginRecord {
     pub id: String,
     pub name: String,
@@ -20,7 +21,37 @@ pub struct PluginRecord {
     pub config_schema_json: String,
     pub artifact_path: Option<String>,
     pub artifact_hash: Option<String>,
+    pub source: String,
+    pub artifact_id: Option<String>,
+    pub storage_path: Option<String>,
+    pub approved_capabilities: Vec<Capability>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PluginArtifactRecord {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub api_version: String,
+    pub hash: String,
+    pub signature: Option<String>,
+    pub manifest_json: String,
+    pub path: String,
+    pub size_bytes: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginArtifactInput {
+    pub name: String,
+    pub version: String,
+    pub api_version: String,
+    pub hash: String,
+    pub signature: Option<String>,
+    pub manifest_json: String,
+    pub path: String,
+    pub size_bytes: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,10 +73,14 @@ pub struct PluginData {
 }
 
 const PLUGIN_COLUMNS: &str = "id, name, version, kind, runtime_type, enabled, priority, description, \
-     manifest_json, config_schema_json, artifact_path, artifact_hash, updated_at";
+     manifest_json, config_schema_json, artifact_path, artifact_hash, source, artifact_id, \
+     storage_path, approved_capabilities_json, updated_at";
 
 const CONFIG_COLUMNS: &str =
     "id, plugin_id, scope, scope_id, enabled, config, created_at, updated_at";
+
+const ARTIFACT_COLUMNS: &str =
+    "id, name, version, api_version, hash, signature, manifest_json, path, size_bytes, created_at";
 
 fn plugin_from_row(row: &sqlx::sqlite::SqliteRow) -> PluginRecord {
     PluginRecord {
@@ -61,7 +96,29 @@ fn plugin_from_row(row: &sqlx::sqlite::SqliteRow) -> PluginRecord {
         config_schema_json: row.get("config_schema_json"),
         artifact_path: row.get("artifact_path"),
         artifact_hash: row.get("artifact_hash"),
+        source: row.get("source"),
+        artifact_id: row.get("artifact_id"),
+        storage_path: row.get("storage_path"),
+        approved_capabilities: serde_json::from_str(
+            &row.get::<String, _>("approved_capabilities_json"),
+        )
+        .unwrap_or_default(),
         updated_at: row.get("updated_at"),
+    }
+}
+
+fn artifact_from_row(row: &sqlx::sqlite::SqliteRow) -> PluginArtifactRecord {
+    PluginArtifactRecord {
+        id: row.get("id"),
+        name: row.get("name"),
+        version: row.get("version"),
+        api_version: row.get("api_version"),
+        hash: row.get("hash"),
+        signature: row.get("signature"),
+        manifest_json: row.get("manifest_json"),
+        path: row.get("path"),
+        size_bytes: row.get("size_bytes"),
+        created_at: row.get("created_at"),
     }
 }
 
@@ -167,6 +224,200 @@ impl LlmStore {
         .await
         .map_err(|error| map_error("cannot load plugin", error))?;
         Ok(row.as_ref().map(plugin_from_row))
+    }
+
+    pub async fn create_plugin_artifact(
+        &self,
+        input: &PluginArtifactInput,
+    ) -> Result<PluginArtifactRecord> {
+        let id = format!("par_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO plugin_artifacts
+                (id, name, version, api_version, hash, signature, manifest_json, path, size_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&id)
+        .bind(&input.name)
+        .bind(&input.version)
+        .bind(&input.api_version)
+        .bind(&input.hash)
+        .bind(&input.signature)
+        .bind(&input.manifest_json)
+        .bind(&input.path)
+        .bind(input.size_bytes)
+        .execute(self.pool())
+        .await
+        .map_err(|error| map_error("plugin artifact already exists for this version", error))?;
+
+        self.get_plugin_artifact(&id)
+            .await?
+            .ok_or_else(|| Error::Storage("plugin artifact vanished after insert".to_string()))
+    }
+
+    pub async fn get_plugin_artifact(&self, id: &str) -> Result<Option<PluginArtifactRecord>> {
+        let row = sqlx::query(&format!(
+            "SELECT {ARTIFACT_COLUMNS} FROM plugin_artifacts WHERE id = ?1"
+        ))
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| map_error("cannot load plugin artifact", error))?;
+        Ok(row.as_ref().map(artifact_from_row))
+    }
+
+    pub async fn get_plugin_artifact_by_name_version(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<Option<PluginArtifactRecord>> {
+        let row = sqlx::query(&format!(
+            "SELECT {ARTIFACT_COLUMNS} FROM plugin_artifacts WHERE name = ?1 AND version = ?2"
+        ))
+        .bind(name)
+        .bind(version)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| map_error("cannot load plugin artifact", error))?;
+        Ok(row.as_ref().map(artifact_from_row))
+    }
+
+    pub async fn list_plugin_artifacts(
+        &self,
+        name: Option<&str>,
+    ) -> Result<Vec<PluginArtifactRecord>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {ARTIFACT_COLUMNS} FROM plugin_artifacts
+              WHERE (?1 IS NULL OR name = ?1)
+              ORDER BY name ASC, created_at DESC"
+        ))
+        .bind(name)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|error| map_error("cannot list plugin artifacts", error))?;
+        Ok(rows.iter().map(artifact_from_row).collect())
+    }
+
+    pub async fn delete_plugin_artifact(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM plugin_artifacts WHERE id = ?1")
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(|error| map_error("cannot delete plugin artifact", error))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Writes the installed WASM plugin catalog row. `enabled` is preserved on
+    /// conflict so an upgrade does not re-enable a disabled plugin.
+    pub async fn upsert_installed_plugin(
+        &self,
+        manifest: &PluginManifest,
+        artifact: &PluginArtifactRecord,
+        storage_path: &str,
+        approved_capabilities: &[Capability],
+    ) -> Result<PluginRecord> {
+        let id = format!("plg_{}", manifest.name);
+        let manifest_json = serde_json::to_string(manifest).map_err(|error| {
+            Error::Storage(format!("cannot serialize plugin manifest: {error}"))
+        })?;
+        let schema_json = manifest
+            .config_schema
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| Error::Storage(format!("cannot serialize plugin schema: {error}")))?
+            .unwrap_or_else(|| "{}".to_string());
+        let capabilities_json = serde_json::to_string(approved_capabilities)
+            .map_err(|error| Error::Storage(format!("cannot serialize capabilities: {error}")))?;
+
+        sqlx::query(
+            "INSERT INTO plugins
+                (id, name, version, kind, enabled, runtime_type, priority, description,
+                 manifest_json, config_schema_json, artifact_path, artifact_hash,
+                 source, artifact_id, storage_path, approved_capabilities_json)
+             VALUES (?1, ?2, ?3, ?4, 1, 'wasm', ?5, ?6, ?7, ?8, ?9, ?10, 'wasm', ?11, ?12, ?13)
+             ON CONFLICT(name) DO UPDATE SET
+                version = excluded.version,
+                kind = excluded.kind,
+                runtime_type = excluded.runtime_type,
+                priority = excluded.priority,
+                description = excluded.description,
+                manifest_json = excluded.manifest_json,
+                config_schema_json = excluded.config_schema_json,
+                artifact_path = excluded.artifact_path,
+                artifact_hash = excluded.artifact_hash,
+                source = 'wasm',
+                artifact_id = excluded.artifact_id,
+                storage_path = excluded.storage_path,
+                approved_capabilities_json = excluded.approved_capabilities_json,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        )
+        .bind(&id)
+        .bind(&manifest.name)
+        .bind(&manifest.version)
+        .bind(manifest.kind.as_str())
+        .bind(i64::from(manifest.priority))
+        .bind(&manifest.description)
+        .bind(manifest_json)
+        .bind(schema_json)
+        .bind(&artifact.path)
+        .bind(&artifact.hash)
+        .bind(&artifact.id)
+        .bind(storage_path)
+        .bind(capabilities_json)
+        .execute(self.pool())
+        .await
+        .map_err(|error| map_error("cannot upsert installed plugin", error))?;
+
+        self.get_plugin(&id)
+            .await?
+            .ok_or_else(|| Error::Storage("installed plugin vanished after upsert".to_string()))
+    }
+
+    /// Removes a WASM plugin catalog row; `plugin_instances` cascade with it.
+    pub async fn delete_installed_plugin(&self, name: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM plugins WHERE name = ?1 AND source = 'wasm' AND runtime_type = 'wasm'",
+        )
+        .bind(name)
+        .execute(self.pool())
+        .await
+        .map_err(|error| map_error("cannot delete installed plugin", error))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn list_installed_wasm_plugins(&self) -> Result<Vec<PluginRecord>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {PLUGIN_COLUMNS} FROM plugins
+              WHERE source = 'wasm' AND runtime_type = 'wasm' AND enabled = 1
+              ORDER BY name ASC"
+        ))
+        .fetch_all(self.pool())
+        .await
+        .map_err(|error| map_error("cannot list installed wasm plugins", error))?;
+        Ok(rows.iter().map(plugin_from_row).collect())
+    }
+
+    pub async fn set_plugin_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<Option<PluginRecord>> {
+        let result = sqlx::query(
+            "UPDATE plugins
+                SET enabled = ?2,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(i64::from(enabled))
+        .execute(self.pool())
+        .await
+        .map_err(|error| map_error("cannot update plugin", error))?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_plugin(id).await
     }
 
     pub async fn update_plugin_flags(
@@ -382,5 +633,120 @@ impl LlmStore {
         .await
         .map_err(|error| Error::Storage(format!("cannot persist plugin state: {error}")))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Storage;
+    use octra_api_plugin_types::{FailPolicy, PluginKind, PluginRuntimeKind};
+
+    fn manifest() -> PluginManifest {
+        PluginManifest {
+            name: "demo-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            kind: PluginKind::Api,
+            runtime: PluginRuntimeKind::Wasm,
+            priority: 100,
+            description: "demo".to_string(),
+            timeout_ms: 50,
+            fail_policy: FailPolicy::Closed,
+            capabilities: vec![Capability::StorageEntities],
+            config_schema: None,
+            api_version: "1".to_string(),
+            entities: Vec::new(),
+            migrations: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn artifacts_and_installed_plugins_round_trip() {
+        let storage = Storage::connect_in_memory().await.unwrap();
+        let input = PluginArtifactInput {
+            name: "demo-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            api_version: "1".to_string(),
+            hash: "abc".to_string(),
+            signature: None,
+            manifest_json: "{}".to_string(),
+            path: "/tmp/demo".to_string(),
+            size_bytes: 10,
+        };
+        let artifact = storage.llm.create_plugin_artifact(&input).await.unwrap();
+        assert!(
+            storage
+                .llm
+                .get_plugin_artifact(&artifact.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(storage.llm.create_plugin_artifact(&input).await.is_err());
+
+        let manifest = manifest();
+        let record = storage
+            .llm
+            .upsert_installed_plugin(
+                &manifest,
+                &artifact,
+                "/tmp/data",
+                &[Capability::StorageEntities],
+            )
+            .await
+            .unwrap();
+        assert_eq!(record.source, "wasm");
+        assert_eq!(
+            record.approved_capabilities,
+            vec![Capability::StorageEntities]
+        );
+        assert_eq!(
+            storage
+                .llm
+                .list_installed_wasm_plugins()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let record = storage
+            .llm
+            .set_plugin_enabled(&record.id, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!record.enabled);
+        assert!(
+            storage
+                .llm
+                .list_installed_wasm_plugins()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(
+            storage
+                .llm
+                .delete_plugin_artifact(&artifact.id)
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .llm
+                .delete_installed_plugin("demo-plugin")
+                .await
+                .unwrap()
+        );
+        assert!(
+            storage
+                .llm
+                .get_plugin_by_name("demo-plugin")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

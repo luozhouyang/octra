@@ -8,6 +8,7 @@ mod consumer_groups;
 mod consumers;
 mod credentials;
 mod error;
+mod installed_plugins;
 mod list;
 mod operations;
 mod plugins;
@@ -147,6 +148,43 @@ pub fn router() -> Router<ApiControlState> {
         )
         .route("/admin/plugins", get(plugins::list).post(plugins::create))
         .route("/admin/plugins/enabled", get(plugins::enabled))
+        .route(
+            "/admin/plugin-artifacts",
+            get(installed_plugins::list_artifacts).post(installed_plugins::upload_artifact),
+        )
+        .route(
+            "/admin/plugin-artifacts/{id}",
+            get(installed_plugins::get_artifact),
+        )
+        .route("/admin/plugin-metrics", get(installed_plugins::all_metrics))
+        .route(
+            "/admin/plugins/{name}/health",
+            get(installed_plugins::health),
+        )
+        .route(
+            "/admin/plugins/{name}/metrics",
+            get(installed_plugins::metrics),
+        )
+        .route(
+            "/admin/plugins/{name}/install",
+            post(installed_plugins::install),
+        )
+        .route(
+            "/admin/plugins/{name}/upgrade",
+            post(installed_plugins::upgrade),
+        )
+        .route(
+            "/admin/plugins/{name}/uninstall",
+            post(installed_plugins::uninstall),
+        )
+        .route(
+            "/admin/plugins/{name}/migrations",
+            get(installed_plugins::migrations),
+        )
+        .route(
+            "/admin/plugins/{name}/entities/{entity}",
+            get(installed_plugins::entity_rows),
+        )
         .route(
             "/admin/plugins/{id}",
             get(plugins::get)

@@ -19,6 +19,7 @@ pub struct OctraConfig {
     pub mcp: McpConfig,
     pub storage: StorageConfig,
     pub logging: LoggingConfig,
+    pub plugins: PluginsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +84,28 @@ pub struct RetentionConfig {
 pub struct LoggingConfig {
     pub level: String,
     pub format: LogFormat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsConfig {
+    /// Per-plugin SQLite databases.
+    pub dir: String,
+    /// Installed artifact directories.
+    pub artifact_dir: String,
+    pub wasm_enabled: bool,
+    pub strict_boot: bool,
+    /// Accept artifacts without a signature when `trusted_keys` is set.
+    pub allow_unsigned: bool,
+    /// Base64-encoded Ed25519 public keys. Empty disables signature checks.
+    pub trusted_keys: Vec<String>,
+    pub max_artifact_bytes: usize,
+    /// Per-plugin database cap; zero leaves databases unbounded.
+    pub max_plugin_db_bytes: u64,
+    pub max_fuel: u64,
+    pub max_memory_bytes: usize,
+    pub max_inflight: usize,
+    pub default_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -166,6 +189,25 @@ impl Default for LoggingConfig {
     }
 }
 
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self {
+            dir: "plugins".to_string(),
+            artifact_dir: "plugin-artifacts".to_string(),
+            wasm_enabled: true,
+            strict_boot: false,
+            allow_unsigned: false,
+            trusted_keys: Vec::new(),
+            max_artifact_bytes: 16 * 1024 * 1024,
+            max_plugin_db_bytes: 64 * 1024 * 1024,
+            max_fuel: 10_000_000,
+            max_memory_bytes: 64 * 1024 * 1024,
+            max_inflight: 64,
+            default_timeout_ms: 100,
+        }
+    }
+}
+
 /// Resolved local data directory for a single Octra installation.
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -210,6 +252,23 @@ impl Workspace {
             configured.to_path_buf()
         } else {
             self.home.join(configured)
+        }
+    }
+
+    pub fn plugin_dir(&self, config: &OctraConfig) -> PathBuf {
+        self.resolve_path(&config.plugins.dir)
+    }
+
+    pub fn plugin_artifact_dir(&self, config: &OctraConfig) -> PathBuf {
+        self.resolve_path(&config.plugins.artifact_dir)
+    }
+
+    fn resolve_path(&self, configured: &str) -> PathBuf {
+        let path = Path::new(configured);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.home.join(path)
         }
     }
 }

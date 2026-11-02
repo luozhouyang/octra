@@ -1,0 +1,32 @@
+# Reference third-party plugin for the Octra API Gateway.
+#
+# Build a component artifact with:
+#
+#   cargo component build --release --manifest-path examples/plugins/consumer-quota/Cargo.toml
+#
+# The result is target/wasm32-wasip1/release/consumer_quota.wasm; pair it with
+# plugin.json and migrations/ as described in the plugin platform docs.
+[package]
+name = "consumer-quota"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+octra-plugin-sdk = { path = "../../../crates/octra-plugin-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wit-bindgen-rt = { version = "0.41", features = ["bitflags"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+[package.metadata.component]
+package = "octra:api-plugin"
+
+# Standalone workspace: keeps the example out of the root workspace.
+[workspace]

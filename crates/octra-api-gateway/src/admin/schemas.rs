@@ -13,7 +13,7 @@ use super::list::{deserialize, read_json_body};
 
 pub async fn list(State(state): State<ApiControlState>) -> Json<Value> {
     let mut schemas = serde_json::Map::new();
-    for manifest in state.plugins.registry().manifests() {
+    for manifest in state.plugins.manifests() {
         schemas.insert(
             manifest.name,
             manifest.config_schema.unwrap_or_else(|| json!({})),
@@ -28,7 +28,6 @@ pub async fn get(
 ) -> AdminResult<Json<Value>> {
     let factory = state
         .plugins
-        .registry()
         .factory(&name)
         .ok_or_else(|| AdminError::not_found(format!("plugin '{name}' not found")))?;
     let schema = factory
@@ -53,17 +52,13 @@ pub async fn validate(
     if input.name.trim().is_empty() {
         return Err(AdminError::schema("name is required"));
     }
-    if state.plugins.registry().factory(&input.name).is_none() {
+    if state.plugins.factory(&input.name).is_none() {
         return Err(AdminError::not_found(format!(
             "plugin '{}' not found",
             input.name
         )));
     }
-    match state
-        .plugins
-        .registry()
-        .validate(&input.name, &input.config)
-    {
+    match state.plugins.validate(&input.name, &input.config) {
         Ok(()) => Ok(Json(json!({ "valid": true, "errors": [] }))),
         Err(error) => Ok(Json(json!({
             "valid": false,

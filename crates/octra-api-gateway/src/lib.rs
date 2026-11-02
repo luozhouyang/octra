@@ -14,11 +14,14 @@ pub mod http_client;
 pub mod key;
 pub mod metrics;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
 use octra_api_plugin_runtime::PluginRuntime;
+use octra_api_plugin_wasm::{WasmEngine, WasmHostProvider, WasmPluginCatalog};
 use octra_config::OctraConfig;
+use octra_plugin_storage::PluginStorageRoot;
 use octra_runtime::GatewayRuntime;
 use octra_storage::Storage;
 
@@ -78,12 +81,27 @@ impl ApiDataState {
     }
 }
 
+/// Shared handles used by the plugin lifecycle endpoints. Present only when
+/// the daemon enabled the WASM runtime.
+pub struct WasmControlState {
+    pub engine: Arc<WasmEngine>,
+    pub catalog: Arc<WasmPluginCatalog>,
+    pub host_provider: Arc<WasmHostProvider>,
+    pub storage_root: Arc<PluginStorageRoot>,
+    pub artifact_dir: PathBuf,
+    pub max_artifact_bytes: u64,
+    /// Base64 Ed25519 public keys; empty disables signature checks.
+    pub trusted_keys: Vec<String>,
+    pub allow_unsigned: bool,
+}
+
 #[derive(Clone)]
 pub struct ApiControlState {
     pub storage: Arc<Storage>,
     pub runtime: Arc<GatewayRuntime>,
     pub plugins: Arc<PluginRuntime>,
     pub metrics: Arc<ApiMetrics>,
+    pub wasm: Option<Arc<WasmControlState>>,
 }
 
 impl ApiControlState {
@@ -110,7 +128,13 @@ impl ApiControlState {
             runtime,
             plugins,
             metrics,
+            wasm: None,
         }
+    }
+
+    pub fn with_wasm(mut self, wasm: Arc<WasmControlState>) -> Self {
+        self.wasm = Some(wasm);
+        self
     }
 }
 

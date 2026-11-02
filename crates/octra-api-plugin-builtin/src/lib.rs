@@ -157,5 +157,8 @@ pub(crate) fn manifest(
         fail_policy: octra_api_plugin_types::FailPolicy::Open,
         capabilities,
         config_schema: Some(config_schema),
+        api_version: "1".to_string(),
+        entities: Vec::new(),
+        migrations: Vec::new(),
     }
 }

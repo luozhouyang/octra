@@ -1061,6 +1061,9 @@ mod tests {
             fail_policy: FailPolicy::Open,
             capabilities: Vec::<Capability>::new(),
             config_schema: None,
+            api_version: "1".to_string(),
+            entities: Vec::new(),
+            migrations: Vec::new(),
         }
     }
 
@@ -1078,6 +1081,10 @@ mod tests {
             config_schema_json: "{}".into(),
             artifact_path: None,
             artifact_hash: None,
+            source: "builtin".into(),
+            artifact_id: None,
+            storage_path: None,
+            approved_capabilities: Vec::new(),
             updated_at: String::new(),
         }
     }
