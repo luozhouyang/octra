@@ -8,7 +8,7 @@
 //! Errors and logs are never restored: upstream error bodies often echo the
 //! request, and restoring them would leak PII back through an unexpected path.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -18,6 +18,7 @@ use octra_llm_plugin_types::{
     LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmProviderRequestContext,
     LlmRequestContext, LlmResponseContext, LlmStreamAction, LlmStreamContext, LlmStreamResult,
 };
+use aho_corasick::AhoCorasick;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,6 +29,9 @@ const PLACEHOLDER_PREFIX: &str = "[[octra:";
 const PLACEHOLDER_SUFFIX: &str = "]]";
 const DEFAULT_MAX_PLACEHOLDERS: usize = 1024;
 const HARD_MAX_PLACEHOLDERS: usize = 10_000;
+const DEFAULT_MAX_DICTIONARY_TERMS: usize = 10_000;
+const HARD_MAX_DICTIONARY_TERMS: usize = 100_000;
+const MAX_DICTIONARY_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PiiKind {
@@ -106,6 +110,7 @@ struct Rules {
     api_key: Option<Regex>,
     ipv4: Option<Regex>,
     custom: Vec<(String, Regex)>,
+    dictionary: Option<AhoCorasick>,
 }
 
 #[derive(Debug)]
@@ -114,7 +119,11 @@ pub struct RuleDetector {
 }
 
 impl RuleDetector {
-    fn compile(flags: &RulesConfig, custom: &[(String, String)]) -> Result<Self, PluginError> {
+    fn compile(
+        flags: &RulesConfig,
+        custom: &[(String, String)],
+        dictionary: Option<AhoCorasick>,
+    ) -> Result<Self, PluginError> {
         let build = |enabled: bool, pattern: &str| -> Result<Option<Regex>, PluginError> {
             if !enabled {
                 return Ok(None);
@@ -143,6 +152,7 @@ impl RuleDetector {
                 api_key: build(flags.api_key, r"\b(?:sk|ak|pk)[-_][A-Za-z0-9]{16,}\b")?,
                 ipv4: build(flags.ip, r"\b(?:\d{1,3}\.){3}\d{1,3}\b")?,
                 custom: compiled,
+                dictionary,
             },
         })
     }
@@ -210,8 +220,109 @@ impl PiiDetector for RuleDetector {
                 });
             }
         }
+        if let Some(dictionary) = &self.rules.dictionary {
+            for mat in dictionary.find_iter(text) {
+                detections.push(Detection {
+                    kind: PiiKind::Custom("dictionary".to_string()),
+                    start: mat.start(),
+                    end: mat.end(),
+                    confidence: 1.0,
+                    detector: "dictionary",
+                });
+            }
+        }
         detections
     }
+}
+
+fn compile_dictionary(config: &Value) -> Result<Option<AhoCorasick>, PluginError> {
+    let mut terms: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(values) = config.get("dictionary") {
+        let values = values.as_array().ok_or_else(|| {
+            PluginError::fail_closed("llm-pii-redaction `dictionary` must be an array")
+        })?;
+        for value in values {
+            let term = value.as_str().ok_or_else(|| {
+                PluginError::fail_closed("llm-pii-redaction dictionary terms must be strings")
+            })?;
+            push_dictionary_term(&mut terms, &mut seen, term)?;
+        }
+    }
+    if let Some(path) = config.get("dictionary_file").and_then(Value::as_str) {
+        let path = path.trim();
+        if path.is_empty() {
+            return Err(PluginError::fail_closed(
+                "llm-pii-redaction `dictionary_file` must not be empty",
+            ));
+        }
+        let metadata = std::fs::metadata(path).map_err(|error| {
+            PluginError::fail_closed(format!("cannot read dictionary file {path}: {error}"))
+        })?;
+        if metadata.len() > MAX_DICTIONARY_FILE_BYTES {
+            return Err(PluginError::fail_closed(format!(
+                "dictionary file {path} exceeds {MAX_DICTIONARY_FILE_BYTES} bytes"
+            )));
+        }
+        let content = std::fs::read_to_string(path).map_err(|error| {
+            PluginError::fail_closed(format!("cannot read dictionary file {path}: {error}"))
+        })?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            push_dictionary_term(&mut terms, &mut seen, line)?;
+        }
+    }
+    if terms.is_empty() {
+        return Ok(None);
+    }
+    let max_terms = config
+        .get("max_dictionary_terms")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(DEFAULT_MAX_DICTIONARY_TERMS)
+        .min(HARD_MAX_DICTIONARY_TERMS);
+    if max_terms == 0 {
+        return Err(PluginError::fail_closed(
+            "llm-pii-redaction `max_dictionary_terms` must be positive",
+        ));
+    }
+    if terms.len() > max_terms {
+        return Err(PluginError::fail_closed(format!(
+            "llm-pii-redaction dictionary has {} terms, over the limit of {max_terms}",
+            terms.len()
+        )));
+    }
+    let case_insensitive = config
+        .get("dictionary_case_insensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    AhoCorasick::builder()
+        .ascii_case_insensitive(case_insensitive)
+        .build(&terms)
+        .map(Some)
+        .map_err(|error| {
+            PluginError::fail_closed(format!("invalid PII dictionary: {error}"))
+        })
+}
+
+fn push_dictionary_term(
+    terms: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    term: &str,
+) -> Result<(), PluginError> {
+    let term = term.trim();
+    if term.is_empty() {
+        return Err(PluginError::fail_closed(
+            "llm-pii-redaction dictionary terms must not be empty",
+        ));
+    }
+    if seen.insert(term.to_string()) {
+        terms.push(term.to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -312,6 +423,7 @@ impl RedactionFactory {
                 custom.push((name.to_string(), regex.to_string()));
             }
         }
+        let dictionary = compile_dictionary(config)?;
         let max_placeholders = config
             .get("max_placeholders")
             .and_then(Value::as_u64)
@@ -328,7 +440,7 @@ impl RedactionFactory {
         Ok(Redaction {
             manifest: Self::manifest(),
             mode,
-            detector: RuleDetector::compile(&flags, &custom)?,
+            detector: RuleDetector::compile(&flags, &custom, dictionary)?,
             max_placeholders,
             redact_system: flag("redact_system", true),
             redact_assistant: flag("redact_assistant", true),
@@ -988,6 +1100,97 @@ mod tests {
             }
         }
         assert_eq!(emit, "contact a@b.com now");
+    }
+
+    #[tokio::test]
+    async fn dictionary_terms_are_masked_and_restored() {
+        let plugin = plugin(json!({"dictionary": ["张三", "Project Falcon"]}));
+        let secret = "张三 owns Project Falcon";
+        let mut request = text_request(secret);
+        let mut state = Value::Null;
+        mask_request(&plugin, &mut request, &mut state).await;
+
+        let masked = request_text(&request);
+        assert!(!masked.contains("张三"), "{masked}");
+        assert!(!masked.contains("Project Falcon"), "{masked}");
+        assert!(masked.contains(PLACEHOLDER_PREFIX), "{masked}");
+
+        let mut response = ChatResponse::new(
+            "id",
+            "m",
+            Message {
+                role: Role::Assistant,
+                content: None,
+                assistant: vec![AssistantContent::Text { text: masked }],
+                tool_results: Vec::new(),
+                name: None,
+                extra: Default::default(),
+            },
+        );
+        let meta = meta();
+        let mut usage = usage();
+        let mut cx = LlmResponseContext {
+            meta: &meta,
+            request_model: "m",
+            response: &mut response,
+            usage: &mut usage,
+            state: &mut state,
+        };
+        plugin.on_response(&mut cx).await.unwrap();
+        let restored = match &response.message.assistant[0] {
+            AssistantContent::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert_eq!(restored, secret);
+    }
+
+    #[tokio::test]
+    async fn dictionary_file_ignores_comments_and_matches_case_insensitively() {
+        let path = std::env::temp_dir().join(format!(
+            "octra-pii-dictionary-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, "# comment\n\n Acme Corp \n").unwrap();
+        let plugin = plugin(json!({
+            "dictionary_file": path.to_str().unwrap(),
+            "dictionary_case_insensitive": true
+        }));
+        let mut request = text_request("visit acme corp today");
+        let mut state = Value::Null;
+        mask_request(&plugin, &mut request, &mut state).await;
+        let masked = request_text(&request);
+        let _ = std::fs::remove_file(&path);
+        assert!(!masked.to_ascii_lowercase().contains("acme corp"), "{masked}");
+        assert!(masked.contains(PLACEHOLDER_PREFIX), "{masked}");
+    }
+
+    #[test]
+    fn rejects_bad_dictionary_configuration() {
+        assert!(
+            RedactionFactory
+                .create(json!({"dictionary": [""]}))
+                .is_err()
+        );
+        assert!(
+            RedactionFactory
+                .create(json!({"dictionary": ["acme"], "max_dictionary_terms": 0}))
+                .is_err()
+        );
+        assert!(
+            RedactionFactory
+                .create(json!({"dictionary": ["acme"], "max_dictionary_terms": 1}))
+                .is_ok()
+        );
+        assert!(
+            RedactionFactory
+                .create(json!({"dictionary": ["a", "b"], "max_dictionary_terms": 1}))
+                .is_err()
+        );
+        assert!(
+            RedactionFactory
+                .create(json!({"dictionary_file": "/nonexistent/octra-dictionary.txt"}))
+                .is_err()
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@ todo = "deny"
 unimplemented = "deny"
 
 [workspace.dependencies]
+aho-corasick = "1"
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
