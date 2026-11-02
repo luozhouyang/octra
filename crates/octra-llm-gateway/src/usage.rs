@@ -28,6 +28,8 @@ pub struct UsageRecord {
     /// Model pricing used to compute the cost when it was not set directly.
     pub pricing: Option<Value>,
     pub error: Option<String>,
+    /// Request receipt time; the raw row and the rollup share it.
+    pub created_at: Option<String>,
 }
 
 impl UsageRecord {
@@ -50,6 +52,7 @@ impl UsageRecord {
             cost_currency: None,
             pricing: None,
             error: None,
+            created_at: None,
         }
     }
 }
@@ -65,10 +68,13 @@ pub struct UsageTracker {
 
 impl UsageTracker {
     pub fn new(request_id: impl Into<String>, virtual_model_id: impl Into<String>) -> Self {
+        let received_at = Utc::now();
+        let mut record = UsageRecord::new(request_id, virtual_model_id);
+        record.created_at = Some(octra_storage::canonical_timestamp(received_at));
         Self {
             started: Instant::now(),
-            received_at: Utc::now(),
-            record: UsageRecord::new(request_id, virtual_model_id),
+            received_at,
+            record,
         }
     }
 
@@ -133,6 +139,7 @@ pub fn spawn_record(storage: Arc<Storage>, record: UsageRecord) {
             cost_currency,
             finish_reason: record.finish_reason.clone(),
             error: record.error.clone(),
+            created_at: record.created_at.clone(),
         };
         if let Err(error) = storage.llm.insert_usage(&input).await {
             tracing::warn!(error = ?error, request_id = %record.request_id, "cannot record llm usage");

@@ -3,6 +3,7 @@
 pub mod api;
 pub mod llm;
 pub mod logs;
+pub mod maintenance;
 pub mod mcp;
 pub mod plugins;
 
@@ -11,9 +12,10 @@ pub use llm::{
     LlmProviderAccountRecord, LlmProviderInput, LlmProviderRecord, LlmRouteRecord,
     LlmRoutingGroupRecord, LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmRuntimeData,
     LlmStorageError, LlmUsageInput, LlmUsageRecord, LlmUsageSummaryRow, LlmVirtualKeyInput,
-    LlmVirtualKeyRecord, LlmVirtualKeyUsage,
+    LlmVirtualKeyRecord, LlmVirtualKeyUsage, canonical_timestamp,
 };
 pub use logs::{AuditLog, NewRequestLog, RequestLog};
+pub use maintenance::{PruneReport, RetentionPolicy};
 
 use std::path::Path;
 use std::time::Duration;
@@ -57,6 +59,7 @@ impl Storage {
 
         let storage = Self::from_options(options, 5).await?;
         storage.migrate().await?;
+        storage.ensure_usage_rollup().await?;
         Ok(storage)
     }
 
@@ -67,6 +70,7 @@ impl Storage {
 
         let storage = Self::from_options(options, 1).await?;
         storage.migrate().await?;
+        storage.ensure_usage_rollup().await?;
         Ok(storage)
     }
 
@@ -198,5 +202,40 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(tables, 1);
+
+        let rollup: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'llm_usage_rollup'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(rollup, 1);
+
+        let indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN (
+                 'idx_llm_usage_api_key_created', 'idx_llm_usage_account_created',
+                 'idx_llm_usage_vmodel_created', 'idx_rollup_api_key'
+             )",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(indexes, 4);
+
+        let dropped: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_llm_usage_api_key'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(dropped, 0);
+
+        let kept: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_llm_usage_created'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(kept, 1);
     }
 }

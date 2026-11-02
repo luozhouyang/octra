@@ -1,6 +1,6 @@
 //! LLM gateway persistence: providers, models, routing, virtual keys and usage.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use octra_api_core::Policy;
 use octra_core::{Error, Result};
 use sqlx::{Row, SqlitePool};
@@ -238,6 +238,26 @@ pub struct LlmUsageInput {
     pub cost_currency: Option<String>,
     pub finish_reason: Option<String>,
     pub error: Option<String>,
+    /// Request receipt time. `None` stamps the row when it is written.
+    pub created_at: Option<String>,
+}
+
+/// Canonical usage timestamp; matches SQLite's
+/// `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`.
+pub fn canonical_timestamp(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn hour_bucket(timestamp: &str) -> LlmResult<String> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|at| {
+            at.with_timezone(&Utc)
+                .format("%Y-%m-%dT%H:00:00.000Z")
+                .to_string()
+        })
+        .map_err(|error| {
+            LlmStorageError::Backend(format!("invalid usage timestamp '{timestamp}': {error}"))
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -867,10 +887,10 @@ impl LlmStore {
         since: &str,
     ) -> LlmResult<LlmVirtualKeyUsage> {
         let row = sqlx::query(
-            "SELECT COALESCE(SUM(input_tokens + output_tokens + COALESCE(cache_write_tokens, 0)), 0) AS tokens,
-                 COALESCE(SUM(COALESCE(cost_micros, 0)), 0) AS cost_micros
-             FROM llm_usage
-             WHERE api_key_id = ? AND created_at >= ?",
+            "SELECT COALESCE(SUM(input_tokens + output_tokens + cache_write_tokens), 0) AS tokens,
+                 COALESCE(SUM(cost_micros), 0) AS cost_micros
+             FROM llm_usage_rollup
+             WHERE api_key_id = ? AND bucket_start >= ?",
         )
         .bind(api_key_id)
         .bind(since)
@@ -1393,14 +1413,22 @@ impl LlmStore {
 
     // Usage
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_usage(&self, input: &LlmUsageInput) -> LlmResult<()> {
+        let created_at = input
+            .created_at
+            .clone()
+            .unwrap_or_else(|| canonical_timestamp(Utc::now()));
+        let bucket = hour_bucket(&created_at)?;
+        let errors = i64::from(
+            input.error.is_some() || input.status_code.is_some_and(|status| status >= 400),
+        );
+        let mut tx = self.pool().begin().await.map_err(backend)?;
         sqlx::query(
             "INSERT INTO llm_usage (request_id, virtual_model_id, provider_id, model_id,
                  account_id, account_name, api_key_id, protocol, status_code, latency_ms,
                  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                 reasoning_tokens, cost_micros, cost_currency, finish_reason, error)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 reasoning_tokens, cost_micros, cost_currency, finish_reason, error, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&input.request_id)
         .bind(&input.virtual_model_id)
@@ -1421,9 +1449,39 @@ impl LlmStore {
         .bind(&input.cost_currency)
         .bind(&input.finish_reason)
         .bind(&input.error)
-        .execute(self.pool())
+        .bind(&created_at)
+        .execute(&mut *tx)
         .await
         .map_err(backend)?;
+        sqlx::query(
+            "INSERT INTO llm_usage_rollup (bucket_start, api_key_id, account_id, provider_id,
+                 model_id, virtual_model_id, requests, errors, input_tokens, output_tokens,
+                 cache_write_tokens, cost_micros)
+             VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+             ON CONFLICT (bucket_start, api_key_id, account_id, provider_id, model_id, virtual_model_id)
+             DO UPDATE SET
+                 requests = requests + 1,
+                 errors = errors + excluded.errors,
+                 input_tokens = input_tokens + excluded.input_tokens,
+                 output_tokens = output_tokens + excluded.output_tokens,
+                 cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+                 cost_micros = cost_micros + excluded.cost_micros",
+        )
+        .bind(&bucket)
+        .bind(input.api_key_id.as_deref().unwrap_or(""))
+        .bind(input.account_id.as_deref().unwrap_or(""))
+        .bind(input.provider_id.as_deref().unwrap_or(""))
+        .bind(input.model_id.as_deref().unwrap_or(""))
+        .bind(&input.virtual_model_id)
+        .bind(errors)
+        .bind(input.input_tokens)
+        .bind(input.output_tokens)
+        .bind(input.cache_write_tokens.unwrap_or(0))
+        .bind(input.cost_micros.unwrap_or(0))
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
         Ok(())
     }
 
@@ -1444,10 +1502,9 @@ impl LlmStore {
 
     pub async fn usage_summary(&self) -> LlmResult<Vec<LlmUsageSummaryRow>> {
         let rows = sqlx::query(
-            "SELECT virtual_model_id, COUNT(*) AS requests,
-                 SUM(CASE WHEN error IS NOT NULL OR status_code >= 400 THEN 1 ELSE 0 END) AS errors,
+            "SELECT virtual_model_id, SUM(requests) AS requests, SUM(errors) AS errors,
                  SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens
-             FROM llm_usage GROUP BY virtual_model_id ORDER BY requests DESC",
+             FROM llm_usage_rollup GROUP BY virtual_model_id ORDER BY requests DESC",
         )
         .fetch_all(self.pool())
         .await
@@ -1466,10 +1523,11 @@ impl LlmStore {
 
     pub async fn usage_totals(&self) -> LlmResult<LlmUsageSummaryRow> {
         let row = sqlx::query(
-            "SELECT COUNT(*) AS requests,
-                 SUM(CASE WHEN error IS NOT NULL OR status_code >= 400 THEN 1 ELSE 0 END) AS errors,
-                 SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens
-             FROM llm_usage",
+            "SELECT COALESCE(SUM(requests), 0) AS requests,
+                 COALESCE(SUM(errors), 0) AS errors,
+                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                 COALESCE(SUM(output_tokens), 0) AS output_tokens
+             FROM llm_usage_rollup",
         )
         .fetch_one(self.pool())
         .await
@@ -1488,6 +1546,7 @@ impl LlmStore {
 mod tests {
     use super::*;
     use crate::Storage;
+    use sqlx::Row;
 
     async fn storage() -> Storage {
         Storage::connect_in_memory().await.unwrap()
@@ -1777,5 +1836,153 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn usage_rollup_buckets_by_hour_and_dimensions() {
+        let storage = storage().await;
+        for (request_id, created_at, input, output, cache_write, cost, status) in [
+            (
+                "a",
+                "2026-10-01T05:12:00.000Z",
+                10,
+                5,
+                Some(2),
+                Some(7),
+                200,
+            ),
+            ("b", "2026-10-01T05:55:00.000Z", 1, 2, None, None, 500),
+            ("c", "2026-10-01T06:01:00.000Z", 3, 4, None, None, 200),
+        ] {
+            storage
+                .llm
+                .insert_usage(&LlmUsageInput {
+                    request_id: request_id.into(),
+                    virtual_model_id: "octra-default".into(),
+                    provider_id: Some("p1".into()),
+                    model_id: Some("m1".into()),
+                    account_id: Some("a1".into()),
+                    api_key_id: Some("k1".into()),
+                    status_code: Some(status),
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_write_tokens: cache_write,
+                    cost_micros: cost,
+                    created_at: Some(created_at.into()),
+                    ..LlmUsageInput::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        let rows = sqlx::query(
+            "SELECT bucket_start, requests, errors, input_tokens, output_tokens,
+                 cache_write_tokens, cost_micros
+             FROM llm_usage_rollup ORDER BY bucket_start",
+        )
+        .fetch_all(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].get::<String, _>("bucket_start"),
+            "2026-10-01T05:00:00.000Z"
+        );
+        assert_eq!(rows[0].get::<i64, _>("requests"), 2);
+        assert_eq!(rows[0].get::<i64, _>("errors"), 1);
+        assert_eq!(rows[0].get::<i64, _>("input_tokens"), 11);
+        assert_eq!(rows[0].get::<i64, _>("output_tokens"), 7);
+        assert_eq!(rows[0].get::<i64, _>("cache_write_tokens"), 2);
+        assert_eq!(rows[0].get::<i64, _>("cost_micros"), 7);
+        assert_eq!(
+            rows[1].get::<String, _>("bucket_start"),
+            "2026-10-01T06:00:00.000Z"
+        );
+        assert_eq!(rows[1].get::<i64, _>("requests"), 1);
+        assert_eq!(rows[1].get::<i64, _>("errors"), 0);
+        assert_eq!(rows[1].get::<i64, _>("input_tokens"), 3);
+        assert_eq!(rows[1].get::<i64, _>("output_tokens"), 4);
+
+        let totals = storage.llm.usage_totals().await.unwrap();
+        assert_eq!(totals.requests, 3);
+        assert_eq!(totals.errors, 1);
+        assert_eq!(totals.input_tokens, 14);
+        assert_eq!(totals.output_tokens, 11);
+    }
+
+    #[tokio::test]
+    async fn virtual_key_usage_since_uses_hour_buckets() {
+        let storage = storage().await;
+        for (request_id, created_at, input, output, cost) in [
+            ("a", "2026-10-01T05:12:00.000Z", 10, 5, Some(3)),
+            ("b", "2026-10-01T06:01:00.000Z", 6, 3, Some(4)),
+        ] {
+            storage
+                .llm
+                .insert_usage(&LlmUsageInput {
+                    request_id: request_id.into(),
+                    virtual_model_id: "octra-default".into(),
+                    api_key_id: Some("k1".into()),
+                    input_tokens: input,
+                    output_tokens: output,
+                    cost_micros: cost,
+                    created_at: Some(created_at.into()),
+                    ..LlmUsageInput::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        let since_05 = storage
+            .llm
+            .virtual_key_usage_since("k1", "2026-10-01T05:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(since_05.tokens, 24);
+        assert_eq!(since_05.cost_micros, 7);
+
+        let since_06 = storage
+            .llm
+            .virtual_key_usage_since("k1", "2026-10-01T06:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(since_06.tokens, 9);
+        assert_eq!(since_06.cost_micros, 4);
+
+        let since_07 = storage
+            .llm
+            .virtual_key_usage_since("k1", "2026-10-01T07:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(since_07.tokens, 0);
+        assert_eq!(since_07.cost_micros, 0);
+    }
+
+    #[tokio::test]
+    async fn null_dimensions_share_the_empty_string_bucket() {
+        let storage = storage().await;
+        for (request_id, api_key) in [("none", None), ("empty", Some(""))] {
+            storage
+                .llm
+                .insert_usage(&LlmUsageInput {
+                    request_id: request_id.into(),
+                    virtual_model_id: "octra-default".into(),
+                    api_key_id: api_key.map(str::to_string),
+                    input_tokens: 1,
+                    created_at: Some("2026-10-01T05:12:00.000Z".into()),
+                    ..LlmUsageInput::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        let requests: i64 = sqlx::query_scalar(
+            "SELECT requests FROM llm_usage_rollup
+             WHERE api_key_id = '' AND bucket_start = '2026-10-01T05:00:00.000Z'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(requests, 2);
     }
 }
