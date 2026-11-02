@@ -5,8 +5,10 @@
 //! parts. Responses are wrapped in [`LlmResponse`] so handler signatures do
 //! not depend on which response helper is used internally.
 
+use std::net::{IpAddr, SocketAddr};
+
 use axum::body::Body;
-use axum::extract::{FromRequest, FromRequestParts, Request, State};
+use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Request, State};
 use axum::http::header;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, Uri};
@@ -21,6 +23,7 @@ pub struct Incoming {
     pub method: Method,
     pub uri: Uri,
     pub headers: HeaderMap,
+    pub client_ip: Option<IpAddr>,
 }
 
 impl FromRequestParts<LlmDataState> for Incoming {
@@ -34,6 +37,10 @@ impl FromRequestParts<LlmDataState> for Incoming {
             method: parts.method.clone(),
             uri: parts.uri.clone(),
             headers: parts.headers.clone(),
+            client_ip: parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|info| info.0.ip()),
         })
     }
 }

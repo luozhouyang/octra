@@ -100,6 +100,8 @@ mod tests {
             consumer_id: None,
             virtual_key_id: None,
             session_id: None,
+            client_ip: None,
+            user_agent: None,
         };
         let mut state = serde_json::Value::Null;
         let mut cx = LlmRequestContext {

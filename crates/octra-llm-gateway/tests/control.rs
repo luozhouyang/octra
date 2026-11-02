@@ -9,11 +9,11 @@ use common::{
 };
 use serde_json::{Value, json};
 
-const PROVIDERS: &str = "/api/v1/llm/providers";
-const MODELS: &str = "/api/v1/llm/models";
-const GROUPS: &str = "/api/v1/llm/routing-groups";
-const ROUTES: &str = "/api/v1/llm/routes";
-const KEYS: &str = "/api/v1/llm/virtual-keys";
+const PROVIDERS: &str = "/admin/llm/providers";
+const MODELS: &str = "/admin/llm/models";
+const GROUPS: &str = "/admin/llm/routing-groups";
+const ROUTES: &str = "/admin/llm/routes";
+const KEYS: &str = "/admin/llm/virtual-keys";
 
 async fn call(
     harness: &Harness,
@@ -362,7 +362,7 @@ async fn reload_reports_runtime_state() {
     let (status, body) = create(&harness, PROVIDERS, provider_body("p", "https://a.test/v1")).await;
     assert_eq!(status, StatusCode::CREATED, "body {body}");
 
-    let (status, reload) = call(&harness, Method::POST, "/api/v1/llm/reload", None).await;
+    let (status, reload) = call(&harness, Method::POST, "/admin/llm/reload", None).await;
     assert_eq!(status, StatusCode::OK, "body: {reload}");
     assert_eq!(reload["status"], "reloaded");
     assert_eq!(reload["providers"], 1);
@@ -394,7 +394,7 @@ async fn usage_endpoint_summarizes_traffic() {
     assert_eq!(status, StatusCode::OK);
     wait_for_usage(&harness.storage, 1).await;
 
-    let (status, usage) = call(&harness, Method::GET, "/api/v1/llm/usage?limit=5", None).await;
+    let (status, usage) = call(&harness, Method::GET, "/admin/llm/usage?limit=5", None).await;
     assert_eq!(status, StatusCode::OK, "body: {usage}");
     assert_eq!(usage["totals"]["requests"], 1);
     assert_eq!(usage["totals"]["input_tokens"], 11);
@@ -445,7 +445,7 @@ async fn account_crud_round_trip() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(listed.as_array().unwrap().len(), 1);
 
-    let single = format!("/api/v1/llm/accounts/{account_id}");
+    let single = format!("/admin/llm/accounts/{account_id}");
     let (status, fetched) = call(&harness, Method::GET, &single, None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fetched["name"], "primary");
@@ -467,7 +467,7 @@ async fn account_crud_round_trip() {
     let (status, reset) = call(
         &harness,
         Method::POST,
-        &format!("/api/v1/llm/accounts/{account_id}/quota/reset"),
+        &format!("/admin/llm/accounts/{account_id}/quota/reset"),
         None,
     )
     .await;
@@ -594,7 +594,7 @@ async fn group_strategies_are_validated() {
 // ---------------------------------------------------------------------------
 // LLM plugins
 
-const PLUGINS: &str = "/api/v1/llm/plugins";
+const PLUGINS: &str = "/admin/llm/plugins";
 
 async fn plugin_id(harness: &Harness, name: &str) -> String {
     let (status, listed) = call(harness, Method::GET, PLUGINS, None).await;
@@ -636,7 +636,7 @@ async fn llm_plugin_catalog_and_config_crud() {
     let (status, updated) = call(
         &harness,
         Method::PUT,
-        &format!("/api/v1/llm/plugin-configs/{config_id}"),
+        &format!("/admin/llm/plugin-configs/{config_id}"),
         Some(json!({"enabled": false})),
     )
     .await;
@@ -662,7 +662,7 @@ async fn llm_plugin_catalog_and_config_crud() {
     let (status, _) = call(
         &harness,
         Method::DELETE,
-        &format!("/api/v1/llm/plugin-configs/{config_id}"),
+        &format!("/admin/llm/plugin-configs/{config_id}"),
         None,
     )
     .await;
@@ -704,6 +704,53 @@ async fn llm_plugin_config_is_validated() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}
+
+#[tokio::test]
+async fn llm_plugin_effective_chain_and_metrics() {
+    let harness = Harness::new().await;
+    let id = plugin_id(&harness, "llm-model-map").await;
+    let (status, config) = create(
+        &harness,
+        &format!("{PLUGINS}/{id}/configs"),
+        json!({"scope": "global", "config": {"map": {"alias": "model"}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {config}");
+
+    let (status, effective) = call(
+        &harness,
+        Method::GET,
+        &format!("{PLUGINS}/effective?model=alias"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {effective}");
+    assert_eq!(effective["model"], "alias");
+    let chain = effective["chain"].as_array().unwrap();
+    let entry = chain
+        .iter()
+        .find(|entry| entry["name"] == "llm-model-map")
+        .expect("model map is in the effective chain");
+    assert_eq!(entry["scope"], "global");
+    assert_eq!(entry["scope_id"], "");
+
+    let (status, _) = call(&harness, Method::GET, &format!("{PLUGINS}/effective"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, metrics) = call(&harness, Method::GET, &format!("{PLUGINS}/metrics"), None).await;
+    assert_eq!(status, StatusCode::OK, "body: {metrics}");
+    let plugins = metrics["plugins"].as_array().unwrap();
+    let map = plugins
+        .iter()
+        .find(|plugin| plugin["name"] == "llm-model-map")
+        .expect("model map has a metrics entry");
+    assert_eq!(map["stages"]["request"]["calls"], 0);
+    assert!(
+        plugins
+            .iter()
+            .any(|plugin| plugin["name"] == "llm-pii-redaction")
+    );
 }
 
 #[tokio::test]

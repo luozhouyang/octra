@@ -119,7 +119,7 @@ fn main() -> Result<()> {
         Command::Reload => print_json(control.post("/api/v1/system/reload")?)?,
         Command::Doctor => doctor(&control)?,
         Command::Usage { limit } => {
-            print_json(control.get(&format!("/api/v1/llm/usage?limit={limit}"))?)?
+            print_json(control.get(&format!("/admin/llm/usage?limit={limit}"))?)?
         }
         Command::Accounts(command) => accounts(&control, command)?,
     }
@@ -130,7 +130,7 @@ fn main() -> Result<()> {
 fn accounts(control: &Control, command: AccountsCommand) -> Result<()> {
     match command {
         AccountsCommand::List { provider } => {
-            print_json(control.get(&format!("/api/v1/llm/providers/{provider}/accounts"))?)?
+            print_json(control.get(&format!("/admin/llm/providers/{provider}/accounts"))?)?
         }
         AccountsCommand::Create {
             provider,
@@ -156,7 +156,7 @@ fn accounts(control: &Control, command: AccountsCommand) -> Result<()> {
                 body["quota_limit"] = serde_json::json!(quota_limit);
             }
             print_json(
-                control.post_json(&format!("/api/v1/llm/providers/{provider}/accounts"), &body)?,
+                control.post_json(&format!("/admin/llm/providers/{provider}/accounts"), &body)?,
             )?
         }
         AccountsCommand::Update {
@@ -186,15 +186,15 @@ fn accounts(control: &Control, command: AccountsCommand) -> Result<()> {
                 }
             }
             print_json(control.put(
-                &format!("/api/v1/llm/accounts/{id}"),
+                &format!("/admin/llm/accounts/{id}"),
                 &serde_json::Value::Object(body),
             )?)?
         }
         AccountsCommand::Delete { id } => {
-            print_json(control.delete(&format!("/api/v1/llm/accounts/{id}"))?)?
+            print_json(control.delete(&format!("/admin/llm/accounts/{id}"))?)?
         }
         AccountsCommand::ResetQuota { id } => {
-            print_json(control.post(&format!("/api/v1/llm/accounts/{id}/quota/reset"))?)?
+            print_json(control.post(&format!("/admin/llm/accounts/{id}/quota/reset"))?)?
         }
     }
     Ok(())

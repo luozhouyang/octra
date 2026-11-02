@@ -7,6 +7,7 @@
 //! stage.
 
 use std::fmt;
+use std::net::IpAddr;
 
 use async_trait::async_trait;
 use octra_llm_core::{ChatRequest, ChatResponse, GatewayError, Protocol, StreamEvent, Usage};
@@ -83,13 +84,21 @@ pub enum LlmStreamAction {
 
 pub type LlmStreamResult = Result<LlmStreamAction, PluginError>;
 
-/// Read-only request metadata shared by every stage.
+/// Contract version a factory must implement to be registered. Bumped when a
+/// context or trait signature changes incompatibly.
+pub const LLM_PLUGIN_API_VERSION: u32 = 1;
+
+/// Read-only request metadata shared by every stage. Headers other than the
+/// user agent are not exposed, so credentials and cookies cannot leak into a
+/// plugin.
 pub struct LlmRequestMeta<'a> {
     pub request_id: &'a str,
     pub ingress: Protocol,
     pub consumer_id: Option<&'a str>,
     pub virtual_key_id: Option<&'a str>,
     pub session_id: Option<&'a str>,
+    pub client_ip: Option<IpAddr>,
+    pub user_agent: Option<&'a str>,
 }
 
 /// Per-request, per-plugin state. Plugins receive their own slot, so one
@@ -209,6 +218,10 @@ pub trait LlmPlugin: Send + Sync {
 /// when chains compile, never on the request path.
 pub trait LlmPluginFactory: Send + Sync {
     fn manifest(&self) -> PluginManifest;
+
+    fn api_version(&self) -> u32 {
+        LLM_PLUGIN_API_VERSION
+    }
 
     fn create(&self, config: Value) -> Result<std::sync::Arc<dyn LlmPlugin>, PluginError>;
 

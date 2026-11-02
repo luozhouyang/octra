@@ -205,6 +205,8 @@ mod tests {
             consumer_id: None,
             virtual_key_id: None,
             session_id: None,
+            client_ip: None,
+            user_agent: None,
         }
     }
 

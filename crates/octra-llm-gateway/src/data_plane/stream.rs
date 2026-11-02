@@ -171,6 +171,8 @@ pub struct StreamMeta {
     pub consumer_id: Option<String>,
     pub virtual_key_id: Option<String>,
     pub session_id: Option<String>,
+    pub client_ip: Option<std::net::IpAddr>,
+    pub user_agent: Option<String>,
 }
 
 impl StreamMeta {
@@ -181,6 +183,8 @@ impl StreamMeta {
             consumer_id: self.consumer_id.as_deref(),
             virtual_key_id: self.virtual_key_id.as_deref(),
             session_id: self.session_id.as_deref(),
+            client_ip: self.client_ip,
+            user_agent: self.user_agent.as_deref(),
         }
     }
 }

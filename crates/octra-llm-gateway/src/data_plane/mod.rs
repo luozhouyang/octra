@@ -506,12 +506,15 @@ async fn handle(
 
     let virtual_key_id = key.as_ref().map(|key| key.id.clone());
     let session = header_str(&request, &state.config.llm.session_header).map(str::to_string);
+    let user_agent = header_str(&request, "user-agent");
     let meta = LlmRequestMeta {
         request_id: &request_id,
         ingress,
         consumer_id,
         virtual_key_id: virtual_key_id.as_deref(),
         session_id: session.as_deref(),
+        client_ip: request.client_ip,
+        user_agent,
     };
     let mut request_state = LlmRequestState::new();
     let request_chain = state
@@ -942,6 +945,8 @@ async fn try_attempt(
                 consumer_id: meta.consumer_id.map(str::to_string),
                 virtual_key_id: meta.virtual_key_id.map(str::to_string),
                 session_id: meta.session_id.map(str::to_string),
+                client_ip: meta.client_ip,
+                user_agent: meta.user_agent.map(str::to_string),
             },
             std::mem::take(request_state),
         );
@@ -1076,18 +1081,21 @@ mod tests {
             method: axum::http::Method::POST,
             uri: "/v1/messages".parse().unwrap(),
             headers: header_map(&[("anthropic-version", "2023-06-01")]),
+            client_ip: None,
         };
         assert!(wants_anthropic(&request));
         let request = Incoming {
             method: axum::http::Method::POST,
             uri: "/v1/messages".parse().unwrap(),
             headers: header_map(&[("user-agent", "Anthropic/JS 0.30")]),
+            client_ip: None,
         };
         assert!(wants_anthropic(&request));
         let request = Incoming {
             method: axum::http::Method::POST,
             uri: "/v1/chat/completions".parse().unwrap(),
             headers: header_map(&[("user-agent", "openai-python/1.0")]),
+            client_ip: None,
         };
         assert!(!wants_anthropic(&request));
     }

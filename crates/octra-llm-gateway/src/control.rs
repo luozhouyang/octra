@@ -29,80 +29,82 @@ use crate::runtime::{LlmControlState, LlmRuntime};
 pub fn router(state: LlmControlState) -> Router {
     let providers = Router::new()
         .route(
-            "/api/v1/llm/providers",
+            "/admin/llm/providers",
             get(list_providers).post(create_provider),
         )
         .route(
-            "/api/v1/llm/providers/{id}",
+            "/admin/llm/providers/{id}",
             get(get_provider)
                 .put(update_provider)
                 .delete(delete_provider),
         )
         .route(
-            "/api/v1/llm/providers/{id}/accounts",
+            "/admin/llm/providers/{id}/accounts",
             get(list_provider_accounts).post(create_account),
         )
         .route(
-            "/api/v1/llm/accounts/{id}",
+            "/admin/llm/accounts/{id}",
             get(get_account).put(update_account).delete(delete_account),
         )
         .route(
-            "/api/v1/llm/accounts/{id}/quota/reset",
+            "/admin/llm/accounts/{id}/quota/reset",
             post(reset_account_quota),
         );
     let models = Router::new()
-        .route("/api/v1/llm/models", get(list_models).post(create_model))
+        .route("/admin/llm/models", get(list_models).post(create_model))
         .route(
-            "/api/v1/llm/models/{id}",
+            "/admin/llm/models/{id}",
             get(get_model).put(update_model).delete(delete_model),
         );
     let groups = Router::new()
         .route(
-            "/api/v1/llm/routing-groups",
+            "/admin/llm/routing-groups",
             get(list_groups).post(create_group),
         )
         .route(
-            "/api/v1/llm/routing-groups/{id}",
+            "/admin/llm/routing-groups/{id}",
             get(get_group).put(update_group).delete(delete_group),
         )
         .route(
-            "/api/v1/llm/routing-groups/{id}/targets",
+            "/admin/llm/routing-groups/{id}/targets",
             get(list_targets).post(create_target),
         )
         .route(
-            "/api/v1/llm/routing-groups/{id}/targets/{target_id}",
+            "/admin/llm/routing-groups/{id}/targets/{target_id}",
             put(update_target).delete(delete_target),
         );
     let routes = Router::new()
-        .route("/api/v1/llm/routes", get(list_routes).post(create_route))
+        .route("/admin/llm/routes", get(list_routes).post(create_route))
         .route(
-            "/api/v1/llm/routes/{id}",
+            "/admin/llm/routes/{id}",
             get(get_route).put(update_route).delete(delete_route),
         );
     let keys = Router::new()
         .route(
-            "/api/v1/llm/virtual-keys",
+            "/admin/llm/virtual-keys",
             get(list_virtual_keys).post(create_virtual_key),
         )
         .route(
-            "/api/v1/llm/virtual-keys/{id}",
+            "/admin/llm/virtual-keys/{id}",
             get(get_virtual_key)
                 .put(update_virtual_key)
                 .delete(delete_virtual_key),
         );
     let plugins = Router::new()
-        .route("/api/v1/llm/plugins", get(list_plugins))
-        .route("/api/v1/llm/plugins/reload", post(reload_plugins))
+        .route("/admin/llm/plugins", get(list_plugins))
+        .route("/admin/llm/plugins/reload", post(reload_plugins))
+        .route("/admin/llm/plugins/metrics", get(plugin_metrics))
+        .route("/admin/llm/plugins/effective", get(plugin_effective_chain))
         .route(
-            "/api/v1/llm/plugins/{id}",
+            "/admin/llm/plugins/{id}",
             get(get_plugin).put(update_plugin),
         )
         .route(
-            "/api/v1/llm/plugins/{id}/configs",
+            "/admin/llm/plugins/{id}/configs",
             get(list_plugin_configs).post(create_plugin_config),
         )
         .route(
-            "/api/v1/llm/plugin-configs/{id}",
+            "/admin/llm/plugin-configs/{id}",
             put(update_plugin_config).delete(delete_plugin_config),
         );
     Router::new()
@@ -112,8 +114,8 @@ pub fn router(state: LlmControlState) -> Router {
         .merge(routes)
         .merge(keys)
         .merge(plugins)
-        .route("/api/v1/llm/reload", post(reload))
-        .route("/api/v1/llm/usage", get(usage))
+        .route("/admin/llm/reload", post(reload))
+        .route("/admin/llm/usage", get(usage))
         .with_state(state)
 }
 
@@ -1521,6 +1523,53 @@ async fn reload_plugins(State(state): State<LlmControlState>) -> ApiResult<extra
     Ok(extract::Json(json!({
         "status": "reloaded",
         "plugins": plugins.registry().manifests().len(),
+    })))
+}
+
+async fn plugin_metrics(State(state): State<LlmControlState>) -> ApiResult<extract::Json<Value>> {
+    let plugins = state.plugins.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM plugin runtime is not enabled",
+        )
+    })?;
+    Ok(extract::Json(json!({ "plugins": plugins.metrics() })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EffectiveChainQuery {
+    pub consumer_id: Option<String>,
+    pub virtual_key_id: Option<String>,
+    pub model: Option<String>,
+    pub provider_id: Option<String>,
+}
+
+async fn plugin_effective_chain(
+    State(state): State<LlmControlState>,
+    Query(query): Query<EffectiveChainQuery>,
+) -> ApiResult<extract::Json<Value>> {
+    let plugins = state.plugins.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM plugin runtime is not enabled",
+        )
+    })?;
+    let model = query
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| ApiError::bad_request("model is required"))?;
+    let chain = plugins.effective_chain(
+        query.consumer_id.as_deref(),
+        query.virtual_key_id.as_deref(),
+        model,
+        query.provider_id.as_deref(),
+    );
+    Ok(extract::Json(json!({
+        "model": model,
+        "provider_id": query.provider_id,
+        "chain": chain,
     })))
 }
 
