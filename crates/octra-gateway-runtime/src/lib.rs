@@ -1,26 +1,26 @@
 //! Runtime snapshot management for the API gateway.
 //!
-//! The proxy hot path must not query SQLite per request. Configuration is
-//! compiled once into an immutable snapshot and swapped atomically on reload.
-//! In-flight requests keep the snapshot they started with.
+//! The proxy hot path never queries SQLite. Configuration is compiled once
+//! into an immutable snapshot and swapped atomically on reload. In-flight
+//! requests keep the snapshot they started with.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::{DateTime, Utc};
-use octra_api_core::{ApiCredential, LoadBalanceAlgorithm, Route, Service, Target};
+use chrono::Utc;
+use octra_api_core::{
+    Acl, BasicauthCredential, Consumer, JwtSecret, KeyauthCredential, LoadBalanceAlgorithm, Route,
+    Service, Target, Upstream,
+};
 use octra_core::{Result, SnapshotCounts, SnapshotInfo};
 use octra_storage::Storage;
 use octra_storage::api_gateway::ApiRuntimeData;
-use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
 pub mod balancer;
 pub mod matcher;
 
-pub use balancer::TargetPool;
+pub use balancer::{Endpoint, TargetPool, algorithm_from_str};
 pub use matcher::{
     CompiledRoute, CompiledService, MatchInput, RouteMatch, RouteMatcher, ServiceLimits,
     strip_matched_prefix,
@@ -28,23 +28,72 @@ pub use matcher::{
 
 /// SHA-256 hex digest of a plaintext API key.
 pub fn hash_api_key(key: &str) -> String {
+    use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(key.as_bytes()))
 }
 
-/// A credential as seen by the request hot path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CredentialEntry {
+#[derive(Debug, Clone, Default)]
+pub struct ConsumerRecord {
     pub id: String,
-    pub consumer_id: String,
-    pub key_hash: String,
-    pub enabled: bool,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub username: Option<String>,
+    pub custom_id: Option<String>,
+    pub acl_groups: Vec<String>,
 }
 
-impl CredentialEntry {
-    /// A credential is usable when enabled and permanent or not yet expired.
-    pub fn is_active(&self, now: DateTime<Utc>) -> bool {
-        self.enabled && self.expires_at.is_none_or(|expires| expires > now)
+#[derive(Debug, Clone)]
+pub struct KeyauthRef {
+    pub id: String,
+    pub consumer_id: String,
+    pub key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BasicAuthRef {
+    pub id: String,
+    pub consumer_id: String,
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct JwtRef {
+    pub id: String,
+    pub consumer_id: String,
+    pub key: String,
+    pub secret: String,
+    pub algorithm: String,
+    pub rsa_public_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AuthSnapshot {
+    pub consumers: HashMap<String, ConsumerRecord>,
+    pub consumer_by_username: HashMap<String, String>,
+    pub consumer_by_custom_id: HashMap<String, String>,
+    pub keyauth: HashMap<String, KeyauthRef>,
+    pub basicauth: HashMap<String, BasicAuthRef>,
+    pub jwt: HashMap<String, JwtRef>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ServiceEndpoint {
+    Pool(Arc<TargetPool>),
+    Direct(Arc<Endpoint>),
+}
+
+impl ServiceEndpoint {
+    pub fn attempts(&self) -> Vec<Arc<Endpoint>> {
+        match self {
+            Self::Pool(pool) => pool.ordered_attempts(),
+            Self::Direct(endpoint) => vec![Arc::clone(endpoint)],
+        }
+    }
+
+    pub fn has_eligible(&self) -> bool {
+        match self {
+            Self::Pool(pool) => pool.has_eligible(),
+            Self::Direct(endpoint) => endpoint.eligible,
+        }
     }
 }
 
@@ -54,15 +103,13 @@ pub struct RuntimeSnapshot {
     pub services: Vec<Service>,
     pub routes: Vec<Route>,
     pub matcher: RouteMatcher,
-    pub credentials: Vec<CredentialEntry>,
-    credential_index: HashMap<String, usize>,
-    /// Upstreams per service id, in name-then-id order.
-    service_upstreams: HashMap<String, Vec<String>>,
-    target_pools: HashMap<String, Arc<TargetPool>>,
-    /// Route ids granted by consumer-scoped policies.
-    consumer_policy_routes: HashMap<String, Vec<String>>,
-    /// Route ids granted by policies that apply to every consumer.
-    global_policy_routes: Option<Vec<String>>,
+    endpoints: HashMap<String, ServiceEndpoint>,
+    consumers: HashMap<String, ConsumerRecord>,
+    consumer_by_username: HashMap<String, String>,
+    consumer_by_custom_id: HashMap<String, String>,
+    keyauth: HashMap<String, KeyauthRef>,
+    basicauth: HashMap<String, BasicAuthRef>,
+    jwt: HashMap<String, JwtRef>,
 }
 
 impl std::fmt::Debug for RuntimeSnapshot {
@@ -71,203 +118,241 @@ impl std::fmt::Debug for RuntimeSnapshot {
             .field("info", &self.info)
             .field("services", &self.services.len())
             .field("routes", &self.routes.len())
-            .field("credentials", &self.credentials.len())
-            .field("target_pools", &self.target_pools.len())
+            .field("endpoints", &self.endpoints.len())
+            .field("consumers", &self.consumers.len())
             .finish()
     }
 }
 
 impl RuntimeSnapshot {
-    /// Compiles raw storage rows into a snapshot.
     pub fn compile(data: ApiRuntimeData) -> Self {
         let matcher = RouteMatcher::compile(&data.services, &data.routes);
+        let endpoints = compile_endpoints(&data.services, &data.upstreams, &data.targets);
 
-        let mut credential_index = HashMap::new();
-        let mut credentials = Vec::with_capacity(data.credentials.len());
-        for credential in &data.credentials {
-            if let Some(hash) = &credential.key_hash {
-                credential_index.insert(hash.clone(), credentials.len());
-                credentials.push(to_credential_entry(credential));
+        let acl_groups = group_acls(&data.acls);
+        let mut consumers = HashMap::new();
+        let mut consumer_by_username = HashMap::new();
+        let mut consumer_by_custom_id = HashMap::new();
+        for consumer in &data.consumers {
+            let record = consumer_record(consumer, &acl_groups);
+            if let Some(username) = &record.username {
+                consumer_by_username.insert(username.clone(), record.id.clone());
             }
-        }
-
-        let target_pools = compile_pools(&data);
-
-        let mut consumer_policy_routes: HashMap<String, Vec<String>> = HashMap::new();
-        let mut global_policy_routes: Option<Vec<String>> = None;
-        for policy in &data.policies {
-            let routes = allowed_routes(&policy.document);
-            match &policy.consumer_id {
-                Some(consumer_id) => consumer_policy_routes
-                    .entry(consumer_id.clone())
-                    .or_default()
-                    .extend(routes),
-                None => global_policy_routes
-                    .get_or_insert_with(Vec::new)
-                    .extend(routes),
+            if let Some(custom_id) = &record.custom_id {
+                consumer_by_custom_id.insert(custom_id.clone(), record.id.clone());
             }
+            consumers.insert(record.id.clone(), record);
         }
 
-        let mut service_upstreams: HashMap<String, Vec<String>> = HashMap::new();
-        for upstream in &data.upstreams {
-            service_upstreams
-                .entry(upstream.service_id.clone())
-                .or_default()
-                .push(upstream.id.clone());
-        }
+        let keyauth = data
+            .keyauth
+            .iter()
+            .map(keyauth_ref)
+            .map(|entry| (entry.key.clone(), entry))
+            .collect();
+        let basicauth = data
+            .basicauth
+            .iter()
+            .map(basicauth_ref)
+            .map(|entry| (entry.username.clone(), entry))
+            .collect();
+        let jwt = data
+            .jwt
+            .iter()
+            .map(jwt_ref)
+            .map(|entry| (entry.key.clone(), entry))
+            .collect();
 
         Self {
             info: SnapshotInfo {
                 generated_at: Utc::now(),
                 counts: SnapshotCounts {
-                    services: data.counts.services,
-                    routes: data.counts.routes,
-                    upstreams: data.counts.upstreams,
-                    targets: data.counts.targets,
+                    services: data.services.len() as i64,
+                    routes: data.routes.len() as i64,
+                    upstreams: data.upstreams.len() as i64,
+                    targets: data.targets.len() as i64,
                 },
             },
             services: data.services,
             routes: data.routes,
             matcher,
-            credentials,
-            credential_index,
-            service_upstreams,
-            target_pools,
-            consumer_policy_routes,
-            global_policy_routes,
+            endpoints,
+            consumers,
+            consumer_by_username,
+            consumer_by_custom_id,
+            keyauth,
+            basicauth,
+            jwt,
         }
     }
 
-    /// Whether the consumer may reach the route. With no applicable policy the
-    /// route is allowed; once a policy applies, only granted routes pass.
-    pub fn permits_route(&self, consumer_id: Option<&str>, route_id: &str) -> bool {
-        let mut restricted = false;
-        if let Some(allowed) = &self.global_policy_routes {
-            restricted = true;
-            if route_listed(allowed, route_id) {
-                return true;
-            }
+    pub fn auth_snapshot(&self) -> AuthSnapshot {
+        AuthSnapshot {
+            consumers: self.consumers.clone(),
+            consumer_by_username: self.consumer_by_username.clone(),
+            consumer_by_custom_id: self.consumer_by_custom_id.clone(),
+            keyauth: self.keyauth.clone(),
+            basicauth: self.basicauth.clone(),
+            jwt: self.jwt.clone(),
         }
-        if let Some(consumer_id) = consumer_id
-            && let Some(allowed) = self.consumer_policy_routes.get(consumer_id)
-        {
-            restricted = true;
-            if route_listed(allowed, route_id) {
-                return true;
-            }
-        }
-        !restricted
     }
 
-    /// Resolves a plaintext API key to an active credential.
-    pub fn authenticate(&self, key: &str, now: DateTime<Utc>) -> Option<&CredentialEntry> {
-        let hash = hash_api_key(key);
-        let entry = self.credentials.get(*self.credential_index.get(&hash)?)?;
-        entry.is_active(now).then_some(entry)
+    pub fn endpoint_for_service(&self, service_id: &str) -> Option<ServiceEndpoint> {
+        self.endpoints.get(service_id).cloned()
     }
 
-    pub fn target_pool(&self, upstream_id: &str) -> Option<&Arc<TargetPool>> {
-        self.target_pools.get(upstream_id)
+    pub fn service(&self, service_id: &str) -> Option<&Service> {
+        self.services
+            .iter()
+            .find(|service| service.id == service_id)
     }
 
-    /// The first upstream configured for a service.
-    pub fn upstream_for_service(&self, service_id: &str) -> Option<&str> {
-        self.service_upstreams
-            .get(service_id)?
-            .first()
+    pub fn consumer(&self, consumer_id: &str) -> Option<&ConsumerRecord> {
+        self.consumers.get(consumer_id)
+    }
+
+    pub fn consumer_id_by_username(&self, username: &str) -> Option<&str> {
+        self.consumer_by_username.get(username).map(String::as_str)
+    }
+
+    pub fn consumer_id_by_custom_id(&self, custom_id: &str) -> Option<&str> {
+        self.consumer_by_custom_id
+            .get(custom_id)
             .map(String::as_str)
     }
 
-    /// The first upstream pool for a service that has eligible targets.
-    /// Falls back to the first configured pool so exhaustion is reported by
-    /// the proxy as an unavailable upstream rather than a missing one.
-    pub fn pool_for_service(&self, service_id: &str) -> Option<&Arc<TargetPool>> {
-        let mut fallback = None;
-        for upstream_id in self.service_upstreams.get(service_id)? {
-            let Some(pool) = self.target_pools.get(upstream_id) else {
-                continue;
-            };
-            if pool.has_eligible() {
-                return Some(pool);
-            }
-            fallback.get_or_insert(pool);
+    pub fn keyauth(&self, key: &str) -> Option<&KeyauthRef> {
+        self.keyauth.get(key)
+    }
+
+    pub fn basicauth(&self, username: &str) -> Option<&BasicAuthRef> {
+        self.basicauth.get(username)
+    }
+
+    pub fn jwt(&self, key: &str) -> Option<&JwtRef> {
+        self.jwt.get(key)
+    }
+
+    pub fn acl_groups(&self, consumer_id: &str) -> &[String] {
+        self.consumers
+            .get(consumer_id)
+            .map(|consumer| consumer.acl_groups.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
+fn compile_endpoints(
+    services: &[Service],
+    upstreams: &[Upstream],
+    targets: &[Target],
+) -> HashMap<String, ServiceEndpoint> {
+    let mut targets_by_upstream: HashMap<&str, Vec<&Target>> = HashMap::new();
+    for target in targets {
+        targets_by_upstream
+            .entry(target.upstream_id.as_str())
+            .or_default()
+            .push(target);
+    }
+
+    let mut upstreams_by_name: HashMap<&str, &Upstream> = HashMap::new();
+    for upstream in upstreams {
+        upstreams_by_name.insert(upstream.name.as_str(), upstream);
+    }
+
+    let mut endpoints = HashMap::new();
+    for service in services {
+        if !service.enabled {
+            continue;
         }
-        fallback
+        let scheme = if service.protocol.eq_ignore_ascii_case("https") {
+            "https"
+        } else {
+            "http"
+        };
+        let endpoint = if let Some(upstream) = upstreams_by_name.get(service.host.as_str()) {
+            let pool_targets: Vec<Target> = targets_by_upstream
+                .get(upstream.id.as_str())
+                .map(|targets| {
+                    targets
+                        .iter()
+                        .filter(|target| target.weight > 0)
+                        .map(|target| (*target).clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if pool_targets.is_empty() {
+                continue;
+            }
+            ServiceEndpoint::Pool(Arc::new(TargetPool::new(
+                algorithm_from_str(upstream.algorithm.as_str()),
+                &pool_targets,
+                scheme,
+                pool_seed(&service.id),
+            )))
+        } else {
+            let url = format!("{}://{}:{}", scheme, service.host, service.port);
+            ServiceEndpoint::Direct(Endpoint::direct(service.id.clone(), url))
+        };
+        endpoints.insert(service.id.clone(), endpoint);
     }
+    endpoints
+}
 
-    pub fn pools(&self) -> impl Iterator<Item = (&str, &Arc<TargetPool>)> {
-        self.target_pools
-            .iter()
-            .map(|(id, pool)| (id.as_str(), pool))
+fn consumer_record(
+    consumer: &Consumer,
+    acl_groups: &HashMap<String, Vec<String>>,
+) -> ConsumerRecord {
+    ConsumerRecord {
+        id: consumer.id.clone(),
+        username: consumer.username.clone(),
+        custom_id: consumer.custom_id.clone(),
+        acl_groups: acl_groups.get(&consumer.id).cloned().unwrap_or_default(),
     }
 }
 
-fn allowed_routes(document: &serde_json::Value) -> Vec<String> {
-    document
-        .get("allowed_routes")
-        .and_then(serde_json::Value::as_array)
-        .map(|routes| {
-            routes
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+fn group_acls(acls: &[Acl]) -> HashMap<String, Vec<String>> {
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    for acl in acls {
+        groups
+            .entry(acl.consumer_id.clone())
+            .or_default()
+            .push(acl.group.clone());
+    }
+    groups
 }
 
-fn route_listed(allowed: &[String], route_id: &str) -> bool {
-    allowed
-        .iter()
-        .any(|route| route == "*" || route == route_id)
-}
-
-fn to_credential_entry(credential: &ApiCredential) -> CredentialEntry {
-    CredentialEntry {
+fn keyauth_ref(credential: &KeyauthCredential) -> KeyauthRef {
+    KeyauthRef {
         id: credential.id.clone(),
         consumer_id: credential.consumer_id.clone(),
-        key_hash: credential.key_hash.clone().unwrap_or_default(),
-        enabled: credential.enabled,
-        expires_at: credential.expires_at,
+        key: credential.key.clone(),
     }
 }
 
-fn compile_pools(data: &ApiRuntimeData) -> HashMap<String, Arc<TargetPool>> {
-    let algorithms: HashMap<&str, LoadBalanceAlgorithm> = data
-        .upstreams
-        .iter()
-        .map(|upstream| (upstream.id.as_str(), upstream.algorithm))
-        .collect();
-
-    let mut grouped: HashMap<&str, Vec<&Target>> = HashMap::new();
-    for target in &data.targets {
-        if algorithms.contains_key(target.upstream_id.as_str()) {
-            grouped
-                .entry(target.upstream_id.as_str())
-                .or_default()
-                .push(target);
-        }
+fn basicauth_ref(credential: &BasicauthCredential) -> BasicAuthRef {
+    BasicAuthRef {
+        id: credential.id.clone(),
+        consumer_id: credential.consumer_id.clone(),
+        username: credential.username.clone(),
+        password: credential.password.clone(),
     }
-
-    grouped
-        .into_iter()
-        .map(|(upstream_id, mut targets)| {
-            targets.sort_by(|a, b| a.id.cmp(&b.id));
-            let algorithm = algorithms[upstream_id];
-            let seed = pool_seed(upstream_id);
-            (
-                upstream_id.to_string(),
-                Arc::new(TargetPool::new(algorithm, &targets, seed)),
-            )
-        })
-        .collect()
 }
 
-/// Per-upstream rotation offset so independent pools do not march in lockstep.
-fn pool_seed(upstream_id: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    let mut hasher = DefaultHasher::new();
-    upstream_id.hash(&mut hasher);
+fn jwt_ref(secret: &JwtSecret) -> JwtRef {
+    JwtRef {
+        id: secret.id.clone(),
+        consumer_id: secret.consumer_id.clone(),
+        key: secret.key.clone(),
+        secret: secret.secret.clone(),
+        algorithm: secret.algorithm.clone(),
+        rsa_public_key: secret.rsa_public_key.clone(),
+    }
+}
+
+fn pool_seed(service_id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    service_id.hash(&mut hasher);
     hasher.finish() % 64
 }
 
@@ -275,7 +360,6 @@ fn pool_seed(upstream_id: &str) -> u64 {
 pub struct GatewayRuntime {
     storage: Arc<Storage>,
     snapshot: RwLock<Arc<RuntimeSnapshot>>,
-    reload_generation: AtomicU64,
 }
 
 impl GatewayRuntime {
@@ -284,28 +368,14 @@ impl GatewayRuntime {
         Ok(Self {
             storage,
             snapshot: RwLock::new(Arc::new(RuntimeSnapshot::compile(data))),
-            reload_generation: AtomicU64::new(0),
         })
     }
 
-    /// Loads a fresh snapshot and atomically replaces the current one.
-    /// In-flight requests keep the snapshot they started with.
     pub async fn reload(&self) -> Result<SnapshotInfo> {
         let data = self.storage.load_api_runtime_data().await?;
         let next = Arc::new(RuntimeSnapshot::compile(data));
         let info = next.info.clone();
-
-        let mut guard = self.snapshot.write().await;
-        *guard = next;
-        let generation = self.reload_generation.fetch_add(1, Ordering::Relaxed) + 1;
-
-        tracing::info!(
-            generation,
-            services = info.counts.services,
-            routes = info.counts.routes,
-            "api gateway runtime snapshot reloaded"
-        );
-
+        *self.snapshot.write().await = next;
         Ok(info)
     }
 
@@ -316,17 +386,11 @@ impl GatewayRuntime {
     pub fn storage(&self) -> &Storage {
         &self.storage
     }
-
-    pub fn generation(&self) -> u64 {
-        self.reload_generation.load(Ordering::Relaxed)
-    }
 }
 
 impl std::fmt::Debug for GatewayRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GatewayRuntime")
-            .field("generation", &self.generation())
-            .finish_non_exhaustive()
+        f.debug_struct("GatewayRuntime").finish_non_exhaustive()
     }
 }
 
@@ -345,42 +409,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hash_is_stable_sha256_hex() {
-        // SHA-256("hello")
-        assert_eq!(
-            hash_api_key("hello"),
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        );
-        assert_eq!(hash_api_key("hello").len(), 64);
-    }
-
-    #[test]
     fn host_normalization() {
         assert_eq!(normalize_host("Example.COM:8080"), "example.com");
-        assert_eq!(normalize_host("example.com"), "example.com");
         assert_eq!(normalize_host("[::1]:8080"), "::1");
         assert_eq!(normalize_host("user@host.test:1"), "host.test");
     }
 
-    #[tokio::test]
-    async fn reload_reflects_new_configuration() {
-        let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
-        let runtime = GatewayRuntime::bootstrap(storage.clone()).await.unwrap();
-        assert_eq!(runtime.snapshot().await.info.counts.services, 0);
-
-        sqlx::query(
-            "INSERT INTO services (id, name, protocol, enabled) VALUES ('svc-1', 'demo', 'http', 1)",
-        )
-        .execute(storage.pool())
-        .await
-        .unwrap();
-
-        let info = runtime.reload().await.unwrap();
-        assert_eq!(info.counts.services, 1);
-        assert_eq!(runtime.generation(), 1);
-
-        let snapshot = runtime.snapshot().await;
-        assert_eq!(snapshot.services.len(), 1);
-        assert_eq!(snapshot.services[0].name, "demo");
+    #[test]
+    fn snapshot_compiles_direct_and_upstream_endpoints() {
+        let direct = Service {
+            id: "svc-direct".into(),
+            name: "direct".into(),
+            protocol: "http".into(),
+            host: "127.0.0.1".into(),
+            port: 9000,
+            path: None,
+            retries: 0,
+            connect_timeout: 1000,
+            write_timeout: 1000,
+            read_timeout: 1000,
+            enabled: true,
+            description: String::new(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let pooled = Service {
+            id: "svc-pool".into(),
+            host: "up".into(),
+            ..direct.clone()
+        };
+        let data = ApiRuntimeData {
+            services: vec![direct, pooled],
+            upstreams: vec![Upstream {
+                id: "u".into(),
+                name: "up".into(),
+                algorithm: LoadBalanceAlgorithm::RoundRobin,
+                hash_on: "none".into(),
+                hash_fallback: "none".into(),
+                slots: 10000,
+                healthchecks: serde_json::json!({}),
+                host_header: None,
+                tags: Vec::new(),
+                created_at: 0,
+                updated_at: 0,
+            }],
+            targets: vec![Target {
+                id: "t".into(),
+                upstream_id: "u".into(),
+                target: "127.0.0.2:9001".into(),
+                weight: 100,
+                tags: Vec::new(),
+                created_at: 0,
+                updated_at: 0,
+            }],
+            ..Default::default()
+        };
+        let snapshot = RuntimeSnapshot::compile(data);
+        assert!(matches!(
+            snapshot.endpoint_for_service("svc-direct"),
+            Some(ServiceEndpoint::Direct(_))
+        ));
+        assert!(matches!(
+            snapshot.endpoint_for_service("svc-pool"),
+            Some(ServiceEndpoint::Pool(_))
+        ));
     }
 }

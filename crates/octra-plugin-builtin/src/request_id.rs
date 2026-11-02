@@ -26,7 +26,11 @@ impl ApiGatewayPluginFactory for RequestIdFactory {
         )
     }
 
-    fn create(&self, _config: Value) -> Result<std::sync::Arc<dyn ApiGatewayPlugin>, PluginError> {
+    fn create(
+        &self,
+        _id: &str,
+        _config: Value,
+    ) -> Result<std::sync::Arc<dyn ApiGatewayPlugin>, PluginError> {
         Ok(std::sync::Arc::new(RequestIdPlugin {
             manifest: self.manifest(),
         }))

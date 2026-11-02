@@ -427,7 +427,7 @@ impl Storage {
     // ----- consumers -----------------------------------------------------
 
     pub async fn ensure_consumer(&self, id: &str, name: &str) -> Result<()> {
-        sqlx::query("INSERT OR IGNORE INTO consumers (id, name) VALUES (?1, ?2)")
+        sqlx::query("INSERT OR IGNORE INTO consumers (id, username) VALUES (?1, ?2)")
             .bind(id)
             .bind(name)
             .execute(self.mcp_pool())
@@ -1038,7 +1038,7 @@ mod tests {
         assert!(!storage.mcp_consumer_exists("c2").await.unwrap());
         // A different name for the same consumer keeps the first row.
         storage.ensure_consumer("c1", "renamed").await.unwrap();
-        let name: String = sqlx::query_scalar("SELECT name FROM consumers WHERE id = 'c1'")
+        let name: String = sqlx::query_scalar("SELECT username FROM consumers WHERE id = 'c1'")
             .fetch_one(storage.pool())
             .await
             .unwrap();

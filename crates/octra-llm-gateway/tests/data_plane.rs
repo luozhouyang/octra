@@ -757,7 +757,7 @@ async fn consumer_policies_restrict_models_and_providers() {
     let consumer = harness
         .storage
         .create_consumer(&CreateConsumer {
-            name: "policy-team".into(),
+            username: Some("policy-team".into()),
             ..Default::default()
         })
         .await
@@ -1202,7 +1202,7 @@ async fn model_map_cannot_bypass_model_policy() {
     let consumer = harness
         .storage
         .create_consumer(&CreateConsumer {
-            name: "mapped-team".into(),
+            username: Some("mapped-team".into()),
             ..Default::default()
         })
         .await

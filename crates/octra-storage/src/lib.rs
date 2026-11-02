@@ -113,7 +113,7 @@ impl Storage {
             .collect();
 
         let route_rows = sqlx::query(
-            "SELECT id, service_id, host, path_prefix, enabled FROM routes ORDER BY path_prefix ASC",
+            "SELECT id, service_id, hosts, paths, enabled FROM routes ORDER BY paths ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -123,9 +123,22 @@ impl Storage {
             .into_iter()
             .map(|row| RouteSummary {
                 id: row.get("id"),
-                service_id: row.get("service_id"),
-                host: row.get("host"),
-                path_prefix: row.get("path_prefix"),
+                service_id: row
+                    .get::<Option<String>, _>("service_id")
+                    .unwrap_or_default(),
+                host: row
+                    .try_get::<Option<String>, _>("hosts")
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+                    .and_then(|hosts| hosts.into_iter().next()),
+                path_prefix: row
+                    .try_get::<Option<String>, _>("paths")
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+                    .and_then(|paths| paths.into_iter().next())
+                    .unwrap_or_else(|| "/".into()),
                 enabled: row.get::<i64, _>("enabled") != 0,
             })
             .collect();

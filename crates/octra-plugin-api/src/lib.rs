@@ -133,6 +133,79 @@ pub enum Capability {
 }
 
 /// Plugin metadata stored in the catalog and carried by every instance.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginPhase {
+    Certificate,
+    Rewrite,
+    Request,
+    UpstreamRequest,
+    Response,
+    ResponseBody,
+    Log,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConsumerInfo {
+    pub id: String,
+    pub username: Option<String>,
+    pub custom_id: Option<String>,
+    pub acl_groups: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CredentialInfo {
+    pub id: String,
+    pub kind: String,
+    pub identifier: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AuthKey {
+    pub credential_id: String,
+    pub consumer_id: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AuthBasic {
+    pub credential_id: String,
+    pub consumer_id: String,
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AuthJwt {
+    pub credential_id: String,
+    pub consumer_id: String,
+    pub key: String,
+    pub secret: String,
+    pub algorithm: String,
+    pub rsa_public_key: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct GatewayState {
+    pub consumer: Option<ConsumerInfo>,
+    pub credential: Option<CredentialInfo>,
+    pub anonymous: bool,
+    pub values: std::collections::BTreeMap<String, Value>,
+    pub method_override: Option<http::Method>,
+    pub consumers: std::collections::HashMap<String, ConsumerInfo>,
+    pub consumer_by_username: std::collections::HashMap<String, String>,
+    pub consumer_by_custom_id: std::collections::HashMap<String, String>,
+    pub keyauth: std::collections::HashMap<String, AuthKey>,
+    pub basicauth: std::collections::HashMap<String, AuthBasic>,
+    pub jwt: std::collections::HashMap<String, AuthJwt>,
+}
+
+impl GatewayState {
+    pub fn slot(&mut self, plugin: &str) -> &mut Value {
+        self.values.entry(plugin.to_string()).or_insert(Value::Null)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
     pub name: String,
@@ -201,6 +274,8 @@ pub type PluginResult = Result<PluginAction, PluginError>;
 
 pub struct RequestContext<'a> {
     pub request_id: &'a str,
+    pub state: &'a mut GatewayState,
+    pub matched_path: &'a str,
     pub method: &'a Method,
     pub uri: &'a mut Uri,
     pub headers: &'a mut HeaderMap,
@@ -213,6 +288,7 @@ pub struct RequestContext<'a> {
 
 pub struct UpstreamRequestContext<'a> {
     pub request_id: &'a str,
+    pub state: &'a mut GatewayState,
     pub method: &'a Method,
     pub uri: &'a mut Uri,
     pub headers: &'a mut HeaderMap,
@@ -224,6 +300,7 @@ pub struct UpstreamRequestContext<'a> {
 
 pub struct ResponseContext<'a> {
     pub request_id: &'a str,
+    pub state: &'a mut GatewayState,
     pub request_headers: &'a HeaderMap,
     pub status: &'a mut StatusCode,
     pub headers: &'a mut HeaderMap,
@@ -235,6 +312,7 @@ pub struct ResponseContext<'a> {
 
 pub struct BodyContext<'a> {
     pub request_id: &'a str,
+    pub state: &'a mut GatewayState,
     pub route: &'a Route,
     pub service: &'a Service,
     pub target_url: &'a str,
@@ -242,6 +320,7 @@ pub struct BodyContext<'a> {
 
 pub struct ErrorContext<'a> {
     pub request_id: &'a str,
+    pub state: &'a mut GatewayState,
     pub method: &'a Method,
     pub uri: &'a Uri,
     pub headers: &'a HeaderMap,
@@ -254,6 +333,7 @@ pub struct ErrorContext<'a> {
 
 pub struct LogContext<'a> {
     pub request_id: &'a str,
+    pub state: &'a mut GatewayState,
     pub method: &'a Method,
     pub path: &'a str,
     pub status: u16,
@@ -265,10 +345,52 @@ pub struct LogContext<'a> {
     pub error: Option<&'a str>,
 }
 
+pub struct RequestBodyContext<'a> {
+    pub request_id: &'a str,
+    pub state: &'a mut GatewayState,
+    pub method: &'a Method,
+    pub uri: &'a Uri,
+    pub headers: &'a HeaderMap,
+    pub consumer_id: Option<&'a str>,
+    pub route: &'a Route,
+    pub service: &'a Service,
+}
+
+pub struct ResponseBodyContext<'a> {
+    pub request_id: &'a str,
+    pub state: &'a mut GatewayState,
+    pub status: StatusCode,
+    pub headers: &'a HeaderMap,
+    pub consumer_id: Option<&'a str>,
+    pub route: &'a Route,
+    pub service: &'a Service,
+    pub target_url: &'a str,
+}
+
 /// API Gateway plugin stages.
 #[async_trait]
 pub trait ApiGatewayPlugin: Send + Sync {
     fn manifest(&self) -> &PluginManifest;
+
+    async fn on_rewrite(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
+        Ok(PluginAction::Continue)
+    }
+
+    async fn on_request_buffer(
+        &self,
+        _cx: &mut RequestBodyContext<'_>,
+        body: Bytes,
+    ) -> Result<Bytes, PluginError> {
+        Ok(body)
+    }
+
+    async fn on_response_buffer(
+        &self,
+        _cx: &mut ResponseBodyContext<'_>,
+        body: Bytes,
+    ) -> Result<Bytes, PluginError> {
+        Ok(body)
+    }
 
     async fn on_request(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
         Ok(PluginAction::Continue)
@@ -302,9 +424,17 @@ pub trait ApiGatewayPlugin: Send + Sync {
 pub trait ApiGatewayPluginFactory: Send + Sync {
     fn manifest(&self) -> PluginManifest;
 
-    fn create(&self, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError>;
+    fn create(&self, id: &str, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError>;
+
+    fn phases(&self) -> Vec<PluginPhase> {
+        vec![PluginPhase::Request, PluginPhase::Log]
+    }
+
+    fn auth(&self) -> bool {
+        false
+    }
 
     fn validate(&self, config: &Value) -> Result<(), PluginError> {
-        self.create(config.clone()).map(|_| ())
+        self.create("validation", config.clone()).map(|_| ())
     }
 }

@@ -32,7 +32,7 @@ impl ApiGatewayPluginFactory for CorsFactory {
     fn manifest(&self) -> PluginManifest {
         manifest(
             "cors",
-            5,
+            1300,
             vec![Capability::RequestHeaders, Capability::ResponseHeaders],
             "Handles CORS preflight requests and response headers",
             json!({
@@ -49,7 +49,15 @@ impl ApiGatewayPluginFactory for CorsFactory {
         )
     }
 
-    fn create(&self, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
+    fn phases(&self) -> Vec<octra_plugin_api::PluginPhase> {
+        vec![
+            octra_plugin_api::PluginPhase::Request,
+            octra_plugin_api::PluginPhase::Response,
+            octra_plugin_api::PluginPhase::Log,
+        ]
+    }
+
+    fn create(&self, _id: &str, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
         let config: CorsConfig = serde_json::from_value(config)
             .map_err(|error| PluginError::fail_closed(format!("invalid cors config: {error}")))?;
         if config.allow_origins.is_empty() {
@@ -244,7 +252,7 @@ mod tests {
     use super::*;
 
     fn plugin(config: Value) -> Arc<dyn ApiGatewayPlugin> {
-        CorsFactory.create(config).unwrap()
+        CorsFactory.create("test", config).unwrap()
     }
 
     #[test]
@@ -253,14 +261,14 @@ mod tests {
         assert_eq!(wildcard, "cors");
 
         let explicit = CorsFactory
-            .create(json!({"allow_origins": ["https://app.test"]}))
+            .create("test", json!({"allow_origins": ["https://app.test"]}))
             .unwrap();
         assert_eq!(explicit.manifest().name, "cors");
     }
 
     #[test]
     fn rejects_empty_origins() {
-        let Err(error) = CorsFactory.create(json!({"allow_origins": []})) else {
+        let Err(error) = CorsFactory.create("test", json!({"allow_origins": []})) else {
             panic!("expected an error");
         };
         assert!(error.message.contains("allow_origins"));

@@ -38,7 +38,7 @@ impl ApiGatewayPluginFactory for RateLimitFactory {
         )
     }
 
-    fn create(&self, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
+    fn create(&self, _id: &str, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
         let config: RateLimitConfig = serde_json::from_value(config).map_err(|error| {
             PluginError::fail_closed(format!("invalid rate-limit config: {error}"))
         })?;
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn rejects_non_positive_rate() {
-        let Err(error) = RateLimitFactory.create(json!({"requests_per_second": 0})) else {
+        let Err(error) = RateLimitFactory.create("test", json!({"requests_per_second": 0})) else {
             panic!("expected an error");
         };
         assert!(error.message.contains("requests_per_second"));

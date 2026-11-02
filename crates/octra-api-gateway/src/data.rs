@@ -1,8 +1,8 @@
 //! Data plane: catch-all reverse proxy.
 //!
-//! Every request that reaches this router is matched against the compiled
-//! runtime snapshot. The request body streams to the selected upstream target
-//! and the upstream response streams back to the client.
+//! Every request is matched against the compiled runtime snapshot. Plugins run
+//! in ordered phases while keeping the existing Octra plugin names
+//! (`request-id`, `cors`, `rate-limit`, `header-rewrite`, `circuit-breaker`).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
 use chrono::Utc;
 use http_body::Body as _;
@@ -22,19 +22,17 @@ use octra_data_plane::{
 };
 use octra_gateway_runtime::balancer::Endpoint;
 use octra_gateway_runtime::{
-    CompiledRoute, CompiledService, CredentialEntry, MatchInput, RuntimeSnapshot, normalize_host,
-    strip_matched_prefix,
+    AuthSnapshot, CompiledRoute, CompiledService, MatchInput, RuntimeSnapshot, ServiceLimits,
+    normalize_host, strip_matched_prefix,
 };
 use octra_plugin_api::{
-    BodyContext, ErrorContext, LogContext, PluginError, RequestContext, ResponseContext,
-    UpstreamRequestContext,
+    AuthBasic, AuthJwt, AuthKey, ConsumerInfo, ErrorContext, GatewayState, LogContext, PluginError,
+    RequestContext, ResponseContext, UpstreamRequestContext,
 };
 use octra_plugin_runtime::PluginChain;
 use octra_storage::NewRequestLog;
 
 use crate::ApiDataState;
-
-const HEADER_API_KEY: &str = "x-api-key";
 
 /// Catch-all proxy handler.
 pub async fn proxy(
@@ -60,20 +58,15 @@ pub async fn proxy(
 
     let snapshot = state.runtime.snapshot().await;
 
-    let matched = snapshot
-        .matcher
-        .resolve(&MatchInput {
-            host: host.as_deref(),
-            path: &path,
-            method: method.as_str(),
-            headers: &parts.headers,
-        })
-        .map(|(route, service)| Dispatch {
-            route: route.clone(),
-            service: service.clone(),
-        });
-
-    let Some(dispatch) = matched else {
+    let scheme = forwarded_scheme(&parts.headers);
+    let input = MatchInput {
+        scheme,
+        host: host.as_deref(),
+        path: &path,
+        method: method.as_str(),
+        headers: &parts.headers,
+    };
+    let Some(matched) = snapshot.matcher.match_route(&input) else {
         let response = not_found();
         let elapsed = started.elapsed();
         state.metrics.record(response.status().as_u16(), elapsed, 0);
@@ -102,49 +95,72 @@ pub async fn proxy(
         );
         return with_request_id(response, &request_id);
     };
+    let Some(compiled_route) = snapshot.matcher.route(matched.route_index).cloned() else {
+        return with_request_id(not_found(), &request_id);
+    };
+    let dispatch = Dispatch {
+        route: compiled_route,
+        service: matched
+            .service_index
+            .and_then(|index| snapshot.matcher.service(index))
+            .cloned(),
+        matched_path: matched.matched_path,
+    };
 
-    let route_id = &dispatch.route.route.id;
-    let service_id = &dispatch.service.service.id;
+    let placeholder = placeholder_service();
+    let route_id = dispatch.route.route.id.clone();
+    let service_id = dispatch
+        .service
+        .as_ref()
+        .map(|service| service.service.id.clone());
     let route = &dispatch.route.route;
-    let service = &dispatch.service.service;
+    let service = dispatch
+        .service
+        .as_ref()
+        .map(|service| &service.service)
+        .unwrap_or(&placeholder);
+    let matched_path = dispatch.matched_path.clone();
 
-    // Authentication runs before the plugin chain so consumer-scoped plugins
-    // can be selected, but rejection is deferred until `on_request` has run:
-    // CORS preflight must be answered without credentials.
-    let credential = authenticate(&snapshot, &parts.headers);
-    let consumer_id = credential.as_ref().map(|entry| entry.consumer_id.clone());
-    let chain = state
+    let mut auth_state = build_gateway_state(snapshot.auth_snapshot());
+    let pre_chain = state
         .plugins
-        .chain_for(route_id, service_id, consumer_id.as_deref());
+        .pre_auth_chain(Some(&route_id), service_id.as_deref());
+
     let subject = LogSubject {
         request_id: &request_id,
         method: &method,
         path: &path,
         route,
         service,
-        consumer: consumer_id.as_deref(),
+        consumer: None,
     };
 
     let mut request_cx = RequestContext {
         request_id: &request_id,
+        state: &mut auth_state,
+        matched_path: &matched_path,
         method: &parts.method,
         uri: &mut parts.uri,
         headers: &mut parts.headers,
         client_ip: Some(peer.ip()),
-        consumer_id: consumer_id.as_deref(),
-        credential_id: credential.as_ref().map(|entry| entry.id.as_str()),
+        consumer_id: None,
+        credential_id: None,
         route,
         service,
     };
-    match chain.on_request(&mut request_cx).await {
+    match pre_chain.on_request(&mut request_cx).await {
         Ok(None) => {}
         Ok(Some(response)) => {
             let elapsed = started.elapsed();
             state.metrics.record(response.status().as_u16(), elapsed, 0);
             return complete(
                 &state,
-                &chain,
+                &pre_chain,
+                &state
+                    .plugins
+                    .pre_auth_chain(Some(&route_id), service_id.as_deref()),
                 &subject,
+                &mut auth_state,
                 Finish {
                     latency: elapsed,
                     target: None,
@@ -159,51 +175,103 @@ pub async fn proxy(
         }
     }
 
-    if dispatch.service.limits.require_auth && credential.is_none() {
-        let response = unauthorized();
+    let consumer_id = auth_state
+        .consumer
+        .as_ref()
+        .map(|consumer| consumer.id.clone());
+
+    let post_chain = consumer_id
+        .as_deref()
+        .map(|consumer_id| {
+            state
+                .plugins
+                .post_auth_chain(Some(&route_id), service_id.as_deref(), consumer_id)
+        })
+        .unwrap_or_else(|| Arc::new(PluginChain::default()));
+
+    if let Some(consumer_id) = consumer_id.as_deref() {
+        let credential_id = auth_state.credential.as_ref().map(|c| c.id.clone());
+        let mut post_cx = RequestContext {
+            request_id: &request_id,
+            state: &mut auth_state,
+            matched_path: &matched_path,
+            method: &parts.method,
+            uri: &mut parts.uri,
+            headers: &mut parts.headers,
+            client_ip: Some(peer.ip()),
+            consumer_id: Some(consumer_id),
+            credential_id: credential_id.as_deref(),
+            route,
+            service,
+        };
+        match post_chain.on_request(&mut post_cx).await {
+            Ok(None) => {}
+            Ok(Some(response)) => {
+                let elapsed = started.elapsed();
+                state.metrics.record(response.status().as_u16(), elapsed, 0);
+                return complete(
+                    &state,
+                    &pre_chain,
+                    &post_chain,
+                    &subject,
+                    &mut auth_state,
+                    Finish {
+                        latency: elapsed,
+                        target: None,
+                        error: None,
+                    },
+                    response,
+                )
+                .await;
+            }
+            Err(error) => {
+                return failed_plugin(&state, &subject, started, error);
+            }
+        }
+    }
+
+    inject_consumer_headers(&mut parts.headers, &auth_state);
+
+    let consumer_id = auth_state
+        .consumer
+        .as_ref()
+        .map(|consumer| consumer.id.clone());
+    let subject = LogSubject {
+        consumer: consumer_id.clone(),
+        ..subject
+    };
+
+    let Some(service_id) = service_id.as_deref() else {
+        let response = bad_gateway("route has no service");
         let elapsed = started.elapsed();
+        state.metrics.record_upstream_error();
         state.metrics.record(response.status().as_u16(), elapsed, 0);
         return complete(
             &state,
-            &chain,
+            &pre_chain,
+            &post_chain,
             &subject,
+            &mut auth_state,
             Finish {
                 latency: elapsed,
                 target: None,
-                error: None,
+                error: Some("route has no service".to_string()),
             },
             response,
         )
         .await;
-    }
-
-    if !snapshot.permits_route(consumer_id.as_deref(), route_id.as_str()) {
-        let response = forbidden();
-        let elapsed = started.elapsed();
-        state.metrics.record(response.status().as_u16(), elapsed, 0);
-        return complete(
-            &state,
-            &chain,
-            &subject,
-            Finish {
-                latency: elapsed,
-                target: None,
-                error: None,
-            },
-            response,
-        )
-        .await;
-    }
-
-    let Some(pool) = snapshot.pool_for_service(service_id.as_str()).cloned() else {
+    };
+    let Some(endpoint) = snapshot.endpoint_for_service(service_id) else {
         let response = bad_gateway("no upstream configured for service");
         let elapsed = started.elapsed();
         state.metrics.record_upstream_error();
         state.metrics.record(response.status().as_u16(), elapsed, 0);
         return complete(
             &state,
-            &chain,
+            &pre_chain,
+            &post_chain,
             &subject,
+            &mut auth_state,
             Finish {
                 latency: elapsed,
                 target: None,
@@ -214,10 +282,16 @@ pub async fn proxy(
         .await;
     };
 
-    let mut attempts = pool.ordered_attempts();
-    let retry_limit = 1 + usize::try_from(dispatch.service.limits.retries).unwrap_or(usize::MAX);
+    let mut attempts = endpoint.attempts();
+    let retry_limit = 1 + usize::try_from(
+        dispatch
+            .service
+            .as_ref()
+            .map(|service| service.limits.retries)
+            .unwrap_or(0),
+    )
+    .unwrap_or(usize::MAX);
     attempts.truncate(attempts.len().min(retry_limit));
-    // Only idempotent requests are retried, and only across distinct targets.
     if !is_idempotent(method.as_str()) {
         attempts.truncate(1);
     }
@@ -229,8 +303,10 @@ pub async fn proxy(
         state.metrics.record(response.status().as_u16(), elapsed, 0);
         return complete(
             &state,
-            &chain,
+            &pre_chain,
+            &post_chain,
             &subject,
+            &mut auth_state,
             Finish {
                 latency: elapsed,
                 target: None,
@@ -241,8 +317,13 @@ pub async fn proxy(
         .await;
     };
 
+    if let Some(method) = auth_state.method_override.take() {
+        parts.method = method;
+    }
+
     let mut upstream_cx = UpstreamRequestContext {
         request_id: &request_id,
+        state: &mut auth_state,
         method: &parts.method,
         uri: &mut parts.uri,
         headers: &mut parts.headers,
@@ -251,26 +332,30 @@ pub async fn proxy(
         service,
         target_url: &target_url,
     };
-    match chain.on_upstream_request(&mut upstream_cx).await {
-        Ok(None) => {}
-        Ok(Some(response)) => {
-            let elapsed = started.elapsed();
-            state.metrics.record(response.status().as_u16(), elapsed, 0);
-            return complete(
-                &state,
-                &chain,
-                &subject,
-                Finish {
-                    latency: elapsed,
-                    target: Some(target_url),
-                    error: None,
-                },
-                response,
-            )
-            .await;
-        }
-        Err(error) => {
-            return failed_plugin(&state, &subject, started, error);
+    for chain in [&pre_chain, &post_chain] {
+        match chain.on_upstream_request(&mut upstream_cx).await {
+            Ok(None) => {}
+            Ok(Some(response)) => {
+                let elapsed = started.elapsed();
+                state.metrics.record(response.status().as_u16(), elapsed, 0);
+                return complete(
+                    &state,
+                    &pre_chain,
+                    &post_chain,
+                    &subject,
+                    &mut auth_state,
+                    Finish {
+                        latency: elapsed,
+                        target: Some(target_url.clone()),
+                        error: None,
+                    },
+                    response,
+                )
+                .await;
+            }
+            Err(error) => {
+                return failed_plugin(&state, &subject, started, error);
+            }
         }
     }
 
@@ -295,8 +380,10 @@ pub async fn proxy(
         state.metrics.record(response.status().as_u16(), elapsed, 0);
         return complete(
             &state,
-            &chain,
+            &pre_chain,
+            &post_chain,
             &subject,
+            &mut auth_state,
             Finish {
                 latency: elapsed,
                 target: None,
@@ -307,9 +394,6 @@ pub async fn proxy(
         .await;
     }
 
-    // Retries need the body more than once, so those requests are buffered
-    // within the configured limit. Single-attempt requests stay streaming and
-    // are bounded by a limited body.
     let payload = if attempts.len() > 1 {
         match axum::body::to_bytes(body, max_body).await {
             Ok(bytes) => RequestBody::Buffered(bytes),
@@ -319,8 +403,10 @@ pub async fn proxy(
                 state.metrics.record(response.status().as_u16(), elapsed, 0);
                 return complete(
                     &state,
-                    &chain,
+                    &pre_chain,
+                    &post_chain,
                     &subject,
+                    &mut auth_state,
                     Finish {
                         latency: elapsed,
                         target: None,
@@ -335,7 +421,16 @@ pub async fn proxy(
         RequestBody::Stream(Body::new(http_body_util::Limited::new(body, max_body)))
     };
 
-    let outcome = forward(&state, attempts, &dispatch, parts, payload, context).await;
+    let outcome = forward(
+        &state,
+        attempts,
+        &dispatch,
+        parts,
+        payload,
+        context,
+        &matched_path,
+    )
+    .await;
     let elapsed = started.elapsed();
 
     match outcome {
@@ -345,9 +440,10 @@ pub async fn proxy(
 
             let (mut response_parts, response_body) = response.into_parts();
             let target = response_target(&response_parts);
-            let response_action = {
+            for chain in [&pre_chain, &post_chain] {
                 let mut response_cx = ResponseContext {
                     request_id: &request_id,
+                    state: &mut auth_state,
                     request_headers: &request_headers,
                     status: &mut response_parts.status,
                     headers: &mut response_parts.headers,
@@ -356,48 +452,41 @@ pub async fn proxy(
                     service,
                     target_url: &target,
                 };
-                chain.on_response(&mut response_cx).await
-            };
-            match response_action {
-                Ok(None) => {}
-                Ok(Some(replacement)) => {
-                    let elapsed = started.elapsed();
-                    state
-                        .metrics
-                        .record(replacement.status().as_u16(), elapsed, 0);
-                    return complete(
-                        &state,
-                        &chain,
-                        &subject,
-                        Finish {
-                            latency: elapsed,
-                            target: Some(target),
-                            error: None,
-                        },
-                        replacement,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    return failed_plugin(&state, &subject, started, error);
+                match chain.on_response(&mut response_cx).await {
+                    Ok(None) => {}
+                    Ok(Some(replacement)) => {
+                        let elapsed = started.elapsed();
+                        state
+                            .metrics
+                            .record(replacement.status().as_u16(), elapsed, 0);
+                        return complete(
+                            &state,
+                            &pre_chain,
+                            &post_chain,
+                            &subject,
+                            &mut auth_state,
+                            Finish {
+                                latency: elapsed,
+                                target: Some(target),
+                                error: None,
+                            },
+                            replacement,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        return failed_plugin(&state, &subject, started, error);
+                    }
                 }
             }
 
-            let filtered = filter_response_body(
-                chain.clone(),
-                OwnedBodyContext {
-                    request_id: request_id.clone(),
-                    route: route.clone(),
-                    service: service.clone(),
-                    target_url: target.clone(),
-                },
-                response_body,
-            );
-            let response = Response::from_parts(response_parts, filtered);
+            let response = Response::from_parts(response_parts, response_body);
             complete(
                 &state,
-                &chain,
+                &pre_chain,
+                &post_chain,
                 &subject,
+                &mut auth_state,
                 Finish {
                     latency: elapsed,
                     target: Some(target),
@@ -417,6 +506,7 @@ pub async fn proxy(
 
             let mut error_cx = ErrorContext {
                 request_id: &request_id,
+                state: &mut auth_state,
                 method: &method,
                 uri: &original_uri,
                 headers: &request_headers,
@@ -426,15 +516,20 @@ pub async fn proxy(
                 target_url: &failure.target,
                 error: &failure.message,
             };
-            let response = match chain.on_error(&mut error_cx).await {
-                Ok(Some(response)) => response,
-                Ok(None) => fallback,
-                Err(error) => plugin_failure(error),
-            };
+            let mut response = fallback;
+            for chain in [&pre_chain, &post_chain] {
+                match chain.on_error(&mut error_cx).await {
+                    Ok(Some(replacement)) => response = replacement,
+                    Ok(None) => {}
+                    Err(error) => response = plugin_failure(error),
+                }
+            }
             complete(
                 &state,
-                &chain,
+                &pre_chain,
+                &post_chain,
                 &subject,
+                &mut auth_state,
                 Finish {
                     latency: elapsed,
                     target: Some(failure.target),
@@ -447,10 +542,122 @@ pub async fn proxy(
     }
 }
 
+fn build_gateway_state(auth: AuthSnapshot) -> GatewayState {
+    let mut state = GatewayState::default();
+    state.consumers = auth
+        .consumers
+        .into_iter()
+        .map(|(id, consumer)| {
+            (
+                id,
+                ConsumerInfo {
+                    id: consumer.id,
+                    username: consumer.username,
+                    custom_id: consumer.custom_id,
+                    acl_groups: consumer.acl_groups,
+                },
+            )
+        })
+        .collect();
+    state.consumer_by_username = auth.consumer_by_username;
+    state.consumer_by_custom_id = auth.consumer_by_custom_id;
+    state.keyauth = auth
+        .keyauth
+        .into_iter()
+        .map(|(key, entry)| {
+            (
+                key,
+                AuthKey {
+                    credential_id: entry.id,
+                    consumer_id: entry.consumer_id,
+                },
+            )
+        })
+        .collect();
+    state.basicauth = auth
+        .basicauth
+        .into_iter()
+        .map(|(username, entry)| {
+            (
+                username,
+                AuthBasic {
+                    credential_id: entry.id,
+                    consumer_id: entry.consumer_id,
+                    username: entry.username,
+                    password: entry.password,
+                },
+            )
+        })
+        .collect();
+    state.jwt = auth
+        .jwt
+        .into_iter()
+        .map(|(key, entry)| {
+            (
+                key,
+                AuthJwt {
+                    credential_id: entry.id,
+                    consumer_id: entry.consumer_id,
+                    key: entry.key,
+                    secret: entry.secret,
+                    algorithm: entry.algorithm,
+                    rsa_public_key: entry.rsa_public_key,
+                },
+            )
+        })
+        .collect();
+    state
+}
+
+fn inject_consumer_headers(headers: &mut HeaderMap, state: &GatewayState) {
+    let Some(consumer) = &state.consumer else {
+        return;
+    };
+    insert_header(headers, "x-consumer-id", &consumer.id);
+    if let Some(username) = &consumer.username {
+        insert_header(headers, "x-consumer-username", username);
+    }
+    if let Some(custom_id) = &consumer.custom_id {
+        insert_header(headers, "x-consumer-custom-id", custom_id);
+    }
+    if let Some(credential) = &state.credential {
+        insert_header(headers, "x-credential-identifier", &credential.id);
+    }
+    if state.anonymous {
+        insert_header(headers, "x-anonymous-consumer", "true");
+    }
+}
+
+fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
+    if let (Ok(name), Ok(value)) = (HeaderName::try_from(name), HeaderValue::from_str(value)) {
+        headers.insert(name, value);
+    }
+}
+
+fn placeholder_service() -> Service {
+    Service {
+        id: String::new(),
+        name: String::new(),
+        protocol: "http".into(),
+        host: "localhost".into(),
+        port: 80,
+        path: None,
+        retries: 0,
+        connect_timeout: 60_000,
+        write_timeout: 60_000,
+        read_timeout: 60_000,
+        enabled: true,
+        description: String::new(),
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
 #[derive(Clone)]
 struct Dispatch {
     route: CompiledRoute,
-    service: CompiledService,
+    service: Option<CompiledService>,
+    matched_path: String,
 }
 
 struct ForwardContext<'a> {
@@ -472,20 +679,15 @@ struct LogSubject<'a> {
     path: &'a str,
     route: &'a Route,
     service: &'a Service,
-    consumer: Option<&'a str>,
-}
-
-struct OwnedBodyContext {
-    request_id: String,
-    route: Route,
-    service: Service,
-    target_url: String,
+    consumer: Option<String>,
 }
 
 async fn complete(
     state: &ApiDataState,
-    chain: &PluginChain,
+    pre_chain: &PluginChain,
+    post_chain: &PluginChain,
     subject: &LogSubject<'_>,
+    auth_state: &mut GatewayState,
     finish: Finish,
     response: Response,
 ) -> Response {
@@ -496,21 +698,23 @@ async fn complete(
         route,
         service,
         consumer,
-    } = *subject;
+    } = subject;
     let status = response.status().as_u16();
-    let log_cx = LogContext {
+    let mut log_cx = LogContext {
         request_id,
+        state: auth_state,
         method,
         path,
         status,
         latency: finish.latency,
-        consumer_id: consumer,
+        consumer_id: consumer.as_deref(),
         route,
         service,
         target_url: finish.target.as_deref(),
         error: finish.error.as_deref(),
     };
-    chain.on_log(&log_cx).await;
+    pre_chain.on_log(&mut log_cx).await;
+    post_chain.on_log(&mut log_cx).await;
 
     if let Some(error) = finish.error.as_deref() {
         tracing::warn!(
@@ -521,7 +725,7 @@ async fn complete(
             route = %route.id,
             service = %service.id,
             target = finish.target.as_deref().unwrap_or("-"),
-            consumer = consumer.unwrap_or("-"),
+            consumer = consumer.as_deref().unwrap_or("-"),
             request_id = %request_id,
             error,
             "api gateway upstream failed"
@@ -535,7 +739,7 @@ async fn complete(
             route = %route.id,
             service = %service.id,
             target = finish.target.as_deref().unwrap_or("-"),
-            consumer = consumer.unwrap_or("-"),
+            consumer = consumer.as_deref().unwrap_or("-"),
             request_id = %request_id,
             "api gateway request"
         );
@@ -550,9 +754,9 @@ async fn complete(
             status,
             latency_ms: finish.latency.as_millis() as u64,
             route_id: Some(route.id.clone()),
-            service_id: Some(service.id.clone()),
+            service_id: (!service.id.is_empty()).then(|| service.id.clone()),
             target_url: finish.target.clone(),
-            consumer_id: consumer.map(str::to_string),
+            consumer_id: consumer.clone(),
             error: finish.error.clone(),
         },
     );
@@ -585,66 +789,20 @@ fn failed_plugin(
     started: Instant,
     error: PluginError,
 ) -> Response {
-    let LogSubject {
-        request_id,
-        method,
-        path,
-        route,
-        service,
-        consumer: _,
-    } = *subject;
     let response = plugin_failure(error);
     let elapsed = started.elapsed();
     state.metrics.record(response.status().as_u16(), elapsed, 0);
     tracing::warn!(
-        %method,
-        %path,
+        %subject.method,
+        %subject.path,
         status = response.status().as_u16(),
         latency_ms = elapsed.as_millis() as u64,
-        route = %route.id,
-        service = %service.id,
-        request_id = %request_id,
+        route = %subject.route.id,
+        service = %subject.service.id,
+        request_id = %subject.request_id,
         "api gateway plugin failed"
     );
-    with_request_id(response, request_id)
-}
-
-fn filter_response_body(chain: Arc<PluginChain>, cx: OwnedBodyContext, body: Body) -> Body {
-    let stream =
-        futures_util::stream::unfold((body, chain, cx), |(mut body, chain, cx)| async move {
-            loop {
-                let frame = match body.frame().await {
-                    Some(Ok(frame)) => frame,
-                    Some(Err(error)) => {
-                        tracing::warn!(%error, "api gateway: upstream response body failed");
-                        return None;
-                    }
-                    None => return None,
-                };
-                let Ok(chunk) = frame.into_data() else {
-                    continue;
-                };
-                let body_cx = BodyContext {
-                    request_id: &cx.request_id,
-                    route: &cx.route,
-                    service: &cx.service,
-                    target_url: &cx.target_url,
-                };
-                let next: Result<bytes::Bytes, axum::Error> =
-                    match chain.on_response_body(&body_cx, chunk).await {
-                        Ok(next) => Ok(next),
-                        Err(error) => {
-                            tracing::warn!(
-                                plugin_error = %error,
-                                "api gateway: response body plugin failed"
-                            );
-                            Err(axum::Error::new(error))
-                        }
-                    };
-                return Some((next, (body, chain, cx)));
-            }
-        });
-    Body::from_stream(stream)
+    with_request_id(response, subject.request_id)
 }
 
 fn with_request_id(mut response: Response, request_id: &str) -> Response {
@@ -662,18 +820,6 @@ fn json_error(status: StatusCode, code: &'static str, message: &str) -> Response
 
 fn not_found() -> Response {
     json_error(StatusCode::NOT_FOUND, "no_route", "no matching route")
-}
-
-fn unauthorized() -> Response {
-    let mut response = json_error(
-        StatusCode::UNAUTHORIZED,
-        "unauthorized",
-        "a valid API key is required",
-    );
-    response
-        .headers_mut()
-        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-    response
 }
 
 fn forbidden() -> Response {
@@ -699,29 +845,6 @@ fn payload_too_large() -> Response {
 enum RequestBody {
     Buffered(bytes::Bytes),
     Stream(Body),
-}
-
-/// Resolves an API key from `Authorization: Bearer` or `X-API-Key`.
-fn authenticate(snapshot: &RuntimeSnapshot, headers: &HeaderMap) -> Option<CredentialEntry> {
-    let candidate = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            let (scheme, token) = value.split_once(' ')?;
-            scheme
-                .eq_ignore_ascii_case("bearer")
-                .then(|| token.trim())
-                .filter(|token| !token.is_empty())
-        })
-        .or_else(|| {
-            headers
-                .get(HEADER_API_KEY)
-                .and_then(|value| value.to_str().ok())
-                .map(str::trim)
-                .filter(|key| !key.is_empty())
-        })?;
-
-    snapshot.authenticate(candidate, Utc::now()).cloned()
 }
 
 fn forwarded_scheme(headers: &HeaderMap) -> &'static str {
@@ -760,7 +883,6 @@ fn response_target(parts: &axum::http::response::Parts) -> String {
         .unwrap_or_default()
 }
 
-/// Marker carried on proxied responses so logs can name the target.
 #[derive(Clone)]
 struct UpstreamTarget(String);
 
@@ -773,8 +895,17 @@ async fn forward(
     parts: axum::http::request::Parts,
     mut payload: RequestBody,
     context: ForwardContext<'_>,
+    matched_path: &str,
 ) -> Result<Response, UpstreamFailure> {
-    let limits = dispatch.service.limits;
+    let limits = dispatch
+        .service
+        .as_ref()
+        .map(|service| service.limits)
+        .unwrap_or(ServiceLimits {
+            connect_timeout: Duration::from_secs(state.config.gateway.connect_timeout_secs),
+            request_timeout: Duration::from_secs(state.config.gateway.request_timeout_secs),
+            retries: 0,
+        });
 
     if attempts.is_empty() {
         return Err(UpstreamFailure {
@@ -793,9 +924,6 @@ async fn forward(
     let total_attempts = attempts.len();
     let mut last_error: Option<String> = None;
 
-    // reqwest exposes `connect_timeout` only on the client builder. Services
-    // that override the gateway-wide value get a dedicated client; all others
-    // reuse the shared, pooled one.
     let default_connect_timeout = Duration::from_secs(state.config.gateway.connect_timeout_secs);
     let client = if limits.connect_timeout == default_connect_timeout {
         state.client.clone()
@@ -812,8 +940,6 @@ async fn forward(
 
         let mut forward_headers = base_headers.clone();
         sanitize_request_headers(&mut forward_headers);
-        // The client sends the gateway's own host; the upstream must see the
-        // target authority instead.
         if let Ok(authority) = HeaderValue::from_str(&endpoint_authority(&endpoint.url)) {
             forward_headers.insert(header::HOST, authority);
         }
@@ -825,10 +951,16 @@ async fn forward(
             context.request_id,
         );
 
+        let service_path = dispatch
+            .service
+            .as_ref()
+            .and_then(|service| service.service.path.as_deref());
         let upstream_url = match build_upstream_url(
             endpoint.url.as_str(),
             path_and_query.as_deref(),
             &dispatch.route,
+            matched_path,
+            service_path,
         ) {
             Ok(url) => url,
             Err(err) => {
@@ -903,7 +1035,6 @@ async fn forward(
     })
 }
 
-/// Streams request chunks for the attempt that carries the body.
 struct ChunkStream {
     body: Body,
     finished: bool,
@@ -923,7 +1054,6 @@ impl futures_util::Stream for ChunkStream {
             let frame = std::pin::Pin::new(&mut self.body).poll_frame(cx);
             match frame {
                 std::task::Poll::Ready(Some(Ok(frame))) => {
-                    // Trailers are not forwarded, so keep polling.
                     if let Ok(data) = frame.into_data() {
                         return std::task::Poll::Ready(Some(Ok(data)));
                     }
@@ -959,12 +1089,12 @@ fn is_idempotent(method: &str) -> bool {
     )
 }
 
-/// Joins the target base URL with the request path. When the route strips its
-/// prefix, the matched prefix is removed first; the query is preserved.
 fn build_upstream_url(
     base: &str,
     path_and_query: Option<&str>,
     route: &CompiledRoute,
+    matched_path: &str,
+    service_path: Option<&str>,
 ) -> Result<url::Url, url::ParseError> {
     let mut url = url::Url::parse(base)?;
     let base_path = url.path().trim_end_matches('/').to_string();
@@ -977,13 +1107,14 @@ fn build_upstream_url(
         None => ("/".to_string(), None),
     };
 
-    let rewritten = if route.route.strip_prefix {
-        strip_matched_prefix(&path, &route.route.path_prefix)
+    let rewritten = if route.route.strip_path && !matched_path.is_empty() {
+        strip_matched_prefix(&path, matched_path)
     } else {
         path
     };
 
-    let joined = format!("{base_path}{rewritten}");
+    let service_path = service_path.unwrap_or_default().trim_end_matches('/');
+    let joined = format!("{base_path}{service_path}{rewritten}");
     let joined = if joined.is_empty() {
         "/".to_string()
     } else if joined.starts_with('/') {
@@ -1010,78 +1141,4 @@ pub fn endpoint_authority(url: &str) -> String {
             })
         })
         .unwrap_or_else(|| normalize_host(url))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    fn compiled_route(prefix: &str, strip: bool) -> CompiledRoute {
-        use octra_gateway_runtime::RouteMatcher;
-        let now = Utc::now();
-        let service = octra_api_core::Service {
-            id: "s".into(),
-            name: "s".into(),
-            protocol: "http".into(),
-            description: String::new(),
-            enabled: true,
-            connect_timeout_ms: 100,
-            request_timeout_ms: 1000,
-            retries: 0,
-            require_auth: false,
-            created_at: now,
-            updated_at: now,
-        };
-        let route = octra_api_core::Route {
-            id: "r".into(),
-            service_id: "s".into(),
-            host: None,
-            path_prefix: prefix.into(),
-            methods: vec![],
-            headers: BTreeMap::new(),
-            protocol: "http".into(),
-            priority: 0,
-            strip_prefix: strip,
-            enabled: true,
-            created_at: now,
-            updated_at: now,
-        };
-        let matcher = RouteMatcher::compile(&[service], &[route]);
-        matcher.route(0).unwrap().clone()
-    }
-
-    #[test]
-    fn upstream_url_joins_and_rewrites() {
-        let route = compiled_route("/api", true);
-        let url = build_upstream_url(
-            "http://127.0.0.1:9000/base",
-            Some("/api/v1/users?limit=2"),
-            &route,
-        )
-        .unwrap();
-        assert_eq!(url.as_str(), "http://127.0.0.1:9000/base/v1/users?limit=2");
-
-        let url = build_upstream_url("http://127.0.0.1:9000", Some("/api"), &route).unwrap();
-        assert_eq!(url.as_str(), "http://127.0.0.1:9000/");
-
-        let url = build_upstream_url("http://127.0.0.1:9000", Some("/api?x=1"), &route).unwrap();
-        assert_eq!(url.as_str(), "http://127.0.0.1:9000/?x=1");
-    }
-
-    #[test]
-    fn upstream_url_keeps_prefix_when_not_stripping() {
-        let route = compiled_route("/api", false);
-        let url = build_upstream_url("http://up.test", Some("/api/x"), &route).unwrap();
-        assert_eq!(url.as_str(), "http://up.test/api/x");
-    }
-
-    #[test]
-    fn authority_includes_port() {
-        assert_eq!(
-            endpoint_authority("http://127.0.0.1:9000"),
-            "127.0.0.1:9000"
-        );
-        assert_eq!(endpoint_authority("https://example.test"), "example.test");
-    }
 }

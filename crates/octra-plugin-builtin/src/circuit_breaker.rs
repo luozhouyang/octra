@@ -40,7 +40,15 @@ impl ApiGatewayPluginFactory for CircuitBreakerFactory {
         )
     }
 
-    fn create(&self, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
+    fn phases(&self) -> Vec<octra_plugin_api::PluginPhase> {
+        vec![
+            octra_plugin_api::PluginPhase::Request,
+            octra_plugin_api::PluginPhase::Response,
+            octra_plugin_api::PluginPhase::Log,
+        ]
+    }
+
+    fn create(&self, _id: &str, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
         let config: CircuitConfig = serde_json::from_value(config).map_err(|error| {
             PluginError::fail_closed(format!("invalid circuit-breaker config: {error}"))
         })?;
@@ -192,42 +200,48 @@ fn open_circuit(retry_after: u64) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use http::{HeaderMap, Method, StatusCode, Uri};
     use octra_api_core::{Route, Service};
+    use octra_plugin_api::GatewayState;
 
     fn service() -> Service {
-        let now = Utc::now();
         Service {
             id: "svc".into(),
             name: "svc".into(),
             protocol: "http".into(),
-            description: String::new(),
-            enabled: true,
-            connect_timeout_ms: 1000,
-            request_timeout_ms: 1000,
+            host: "up.test".into(),
+            port: 80,
+            path: None,
             retries: 0,
-            require_auth: false,
-            created_at: now,
-            updated_at: now,
+            connect_timeout: 1000,
+            write_timeout: 1000,
+            read_timeout: 1000,
+            enabled: true,
+            description: String::new(),
+            created_at: 0,
+            updated_at: 0,
         }
     }
 
     fn route() -> Route {
-        let now = Utc::now();
         Route {
             id: "route".into(),
-            service_id: "svc".into(),
-            host: None,
-            path_prefix: "/".into(),
-            methods: vec![],
+            name: None,
+            protocols: vec!["http".into()],
+            methods: Vec::new(),
+            hosts: Vec::new(),
+            paths: vec!["/".into()],
             headers: Default::default(),
-            protocol: "http".into(),
-            priority: 0,
-            strip_prefix: false,
+            strip_path: false,
+            preserve_host: false,
+            request_buffering: true,
+            response_buffering: true,
+            regex_priority: 0,
+            service_id: Some("svc".into()),
             enabled: true,
-            created_at: now,
-            updated_at: now,
+            tags: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
         }
     }
 
@@ -237,8 +251,11 @@ mod tests {
         let method = Method::GET;
         let mut uri: Uri = "/".parse().unwrap();
         let mut headers = HeaderMap::new();
+        let mut state = GatewayState::default();
         let mut cx = RequestContext {
             request_id: "req",
+            state: &mut state,
+            matched_path: "/",
             method: &method,
             uri: &mut uri,
             headers: &mut headers,
@@ -257,8 +274,10 @@ mod tests {
         let method = Method::GET;
         let uri: Uri = "/".parse().unwrap();
         let headers = HeaderMap::new();
+        let mut state = GatewayState::default();
         let mut cx = ErrorContext {
             request_id: "req",
+            state: &mut state,
             method: &method,
             uri: &uri,
             headers: &headers,
@@ -277,8 +296,10 @@ mod tests {
         let mut status = status;
         let mut headers = HeaderMap::new();
         let request_headers = HeaderMap::new();
+        let mut state = GatewayState::default();
         let mut cx = ResponseContext {
             request_id: "req",
+            state: &mut state,
             request_headers: &request_headers,
             status: &mut status,
             headers: &mut headers,
@@ -293,7 +314,7 @@ mod tests {
     #[tokio::test]
     async fn opens_after_threshold_and_short_circuits() {
         let plugin = CircuitBreakerFactory
-            .create(json!({"failure_threshold": 2, "open_seconds": 30}))
+            .create("test", json!({"failure_threshold": 2, "open_seconds": 30}))
             .unwrap();
         assert!(matches!(
             request(plugin.as_ref()).await,
@@ -318,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn success_resets_failure_count() {
         let plugin = CircuitBreakerFactory
-            .create(json!({"failure_threshold": 2, "open_seconds": 30}))
+            .create("test", json!({"failure_threshold": 2, "open_seconds": 30}))
             .unwrap();
         fail(plugin.as_ref()).await;
         respond(plugin.as_ref(), StatusCode::OK).await;
@@ -332,7 +353,7 @@ mod tests {
     #[tokio::test]
     async fn upstream_5xx_counts_as_failure() {
         let plugin = CircuitBreakerFactory
-            .create(json!({"failure_threshold": 1, "open_seconds": 30}))
+            .create("test", json!({"failure_threshold": 1, "open_seconds": 30}))
             .unwrap();
         respond(plugin.as_ref(), StatusCode::BAD_GATEWAY).await;
         assert!(matches!(
@@ -343,7 +364,8 @@ mod tests {
 
     #[test]
     fn rejects_zero_threshold() {
-        let Err(error) = CircuitBreakerFactory.create(json!({"failure_threshold": 0})) else {
+        let Err(error) = CircuitBreakerFactory.create("test", json!({"failure_threshold": 0}))
+        else {
             panic!("expected an error");
         };
         assert!(error.message.contains("failure_threshold"));

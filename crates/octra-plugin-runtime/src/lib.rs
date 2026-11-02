@@ -1,23 +1,23 @@
-//! Plugin registry, scope resolution, and ordered execution.
+//! Plugin registry, scope resolution, and phase execution.
 //!
-//! Plugin configuration is compiled into immutable chains whenever the
-//! control plane changes a plugin or one of its scoped configs. The data plane
-//! only performs map lookups and in-memory plugin calls.
+//! Chains are compiled from configured plugin instances once per control-plane
+//! mutation. The data plane only performs map lookups and in-memory calls.
+//! Consumer-scoped plugins are selected in a second pass after authentication.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::response::Response;
 use bytes::Bytes;
+use octra_api_core::PluginInstance;
 use octra_core::{Error, Result};
 use octra_plugin_api::{
     ApiGatewayPlugin, ApiGatewayPluginFactory, BodyContext, ErrorContext, FailPolicy, LogContext,
-    PluginAction, PluginError, PluginManifest, RequestContext, ResponseContext, Scope,
-    UpstreamRequestContext,
+    PluginAction, PluginError, PluginManifest, PluginPhase, RequestBodyContext, RequestContext,
+    ResponseBodyContext, ResponseContext, UpstreamRequestContext,
 };
 use octra_storage::Storage;
-use octra_storage::plugins::{PluginConfigRecord, PluginData, PluginRecord};
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
 
@@ -66,14 +66,61 @@ impl PluginRegistry {
 
 #[derive(Clone)]
 struct PluginEntry {
+    pub id: String,
     name: String,
-    priority: i64,
+    priority: i32,
     timeout: Duration,
+    phases: Vec<PluginPhase>,
+    auth: bool,
+    ordering: Option<Value>,
+    service_id: Option<String>,
+    route_id: Option<String>,
+    consumer_id: Option<String>,
     plugin: Arc<dyn ApiGatewayPlugin>,
 }
 
-type ScopeKey = (Scope, String);
-type ChainKey = (String, String, Option<String>);
+impl PluginEntry {
+    fn has_consumer_scope(&self) -> bool {
+        self.consumer_id.is_some()
+    }
+
+    fn applies(
+        &self,
+        route_id: Option<&str>,
+        service_id: Option<&str>,
+        consumer_id: Option<&str>,
+    ) -> Option<i32> {
+        if let Some(expected) = &self.route_id
+            && route_id != Some(expected.as_str())
+        {
+            return None;
+        }
+        if let Some(expected) = &self.service_id
+            && service_id != Some(expected.as_str())
+        {
+            return None;
+        }
+        if let Some(expected) = &self.consumer_id
+            && consumer_id != Some(expected.as_str())
+        {
+            return None;
+        }
+        let has_r = self.route_id.is_some();
+        let has_s = self.service_id.is_some();
+        let has_c = self.consumer_id.is_some();
+
+        Some(match (has_c, has_r, has_s) {
+            (true, true, true) => 8,
+            (true, true, false) => 7,
+            (true, false, true) => 6,
+            (false, true, true) => 5,
+            (true, false, false) => 4,
+            (false, true, false) => 3,
+            (false, false, true) => 2,
+            (false, false, false) => 1,
+        })
+    }
+}
 
 #[derive(Default)]
 pub struct PluginChain {
@@ -89,14 +136,45 @@ impl PluginChain {
         self.entries.iter().map(|entry| entry.name.as_str())
     }
 
+    pub fn has_phase(&self, phase: PluginPhase) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.phases.contains(&phase))
+    }
+
+    pub fn has_auth(&self) -> bool {
+        self.entries.iter().any(|entry| entry.auth)
+    }
+
+    pub async fn on_rewrite(
+        &self,
+        cx: &mut RequestContext<'_>,
+    ) -> std::result::Result<Option<Response>, PluginError> {
+        for entry in &self.entries {
+            if !entry.phases.contains(&PluginPhase::Rewrite) {
+                continue;
+            }
+            let action =
+                run_stage(entry, PluginPhase::Rewrite, entry.plugin.on_rewrite(cx)).await?;
+            if let PluginAction::ShortCircuit(response) = action {
+                return Ok(Some(response));
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn on_request(
         &self,
         cx: &mut RequestContext<'_>,
     ) -> std::result::Result<Option<Response>, PluginError> {
         for entry in &self.entries {
-            match run_stage(entry, entry.plugin.on_request(cx)).await? {
-                PluginAction::Continue => {}
-                PluginAction::ShortCircuit(response) => return Ok(Some(response)),
+            if !entry.phases.contains(&PluginPhase::Request) {
+                continue;
+            }
+            let action =
+                run_stage(entry, PluginPhase::Request, entry.plugin.on_request(cx)).await?;
+            if let PluginAction::ShortCircuit(response) = action {
+                return Ok(Some(response));
             }
         }
         Ok(None)
@@ -107,9 +185,17 @@ impl PluginChain {
         cx: &mut UpstreamRequestContext<'_>,
     ) -> std::result::Result<Option<Response>, PluginError> {
         for entry in &self.entries {
-            match run_stage(entry, entry.plugin.on_upstream_request(cx)).await? {
-                PluginAction::Continue => {}
-                PluginAction::ShortCircuit(response) => return Ok(Some(response)),
+            if !entry.phases.contains(&PluginPhase::UpstreamRequest) {
+                continue;
+            }
+            let action = run_stage(
+                entry,
+                PluginPhase::UpstreamRequest,
+                entry.plugin.on_upstream_request(cx),
+            )
+            .await?;
+            if let PluginAction::ShortCircuit(response) = action {
+                return Ok(Some(response));
             }
         }
         Ok(None)
@@ -120,9 +206,13 @@ impl PluginChain {
         cx: &mut ResponseContext<'_>,
     ) -> std::result::Result<Option<Response>, PluginError> {
         for entry in &self.entries {
-            match run_stage(entry, entry.plugin.on_response(cx)).await? {
-                PluginAction::Continue => {}
-                PluginAction::ShortCircuit(response) => return Ok(Some(response)),
+            if !entry.phases.contains(&PluginPhase::Response) {
+                continue;
+            }
+            let action =
+                run_stage(entry, PluginPhase::Response, entry.plugin.on_response(cx)).await?;
+            if let PluginAction::ShortCircuit(response) = action {
+                return Ok(Some(response));
             }
         }
         Ok(None)
@@ -130,10 +220,13 @@ impl PluginChain {
 
     pub async fn on_response_body(
         &self,
-        cx: &BodyContext<'_>,
+        cx: &mut BodyContext<'_>,
         mut chunk: Bytes,
     ) -> std::result::Result<Bytes, PluginError> {
         for entry in &self.entries {
+            if !entry.phases.contains(&PluginPhase::ResponseBody) {
+                continue;
+            }
             let result = tokio::time::timeout(
                 entry.timeout,
                 entry.plugin.on_response_body(cx, chunk.clone()),
@@ -155,21 +248,55 @@ impl PluginChain {
         Ok(chunk)
     }
 
+    pub async fn on_request_buffer(
+        &self,
+        cx: &mut RequestBodyContext<'_>,
+        mut body: Bytes,
+    ) -> std::result::Result<Bytes, PluginError> {
+        for entry in &self.entries {
+            if !entry.phases.contains(&PluginPhase::Request) {
+                continue;
+            }
+            body = run_bytes_stage(entry, entry.plugin.on_request_buffer(cx, body)).await?;
+        }
+        Ok(body)
+    }
+
+    pub async fn on_response_buffer(
+        &self,
+        cx: &mut ResponseBodyContext<'_>,
+        mut body: Bytes,
+    ) -> std::result::Result<Bytes, PluginError> {
+        for entry in &self.entries {
+            if !entry.phases.contains(&PluginPhase::ResponseBody) {
+                continue;
+            }
+            body = run_bytes_stage(entry, entry.plugin.on_response_buffer(cx, body)).await?;
+        }
+        Ok(body)
+    }
+
     pub async fn on_error(
         &self,
         cx: &mut ErrorContext<'_>,
     ) -> std::result::Result<Option<Response>, PluginError> {
         for entry in &self.entries {
-            match run_stage(entry, entry.plugin.on_error(cx)).await? {
-                PluginAction::Continue => {}
-                PluginAction::ShortCircuit(response) => return Ok(Some(response)),
+            if !entry.phases.contains(&PluginPhase::Log) {
+                continue;
+            }
+            let action = run_stage(entry, PluginPhase::Log, entry.plugin.on_error(cx)).await?;
+            if let PluginAction::ShortCircuit(response) = action {
+                return Ok(Some(response));
             }
         }
         Ok(None)
     }
 
-    pub async fn on_log(&self, cx: &LogContext<'_>) {
+    pub async fn on_log(&self, cx: &mut LogContext<'_>) {
         for entry in &self.entries {
+            if !entry.phases.contains(&PluginPhase::Log) {
+                continue;
+            }
             if tokio::time::timeout(entry.timeout, entry.plugin.on_log(cx))
                 .await
                 .is_err()
@@ -182,6 +309,7 @@ impl PluginChain {
 
 async fn run_stage<F>(
     entry: &PluginEntry,
+    _phase: PluginPhase,
     future: F,
 ) -> std::result::Result<PluginAction, PluginError>
 where
@@ -205,84 +333,73 @@ where
     }
 }
 
+async fn run_bytes_stage<F>(
+    entry: &PluginEntry,
+    future: F,
+) -> std::result::Result<Bytes, PluginError>
+where
+    F: std::future::Future<Output = std::result::Result<Bytes, PluginError>>,
+{
+    let result = tokio::time::timeout(entry.timeout, future).await;
+    match result {
+        Ok(Ok(body)) => Ok(body),
+        Ok(Err(error)) => match error.fail_policy {
+            FailPolicy::Open => {
+                tracing::warn!(plugin = %entry.name, error = %error, "plugin body stage failed");
+                Ok(Bytes::new())
+            }
+            FailPolicy::Closed => Err(error),
+        },
+        Err(_) => {
+            let error = PluginError::fail_closed(format!("plugin '{}' timed out", entry.name));
+            tracing::warn!(plugin = %entry.name, "plugin body stage timed out");
+            Err(error)
+        }
+    }
+}
+
 #[derive(Default)]
 struct PluginChains {
-    by_scope: HashMap<ScopeKey, Vec<PluginEntry>>,
-    cache: Mutex<HashMap<ChainKey, Arc<PluginChain>>>,
+    entries: Vec<PluginEntry>,
+    pre_cache: Mutex<HashMap<(String, String), Arc<PluginChain>>>,
+    post_cache: Mutex<HashMap<(String, String, String), Arc<PluginChain>>>,
     empty: Arc<PluginChain>,
     has_any: bool,
 }
 
 impl PluginChains {
-    fn compile(data: PluginData, registry: &PluginRegistry) -> Result<Self> {
-        let plugins: HashMap<&str, &PluginRecord> = data
-            .plugins
-            .iter()
-            .map(|plugin| (plugin.id.as_str(), plugin))
-            .collect();
-        let mut by_scope: HashMap<ScopeKey, Vec<PluginEntry>> = HashMap::new();
-
-        for config in &data.configs {
-            if let Some(entry) = compile_config(config, &plugins, registry)? {
-                by_scope.entry(entry.0).or_default().push(entry.1);
+    fn compile(plugins: Vec<PluginInstance>, registry: &PluginRegistry) -> Result<Self> {
+        let mut entries = Vec::new();
+        for plugin in plugins {
+            if !plugin.enabled {
+                continue;
             }
-        }
-
-        for entries in by_scope.values_mut() {
-            entries.sort_by(|left, right| {
-                right
-                    .priority
-                    .cmp(&left.priority)
-                    .then_with(|| left.name.cmp(&right.name))
+            let Some(factory) = registry.factory(&plugin.name) else {
+                tracing::warn!(plugin = %plugin.name, "plugin is not registered; skipping config");
+                continue;
+            };
+            let instance = match factory.create(&plugin.id, plugin.config.clone()) {
+                Ok(instance) => instance,
+                Err(error) => {
+                    tracing::warn!(plugin = %plugin.name, %error, "invalid plugin config; skipping");
+                    continue;
+                }
+            };
+            let manifest = instance.manifest();
+            entries.push(PluginEntry {
+                id: plugin.id.clone(),
+                name: plugin.name.clone(),
+                priority: manifest.priority,
+                timeout: manifest.timeout(),
+                phases: factory.phases(),
+                auth: factory.auth(),
+                ordering: plugin.ordering.clone(),
+                service_id: plugin.service_id.clone(),
+                route_id: plugin.route_id.clone(),
+                consumer_id: plugin.consumer_id.clone(),
+                plugin: instance,
             });
         }
-
-        Ok(Self {
-            has_any: !by_scope.is_empty(),
-            by_scope,
-            cache: Mutex::new(HashMap::new()),
-            empty: Arc::new(PluginChain::default()),
-        })
-    }
-
-    fn chain_for(
-        &self,
-        route_id: &str,
-        service_id: &str,
-        consumer_id: Option<&str>,
-    ) -> Arc<PluginChain> {
-        if !self.has_any {
-            return self.empty.clone();
-        }
-
-        let key = (
-            route_id.to_string(),
-            service_id.to_string(),
-            consumer_id.map(str::to_string),
-        );
-        if let Some(chain) = self.cache.lock().get(&key) {
-            return chain.clone();
-        }
-
-        let mut seen = std::collections::HashSet::new();
-        let mut entries: Vec<PluginEntry> = Vec::new();
-        let mut push_scope = |scope: Scope, id: &str| {
-            let Some(list) = self.by_scope.get(&(scope, id.to_string())) else {
-                return;
-            };
-            for entry in list {
-                if seen.insert(entry.name.clone()) {
-                    entries.push(entry.clone());
-                }
-            }
-        };
-
-        if let Some(consumer_id) = consumer_id {
-            push_scope(Scope::Consumer, consumer_id);
-        }
-        push_scope(Scope::Route, route_id);
-        push_scope(Scope::Service, service_id);
-        push_scope(Scope::Global, "");
 
         entries.sort_by(|left, right| {
             right
@@ -291,49 +408,174 @@ impl PluginChains {
                 .then_with(|| left.name.cmp(&right.name))
         });
 
-        let chain = Arc::new(PluginChain { entries });
-        self.cache.lock().insert(key, chain.clone());
+        Ok(Self {
+            has_any: !entries.is_empty(),
+            entries,
+            pre_cache: Mutex::new(HashMap::new()),
+            post_cache: Mutex::new(HashMap::new()),
+            empty: Arc::new(PluginChain::default()),
+        })
+    }
+
+    fn pre_auth(&self, route_id: Option<&str>, service_id: Option<&str>) -> Arc<PluginChain> {
+        if !self.has_any {
+            return self.empty.clone();
+        }
+        let key = (
+            route_id.unwrap_or_default().to_string(),
+            service_id.unwrap_or_default().to_string(),
+        );
+        if let Some(chain) = self.pre_cache.lock().get(&key) {
+            return chain.clone();
+        }
+        let chain = Arc::new(PluginChain {
+            entries: resolve(
+                &self.entries,
+                route_id,
+                service_id,
+                None,
+                false,
+                &HashSet::new(),
+            ),
+        });
+        self.pre_cache.lock().insert(key, chain.clone());
+        chain
+    }
+
+    fn post_auth(
+        &self,
+        route_id: Option<&str>,
+        service_id: Option<&str>,
+        consumer_id: &str,
+    ) -> Arc<PluginChain> {
+        if !self.has_any {
+            return self.empty.clone();
+        }
+        let key = (
+            route_id.unwrap_or_default().to_string(),
+            service_id.unwrap_or_default().to_string(),
+            consumer_id.to_string(),
+        );
+        if let Some(chain) = self.post_cache.lock().get(&key) {
+            return chain.clone();
+        }
+
+        let mut seen = HashSet::new();
+        for entry in resolve(
+            &self.entries,
+            route_id,
+            service_id,
+            None,
+            false,
+            &HashSet::new(),
+        ) {
+            seen.insert(entry.name);
+        }
+
+        let chain = Arc::new(PluginChain {
+            entries: resolve(
+                &self.entries,
+                route_id,
+                service_id,
+                Some(consumer_id),
+                true,
+                &seen,
+            ),
+        });
+        self.post_cache.lock().insert(key, chain.clone());
         chain
     }
 }
 
-fn compile_config(
-    config: &PluginConfigRecord,
-    plugins: &HashMap<&str, &PluginRecord>,
-    registry: &PluginRegistry,
-) -> Result<Option<(ScopeKey, PluginEntry)>> {
-    if !config.enabled {
-        return Ok(None);
+fn resolve(
+    entries: &[PluginEntry],
+    route_id: Option<&str>,
+    service_id: Option<&str>,
+    consumer_id: Option<&str>,
+    consumer_scoped_only: bool,
+    exclude: &HashSet<String>,
+) -> Vec<PluginEntry> {
+    let mut best: HashMap<&str, (i32, &PluginEntry)> = HashMap::new();
+    for entry in entries {
+        if consumer_scoped_only && !entry.has_consumer_scope() {
+            continue;
+        }
+        if exclude.contains(&entry.name) {
+            continue;
+        }
+        let Some(score) = entry.applies(route_id, service_id, consumer_id) else {
+            continue;
+        };
+        match best.get(entry.name.as_str()) {
+            Some((current, _)) if *current >= score => {}
+            _ => {
+                best.insert(entry.name.as_str(), (score, entry));
+            }
+        }
     }
-    let Some(plugin) = plugins.get(config.plugin_id.as_str()) else {
-        return Ok(None);
-    };
-    if !plugin.enabled {
-        return Ok(None);
+
+    let mut selected: Vec<PluginEntry> =
+        best.into_values().map(|(_, entry)| entry.clone()).collect();
+    selected.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    apply_ordering(&mut selected);
+    selected
+}
+
+/// Applies `ordering.before` / `ordering.after` constraints while keeping the
+/// priority order for unconstrained plugins.
+fn apply_ordering(entries: &mut Vec<PluginEntry>) {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for index in 0..entries.len() {
+            let ordering = entries[index].ordering.clone();
+            let Some(ordering) = ordering else {
+                continue;
+            };
+            let before = ordering
+                .get("before")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let after = ordering
+                .get("after")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+
+            for name in before {
+                if let Some(other) = entries.iter().position(|entry| entry.name == name)
+                    && other < index
+                {
+                    let entry = entries.remove(index);
+                    entries.insert(other, entry);
+                    changed = true;
+                    break;
+                }
+            }
+            if changed {
+                break;
+            }
+            for name in after {
+                if let Some(other) = entries.iter().position(|entry| entry.name == name)
+                    && other > index
+                {
+                    let entry = entries.remove(index);
+                    entries.insert(other, entry);
+                    changed = true;
+                    break;
+                }
+            }
+            if changed {
+                break;
+            }
+        }
     }
-    let Some(factory) = registry.factory(&plugin.name) else {
-        tracing::warn!(plugin = %plugin.name, "plugin is not registered; skipping config");
-        return Ok(None);
-    };
-    let value: Value = serde_json::from_str(&config.config_json).unwrap_or(Value::Null);
-    let instance = factory
-        .create(value)
-        .map_err(|error| Error::Runtime(format!("plugin '{}': {error}", plugin.name)))?;
-    let scope = Scope::parse(&config.scope)
-        .ok_or_else(|| Error::Runtime(format!("unknown plugin scope '{}'", config.scope)))?;
-    if scope != Scope::Global && config.scope_id.trim().is_empty() {
-        return Err(Error::Runtime(format!(
-            "plugin '{}': {scope} scope requires a scope id",
-            plugin.name
-        )));
-    }
-    let entry = PluginEntry {
-        name: plugin.name.clone(),
-        priority: plugin.priority,
-        timeout: instance.manifest().timeout(),
-        plugin: instance,
-    };
-    Ok(Some(((scope, config.scope_id.clone()), entry)))
 }
 
 pub struct PluginRuntime {
@@ -358,9 +600,6 @@ impl PluginRuntime {
     }
 
     pub async fn bootstrap(storage: Arc<Storage>, registry: Arc<PluginRegistry>) -> Result<Self> {
-        for manifest in registry.manifests() {
-            storage.upsert_builtin_plugin(&manifest).await?;
-        }
         let runtime = Self {
             storage: Some(storage),
             registry,
@@ -378,276 +617,32 @@ impl PluginRuntime {
         let Some(storage) = &self.storage else {
             return Ok(());
         };
-        let data = storage.load_plugin_data().await?;
-        let chains = PluginChains::compile(data, &self.registry)?;
+        let plugins = storage.list_plugin_instances().await?;
+        let chains = PluginChains::compile(plugins, &self.registry)?;
         *self.chains.write() = Arc::new(chains);
         Ok(())
     }
 
-    pub fn chain_for(
+    pub fn pre_auth_chain(
         &self,
-        route_id: &str,
-        service_id: &str,
-        consumer_id: Option<&str>,
+        route_id: Option<&str>,
+        service_id: Option<&str>,
     ) -> Arc<PluginChain> {
         let chains = self.chains.read().clone();
-        chains.chain_for(route_id, service_id, consumer_id)
+        chains.pre_auth(route_id, service_id)
+    }
+
+    pub fn post_auth_chain(
+        &self,
+        route_id: Option<&str>,
+        service_id: Option<&str>,
+        consumer_id: &str,
+    ) -> Arc<PluginChain> {
+        let chains = self.chains.read().clone();
+        chains.post_auth(route_id, service_id, consumer_id)
     }
 
     pub fn has_plugins(&self) -> bool {
         self.chains.read().has_any
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use http::{HeaderName, HeaderValue};
-    use octra_plugin_api::{
-        ApiGatewayPlugin, Capability, PluginAction, PluginKind, PluginResult, PluginRuntimeKind,
-        RequestContext,
-    };
-    use std::sync::Arc;
-
-    struct MarkPlugin {
-        manifest: PluginManifest,
-        mark: &'static str,
-    }
-
-    #[async_trait::async_trait]
-    impl ApiGatewayPlugin for MarkPlugin {
-        fn manifest(&self) -> &PluginManifest {
-            &self.manifest
-        }
-
-        async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
-            cx.headers.insert(
-                HeaderName::from_static("x-mark"),
-                HeaderValue::from_static(self.mark),
-            );
-            Ok(PluginAction::Continue)
-        }
-    }
-
-    struct MarkFactory {
-        manifest: PluginManifest,
-        mark: &'static str,
-    }
-
-    impl ApiGatewayPluginFactory for MarkFactory {
-        fn manifest(&self) -> PluginManifest {
-            self.manifest.clone()
-        }
-
-        fn create(
-            &self,
-            _config: Value,
-        ) -> std::result::Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
-            Ok(Arc::new(MarkPlugin {
-                manifest: self.manifest.clone(),
-                mark: self.mark,
-            }))
-        }
-    }
-
-    fn manifest(name: &'static str, priority: i32) -> PluginManifest {
-        PluginManifest {
-            name: name.to_string(),
-            version: "0.1.0".into(),
-            kind: PluginKind::Api,
-            runtime: PluginRuntimeKind::Builtin,
-            priority,
-            description: String::new(),
-            timeout_ms: 1000,
-            fail_policy: octra_plugin_api::FailPolicy::Open,
-            capabilities: vec![Capability::RequestHeaders],
-            config_schema: None,
-        }
-    }
-
-    fn registry(names: &[(&'static str, i32)]) -> PluginRegistry {
-        let mut registry = PluginRegistry::new();
-        for (name, priority) in names {
-            registry.register(MarkFactory {
-                manifest: manifest(name, *priority),
-                mark: name,
-            });
-        }
-        registry
-    }
-
-    fn plugin_record(name: &str, priority: i64, enabled: bool) -> PluginRecord {
-        PluginRecord {
-            id: format!("plg_{name}"),
-            name: name.to_string(),
-            version: "0.1.0".into(),
-            kind: "api".into(),
-            runtime_type: "builtin".into(),
-            enabled,
-            priority,
-            description: String::new(),
-            manifest_json: "{}".into(),
-            config_schema_json: "{}".into(),
-            artifact_path: None,
-            artifact_hash: None,
-            updated_at: String::new(),
-        }
-    }
-
-    fn config_record(
-        id: &str,
-        plugin: &str,
-        scope: &str,
-        scope_id: &str,
-        enabled: bool,
-        json: &str,
-    ) -> PluginConfigRecord {
-        PluginConfigRecord {
-            id: id.into(),
-            plugin_id: format!("plg_{plugin}"),
-            scope: scope.into(),
-            scope_id: scope_id.into(),
-            enabled,
-            config_json: json.into(),
-            created_at: String::new(),
-            updated_at: String::new(),
-        }
-    }
-
-    fn compile(
-        registry: &PluginRegistry,
-        plugins: Vec<PluginRecord>,
-        configs: Vec<PluginConfigRecord>,
-    ) -> PluginChains {
-        PluginChains::compile(PluginData { plugins, configs }, registry).unwrap()
-    }
-
-    fn service() -> octra_api_core::Service {
-        let now = chrono::Utc::now();
-        octra_api_core::Service {
-            id: "s".into(),
-            name: "s".into(),
-            protocol: "http".into(),
-            description: String::new(),
-            enabled: true,
-            connect_timeout_ms: 100,
-            request_timeout_ms: 1000,
-            retries: 0,
-            require_auth: false,
-            created_at: now,
-            updated_at: now,
-        }
-    }
-
-    fn route() -> octra_api_core::Route {
-        let now = chrono::Utc::now();
-        octra_api_core::Route {
-            id: "r".into(),
-            service_id: "s".into(),
-            host: None,
-            path_prefix: "/".into(),
-            methods: vec![],
-            headers: Default::default(),
-            protocol: "http".into(),
-            priority: 0,
-            strip_prefix: false,
-            enabled: true,
-            created_at: now,
-            updated_at: now,
-        }
-    }
-
-    async fn run(chain: &PluginChain) -> String {
-        let service = service();
-        let route = route();
-        let mut uri: http::Uri = "/".parse().unwrap();
-        let mut headers = http::HeaderMap::new();
-        let mut cx = RequestContext {
-            request_id: "req",
-            method: &http::Method::GET,
-            uri: &mut uri,
-            headers: &mut headers,
-            client_ip: None,
-            consumer_id: None,
-            credential_id: None,
-            route: &route,
-            service: &service,
-        };
-        chain.on_request(&mut cx).await.unwrap();
-        headers
-            .get("x-mark")
-            .map(|value| value.to_str().unwrap().to_string())
-            .unwrap_or_default()
-    }
-
-    #[tokio::test]
-    async fn consumer_scope_overrides_route_service_and_global() {
-        let registry = registry(&[("mark", 100)]);
-        let chains = compile(
-            &registry,
-            vec![plugin_record("mark", 100, true)],
-            vec![
-                config_record("c-global", "mark", "global", "", true, "{}"),
-                config_record("c-service", "mark", "service", "s", true, "{}"),
-                config_record("c-route", "mark", "route", "r", true, "{}"),
-                config_record("c-consumer", "mark", "consumer", "u", true, "{}"),
-            ],
-        );
-
-        let chain = chains.chain_for("r", "s", None);
-        assert_eq!(run(&chain).await, "mark");
-        assert_eq!(chain.names().count(), 1);
-    }
-
-    #[tokio::test]
-    async fn distinct_plugins_run_in_priority_order() {
-        let registry = registry(&[("first", 10), ("second", 200)]);
-        let chains = compile(
-            &registry,
-            vec![
-                plugin_record("first", 10, true),
-                plugin_record("second", 200, true),
-            ],
-            vec![
-                config_record("c1", "first", "global", "", true, "{}"),
-                config_record("c2", "second", "global", "", true, "{}"),
-            ],
-        );
-
-        let chain = chains.chain_for("r", "s", None);
-        let names: Vec<&str> = chain.names().collect();
-        assert_eq!(names, vec!["second", "first"]);
-    }
-
-    #[tokio::test]
-    async fn disabled_configs_and_plugins_are_skipped() {
-        let registry = registry(&[("mark", 100)]);
-        let chains = compile(
-            &registry,
-            vec![plugin_record("mark", 100, true)],
-            vec![config_record("c", "mark", "global", "", false, "{}")],
-        );
-        let chain = chains.chain_for("r", "s", None);
-        assert!(chain.is_empty());
-
-        let chains = compile(
-            &registry,
-            vec![plugin_record("mark", 100, false)],
-            vec![config_record("c", "mark", "global", "", true, "{}")],
-        );
-        assert!(chains.chain_for("r", "s", None).is_empty());
-    }
-
-    #[tokio::test]
-    async fn invalid_config_fails_compilation() {
-        let registry = registry(&[("mark", 100)]);
-        let result = PluginChains::compile(
-            PluginData {
-                plugins: vec![plugin_record("mark", 100, true)],
-                configs: vec![config_record("bad", "mark", "service", "", true, "{}")],
-            },
-            &registry,
-        );
-        assert!(result.is_err());
     }
 }

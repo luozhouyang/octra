@@ -9,14 +9,15 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use octra_api_core::{
-    ApiCredential, Consumer, CreateApiCredential, CreateConsumer, CreatePolicy, CreateRoute,
-    CreateService, CreateTarget, CreateUpstream, Policy, Route, Service, Target,
-    UpdateApiCredential, UpdateConsumer, UpdatePolicy, UpdateRoute, UpdateService, UpdateTarget,
+    Acl, BasicauthCredential, Consumer, CreateAcl, CreateBasicauthCredential, CreateConsumer,
+    CreateJwtSecret, CreateKeyauthCredential, CreatePluginInstance, CreateRoute, CreateService,
+    CreateTarget, CreateUpstream, JwtSecret, KeyauthCredential, PluginInstance, Route, Service,
+    Target, UpdateAcl, UpdateBasicauthCredential, UpdateConsumer, UpdateJwtSecret,
+    UpdateKeyauthCredential, UpdatePluginInstance, UpdateRoute, UpdateService, UpdateTarget,
     UpdateUpstream, Upstream,
 };
 use octra_core::SnapshotInfo;
-use octra_plugin_api::Scope;
-use octra_storage::plugins::{PluginConfigRecord, PluginRecord};
+use octra_plugin_api::PluginManifest;
 use octra_storage::{AuditLog, RequestLog};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -24,8 +25,6 @@ use serde_json::{Value, json};
 use crate::ApiControlState;
 use crate::error::{ControlError, ControlResult};
 use crate::key::generate_api_key;
-
-const MAX_RETRIES: i64 = 10;
 
 pub fn router(state: ApiControlState) -> Router {
     Router::new()
@@ -74,10 +73,25 @@ pub fn router(state: ApiControlState) -> Router {
                 .put(update_credential)
                 .delete(delete_credential),
         )
-        .route("/api/v1/policies", get(list_policies).post(create_policy))
         .route(
-            "/api/v1/policies/{id}",
-            get(get_policy).put(update_policy).delete(delete_policy),
+            "/api/v1/basic-auth",
+            get(list_basicauth).post(create_basicauth),
+        )
+        .route(
+            "/api/v1/basic-auth/{id}",
+            get(get_basicauth)
+                .put(update_basicauth)
+                .delete(delete_basicauth),
+        )
+        .route("/api/v1/jwt", get(list_jwt).post(create_jwt))
+        .route(
+            "/api/v1/jwt/{id}",
+            get(get_jwt).put(update_jwt).delete(delete_jwt),
+        )
+        .route("/api/v1/acls", get(list_acls).post(create_acl))
+        .route(
+            "/api/v1/acls/{id}",
+            get(get_acl).put(update_acl).delete(delete_acl),
         )
         .route("/api/v1/api/reload", post(reload))
         .route("/api/v1/api/metrics", get(metrics))
@@ -86,16 +100,16 @@ pub fn router(state: ApiControlState) -> Router {
         .route("/api/v1/audit-logs", get(audit_logs))
         .route("/api/v1/plugins", get(list_plugins))
         .route("/api/v1/plugins/reload", post(reload_plugins))
-        .route("/api/v1/plugins/{id}", get(get_plugin).put(update_plugin))
+        .route("/api/v1/plugins/{name}", get(get_plugin))
         .route(
-            "/api/v1/plugins/{id}/configs",
-            get(list_plugin_configs).post(create_plugin_config),
+            "/api/v1/plugins/{name}/instances",
+            get(list_plugin_instances).post(create_plugin_instance),
         )
         .route(
-            "/api/v1/plugin-configs/{id}",
-            get(get_plugin_config)
-                .put(update_plugin_config)
-                .delete(delete_plugin_config_route),
+            "/api/v1/plugin-instances/{id}",
+            get(get_plugin_instance)
+                .put(update_plugin_instance)
+                .delete(delete_plugin_instance),
         )
         .with_state(state)
 }
@@ -107,129 +121,39 @@ pub struct PluginView {
     pub version: String,
     pub kind: String,
     pub runtime: String,
-    pub enabled: bool,
     pub priority: i64,
     pub description: String,
     pub capabilities: Value,
     pub config_schema: Value,
 }
 
-#[derive(Debug, Serialize)]
-pub struct PluginConfigView {
-    pub id: String,
-    pub plugin_id: String,
-    pub scope: String,
-    pub scope_id: String,
-    pub enabled: bool,
-    pub config: Value,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdatePluginRequest {
-    pub enabled: Option<bool>,
-    pub priority: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreatePluginConfigRequest {
-    pub scope: String,
-    pub scope_id: Option<String>,
-    pub enabled: Option<bool>,
-    pub config: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdatePluginConfigRequest {
-    pub enabled: Option<bool>,
-    pub config: Option<Value>,
-}
-
-fn plugin_view(record: PluginRecord) -> PluginView {
-    let manifest: Value = serde_json::from_str(&record.manifest_json).unwrap_or(Value::Null);
-    let capabilities = manifest
-        .get("capabilities")
-        .cloned()
-        .unwrap_or_else(|| Value::Array(Vec::new()));
-    let config_schema: Value =
-        serde_json::from_str(&record.config_schema_json).unwrap_or_else(|_| json!({}));
+fn plugin_view(manifest: PluginManifest) -> PluginView {
     PluginView {
-        id: record.id,
-        name: record.name,
-        version: record.version,
-        kind: record.kind,
-        runtime: record.runtime_type,
-        enabled: record.enabled,
-        priority: record.priority,
-        description: record.description,
-        capabilities,
-        config_schema,
+        id: format!("plg_{}", manifest.name),
+        name: manifest.name,
+        version: manifest.version,
+        kind: manifest.kind.as_str().to_string(),
+        runtime: manifest.runtime.as_str().to_string(),
+        priority: i64::from(manifest.priority),
+        description: manifest.description,
+        capabilities: serde_json::to_value(manifest.capabilities).unwrap_or(Value::Array(vec![])),
+        config_schema: manifest.config_schema.unwrap_or_else(|| json!({})),
     }
-}
-
-fn config_view(record: PluginConfigRecord) -> PluginConfigView {
-    let config: Value = serde_json::from_str(&record.config_json).unwrap_or(Value::Null);
-    PluginConfigView {
-        id: record.id,
-        plugin_id: record.plugin_id,
-        scope: record.scope,
-        scope_id: record.scope_id,
-        enabled: record.enabled,
-        config,
-    }
-}
-
-fn plugin_not_found(id: &str) -> ControlError {
-    ControlError::not_found(format!("plugin '{id}' not found"))
-}
-
-fn config_not_found(id: &str) -> ControlError {
-    ControlError::not_found(format!("plugin config '{id}' not found"))
 }
 
 async fn reload_plugin_runtime(state: &ApiControlState) -> ControlResult<()> {
     state.plugins.reload().await.map_err(ControlError::from)
 }
 
-async fn validate_scope_target(
-    state: &ApiControlState,
-    scope: Scope,
-    scope_id: &str,
-) -> ControlResult<()> {
-    match scope {
-        Scope::Global => Ok(()),
-        Scope::Service => {
-            if state.storage.get_service(scope_id).await?.is_some() {
-                Ok(())
-            } else {
-                Err(not_found("service", scope_id))
-            }
-        }
-        Scope::Route => {
-            if state.storage.get_route(scope_id).await?.is_some() {
-                Ok(())
-            } else {
-                Err(not_found("route", scope_id))
-            }
-        }
-        Scope::Consumer => {
-            if state.storage.get_consumer(scope_id).await?.is_some() {
-                Ok(())
-            } else {
-                Err(not_found("consumer", scope_id))
-            }
-        }
-    }
-}
-
 async fn validate_plugin_config(
     state: &ApiControlState,
-    plugin: &PluginRecord,
+    name: &str,
     config: &Value,
 ) -> ControlResult<()> {
     state
         .plugins
         .registry()
-        .validate(&plugin.name, config)
+        .validate(name, config)
         .map_err(|error| ControlError::bad_request(error.message))
 }
 
@@ -237,156 +161,106 @@ async fn validate_plugin_config(
 pub async fn list_plugins(
     State(state): State<ApiControlState>,
 ) -> ControlResult<Json<Vec<PluginView>>> {
-    let plugins = state.storage.list_plugins().await?;
-    Ok(Json(plugins.into_iter().map(plugin_view).collect()))
+    Ok(Json(
+        state
+            .plugins
+            .registry()
+            .manifests()
+            .into_iter()
+            .map(plugin_view)
+            .collect(),
+    ))
 }
 
-/// `GET /api/v1/plugins/{id}`.
+/// `GET /api/v1/plugins/{name}`.
 pub async fn get_plugin(
     State(state): State<ApiControlState>,
-    Path(id): Path<String>,
+    Path(name): Path<String>,
 ) -> ControlResult<Json<PluginView>> {
-    let plugin = state
-        .storage
-        .get_plugin(&id)
-        .await?
-        .ok_or_else(|| plugin_not_found(&id))?;
-    Ok(Json(plugin_view(plugin)))
+    state
+        .plugins
+        .registry()
+        .factory(&name)
+        .map(|factory| Json(plugin_view(factory.manifest())))
+        .ok_or_else(|| ControlError::not_found(format!("plugin '{name}' not found")))
 }
 
-/// `PUT /api/v1/plugins/{id}`.
-pub async fn update_plugin(
+/// `GET /api/v1/plugins/{name}/instances`.
+pub async fn list_plugin_instances(
     State(state): State<ApiControlState>,
-    Path(id): Path<String>,
-    payload: Result<Json<UpdatePluginRequest>, JsonRejection>,
-) -> ControlResult<Json<PluginView>> {
-    let request = read_json(payload).await?;
-    if let Some(priority) = request.priority
-        && !(0..=1000).contains(&priority)
-    {
-        return Err(ControlError::bad_request(
-            "priority must be between 0 and 1000",
-        ));
+    Path(name): Path<String>,
+) -> ControlResult<Json<Vec<PluginInstance>>> {
+    let instances: Vec<PluginInstance> = state
+        .storage
+        .list_plugin_instances()
+        .await?
+        .into_iter()
+        .filter(|instance| instance.name == name)
+        .collect();
+    Ok(Json(instances))
+}
+
+/// `POST /api/v1/plugins/{name}/instances`.
+pub async fn create_plugin_instance(
+    State(state): State<ApiControlState>,
+    Path(name): Path<String>,
+    payload: Result<Json<CreatePluginInstance>, JsonRejection>,
+) -> ControlResult<(StatusCode, Json<PluginInstance>)> {
+    let mut input = read_json(payload).await?;
+    input.name = name.clone();
+    input.validate()?;
+    if state.plugins.registry().factory(&name).is_none() {
+        return Err(ControlError::not_found(format!(
+            "plugin '{name}' not found"
+        )));
     }
-    let plugin = state
-        .storage
-        .update_plugin_flags(&id, request.enabled, request.priority)
-        .await?
-        .ok_or_else(|| plugin_not_found(&id))?;
+    let config = input.config.clone().unwrap_or_else(|| json!({}));
+    validate_plugin_config(&state, &name, &config).await?;
+    let instance = state.storage.create_plugin_instance(&input).await?;
     reload_plugin_runtime(&state).await?;
-    Ok(Json(plugin_view(plugin)))
+    Ok((StatusCode::CREATED, Json(instance)))
 }
 
-/// `GET /api/v1/plugins/{id}/configs`.
-pub async fn list_plugin_configs(
+/// `GET /api/v1/plugin-instances/{id}`.
+pub async fn get_plugin_instance(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
-) -> ControlResult<Json<Vec<PluginConfigView>>> {
-    if state.storage.get_plugin(&id).await?.is_none() {
-        return Err(plugin_not_found(&id));
-    }
-    let configs = state.storage.list_plugin_configs(&id).await?;
-    Ok(Json(configs.into_iter().map(config_view).collect()))
-}
-
-/// `POST /api/v1/plugins/{id}/configs`.
-pub async fn create_plugin_config(
-    State(state): State<ApiControlState>,
-    Path(id): Path<String>,
-    payload: Result<Json<CreatePluginConfigRequest>, JsonRejection>,
-) -> ControlResult<(StatusCode, Json<PluginConfigView>)> {
-    let request = read_json(payload).await?;
-    let plugin = state
+) -> ControlResult<Json<PluginInstance>> {
+    state
         .storage
-        .get_plugin(&id)
+        .get_plugin_instance(&id)
         .await?
-        .ok_or_else(|| plugin_not_found(&id))?;
-    let scope = Scope::parse(&request.scope).ok_or_else(|| {
-        ControlError::bad_request("scope must be one of global, service, route, consumer")
-    })?;
-    let scope_id = scope
-        .normalize_id(request.scope_id.as_deref())
-        .ok_or_else(|| ControlError::bad_request(format!("{scope} scope requires a scope_id")))?;
-    validate_scope_target(&state, scope, &scope_id).await?;
-
-    let config = request.config.unwrap_or_else(|| json!({}));
-    validate_plugin_config(&state, &plugin, &config).await?;
-    let config_json = serde_json::to_string(&config)
-        .map_err(|error| ControlError::bad_request(error.to_string()))?;
-
-    let record = state
-        .storage
-        .create_plugin_config(
-            &id,
-            scope,
-            request.scope_id.as_deref(),
-            request.enabled.unwrap_or(true),
-            &config_json,
-        )
-        .await?;
-    reload_plugin_runtime(&state).await?;
-    Ok((StatusCode::CREATED, Json(config_view(record))))
+        .map(Json)
+        .ok_or_else(|| ControlError::not_found(format!("plugin instance '{id}' not found")))
 }
 
-/// `GET /api/v1/plugin-configs/{id}`.
-pub async fn get_plugin_config(
+/// `PUT /api/v1/plugin-instances/{id}`.
+pub async fn update_plugin_instance(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
-) -> ControlResult<Json<PluginConfigView>> {
-    let record = state
-        .storage
-        .get_plugin_config(&id)
-        .await?
-        .ok_or_else(|| config_not_found(&id))?;
-    Ok(Json(config_view(record)))
-}
-
-/// `PUT /api/v1/plugin-configs/{id}`.
-pub async fn update_plugin_config(
-    State(state): State<ApiControlState>,
-    Path(id): Path<String>,
-    payload: Result<Json<UpdatePluginConfigRequest>, JsonRejection>,
-) -> ControlResult<Json<PluginConfigView>> {
-    let request = read_json(payload).await?;
+    payload: Result<Json<UpdatePluginInstance>, JsonRejection>,
+) -> ControlResult<Json<PluginInstance>> {
+    let input = read_json(payload).await?;
+    input.validate()?;
     let existing = state
         .storage
-        .get_plugin_config(&id)
+        .get_plugin_instance(&id)
         .await?
-        .ok_or_else(|| config_not_found(&id))?;
-
-    let config_json = match &request.config {
-        Some(config) => {
-            let plugin = state
-                .storage
-                .get_plugin(&existing.plugin_id)
-                .await?
-                .ok_or_else(|| plugin_not_found(&existing.plugin_id))?;
-            validate_plugin_config(&state, &plugin, config).await?;
-            Some(
-                serde_json::to_string(config)
-                    .map_err(|error| ControlError::bad_request(error.to_string()))?,
-            )
-        }
-        None => None,
-    };
-
-    let record = state
-        .storage
-        .update_plugin_config(&id, request.enabled, config_json.as_deref())
-        .await?
-        .ok_or_else(|| config_not_found(&id))?;
+        .ok_or_else(|| ControlError::not_found(format!("plugin instance '{id}' not found")))?;
+    if let Some(config) = &input.config {
+        validate_plugin_config(&state, &existing.name, config).await?;
+    }
+    let instance = state.storage.update_plugin_instance(&id, &input).await?;
     reload_plugin_runtime(&state).await?;
-    Ok(Json(config_view(record)))
+    Ok(Json(instance))
 }
 
-/// `DELETE /api/v1/plugin-configs/{id}`.
-pub async fn delete_plugin_config_route(
+/// `DELETE /api/v1/plugin-instances/{id}`.
+pub async fn delete_plugin_instance(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    if !state.storage.delete_plugin_config(&id).await? {
-        return Err(config_not_found(&id));
-    }
+    state.storage.delete_plugin_instance(&id).await?;
     reload_plugin_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -434,17 +308,8 @@ async fn reload_runtime(state: &ApiControlState) -> ControlResult<SnapshotInfo> 
 
 /// `POST /api/v1/api/reload`.
 pub async fn reload(State(state): State<ApiControlState>) -> ControlResult<Json<SnapshotInfo>> {
+    reload_plugin_runtime(&state).await?;
     Ok(Json(reload_runtime(&state).await?))
-}
-
-fn checked_retries(retries: i64) -> ControlResult<()> {
-    if (0..=MAX_RETRIES).contains(&retries) {
-        Ok(())
-    } else {
-        Err(ControlError::bad_request(format!(
-            "retries must be between 0 and {MAX_RETRIES}"
-        )))
-    }
 }
 
 fn not_found(entity: &str, id: &str) -> ControlError {
@@ -498,9 +363,6 @@ pub async fn create_service(
 ) -> ControlResult<(StatusCode, Json<Service>)> {
     let input = read_json(payload).await?;
     input.validate()?;
-    if let Some(retries) = input.retries {
-        checked_retries(retries)?;
-    }
     let service = state.storage.create_service(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(service)))
@@ -513,9 +375,6 @@ pub async fn update_service(
 ) -> ControlResult<Json<Service>> {
     let input = read_json(payload).await?;
     input.validate()?;
-    if let Some(retries) = input.retries {
-        checked_retries(retries)?;
-    }
     let service = state.storage.update_service(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(service))
@@ -562,7 +421,9 @@ pub async fn create_route(
 ) -> ControlResult<(StatusCode, Json<Route>)> {
     let input = read_json(payload).await?;
     input.validate()?;
-    require_service(&state, &input.service_id).await?;
+    if let Some(service_id) = &input.service_id {
+        require_service(&state, service_id).await?;
+    }
     let route = state.storage.create_route(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(route)))
@@ -575,7 +436,7 @@ pub async fn update_route(
 ) -> ControlResult<Json<Route>> {
     let input = read_json(payload).await?;
     input.validate()?;
-    if let Some(service_id) = &input.service_id {
+    if let Some(Some(service_id)) = &input.service_id {
         require_service(&state, service_id).await?;
     }
     let route = state.storage.update_route(&id, &input).await?;
@@ -596,14 +457,8 @@ pub async fn delete_route(
 
 pub async fn list_upstreams(
     State(state): State<ApiControlState>,
-    Query(filter): Query<ListFilter>,
 ) -> ControlResult<Json<Vec<Upstream>>> {
-    Ok(Json(
-        state
-            .storage
-            .list_upstreams(filter.service_id.as_deref())
-            .await?,
-    ))
+    Ok(Json(state.storage.list_upstreams().await?))
 }
 
 pub async fn get_upstream(
@@ -624,7 +479,6 @@ pub async fn create_upstream(
 ) -> ControlResult<(StatusCode, Json<Upstream>)> {
     let input = read_json(payload).await?;
     input.validate()?;
-    require_service(&state, &input.service_id).await?;
     let upstream = state.storage.create_upstream(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(upstream)))
@@ -637,9 +491,6 @@ pub async fn update_upstream(
 ) -> ControlResult<Json<Upstream>> {
     let input = read_json(payload).await?;
     input.validate()?;
-    if let Some(service_id) = &input.service_id {
-        require_service(&state, service_id).await?;
-    }
     let upstream = state.storage.update_upstream(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(upstream))
@@ -743,6 +594,7 @@ pub async fn create_consumer(
     let input = read_json(payload).await?;
     input.validate()?;
     let consumer = state.storage.create_consumer(&input).await?;
+    reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(consumer)))
 }
 
@@ -754,6 +606,7 @@ pub async fn update_consumer(
     let input = read_json(payload).await?;
     input.validate()?;
     let consumer = state.storage.update_consumer(&id, &input).await?;
+    reload_runtime(&state).await?;
     Ok(Json(consumer))
 }
 
@@ -766,20 +619,12 @@ pub async fn delete_consumer(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// Credentials
-
-/// Response for a freshly minted credential. The plaintext key appears exactly
-/// once here and is never stored or logged.
-#[derive(Debug, Serialize)]
-pub struct IssuedCredential {
-    pub credential: ApiCredential,
-    pub key: String,
-}
+// Key-auth credentials
 
 pub async fn list_credentials(
     State(state): State<ApiControlState>,
     Query(filter): Query<ListFilter>,
-) -> ControlResult<Json<Vec<ApiCredential>>> {
+) -> ControlResult<Json<Vec<KeyauthCredential>>> {
     Ok(Json(
         state
             .storage
@@ -791,7 +636,7 @@ pub async fn list_credentials(
 pub async fn get_credential(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
-) -> ControlResult<Json<ApiCredential>> {
+) -> ControlResult<Json<KeyauthCredential>> {
     state
         .storage
         .get_credential(&id)
@@ -802,38 +647,26 @@ pub async fn get_credential(
 
 pub async fn create_credential(
     State(state): State<ApiControlState>,
-    payload: Result<Json<CreateApiCredential>, JsonRejection>,
-) -> ControlResult<(StatusCode, Json<IssuedCredential>)> {
-    let input = read_json(payload).await?;
+    payload: Result<Json<CreateKeyauthCredential>, JsonRejection>,
+) -> ControlResult<(StatusCode, Json<KeyauthCredential>)> {
+    let mut input = read_json(payload).await?;
     input.validate()?;
     require_consumer(&state, &input.consumer_id).await?;
-
-    let generated = generate_api_key();
-    let credential = state
-        .storage
-        .create_credential(&input, &generated.prefix, &generated.hash)
-        .await?;
+    if input.key.is_none() {
+        input.key = Some(generate_api_key().plaintext);
+    }
+    let credential = state.storage.create_credential(&input).await?;
     reload_runtime(&state).await?;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(IssuedCredential {
-            credential,
-            key: generated.plaintext,
-        }),
-    ))
+    Ok((StatusCode::CREATED, Json(credential)))
 }
 
 pub async fn update_credential(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
-    payload: Result<Json<UpdateApiCredential>, JsonRejection>,
-) -> ControlResult<Json<ApiCredential>> {
+    payload: Result<Json<UpdateKeyauthCredential>, JsonRejection>,
+) -> ControlResult<Json<KeyauthCredential>> {
     let input = read_json(payload).await?;
     input.validate()?;
-    if let Some(consumer_id) = &input.consumer_id {
-        require_consumer(&state, consumer_id).await?;
-    }
     let credential = state.storage.update_credential(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(credential))
@@ -848,128 +681,176 @@ pub async fn delete_credential(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn validate_policy_scope(scope: &str) -> ControlResult<()> {
-    match scope {
-        "global" | "consumer" => Ok(()),
-        _ => Err(ControlError::bad_request(
-            "policy scope must be global or consumer",
-        )),
-    }
-}
+// Basic-auth credentials
 
-fn validate_policy_document(document: &Value) -> ControlResult<()> {
-    let object = document
-        .as_object()
-        .ok_or_else(|| ControlError::bad_request("policy document must be a JSON object"))?;
-    if let Some(routes) = object.get("allowed_routes") {
-        let routes = routes.as_array().ok_or_else(|| {
-            ControlError::bad_request("policy.allowed_routes must be an array of route ids")
-        })?;
-        if routes.iter().any(|route| !route.is_string()) {
-            return Err(ControlError::bad_request(
-                "policy.allowed_routes must contain only strings",
-            ));
-        }
-    }
-    Ok(())
-}
-
-async fn require_policy_consumer(
-    state: &ApiControlState,
-    consumer_id: Option<&str>,
-) -> ControlResult<()> {
-    if let Some(consumer_id) = consumer_id
-        && state.storage.get_consumer(consumer_id).await?.is_none()
-    {
-        return Err(not_found("consumer", consumer_id));
-    }
-    Ok(())
-}
-
-/// `GET /api/v1/policies`.
-pub async fn list_policies(
+pub async fn list_basicauth(
     State(state): State<ApiControlState>,
-) -> ControlResult<Json<Vec<Policy>>> {
-    Ok(Json(state.storage.list_policies().await?))
+) -> ControlResult<Json<Vec<BasicauthCredential>>> {
+    Ok(Json(state.storage.list_basicauth().await?))
 }
 
-/// `GET /api/v1/policies/{id}`.
-pub async fn get_policy(
+pub async fn get_basicauth(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
-) -> ControlResult<Json<Policy>> {
-    let policy = state
-        .storage
-        .get_policy(&id)
-        .await?
-        .ok_or_else(|| not_found("policy", &id))?;
-    Ok(Json(policy))
-}
-
-/// `POST /api/v1/policies`.
-pub async fn create_policy(
-    State(state): State<ApiControlState>,
-    payload: Result<Json<CreatePolicy>, JsonRejection>,
-) -> ControlResult<(StatusCode, Json<Policy>)> {
-    let request = read_json(payload).await?;
-    if request.name.trim().is_empty() {
-        return Err(ControlError::bad_request("policy name must not be empty"));
-    }
-    require_policy_consumer(&state, request.consumer_id.as_deref()).await?;
-    let scope = request.scope.clone().unwrap_or_else(|| {
-        if request.consumer_id.is_some() {
-            "consumer".into()
-        } else {
-            "global".into()
-        }
-    });
-    validate_policy_scope(&scope)?;
-    if let Some(document) = &request.document {
-        validate_policy_document(document)?;
-    }
-
-    let policy = state
-        .storage
-        .create_policy(&CreatePolicy {
-            scope: Some(scope),
-            ..request
-        })
-        .await?;
-    reload_runtime(&state).await?;
-    Ok((StatusCode::CREATED, Json(policy)))
-}
-
-/// `PUT /api/v1/policies/{id}`.
-pub async fn update_policy(
-    State(state): State<ApiControlState>,
-    Path(id): Path<String>,
-    payload: Result<Json<UpdatePolicy>, JsonRejection>,
-) -> ControlResult<Json<Policy>> {
-    let request = read_json(payload).await?;
+) -> ControlResult<Json<BasicauthCredential>> {
     state
         .storage
-        .get_policy(&id)
+        .get_basicauth(&id)
         .await?
-        .ok_or_else(|| not_found("policy", &id))?;
-    if let Some(scope) = &request.scope {
-        validate_policy_scope(scope)?;
-    }
-    require_policy_consumer(&state, request.consumer_id.as_deref()).await?;
-    if let Some(document) = &request.document {
-        validate_policy_document(document)?;
-    }
-
-    let policy = state.storage.update_policy(&id, &request).await?;
-    reload_runtime(&state).await?;
-    Ok(Json(policy))
+        .map(Json)
+        .ok_or_else(|| not_found("credential", &id))
 }
 
-/// `DELETE /api/v1/policies/{id}`.
-pub async fn delete_policy(
+pub async fn create_basicauth(
+    State(state): State<ApiControlState>,
+    payload: Result<Json<CreateBasicauthCredential>, JsonRejection>,
+) -> ControlResult<(StatusCode, Json<BasicauthCredential>)> {
+    let mut input = read_json(payload).await?;
+    input.validate()?;
+    require_consumer(&state, &input.consumer_id).await?;
+    input.password = hash_password(input.password).await?;
+    let credential = state.storage.create_basicauth(&input).await?;
+    reload_runtime(&state).await?;
+    Ok((StatusCode::CREATED, Json(credential)))
+}
+
+pub async fn update_basicauth(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<UpdateBasicauthCredential>, JsonRejection>,
+) -> ControlResult<Json<BasicauthCredential>> {
+    let mut input = read_json(payload).await?;
+    input.validate()?;
+    if let Some(password) = input.password.take() {
+        input.password = Some(hash_password(password).await?);
+    }
+    let credential = state.storage.update_basicauth(&id, &input).await?;
+    reload_runtime(&state).await?;
+    Ok(Json(credential))
+}
+
+pub async fn delete_basicauth(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    state.storage.delete_policy(&id).await?;
+    state.storage.delete_basicauth(&id).await?;
+    reload_runtime(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn hash_password(password: String) -> ControlResult<String> {
+    tokio::task::spawn_blocking(move || bcrypt::hash(password, bcrypt::DEFAULT_COST))
+        .await
+        .map_err(|error| ControlError::bad_request(format!("cannot hash password: {error}")))?
+        .map_err(|error| ControlError::bad_request(format!("cannot hash password: {error}")))
+}
+
+// JWT secrets
+
+pub async fn list_jwt(State(state): State<ApiControlState>) -> ControlResult<Json<Vec<JwtSecret>>> {
+    Ok(Json(state.storage.list_jwt().await?))
+}
+
+pub async fn get_jwt(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+) -> ControlResult<Json<JwtSecret>> {
+    state
+        .storage
+        .get_jwt(&id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| not_found("credential", &id))
+}
+
+pub async fn create_jwt(
+    State(state): State<ApiControlState>,
+    payload: Result<Json<CreateJwtSecret>, JsonRejection>,
+) -> ControlResult<(StatusCode, Json<JwtSecret>)> {
+    let input = read_json(payload).await?;
+    input.validate()?;
+    require_consumer(&state, &input.consumer_id).await?;
+    let credential = state.storage.create_jwt(&input).await?;
+    reload_runtime(&state).await?;
+    Ok((StatusCode::CREATED, Json(credential)))
+}
+
+pub async fn update_jwt(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<UpdateJwtSecret>, JsonRejection>,
+) -> ControlResult<Json<JwtSecret>> {
+    let input = read_json(payload).await?;
+    input.validate()?;
+    let credential = state.storage.update_jwt(&id, &input).await?;
+    reload_runtime(&state).await?;
+    Ok(Json(credential))
+}
+
+pub async fn delete_jwt(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+) -> ControlResult<StatusCode> {
+    state.storage.delete_jwt(&id).await?;
+    reload_runtime(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ACL entries
+
+pub async fn list_acls(
+    State(state): State<ApiControlState>,
+    Query(filter): Query<ListFilter>,
+) -> ControlResult<Json<Vec<Acl>>> {
+    Ok(Json(
+        state
+            .storage
+            .list_acls(filter.consumer_id.as_deref())
+            .await?,
+    ))
+}
+
+pub async fn get_acl(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+) -> ControlResult<Json<Acl>> {
+    state
+        .storage
+        .get_acl(&id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| not_found("acl", &id))
+}
+
+pub async fn create_acl(
+    State(state): State<ApiControlState>,
+    payload: Result<Json<CreateAcl>, JsonRejection>,
+) -> ControlResult<(StatusCode, Json<Acl>)> {
+    let input = read_json(payload).await?;
+    input.validate()?;
+    require_consumer(&state, &input.consumer_id).await?;
+    let acl = state.storage.create_acl(&input).await?;
+    reload_runtime(&state).await?;
+    Ok((StatusCode::CREATED, Json(acl)))
+}
+
+pub async fn update_acl(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<UpdateAcl>, JsonRejection>,
+) -> ControlResult<Json<Acl>> {
+    let input = read_json(payload).await?;
+    input.validate()?;
+    let acl = state.storage.update_acl(&id, &input).await?;
+    reload_runtime(&state).await?;
+    Ok(Json(acl))
+}
+
+pub async fn delete_acl(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+) -> ControlResult<StatusCode> {
+    state.storage.delete_acl(&id).await?;
     reload_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }

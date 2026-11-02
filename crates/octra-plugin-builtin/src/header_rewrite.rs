@@ -43,7 +43,15 @@ impl ApiGatewayPluginFactory for HeaderRewriteFactory {
         )
     }
 
-    fn create(&self, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
+    fn phases(&self) -> Vec<octra_plugin_api::PluginPhase> {
+        vec![
+            octra_plugin_api::PluginPhase::UpstreamRequest,
+            octra_plugin_api::PluginPhase::Response,
+            octra_plugin_api::PluginPhase::Log,
+        ]
+    }
+
+    fn create(&self, _id: &str, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
         let config: HeaderConfig = serde_json::from_value(config).map_err(|error| {
             PluginError::fail_closed(format!("invalid header-rewrite config: {error}"))
         })?;
@@ -179,7 +187,7 @@ mod tests {
     #[test]
     fn rejects_invalid_header_names() {
         let Err(error) =
-            HeaderRewriteFactory.create(json!({"request": {"set": {"bad header": "x"}}}))
+            HeaderRewriteFactory.create("test", json!({"request": {"set": {"bad header": "x"}}}))
         else {
             panic!("expected an error");
         };

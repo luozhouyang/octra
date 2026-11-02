@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 axum.workspace = true
 base64.workspace = true
+bcrypt = "0.15"
 bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true

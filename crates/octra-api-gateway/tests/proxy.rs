@@ -12,8 +12,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use http_body_util::BodyExt;
 use octra_api_core::{
-    CreateApiCredential, CreateConsumer, CreatePolicy, CreateRoute, CreateService, CreateTarget,
-    CreateUpstream, UpdatePolicy,
+    CreateConsumer, CreateKeyauthCredential, CreatePluginInstance, CreateRoute, CreateService,
+    CreateTarget, CreateUpstream,
 };
 use octra_api_gateway::{
     ApiControlState, ApiDataState, ApiMetrics, AuditState, control_router, data_plane_router,
@@ -189,6 +189,13 @@ fn header_default(value: &str) -> HeaderValue {
     HeaderValue::from_str(value).unwrap()
 }
 
+/// Converts an absolute URL into the `host:port` target form.
+fn target_address(url: &str) -> String {
+    let parsed = url::Url::parse(url).unwrap();
+    let host = parsed.host_str().unwrap();
+    format!("{host}:{}", parsed.port_or_known_default().unwrap())
+}
+
 /// Inserts a service with one upstream, one target, and one route.
 async fn seed_service(
     storage: &Storage,
@@ -202,7 +209,6 @@ async fn seed_service(
         .create_service(&CreateService {
             id: Some(service_id.into()),
             name: service_id.into(),
-            require_auth: Some(require_auth),
             ..Default::default()
         })
         .await
@@ -210,8 +216,7 @@ async fn seed_service(
     let upstream = storage
         .create_upstream(&CreateUpstream {
             id: Some(format!("{service_id}-up")),
-            service_id: service.id.clone(),
-            name: "primary".into(),
+            name: service_id.into(),
             ..Default::default()
         })
         .await
@@ -220,7 +225,7 @@ async fn seed_service(
         .create_target(&CreateTarget {
             id: Some(format!("{service_id}-tgt")),
             upstream_id: upstream.id,
-            url: target_url.to_string(),
+            target: target_address(target_url),
             ..Default::default()
         })
         .await
@@ -228,13 +233,26 @@ async fn seed_service(
     storage
         .create_route(&CreateRoute {
             id: Some(format!("{service_id}-route")),
-            service_id: service.id,
-            path_prefix: Some(prefix.into()),
-            strip_prefix: Some(strip),
+            service_id: Some(service.id.clone()),
+            paths: Some(vec![prefix.into()]),
+            strip_path: Some(strip),
             ..Default::default()
         })
         .await
         .unwrap();
+    if require_auth {
+        storage
+            .create_plugin_instance(&CreatePluginInstance {
+                name: "key-auth".into(),
+                service_id: Some(service.id),
+                config: Some(serde_json::json!({
+                    "key_names": ["apikey", "x-api-key"],
+                })),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -288,7 +306,6 @@ async fn round_robins_across_two_targets() {
         .create_service(&CreateService {
             id: Some("svc".into()),
             name: "svc".into(),
-            require_auth: Some(false),
             ..Default::default()
         })
         .await
@@ -297,8 +314,7 @@ async fn round_robins_across_two_targets() {
         .storage
         .create_upstream(&CreateUpstream {
             id: Some("up".into()),
-            service_id: service.id.clone(),
-            name: "pool".into(),
+            name: "svc".into(),
             ..Default::default()
         })
         .await
@@ -309,7 +325,7 @@ async fn round_robins_across_two_targets() {
             .create_target(&CreateTarget {
                 id: Some(id.into()),
                 upstream_id: upstream.id.clone(),
-                url: format!("http://{url}"),
+                target: url.to_string(),
                 ..Default::default()
             })
             .await
@@ -319,7 +335,7 @@ async fn round_robins_across_two_targets() {
         .storage
         .create_route(&CreateRoute {
             id: Some("r".into()),
-            service_id: service.id,
+            service_id: Some(service.id),
             ..Default::default()
         })
         .await
@@ -338,7 +354,7 @@ async fn round_robins_across_two_targets() {
 }
 
 #[tokio::test]
-async fn rejects_without_api_key_and_accepts_bearer_and_header() {
+async fn rejects_without_api_key_and_accepts_key_header() {
     let (addr, _calls) = spawn_mock("a").await;
     let gateway = gateway().await;
     seed_service(
@@ -353,7 +369,7 @@ async fn rejects_without_api_key_and_accepts_bearer_and_header() {
     let consumer = gateway
         .storage
         .create_consumer(&CreateConsumer {
-            name: "team".into(),
+            username: Some("team".into()),
             ..Default::default()
         })
         .await
@@ -361,39 +377,34 @@ async fn rejects_without_api_key_and_accepts_bearer_and_header() {
     let key = "ok_test-key-value";
     gateway
         .storage
-        .create_credential(
-            &CreateApiCredential {
-                consumer_id: consumer.id,
-                ..Default::default()
-            },
-            "ok_test-",
-            &octra_gateway_runtime::hash_api_key(key),
-        )
+        .create_credential(&CreateKeyauthCredential {
+            consumer_id: consumer.id,
+            key: Some(key.into()),
+            ..Default::default()
+        })
         .await
         .unwrap();
     gateway.reload().await;
 
     let (status, headers, _) = gateway.send(get("/")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(headers.get(header::WWW_AUTHENTICATE).unwrap(), "Bearer");
-
-    let mut bearer = get("/");
-    bearer.headers_mut().insert(
-        header::AUTHORIZATION,
-        header_default(&format!("Bearer {key}")),
+    assert_eq!(
+        headers.get(header::WWW_AUTHENTICATE).unwrap(),
+        "Key realm=\"octra\""
     );
-    assert_eq!(gateway.send(bearer).await.0, StatusCode::CREATED);
 
     let mut api_key = get("/");
-    api_key
-        .headers_mut()
-        .insert("x-api-key", header_default(key));
+    api_key.headers_mut().insert("apikey", header_default(key));
     assert_eq!(gateway.send(api_key).await.0, StatusCode::CREATED);
 
-    let mut wrong = get("/");
-    wrong
+    let mut alternate = get("/");
+    alternate
         .headers_mut()
-        .insert(header::AUTHORIZATION, header_default("Bearer nope"));
+        .insert("x-api-key", header_default(key));
+    assert_eq!(gateway.send(alternate).await.0, StatusCode::CREATED);
+
+    let mut wrong = get("/");
+    wrong.headers_mut().insert("apikey", header_default("nope"));
     assert_eq!(gateway.send(wrong).await.0, StatusCode::UNAUTHORIZED);
 }
 
@@ -414,7 +425,6 @@ async fn no_target_is_502_and_dead_target_is_502() {
         .create_service(&CreateService {
             id: Some("empty".into()),
             name: "empty".into(),
-            require_auth: Some(false),
             ..Default::default()
         })
         .await
@@ -423,7 +433,6 @@ async fn no_target_is_502_and_dead_target_is_502() {
         .storage
         .create_upstream(&CreateUpstream {
             id: Some("empty-up".into()),
-            service_id: service.id.clone(),
             name: "empty".into(),
             ..Default::default()
         })
@@ -433,7 +442,7 @@ async fn no_target_is_502_and_dead_target_is_502() {
         .storage
         .create_route(&CreateRoute {
             id: Some("empty-route".into()),
-            service_id: service.id,
+            service_id: Some(service.id),
             ..Default::default()
         })
         .await
@@ -489,7 +498,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let response = control()
         .oneshot(post(
             "/api/v1/services",
-            serde_json::json!({ "id": "svc", "name": "svc", "require_auth": false }),
+            serde_json::json!({ "id": "svc", "name": "svc" }),
         ))
         .await
         .unwrap();
@@ -499,7 +508,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let response = control()
         .oneshot(post(
             "/api/v1/routes",
-            serde_json::json!({ "service_id": "missing", "path_prefix": "/" }),
+            serde_json::json!({ "service_id": "missing", "paths": ["/"] }),
         ))
         .await
         .unwrap();
@@ -508,7 +517,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let response = control()
         .oneshot(post(
             "/api/v1/upstreams",
-            serde_json::json!({ "id": "up", "service_id": "svc", "name": "up", "algorithm": "round_robin" }),
+            serde_json::json!({ "id": "up", "name": "svc", "algorithm": "round-robin" }),
         ))
         .await
         .unwrap();
@@ -517,7 +526,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let response = control()
         .oneshot(post(
             "/api/v1/targets",
-            serde_json::json!({ "upstream_id": "up", "url": format!("http://{addr}"), "weight": 1001 }),
+            serde_json::json!({ "upstream_id": "up", "target": addr.to_string(), "weight": 1001 }),
         ))
         .await
         .unwrap();
@@ -526,7 +535,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let response = control()
         .oneshot(post(
             "/api/v1/targets",
-            serde_json::json!({ "upstream_id": "up", "url": "ftp://nope", }),
+            serde_json::json!({ "upstream_id": "up", "target": "ftp://nope" }),
         ))
         .await
         .unwrap();
@@ -535,7 +544,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let response = control()
         .oneshot(post(
             "/api/v1/targets",
-            serde_json::json!({ "upstream_id": "up", "url": format!("http://{addr}") }),
+            serde_json::json!({ "upstream_id": "up", "target": addr.to_string() }),
         ))
         .await
         .unwrap();
@@ -544,7 +553,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let response = control()
         .oneshot(post(
             "/api/v1/routes",
-            serde_json::json!({ "id": "r", "service_id": "svc", "path_prefix": "/", "methods": ["BREW"] }),
+            serde_json::json!({ "id": "r", "service_id": "svc", "paths": ["/"], "methods": ["BREW"] }),
         ))
         .await
         .unwrap();
@@ -553,7 +562,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let response = control()
         .oneshot(post(
             "/api/v1/routes",
-            serde_json::json!({ "id": "r", "service_id": "svc", "path_prefix": "/" }),
+            serde_json::json!({ "id": "r", "service_id": "svc", "paths": ["/"] }),
         ))
         .await
         .unwrap();
@@ -572,7 +581,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let response = control()
         .oneshot(post(
             "/api/v1/services",
-            serde_json::json!({ "name": "bad", "connect_timeout_ms": 0 }),
+            serde_json::json!({ "name": "bad", "connect_timeout": 0 }),
         ))
         .await
         .unwrap();
@@ -584,7 +593,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let response = control()
         .oneshot(post(
             "/api/v1/consumers",
-            serde_json::json!({ "id": "c", "name": "consumer" }),
+            serde_json::json!({ "id": "c", "username": "consumer" }),
         ))
         .await
         .unwrap();
@@ -593,7 +602,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let response = control()
         .oneshot(post(
             "/api/v1/credentials",
-            serde_json::json!({ "consumer_id": "c", "name": "prod key" }),
+            serde_json::json!({ "consumer_id": "c" }),
         ))
         .await
         .unwrap();
@@ -602,16 +611,14 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let issued: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let plaintext = issued["key"].as_str().unwrap();
     assert!(plaintext.starts_with("ok_"));
-    let prefix = issued["credential"]["key_prefix"].as_str().unwrap();
-    assert!(plaintext.starts_with(prefix));
-    assert!(issued["credential"].get("key_hash").is_some());
-
     let stored = storage
-        .find_credential_by_hash(&octra_gateway_runtime::hash_api_key(plaintext))
+        .list_credentials(Some("c"))
         .await
         .unwrap()
+        .into_iter()
+        .find(|credential| credential.key == plaintext)
         .unwrap();
-    assert!(stored.key_hash.as_deref() != Some(plaintext));
+    assert_eq!(stored.consumer_id, "c");
 
     let response = control()
         .oneshot(post(
@@ -657,15 +664,18 @@ async fn create_plugin_config(
     scope_id: Option<&str>,
     config: serde_json::Value,
 ) {
-    let plugin = storage
-        .get_plugin_by_name(plugin_name)
-        .await
-        .unwrap()
-        .unwrap_or_else(|| panic!("plugin '{plugin_name}' was not seeded"));
-    storage
-        .create_plugin_config(&plugin.id, scope, scope_id, true, &config.to_string())
-        .await
-        .unwrap();
+    let mut input = CreatePluginInstance {
+        name: plugin_name.into(),
+        config: Some(config),
+        ..Default::default()
+    };
+    match scope {
+        octra_plugin_api::Scope::Global => {}
+        octra_plugin_api::Scope::Service => input.service_id = scope_id.map(str::to_string),
+        octra_plugin_api::Scope::Route => input.route_id = scope_id.map(str::to_string),
+        octra_plugin_api::Scope::Consumer => input.consumer_id = scope_id.map(str::to_string),
+    }
+    storage.create_plugin_instance(&input).await.unwrap();
 }
 
 #[tokio::test]
@@ -856,19 +866,19 @@ async fn plugin_configs_crud_via_control_plane() {
 
     let create = Request::builder()
         .method("POST")
-        .uri("/api/v1/plugins/plg_request-id/configs")
+        .uri("/api/v1/plugins/request-id/instances")
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"scope":"global","config":{}}"#))
+        .body(Body::from(r#"{"config":{}}"#))
         .unwrap();
     let (status, _, json) = gateway.send_control(create).await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(json["scope"], "global");
+    assert_eq!(json["name"], "request-id");
     let config_id = json["id"].as_str().unwrap().to_string();
 
     let update = Request::builder()
         .method("PUT")
-        .uri(format!("/api/v1/plugin-configs/{config_id}"))
+        .uri(format!("/api/v1/plugin-instances/{config_id}"))
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(r#"{"enabled":false}"#))
@@ -879,7 +889,7 @@ async fn plugin_configs_crud_via_control_plane() {
 
     let delete = Request::builder()
         .method("DELETE")
-        .uri(format!("/api/v1/plugin-configs/{config_id}"))
+        .uri(format!("/api/v1/plugin-instances/{config_id}"))
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .unwrap();
@@ -892,12 +902,10 @@ async fn plugin_config_rejects_unknown_scope_target() {
     let gateway = gateway().await;
     let create = Request::builder()
         .method("POST")
-        .uri("/api/v1/plugins/plg_cors/configs")
+        .uri("/api/v1/plugins/cors/instances")
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            r#"{"scope":"service","scope_id":"missing","config":{}}"#,
-        ))
+        .body(Body::from(r#"{"service_id":"missing","config":{}}"#))
         .unwrap();
     let (status, _, json) = gateway.send_control(create).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -913,7 +921,6 @@ async fn retries_replay_idempotent_request_body() {
         .create_service(&CreateService {
             id: Some("svc-retry".into()),
             name: "svc-retry".into(),
-            require_auth: Some(false),
             retries: Some(1),
             ..Default::default()
         })
@@ -923,22 +930,21 @@ async fn retries_replay_idempotent_request_body() {
         .storage
         .create_upstream(&CreateUpstream {
             id: Some("retry-up".into()),
-            service_id: service.id.clone(),
-            name: "pool".into(),
+            name: "svc-retry".into(),
             ..Default::default()
         })
         .await
         .unwrap();
-    for (id, url) in [
-        ("retry-dead", "http://127.0.0.1:1".to_string()),
-        ("retry-live", format!("http://{addr}")),
+    for (id, target) in [
+        ("retry-dead", "127.0.0.1:1".to_string()),
+        ("retry-live", addr.to_string()),
     ] {
         gateway
             .storage
             .create_target(&CreateTarget {
                 id: Some(id.into()),
                 upstream_id: upstream.id.clone(),
-                url,
+                target,
                 ..Default::default()
             })
             .await
@@ -948,7 +954,7 @@ async fn retries_replay_idempotent_request_body() {
         .storage
         .create_route(&CreateRoute {
             id: Some("retry-route".into()),
-            service_id: service.id,
+            service_id: Some(service.id),
             ..Default::default()
         })
         .await
@@ -991,7 +997,7 @@ async fn rejects_body_over_max_body_bytes() {
 }
 
 #[tokio::test]
-async fn falls_back_to_the_next_upstream_with_eligible_targets() {
+async fn falls_back_to_an_eligible_target() {
     let (addr, _calls) = spawn_mock("live").await;
     let gateway = gateway().await;
     let service = gateway
@@ -999,17 +1005,15 @@ async fn falls_back_to_the_next_upstream_with_eligible_targets() {
         .create_service(&CreateService {
             id: Some("svc-fallback".into()),
             name: "svc-fallback".into(),
-            require_auth: Some(false),
             ..Default::default()
         })
         .await
         .unwrap();
-    let primary = gateway
+    let upstream = gateway
         .storage
         .create_upstream(&CreateUpstream {
-            id: Some("primary".into()),
-            service_id: service.id.clone(),
-            name: "primary".into(),
+            id: Some("svc-fallback-pool".into()),
+            name: "svc-fallback".into(),
             ..Default::default()
         })
         .await
@@ -1018,19 +1022,9 @@ async fn falls_back_to_the_next_upstream_with_eligible_targets() {
         .storage
         .create_target(&CreateTarget {
             id: Some("primary-target".into()),
-            upstream_id: primary.id,
-            url: "http://127.0.0.1:1".into(),
-            enabled: Some(false),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    let secondary = gateway
-        .storage
-        .create_upstream(&CreateUpstream {
-            id: Some("secondary".into()),
-            service_id: service.id.clone(),
-            name: "secondary".into(),
+            upstream_id: upstream.id.clone(),
+            target: "127.0.0.1:1".into(),
+            weight: Some(0),
             ..Default::default()
         })
         .await
@@ -1039,8 +1033,8 @@ async fn falls_back_to_the_next_upstream_with_eligible_targets() {
         .storage
         .create_target(&CreateTarget {
             id: Some("secondary-target".into()),
-            upstream_id: secondary.id,
-            url: format!("http://{addr}"),
+            upstream_id: upstream.id,
+            target: addr.to_string(),
             ..Default::default()
         })
         .await
@@ -1049,7 +1043,7 @@ async fn falls_back_to_the_next_upstream_with_eligible_targets() {
         .storage
         .create_route(&CreateRoute {
             id: Some("fallback-route".into()),
-            service_id: service.id,
+            service_id: Some(service.id),
             ..Default::default()
         })
         .await
@@ -1082,150 +1076,6 @@ async fn prometheus_metrics_are_exposed_on_the_control_plane() {
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(text.contains("octra_api_requests_total 1"));
     assert!(text.contains(r#"octra_api_responses_total{class="4xx"} 1"#));
-}
-
-#[tokio::test]
-async fn consumer_policy_grants_routes_with_default_deny() {
-    let (addr, _calls) = spawn_mock("a").await;
-    let gateway = gateway().await;
-    seed_service(
-        &gateway.storage,
-        "svc-policy",
-        &format!("http://{addr}"),
-        true,
-        "/api",
-        false,
-    )
-    .await;
-    let consumer = gateway
-        .storage
-        .create_consumer(&CreateConsumer {
-            name: "team".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    let key = "ok_policy-key";
-    gateway
-        .storage
-        .create_credential(
-            &CreateApiCredential {
-                consumer_id: consumer.id.clone(),
-                ..Default::default()
-            },
-            "ok_policy-",
-            &octra_gateway_runtime::hash_api_key(key),
-        )
-        .await
-        .unwrap();
-    gateway.reload().await;
-
-    let authorized = |uri: &str| {
-        let mut request = get(uri);
-        request.headers_mut().insert(
-            header::AUTHORIZATION,
-            header_default(&format!("Bearer {key}")),
-        );
-        request
-    };
-
-    // Without a policy, the authenticated consumer is allowed.
-    assert_eq!(
-        gateway.send(authorized("/api/items")).await.0,
-        StatusCode::CREATED
-    );
-
-    let policy = gateway
-        .storage
-        .create_policy(&CreatePolicy {
-            name: "restrict".into(),
-            consumer_id: Some(consumer.id),
-            document: Some(serde_json::json!({"allowed_routes": ["another-route"]})),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    gateway.reload().await;
-
-    let (status, _, json) = gateway.send(authorized("/api/items")).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(json["error"]["code"], "forbidden");
-
-    gateway
-        .storage
-        .update_policy(
-            &policy.id,
-            &UpdatePolicy {
-                document: Some(serde_json::json!({"allowed_routes": ["svc-policy-route"]})),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    gateway.reload().await;
-
-    assert_eq!(
-        gateway.send(authorized("/api/items")).await.0,
-        StatusCode::CREATED
-    );
-}
-
-#[tokio::test]
-async fn policies_crud_via_control_plane() {
-    let gateway = gateway().await;
-
-    let create = Request::builder()
-        .method("POST")
-        .uri("/api/v1/policies")
-        .header(header::HOST, "localhost")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            r#"{"name":"global","document":{"allowed_routes":["*"]}}"#,
-        ))
-        .unwrap();
-    let (status, _, json) = gateway.send_control(create).await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(json["scope"], "global");
-    let policy_id = json["id"].as_str().unwrap().to_string();
-
-    let list = Request::builder()
-        .uri("/api/v1/policies")
-        .header(header::HOST, "localhost")
-        .body(Body::empty())
-        .unwrap();
-    let (status, _, json) = gateway.send_control(list).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(json.as_array().unwrap().len(), 1);
-
-    let invalid = Request::builder()
-        .method("PUT")
-        .uri(format!("/api/v1/policies/{policy_id}"))
-        .header(header::HOST, "localhost")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"document":{"allowed_routes":"*"}}"#))
-        .unwrap();
-    let (status, _, json) = gateway.send_control(invalid).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["code"], "bad_request");
-
-    let missing_consumer = Request::builder()
-        .method("POST")
-        .uri("/api/v1/policies")
-        .header(header::HOST, "localhost")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"name":"team","consumer_id":"missing"}"#))
-        .unwrap();
-    let (status, _, _) = gateway.send_control(missing_consumer).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-
-    let delete = Request::builder()
-        .method("DELETE")
-        .uri(format!("/api/v1/policies/{policy_id}"))
-        .header(header::HOST, "localhost")
-        .body(Body::empty())
-        .unwrap();
-    let (status, _, _) = gateway.send_control(delete).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
 async fn wait_for_request_logs(gateway: &Gateway) -> Vec<octra_storage::RequestLog> {
