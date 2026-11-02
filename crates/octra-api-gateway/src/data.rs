@@ -2,7 +2,7 @@
 //!
 //! Every request is matched against the compiled runtime snapshot. Plugins run
 //! in ordered phases while keeping the existing Octra plugin names
-//! (`correlation-id`, `cors`, `rate-limit`, `header-rewrite`, `circuit-breaker`).
+//! (`correlation-id`, `cors`, `rate-limiting`, `header-rewrite`, `circuit-breaker`).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -466,8 +466,8 @@ pub async fn proxy(
                         request_id: &request_id,
                         state: &mut auth_state,
                         method: &parts.method,
-                        uri: &parts.uri,
-                        headers: &parts.headers,
+                        uri: &mut parts.uri,
+                        headers: &mut parts.headers,
                         consumer_id: consumer_id.as_deref(),
                         route,
                         service,

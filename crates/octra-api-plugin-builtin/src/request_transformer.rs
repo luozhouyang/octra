@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::uri::PathAndQuery;
-use http::{HeaderName, HeaderValue, Method, Uri};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri, header};
 use octra_api_plugin_types::{
     ApiGatewayPlugin, ApiGatewayPluginFactory, Capability, PluginAction, PluginError,
     PluginManifest, PluginResult, RequestBodyContext, RequestContext,
@@ -15,8 +15,9 @@ use serde_json::{Map, Value, json};
 
 use crate::manifest;
 use crate::transform::{
-    apply_header_ops, encode_form, form_add, form_append, form_remove, form_rename, form_replace,
-    is_form_content_type, is_json_content_type, json_append, parse_form, split_pair,
+    MultipartBody, apply_header_ops, encode_form, form_add, form_append, form_remove, form_rename,
+    form_replace, is_form_content_type, is_json_content_type, is_multipart_content_type,
+    json_append, parse_form, split_pair,
 };
 
 pub struct RequestTransformerFactory;
@@ -82,6 +83,24 @@ struct Config {
     replace: ReplaceAction,
     add: Action,
     append: Action,
+}
+
+impl Config {
+    fn has_body_ops(&self) -> bool {
+        !self.remove.body.is_empty()
+            || !self.rename.body.is_empty()
+            || !self.replace.body.is_empty()
+            || !self.add.body.is_empty()
+            || !self.append.body.is_empty()
+    }
+
+    /// Kong moves form parameters into the querystring when the method is
+    /// changed to a bodyless method.
+    fn merges_body_into_query(&self, headers: &HeaderMap) -> bool {
+        self.http_method.as_ref().is_some_and(|method| {
+            matches!(method.to_uppercase().as_str(), "GET" | "HEAD" | "TRACE")
+        }) && is_form_content_type(headers)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -228,7 +247,9 @@ impl ApiGatewayPlugin for RequestTransformerPlugin {
             true,
         );
 
-        transform_query(cx, &self.config);
+        if !self.config.merges_body_into_query(cx.headers) {
+            transform_query(cx.uri, &self.config);
+        }
         Ok(PluginAction::Continue)
     }
 
@@ -237,20 +258,25 @@ impl ApiGatewayPlugin for RequestTransformerPlugin {
         cx: &mut RequestBodyContext<'_>,
         body: Bytes,
     ) -> Result<Bytes, PluginError> {
-        if self.config.remove.body.is_empty()
-            && self.config.rename.body.is_empty()
-            && self.config.replace.body.is_empty()
-            && self.config.add.body.is_empty()
-            && self.config.append.body.is_empty()
-        {
+        let merge = self.config.merges_body_into_query(cx.headers);
+        if !self.config.has_body_ops() && !merge {
             return Ok(body);
         }
 
-        if is_json_content_type(cx.headers) {
-            return Ok(transform_json(&self.config, &body));
+        let mut body = body;
+        if merge {
+            merge_form_into_query(cx.uri, &body);
+            transform_query(cx.uri, &self.config);
         }
-        if is_form_content_type(cx.headers) {
-            return Ok(transform_form(&self.config, &body));
+
+        if self.config.has_body_ops() {
+            if is_json_content_type(cx.headers) {
+                body = transform_json(&self.config, &body);
+            } else if is_form_content_type(cx.headers) {
+                body = transform_form(&self.config, &body);
+            } else if is_multipart_content_type(cx.headers) {
+                body = transform_multipart(&self.config, cx.headers, &body);
+            }
         }
         Ok(body)
     }
@@ -267,7 +293,7 @@ fn replace_uri(uri: &mut Uri, value: &str) {
     }
 }
 
-fn transform_query(cx: &mut RequestContext<'_>, config: &Config) {
+fn transform_query(uri: &mut Uri, config: &Config) {
     let has_ops = !config.remove.querystring.is_empty()
         || !config.rename.querystring.is_empty()
         || !config.replace.querystring.is_empty()
@@ -277,7 +303,7 @@ fn transform_query(cx: &mut RequestContext<'_>, config: &Config) {
         return;
     }
 
-    let mut pairs = cx.uri.query().map(parse_form).unwrap_or_default();
+    let mut pairs = uri.query().map(parse_form).unwrap_or_default();
 
     for entry in &config.remove.querystring {
         form_remove(&mut pairs, split_pair(entry).0);
@@ -303,18 +329,33 @@ fn transform_query(cx: &mut RequestContext<'_>, config: &Config) {
         }
     }
 
-    let query = encode_form(&pairs);
-    let path = cx.uri.path().to_string();
+    set_query(uri, &pairs);
+}
+
+fn merge_form_into_query(uri: &mut Uri, body: &[u8]) {
+    let raw = String::from_utf8_lossy(body);
+    let body_pairs = parse_form(&raw);
+    if body_pairs.is_empty() {
+        return;
+    }
+    let mut pairs = uri.query().map(parse_form).unwrap_or_default();
+    pairs.extend(body_pairs);
+    set_query(uri, &pairs);
+}
+
+fn set_query(uri: &mut Uri, pairs: &[(String, String)]) {
+    let query = encode_form(pairs);
+    let path = uri.path().to_string();
     let path_and_query = if query.is_empty() {
         path
     } else {
         format!("{path}?{query}")
     };
     if let Ok(path_and_query) = path_and_query.parse::<PathAndQuery>() {
-        let mut parts = cx.uri.clone().into_parts();
+        let mut parts = uri.clone().into_parts();
         parts.path_and_query = Some(path_and_query);
         if let Ok(next) = Uri::from_parts(parts) {
-            *cx.uri = next;
+            *uri = next;
         }
     }
 }
@@ -394,6 +435,39 @@ fn transform_form(config: &Config, body: &[u8]) -> Bytes {
     }
 
     Bytes::from(encode_form(&pairs))
+}
+
+fn transform_multipart(config: &Config, headers: &HeaderMap, body: &[u8]) -> Bytes {
+    let Some(content_type) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Bytes::copy_from_slice(body);
+    };
+    let Some(mut multipart) = MultipartBody::parse(content_type, body) else {
+        return Bytes::copy_from_slice(body);
+    };
+
+    for entry in &config.remove.body {
+        multipart.remove(split_pair(entry).0);
+    }
+    for entry in &config.rename.body {
+        if let (old, Some(new)) = split_pair(entry) {
+            multipart.rename(old, new);
+        }
+    }
+    for entry in &config.replace.body {
+        if let (name, Some(value)) = split_pair(entry) {
+            multipart.replace(name, value);
+        }
+    }
+    for entry in &config.add.body {
+        if let (name, Some(value)) = split_pair(entry) {
+            multipart.add(name, value);
+        }
+    }
+
+    Bytes::from(multipart.to_bytes())
 }
 
 #[cfg(test)]
