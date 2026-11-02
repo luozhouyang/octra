@@ -142,7 +142,13 @@ fn plugin_view(manifest: PluginManifest) -> PluginView {
 }
 
 async fn reload_plugin_runtime(state: &ApiControlState) -> ControlResult<()> {
-    state.plugins.reload().await.map_err(ControlError::from)
+    let plugins = state
+        .storage
+        .api
+        .list_plugin_instances()
+        .await
+        .map_err(ControlError::from)?;
+    state.plugins.reload(plugins).map_err(ControlError::from)
 }
 
 async fn validate_plugin_config(

@@ -13,7 +13,6 @@ http.workspace = true
 octra-api-core.workspace = true
 octra-core.workspace = true
 octra-api-plugin-types.workspace = true
-octra-storage.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

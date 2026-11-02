@@ -119,10 +119,10 @@ pub async fn gateway_with_config(config: OctraConfig) -> Gateway {
     let runtime = Arc::new(GatewayRuntime::bootstrap(storage.clone()).await.unwrap());
     let mut registry = PluginRegistry::new();
     octra_api_plugin_builtin::register(&mut registry);
+    let plugin_instances = storage.api.list_plugin_instances().await.unwrap();
     let plugins = Arc::new(
-        PluginRuntime::bootstrap(storage.clone(), Arc::new(registry))
-            .await
-            .unwrap(),
+        PluginRuntime::with_plugins(Arc::new(registry), plugin_instances)
+            .expect("plugin chains compile"),
     );
     let metrics = Arc::new(ApiMetrics::default());
     let data =
@@ -163,7 +163,8 @@ pub async fn send(router: Router, request: Request<Body>) -> ResponseParts {
 impl Gateway {
     pub async fn reload(&self) {
         self.runtime.reload().await.unwrap();
-        self.plugins.reload().await.unwrap();
+        let plugin_instances = self.storage.api.list_plugin_instances().await.unwrap();
+        self.plugins.reload(plugin_instances).unwrap();
     }
 
     pub async fn send(&self, request: Request<Body>) -> ResponseParts {

@@ -51,9 +51,13 @@ async fn main() -> anyhow::Result<()> {
 
     let mut plugin_registry = PluginRegistry::new();
     octra_api_plugin_builtin::register(&mut plugin_registry);
+    let plugin_instances = storage
+        .api
+        .list_plugin_instances()
+        .await
+        .context("cannot load plugin instances")?;
     let plugin_runtime = Arc::new(
-        PluginRuntime::bootstrap(storage.clone(), Arc::new(plugin_registry))
-            .await
+        PluginRuntime::with_plugins(Arc::new(plugin_registry), plugin_instances)
             .context("cannot build the plugin runtime")?,
     );
 

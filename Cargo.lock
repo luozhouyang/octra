@@ -2788,7 +2788,6 @@ dependencies = [
  "octra-api-core",
  "octra-api-plugin-types",
  "octra-core",
- "octra-storage",
  "parking_lot",
  "serde_json",
  "tokio",

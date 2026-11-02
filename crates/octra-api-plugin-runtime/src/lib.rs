@@ -17,7 +17,6 @@ use octra_api_plugin_types::{
     ResponseBodyContext, ResponseContext, UpstreamRequestContext,
 };
 use octra_core::{Error, Result};
-use octra_storage::Storage;
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
 
@@ -579,7 +578,6 @@ fn apply_ordering(entries: &mut Vec<PluginEntry>) {
 }
 
 pub struct PluginRuntime {
-    storage: Option<Arc<Storage>>,
     registry: Arc<PluginRegistry>,
     chains: RwLock<Arc<PluginChains>>,
 }
@@ -592,20 +590,24 @@ impl Default for PluginRuntime {
 
 impl PluginRuntime {
     pub fn empty() -> Self {
+        Self::new(Arc::new(PluginRegistry::default()))
+    }
+
+    pub fn new(registry: Arc<PluginRegistry>) -> Self {
         Self {
-            storage: None,
-            registry: Arc::new(PluginRegistry::default()),
+            registry,
             chains: RwLock::new(Arc::new(PluginChains::default())),
         }
     }
 
-    pub async fn bootstrap(storage: Arc<Storage>, registry: Arc<PluginRegistry>) -> Result<Self> {
-        let runtime = Self {
-            storage: Some(storage),
-            registry,
-            chains: RwLock::new(Arc::new(PluginChains::default())),
-        };
-        runtime.reload().await?;
+    /// Compiles an initial set of plugin instances. The host loads instances
+    /// from its configuration store and passes them in.
+    pub fn with_plugins(
+        registry: Arc<PluginRegistry>,
+        plugins: Vec<PluginInstance>,
+    ) -> Result<Self> {
+        let runtime = Self::new(registry);
+        runtime.reload(plugins)?;
         Ok(runtime)
     }
 
@@ -613,11 +615,7 @@ impl PluginRuntime {
         &self.registry
     }
 
-    pub async fn reload(&self) -> Result<()> {
-        let Some(storage) = &self.storage else {
-            return Ok(());
-        };
-        let plugins = storage.api.list_plugin_instances().await?;
+    pub fn reload(&self, plugins: Vec<PluginInstance>) -> Result<()> {
         let chains = PluginChains::compile(plugins, &self.registry)?;
         *self.chains.write() = Arc::new(chains);
         Ok(())
