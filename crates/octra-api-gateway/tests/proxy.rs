@@ -206,6 +206,7 @@ async fn seed_service(
     strip: bool,
 ) {
     let service = storage
+        .api
         .create_service(&CreateService {
             id: Some(service_id.into()),
             name: service_id.into(),
@@ -214,6 +215,7 @@ async fn seed_service(
         .await
         .unwrap();
     let upstream = storage
+        .api
         .create_upstream(&CreateUpstream {
             id: Some(format!("{service_id}-up")),
             name: service_id.into(),
@@ -222,6 +224,7 @@ async fn seed_service(
         .await
         .unwrap();
     storage
+        .api
         .create_target(&CreateTarget {
             id: Some(format!("{service_id}-tgt")),
             upstream_id: upstream.id,
@@ -231,6 +234,7 @@ async fn seed_service(
         .await
         .unwrap();
     storage
+        .api
         .create_route(&CreateRoute {
             id: Some(format!("{service_id}-route")),
             service_id: Some(service.id.clone()),
@@ -242,6 +246,7 @@ async fn seed_service(
         .unwrap();
     if require_auth {
         storage
+            .api
             .create_plugin_instance(&CreatePluginInstance {
                 name: "key-auth".into(),
                 service_id: Some(service.id),
@@ -303,6 +308,7 @@ async fn round_robins_across_two_targets() {
     let gateway = gateway().await;
     let service = gateway
         .storage
+        .api
         .create_service(&CreateService {
             id: Some("svc".into()),
             name: "svc".into(),
@@ -312,6 +318,7 @@ async fn round_robins_across_two_targets() {
         .unwrap();
     let upstream = gateway
         .storage
+        .api
         .create_upstream(&CreateUpstream {
             id: Some("up".into()),
             name: "svc".into(),
@@ -322,6 +329,7 @@ async fn round_robins_across_two_targets() {
     for (id, url) in [("t1", addr_a), ("t2", addr_b)] {
         gateway
             .storage
+            .api
             .create_target(&CreateTarget {
                 id: Some(id.into()),
                 upstream_id: upstream.id.clone(),
@@ -333,6 +341,7 @@ async fn round_robins_across_two_targets() {
     }
     gateway
         .storage
+        .api
         .create_route(&CreateRoute {
             id: Some("r".into()),
             service_id: Some(service.id),
@@ -368,6 +377,7 @@ async fn rejects_without_api_key_and_accepts_key_header() {
     .await;
     let consumer = gateway
         .storage
+        .api
         .create_consumer(&CreateConsumer {
             username: Some("team".into()),
             ..Default::default()
@@ -377,6 +387,7 @@ async fn rejects_without_api_key_and_accepts_key_header() {
     let key = "ok_test-key-value";
     gateway
         .storage
+        .api
         .create_credential(&CreateKeyauthCredential {
             consumer_id: consumer.id,
             key: Some(key.into()),
@@ -422,6 +433,7 @@ async fn no_target_is_502_and_dead_target_is_502() {
     let gateway = gateway().await;
     let service = gateway
         .storage
+        .api
         .create_service(&CreateService {
             id: Some("empty".into()),
             name: "empty".into(),
@@ -431,6 +443,7 @@ async fn no_target_is_502_and_dead_target_is_502() {
         .unwrap();
     gateway
         .storage
+        .api
         .create_upstream(&CreateUpstream {
             id: Some("empty-up".into()),
             name: "empty".into(),
@@ -440,6 +453,7 @@ async fn no_target_is_502_and_dead_target_is_502() {
         .unwrap();
     gateway
         .storage
+        .api
         .create_route(&CreateRoute {
             id: Some("empty-route".into()),
             service_id: Some(service.id),
@@ -612,6 +626,7 @@ async fn control_plane_crud_validation_and_key_issuance() {
     let plaintext = issued["key"].as_str().unwrap();
     assert!(plaintext.starts_with("ok_"));
     let stored = storage
+        .api
         .list_credentials(Some("c"))
         .await
         .unwrap()
@@ -675,7 +690,7 @@ async fn create_plugin_config(
         octra_plugin_api::Scope::Route => input.route_id = scope_id.map(str::to_string),
         octra_plugin_api::Scope::Consumer => input.consumer_id = scope_id.map(str::to_string),
     }
-    storage.create_plugin_instance(&input).await.unwrap();
+    storage.api.create_plugin_instance(&input).await.unwrap();
 }
 
 #[tokio::test]
@@ -918,6 +933,7 @@ async fn retries_replay_idempotent_request_body() {
     let gateway = gateway().await;
     let service = gateway
         .storage
+        .api
         .create_service(&CreateService {
             id: Some("svc-retry".into()),
             name: "svc-retry".into(),
@@ -928,6 +944,7 @@ async fn retries_replay_idempotent_request_body() {
         .unwrap();
     let upstream = gateway
         .storage
+        .api
         .create_upstream(&CreateUpstream {
             id: Some("retry-up".into()),
             name: "svc-retry".into(),
@@ -941,6 +958,7 @@ async fn retries_replay_idempotent_request_body() {
     ] {
         gateway
             .storage
+            .api
             .create_target(&CreateTarget {
                 id: Some(id.into()),
                 upstream_id: upstream.id.clone(),
@@ -952,6 +970,7 @@ async fn retries_replay_idempotent_request_body() {
     }
     gateway
         .storage
+        .api
         .create_route(&CreateRoute {
             id: Some("retry-route".into()),
             service_id: Some(service.id),
@@ -1002,6 +1021,7 @@ async fn falls_back_to_an_eligible_target() {
     let gateway = gateway().await;
     let service = gateway
         .storage
+        .api
         .create_service(&CreateService {
             id: Some("svc-fallback".into()),
             name: "svc-fallback".into(),
@@ -1011,6 +1031,7 @@ async fn falls_back_to_an_eligible_target() {
         .unwrap();
     let upstream = gateway
         .storage
+        .api
         .create_upstream(&CreateUpstream {
             id: Some("svc-fallback-pool".into()),
             name: "svc-fallback".into(),
@@ -1020,6 +1041,7 @@ async fn falls_back_to_an_eligible_target() {
         .unwrap();
     gateway
         .storage
+        .api
         .create_target(&CreateTarget {
             id: Some("primary-target".into()),
             upstream_id: upstream.id.clone(),
@@ -1031,6 +1053,7 @@ async fn falls_back_to_an_eligible_target() {
         .unwrap();
     gateway
         .storage
+        .api
         .create_target(&CreateTarget {
             id: Some("secondary-target".into()),
             upstream_id: upstream.id,
@@ -1041,6 +1064,7 @@ async fn falls_back_to_an_eligible_target() {
         .unwrap();
     gateway
         .storage
+        .api
         .create_route(&CreateRoute {
             id: Some("fallback-route".into()),
             service_id: Some(service.id),
@@ -1082,6 +1106,7 @@ async fn wait_for_request_logs(gateway: &Gateway) -> Vec<octra_storage::RequestL
     for _ in 0..50 {
         let logs = gateway
             .storage
+            .logs
             .list_request_logs(10, None, None)
             .await
             .unwrap();
@@ -1147,7 +1172,7 @@ async fn control_mutations_write_audit_rows() {
 
     let mut rows = Vec::new();
     for _ in 0..50 {
-        rows = gateway.storage.list_audit_logs(10).await.unwrap();
+        rows = gateway.storage.logs.list_audit_logs(10).await.unwrap();
         if !rows.is_empty() {
             break;
         }

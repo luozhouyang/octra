@@ -687,7 +687,8 @@ async fn list_providers(
 ) -> ApiResult<extract::Json<Vec<ProviderView>>> {
     let records = state
         .storage
-        .llm_list_providers()
+        .llm
+        .list_providers()
         .await
         .map_err(ApiError::from_storage)?;
     Ok(extract::Json(
@@ -701,7 +702,8 @@ async fn get_provider(
 ) -> ApiResult<extract::Json<ProviderView>> {
     let record = state
         .storage
-        .llm_get_provider(&id)
+        .llm
+        .get_provider(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("provider", &id))?;
@@ -717,7 +719,8 @@ async fn create_provider(
     })?;
     let record = state
         .storage
-        .llm_create_provider(&input)
+        .llm
+        .create_provider(&input)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -731,7 +734,8 @@ async fn update_provider(
 ) -> ApiResult<extract::Json<ProviderView>> {
     let existing = state
         .storage
-        .llm_get_provider(&id)
+        .llm
+        .get_provider(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("provider", &id))?;
@@ -751,7 +755,8 @@ async fn update_provider(
     }
     let record = state
         .storage
-        .llm_update_provider(&id, &input)
+        .llm
+        .update_provider(&id, &input)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -764,7 +769,8 @@ async fn delete_provider(
 ) -> ApiResult<StatusCode> {
     if !state
         .storage
-        .llm_delete_provider(&id)
+        .llm
+        .delete_provider(&id)
         .await
         .map_err(ApiError::from_storage)?
     {
@@ -919,7 +925,8 @@ async fn list_provider_accounts(
 ) -> ApiResult<extract::Json<Vec<AccountView>>> {
     if state
         .storage
-        .llm_get_provider(&provider_id)
+        .llm
+        .get_provider(&provider_id)
         .await
         .map_err(ApiError::from_storage)?
         .is_none()
@@ -928,7 +935,8 @@ async fn list_provider_accounts(
     }
     let records = state
         .storage
-        .llm_list_provider_accounts(&provider_id)
+        .llm
+        .list_provider_accounts(&provider_id)
         .await
         .map_err(ApiError::from_storage)?;
     Ok(extract::Json(
@@ -942,7 +950,8 @@ async fn get_account(
 ) -> ApiResult<extract::Json<AccountView>> {
     let record = state
         .storage
-        .llm_get_account(&id)
+        .llm
+        .get_account(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("account", &id))?;
@@ -957,7 +966,8 @@ async fn create_account(
     let input = body.into_input(None)?;
     let record = state
         .storage
-        .llm_create_account(&provider_id, &input)
+        .llm
+        .create_account(&provider_id, &input)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -971,14 +981,16 @@ async fn update_account(
 ) -> ApiResult<extract::Json<AccountView>> {
     let existing = state
         .storage
-        .llm_get_account(&id)
+        .llm
+        .get_account(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("account", &id))?;
     let input = body.into_input(Some(&existing))?;
     let record = state
         .storage
-        .llm_update_account(&id, &input)
+        .llm
+        .update_account(&id, &input)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -991,7 +1003,8 @@ async fn delete_account(
 ) -> ApiResult<StatusCode> {
     if !state
         .storage
-        .llm_delete_account(&id)
+        .llm
+        .delete_account(&id)
         .await
         .map_err(ApiError::from_storage)?
     {
@@ -1007,7 +1020,8 @@ async fn reset_account_quota(
 ) -> ApiResult<extract::Json<AccountView>> {
     if !state
         .storage
-        .llm_reset_account_quota(&id)
+        .llm
+        .reset_account_quota(&id)
         .await
         .map_err(ApiError::from_storage)?
     {
@@ -1017,7 +1031,8 @@ async fn reset_account_quota(
     reload_now(&state).await?;
     let record = state
         .storage
-        .llm_get_account(&id)
+        .llm
+        .get_account(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("account", &id))?;
@@ -1032,7 +1047,8 @@ async fn list_models(
 ) -> ApiResult<extract::Json<Vec<ModelView>>> {
     let records = state
         .storage
-        .llm_list_models()
+        .llm
+        .list_models()
         .await
         .map_err(ApiError::from_storage)?;
     Ok(extract::Json(
@@ -1046,7 +1062,8 @@ async fn get_model(
 ) -> ApiResult<extract::Json<ModelView>> {
     let record = state
         .storage
-        .llm_get_model(&id)
+        .llm
+        .get_model(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("model", &id))?;
@@ -1060,7 +1077,8 @@ async fn create_model(
     let input = body.into_input()?;
     let record = state
         .storage
-        .llm_create_model(&input)
+        .llm
+        .create_model(&input)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -1074,7 +1092,8 @@ async fn update_model(
 ) -> ApiResult<extract::Json<ModelView>> {
     let existing = state
         .storage
-        .llm_get_model(&id)
+        .llm
+        .get_model(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("model", &id))?;
@@ -1087,7 +1106,8 @@ async fn update_model(
     }
     let record = state
         .storage
-        .llm_update_model(&id, &input)
+        .llm
+        .update_model(&id, &input)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -1100,7 +1120,8 @@ async fn delete_model(
 ) -> ApiResult<StatusCode> {
     if !state
         .storage
-        .llm_delete_model(&id)
+        .llm
+        .delete_model(&id)
         .await
         .map_err(ApiError::from_storage)?
     {
@@ -1119,7 +1140,8 @@ async fn group_view(
 ) -> ApiResult<GroupView> {
     let targets = state
         .storage
-        .llm_list_routing_targets()
+        .llm
+        .list_routing_targets()
         .await
         .map_err(ApiError::from_storage)?
         .into_iter()
@@ -1140,7 +1162,8 @@ async fn list_groups(
 ) -> ApiResult<extract::Json<Vec<GroupView>>> {
     let records = state
         .storage
-        .llm_list_routing_groups()
+        .llm
+        .list_routing_groups()
         .await
         .map_err(ApiError::from_storage)?;
     let mut views = Vec::with_capacity(records.len());
@@ -1156,7 +1179,8 @@ async fn get_group(
 ) -> ApiResult<extract::Json<GroupView>> {
     let record = state
         .storage
-        .llm_get_routing_group(&id)
+        .llm
+        .get_routing_group(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("routing group", &id))?;
@@ -1170,7 +1194,8 @@ async fn create_group(
     let (name, strategy) = body.parts()?;
     let record = state
         .storage
-        .llm_create_routing_group(&name, &strategy)
+        .llm
+        .create_routing_group(&name, &strategy)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -1187,7 +1212,8 @@ async fn update_group(
 ) -> ApiResult<extract::Json<GroupView>> {
     let existing = state
         .storage
-        .llm_get_routing_group(&id)
+        .llm
+        .get_routing_group(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("routing group", &id))?;
@@ -1198,7 +1224,8 @@ async fn update_group(
     .parts()?;
     let record = state
         .storage
-        .llm_update_routing_group(&id, &name, &strategy)
+        .llm
+        .update_routing_group(&id, &name, &strategy)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -1211,7 +1238,8 @@ async fn delete_group(
 ) -> ApiResult<StatusCode> {
     if !state
         .storage
-        .llm_delete_routing_group(&id)
+        .llm
+        .delete_routing_group(&id)
         .await
         .map_err(ApiError::from_storage)?
     {
@@ -1227,7 +1255,8 @@ async fn list_targets(
 ) -> ApiResult<extract::Json<Vec<TargetView>>> {
     if !state
         .storage
-        .llm_group_exists(&id)
+        .llm
+        .group_exists(&id)
         .await
         .map_err(ApiError::from_storage)?
     {
@@ -1235,7 +1264,8 @@ async fn list_targets(
     }
     let targets = state
         .storage
-        .llm_list_routing_targets()
+        .llm
+        .list_routing_targets()
         .await
         .map_err(ApiError::from_storage)?
         .into_iter()
@@ -1253,7 +1283,8 @@ async fn create_target(
     let input = body.into_input(None)?;
     let record = state
         .storage
-        .llm_create_routing_target(&id, &input)
+        .llm
+        .create_routing_target(&id, &input)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -1267,7 +1298,8 @@ async fn update_target(
 ) -> ApiResult<extract::Json<TargetView>> {
     let existing = state
         .storage
-        .llm_get_routing_target(&target_id)
+        .llm
+        .get_routing_target(&target_id)
         .await
         .map_err(ApiError::from_storage)?
         .filter(|target| target.group_id == id)
@@ -1275,7 +1307,8 @@ async fn update_target(
     let input = body.into_input(Some(&existing))?;
     let record = state
         .storage
-        .llm_update_routing_target(&target_id, &input)
+        .llm
+        .update_routing_target(&target_id, &input)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -1288,7 +1321,8 @@ async fn delete_target(
 ) -> ApiResult<StatusCode> {
     if !state
         .storage
-        .llm_delete_routing_target(&target_id)
+        .llm
+        .delete_routing_target(&target_id)
         .await
         .map_err(ApiError::from_storage)?
     {
@@ -1306,7 +1340,8 @@ async fn list_routes(
 ) -> ApiResult<extract::Json<Vec<RouteView>>> {
     let records = state
         .storage
-        .llm_list_routes()
+        .llm
+        .list_routes()
         .await
         .map_err(ApiError::from_storage)?;
     Ok(extract::Json(
@@ -1320,7 +1355,8 @@ async fn get_route(
 ) -> ApiResult<extract::Json<RouteView>> {
     let record = state
         .storage
-        .llm_get_route(&id)
+        .llm
+        .get_route(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("route", &id))?;
@@ -1335,7 +1371,8 @@ async fn create_route(
     let group = non_empty(body.routing_group_id, "routing_group_id")?;
     let record = state
         .storage
-        .llm_create_route(&virtual_model_id, group.as_deref())
+        .llm
+        .create_route(&virtual_model_id, group.as_deref())
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -1349,7 +1386,8 @@ async fn update_route(
 ) -> ApiResult<extract::Json<RouteView>> {
     let existing = state
         .storage
-        .llm_get_route(&id)
+        .llm
+        .get_route(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("route", &id))?;
@@ -1360,7 +1398,8 @@ async fn update_route(
     let group = non_empty(body.routing_group_id, "routing_group_id")?;
     let record = state
         .storage
-        .llm_update_route(&id, &virtual_model_id, group.as_deref())
+        .llm
+        .update_route(&id, &virtual_model_id, group.as_deref())
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -1373,7 +1412,8 @@ async fn delete_route(
 ) -> ApiResult<StatusCode> {
     if !state
         .storage
-        .llm_delete_route(&id)
+        .llm
+        .delete_route(&id)
         .await
         .map_err(ApiError::from_storage)?
     {
@@ -1391,7 +1431,8 @@ async fn list_virtual_keys(
 ) -> ApiResult<extract::Json<Vec<VirtualKeyView>>> {
     let records = state
         .storage
-        .llm_list_virtual_keys()
+        .llm
+        .list_virtual_keys()
         .await
         .map_err(ApiError::from_storage)?;
     Ok(extract::Json(
@@ -1405,7 +1446,8 @@ async fn get_virtual_key(
 ) -> ApiResult<extract::Json<VirtualKeyView>> {
     let record = state
         .storage
-        .llm_get_virtual_key(&id)
+        .llm
+        .get_virtual_key(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("virtual key", &id))?;
@@ -1431,7 +1473,8 @@ async fn create_virtual_key(
     };
     let record = state
         .storage
-        .llm_create_virtual_key(&input)
+        .llm
+        .create_virtual_key(&input)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -1452,7 +1495,8 @@ async fn update_virtual_key(
 ) -> ApiResult<extract::Json<VirtualKeyView>> {
     let existing = state
         .storage
-        .llm_get_virtual_key(&id)
+        .llm
+        .get_virtual_key(&id)
         .await
         .map_err(ApiError::from_storage)?
         .ok_or_else(|| ApiError::not_found("virtual key", &id))?;
@@ -1478,7 +1522,8 @@ async fn update_virtual_key(
     };
     let record = state
         .storage
-        .llm_update_virtual_key(&id, &input)
+        .llm
+        .update_virtual_key(&id, &input)
         .await
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
@@ -1491,7 +1536,8 @@ async fn delete_virtual_key(
 ) -> ApiResult<StatusCode> {
     if !state
         .storage
-        .llm_delete_virtual_key(&id)
+        .llm
+        .delete_virtual_key(&id)
         .await
         .map_err(ApiError::from_storage)?
     {
@@ -1675,6 +1721,7 @@ async fn list_plugins(
 ) -> ApiResult<extract::Json<Vec<PluginView>>> {
     let records = state
         .storage
+        .llm
         .list_plugins()
         .await
         .map_err(ApiError::internal)?;
@@ -1694,6 +1741,7 @@ async fn get_plugin(
     let record = llm_plugin(&state, &id).await?;
     let configs = state
         .storage
+        .llm
         .list_plugin_configs(&id)
         .await
         .map_err(ApiError::internal)?;
@@ -1711,6 +1759,7 @@ async fn update_plugin(
     let _ = llm_plugin(&state, &id).await?;
     let record = state
         .storage
+        .llm
         .update_plugin_flags(&id, body.enabled, body.priority)
         .await
         .map_err(ApiError::internal)?
@@ -1718,6 +1767,7 @@ async fn update_plugin(
     reload_now(&state).await?;
     let configs = state
         .storage
+        .llm
         .list_plugin_configs(&id)
         .await
         .map_err(ApiError::internal)?;
@@ -1734,6 +1784,7 @@ async fn list_plugin_configs(
     let _ = llm_plugin(&state, &id).await?;
     let configs = state
         .storage
+        .llm
         .list_plugin_configs(&id)
         .await
         .map_err(ApiError::internal)?;
@@ -1754,6 +1805,7 @@ async fn create_plugin_config(
     ensure_scope_target(&state, scope, body.scope_id.as_deref()).await?;
     let record = state
         .storage
+        .llm
         .create_plugin_config_raw(
             &id,
             scope.as_str(),
@@ -1777,6 +1829,7 @@ async fn update_plugin_config(
 ) -> ApiResult<extract::Json<PluginConfigView>> {
     let existing = state
         .storage
+        .llm
         .get_plugin_config(&id)
         .await
         .map_err(ApiError::internal)?
@@ -1791,6 +1844,7 @@ async fn update_plugin_config(
     };
     let record = state
         .storage
+        .llm
         .update_plugin_config(&id, body.enabled, config_json.as_deref())
         .await
         .map_err(ApiError::internal)?
@@ -1805,6 +1859,7 @@ async fn delete_plugin_config(
 ) -> ApiResult<StatusCode> {
     if !state
         .storage
+        .llm
         .delete_plugin_config(&id)
         .await
         .map_err(ApiError::internal)?
@@ -1818,6 +1873,7 @@ async fn delete_plugin_config(
 async fn llm_plugin(state: &LlmControlState, id: &str) -> ApiResult<PluginRecord> {
     let record = state
         .storage
+        .llm
         .get_plugin(id)
         .await
         .map_err(ApiError::internal)?
@@ -1873,25 +1929,29 @@ async fn ensure_scope_target(
         LlmScope::Global => true,
         LlmScope::Consumer => state
             .storage
+            .api
             .get_consumer(id)
             .await
             .map_err(ApiError::internal)?
             .is_some(),
         LlmScope::VirtualKey => state
             .storage
-            .llm_get_virtual_key(id)
+            .llm
+            .get_virtual_key(id)
             .await
             .map_err(ApiError::from_storage)?
             .is_some(),
         LlmScope::Model => state
             .storage
-            .llm_get_model(id)
+            .llm
+            .get_model(id)
             .await
             .map_err(ApiError::from_storage)?
             .is_some(),
         LlmScope::Provider => state
             .storage
-            .llm_get_provider(id)
+            .llm
+            .get_provider(id)
             .await
             .map_err(ApiError::from_storage)?
             .is_some(),
@@ -1995,17 +2055,20 @@ async fn usage(
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
     let totals = state
         .storage
-        .llm_usage_totals()
+        .llm
+        .usage_totals()
         .await
         .map_err(ApiError::from_storage)?;
     let by_model = state
         .storage
-        .llm_usage_summary()
+        .llm
+        .usage_summary()
         .await
         .map_err(ApiError::from_storage)?;
     let recent = state
         .storage
-        .llm_list_usage(limit)
+        .llm
+        .list_usage(limit)
         .await
         .map_err(ApiError::from_storage)?;
     Ok(extract::Json(UsageView {

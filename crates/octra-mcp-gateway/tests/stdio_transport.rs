@@ -72,7 +72,8 @@ async fn stdio_lists_and_calls_tools() {
 
     let invocations = gateway
         .storage
-        .list_mcp_invocations(10, None)
+        .mcp
+        .list_invocations(10, None)
         .await
         .unwrap();
     assert_eq!(invocations.len(), 2);
@@ -117,7 +118,8 @@ async fn hung_stdio_calls_time_out_and_the_server_restarts() {
 
     let invocations = gateway
         .storage
-        .list_mcp_invocations(10, None)
+        .mcp
+        .list_invocations(10, None)
         .await
         .unwrap();
     assert_eq!(invocations[0].status, "timeout", "{invocations:?}");
@@ -164,7 +166,8 @@ async fn stdio_tool_timeouts_are_recorded() {
 
     let invocations = gateway
         .storage
-        .list_mcp_invocations(10, None)
+        .mcp
+        .list_invocations(10, None)
         .await
         .unwrap();
     assert_eq!(invocations[0].status, "ok");

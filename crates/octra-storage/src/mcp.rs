@@ -10,8 +10,6 @@ use serde_json::{Map, Value};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 
-use crate::Storage;
-
 const SERVER_COLUMNS: &str = "id, name, transport, command, url, enabled, config_json, headers_json, \
      protocol_version, last_seen_at, created_at, updated_at";
 
@@ -87,14 +85,23 @@ pub(crate) fn parse_transport(raw: &str) -> Transport {
     raw.parse().unwrap_or(Transport::Stdio)
 }
 
-impl Storage {
+#[derive(Clone)]
+pub struct McpStore {
+    pool: SqlitePool,
+}
+
+impl McpStore {
+    pub(crate) fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
     fn mcp_pool(&self) -> &SqlitePool {
-        self.pool()
+        &self.pool
     }
 
     // ----- servers -------------------------------------------------------
 
-    pub async fn insert_mcp_server(&self, server: &NewMcpServer) -> Result<McpServer> {
+    pub async fn insert_server(&self, server: &NewMcpServer) -> Result<McpServer> {
         let id = uuid::Uuid::new_v4().to_string();
         let config = if server.config.as_object().is_some_and(|m| m.is_empty()) {
             "{}".to_string()
@@ -119,13 +126,13 @@ impl Storage {
         .await
         .map_err(|err| storage_error("cannot insert mcp server", err))?;
 
-        self.get_mcp_server(&id)
+        self.get_server(&id)
             .await?
             .ok_or_else(|| Error::Storage("mcp server vanished after insert".to_string()))
     }
 
     /// Full update of a server definition. Returns `None` when the id is unknown.
-    pub async fn update_mcp_server(
+    pub async fn update_server(
         &self,
         id: &str,
         server: &NewMcpServer,
@@ -153,10 +160,10 @@ impl Storage {
         if result.rows_affected() == 0 {
             return Ok(None);
         }
-        self.get_mcp_server(id).await
+        self.get_server(id).await
     }
 
-    pub async fn get_mcp_server(&self, id: &str) -> Result<Option<McpServer>> {
+    pub async fn get_server(&self, id: &str) -> Result<Option<McpServer>> {
         let row = sqlx::query(&format!(
             "SELECT {SERVER_COLUMNS} FROM mcp_servers WHERE id = ?1"
         ))
@@ -167,7 +174,7 @@ impl Storage {
         Ok(row.as_ref().map(decode_server))
     }
 
-    pub async fn get_mcp_server_by_name(&self, name: &str) -> Result<Option<McpServer>> {
+    pub async fn get_server_by_name(&self, name: &str) -> Result<Option<McpServer>> {
         let row = sqlx::query(&format!(
             "SELECT {SERVER_COLUMNS} FROM mcp_servers WHERE name = ?1"
         ))
@@ -178,7 +185,7 @@ impl Storage {
         Ok(row.as_ref().map(decode_server))
     }
 
-    pub async fn list_mcp_servers(&self) -> Result<Vec<McpServer>> {
+    pub async fn list_servers(&self) -> Result<Vec<McpServer>> {
         let rows = sqlx::query(&format!(
             "SELECT {SERVER_COLUMNS} FROM mcp_servers ORDER BY name ASC"
         ))
@@ -188,7 +195,7 @@ impl Storage {
         Ok(rows.iter().map(decode_server).collect())
     }
 
-    pub async fn delete_mcp_server(&self, id: &str) -> Result<bool> {
+    pub async fn delete_server(&self, id: &str) -> Result<bool> {
         let result = sqlx::query("DELETE FROM mcp_servers WHERE id = ?1")
             .bind(id)
             .execute(self.mcp_pool())
@@ -197,7 +204,7 @@ impl Storage {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn mark_mcp_server_seen(&self, id: &str, protocol_version: &str) -> Result<()> {
+    pub async fn mark_server_seen(&self, id: &str, protocol_version: &str) -> Result<()> {
         sqlx::query(
             "UPDATE mcp_servers
                 SET protocol_version = ?2,
@@ -217,7 +224,7 @@ impl Storage {
     /// Replaces the tool set of a server with what discovery returned. Tools
     /// keep their id (and therefore their ACL rows and enable flag) when the
     /// name is unchanged; tools the server no longer exposes are dropped.
-    pub async fn replace_mcp_tools(
+    pub async fn replace_tools(
         &self,
         server_id: &str,
         discovered: &[DiscoveredTool],
@@ -258,10 +265,10 @@ impl Storage {
             .await
             .map_err(|err| storage_error("cannot commit tool refresh", err))?;
 
-        self.list_mcp_tools(server_id).await
+        self.list_tools(server_id).await
     }
 
-    pub async fn list_mcp_tools(&self, server_id: &str) -> Result<Vec<McpTool>> {
+    pub async fn list_tools(&self, server_id: &str) -> Result<Vec<McpTool>> {
         let rows = sqlx::query(&format!(
             "SELECT {TOOL_COLUMNS} FROM mcp_tools WHERE server_id = ?1 ORDER BY name ASC"
         ))
@@ -274,7 +281,7 @@ impl Storage {
 
     /// Every tool of every server, with the owning server name, ordered by
     /// server then tool for a stable catalog.
-    pub async fn list_mcp_catalog(&self) -> Result<Vec<CatalogTool>> {
+    pub async fn list_catalog(&self) -> Result<Vec<CatalogTool>> {
         let rows = sqlx::query(
             "SELECT t.id, t.server_id, t.name, t.description, t.schema, t.enabled, t.created_at, s.name AS server_name
                FROM mcp_tools t
@@ -293,7 +300,7 @@ impl Storage {
             .collect())
     }
 
-    pub async fn get_mcp_tool(&self, id: &str) -> Result<Option<McpTool>> {
+    pub async fn get_tool(&self, id: &str) -> Result<Option<McpTool>> {
         let row = sqlx::query(&format!(
             "SELECT {TOOL_COLUMNS} FROM mcp_tools WHERE id = ?1"
         ))
@@ -304,7 +311,7 @@ impl Storage {
         Ok(row.as_ref().map(decode_tool))
     }
 
-    pub async fn list_all_mcp_tools(&self) -> Result<Vec<McpTool>> {
+    pub async fn list_all_tools(&self) -> Result<Vec<McpTool>> {
         let rows = sqlx::query(&format!(
             "SELECT {TOOL_COLUMNS} FROM mcp_tools ORDER BY name ASC"
         ))
@@ -315,7 +322,7 @@ impl Storage {
     }
 
     /// Toggles a tool and returns the new row, or `None` when the id is unknown.
-    pub async fn set_mcp_tool_enabled(&self, id: &str, enabled: bool) -> Result<Option<McpTool>> {
+    pub async fn set_tool_enabled(&self, id: &str, enabled: bool) -> Result<Option<McpTool>> {
         let result = sqlx::query("UPDATE mcp_tools SET enabled = ?2 WHERE id = ?1")
             .bind(id)
             .bind(i64::from(enabled))
@@ -325,13 +332,13 @@ impl Storage {
         if result.rows_affected() == 0 {
             return Ok(None);
         }
-        self.get_mcp_tool(id).await
+        self.get_tool(id).await
     }
 
     // ----- ACLs ----------------------------------------------------------
 
     /// Inserts or updates the (tool, consumer) rule and stores `allowed`.
-    pub async fn upsert_mcp_acl(
+    pub async fn upsert_acl(
         &self,
         tool_id: &str,
         consumer_id: &str,
@@ -364,7 +371,7 @@ impl Storage {
         .map_err(|err| storage_error("cannot load mcp acl", err))
     }
 
-    pub async fn get_mcp_acl(&self, id: &str) -> Result<Option<McpToolAcl>> {
+    pub async fn get_acl(&self, id: &str) -> Result<Option<McpToolAcl>> {
         let row = sqlx::query(&format!(
             "SELECT {ACL_COLUMNS} FROM mcp_tool_acls WHERE id = ?1"
         ))
@@ -375,7 +382,7 @@ impl Storage {
         Ok(row.as_ref().map(decode_acl))
     }
 
-    pub async fn list_mcp_acls(&self, tool_id: Option<&str>) -> Result<Vec<McpToolAcl>> {
+    pub async fn list_acls(&self, tool_id: Option<&str>) -> Result<Vec<McpToolAcl>> {
         let rows = sqlx::query(&format!(
             "SELECT {ACL_COLUMNS} FROM mcp_tool_acls
               WHERE (?1 IS NULL OR tool_id = ?1)
@@ -388,7 +395,7 @@ impl Storage {
         Ok(rows.iter().map(decode_acl).collect())
     }
 
-    pub async fn delete_mcp_acl(&self, id: &str) -> Result<bool> {
+    pub async fn delete_acl(&self, id: &str) -> Result<bool> {
         let result = sqlx::query("DELETE FROM mcp_tool_acls WHERE id = ?1")
             .bind(id)
             .execute(self.mcp_pool())
@@ -399,7 +406,7 @@ impl Storage {
 
     /// The `allowed` flags recorded for one tool. Empty means no rules exist,
     /// which the ACL policy treats as the open-local default.
-    pub async fn mcp_acl_flags(&self, tool_id: &str) -> Result<Vec<bool>> {
+    pub async fn acl_flags(&self, tool_id: &str) -> Result<Vec<bool>> {
         let rows = sqlx::query("SELECT allowed FROM mcp_tool_acls WHERE tool_id = ?1")
             .bind(tool_id)
             .fetch_all(self.mcp_pool())
@@ -412,7 +419,7 @@ impl Storage {
     }
 
     /// True when a rule exists that allows this consumer on this tool.
-    pub async fn mcp_acl_allows(&self, tool_id: &str, consumer_id: &str) -> Result<bool> {
+    pub async fn acl_allows(&self, tool_id: &str, consumer_id: &str) -> Result<bool> {
         let row = sqlx::query(
             "SELECT allowed FROM mcp_tool_acls WHERE tool_id = ?1 AND consumer_id = ?2",
         )
@@ -436,7 +443,7 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn mcp_consumer_exists(&self, id: &str) -> Result<bool> {
+    pub async fn consumer_exists(&self, id: &str) -> Result<bool> {
         let found: Option<String> = sqlx::query_scalar("SELECT id FROM consumers WHERE id = ?1")
             .bind(id)
             .fetch_optional(self.mcp_pool())
@@ -447,7 +454,7 @@ impl Storage {
 
     // ----- API keys ------------------------------------------------------
 
-    pub async fn insert_mcp_api_key(
+    pub async fn insert_api_key(
         &self,
         name: &str,
         key_prefix: &str,
@@ -470,12 +477,12 @@ impl Storage {
         .await
         .map_err(|err| storage_error("cannot insert mcp api key", err))?;
 
-        self.get_mcp_api_key(&id)
+        self.get_api_key(&id)
             .await?
             .ok_or_else(|| Error::Storage("mcp api key vanished after insert".to_string()))
     }
 
-    pub async fn get_mcp_api_key(&self, id: &str) -> Result<Option<McpApiKey>> {
+    pub async fn get_api_key(&self, id: &str) -> Result<Option<McpApiKey>> {
         let row = sqlx::query(&format!(
             "SELECT {KEY_COLUMNS} FROM mcp_api_keys WHERE id = ?1"
         ))
@@ -486,7 +493,7 @@ impl Storage {
         Ok(row.as_ref().map(decode_key))
     }
 
-    pub async fn list_mcp_api_keys(&self) -> Result<Vec<McpApiKey>> {
+    pub async fn list_api_keys(&self) -> Result<Vec<McpApiKey>> {
         let rows = sqlx::query(&format!(
             "SELECT {KEY_COLUMNS} FROM mcp_api_keys ORDER BY created_at ASC"
         ))
@@ -498,7 +505,7 @@ impl Storage {
 
     /// Resolves an enabled, unexpired key by its hash. Expiry dates are
     /// `YYYY-MM-DD` compared against UTC today.
-    pub async fn find_active_mcp_api_key(&self, key_hash: &str) -> Result<Option<McpApiKey>> {
+    pub async fn find_active_api_key(&self, key_hash: &str) -> Result<Option<McpApiKey>> {
         let row = sqlx::query(&format!(
             "SELECT {KEY_COLUMNS} FROM mcp_api_keys
               WHERE key_hash = ?1
@@ -512,7 +519,7 @@ impl Storage {
         Ok(row.as_ref().map(decode_key))
     }
 
-    pub async fn delete_mcp_api_key(&self, id: &str) -> Result<bool> {
+    pub async fn delete_api_key(&self, id: &str) -> Result<bool> {
         let result = sqlx::query("DELETE FROM mcp_api_keys WHERE id = ?1")
             .bind(id)
             .execute(self.mcp_pool())
@@ -521,11 +528,7 @@ impl Storage {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn set_mcp_api_key_enabled(
-        &self,
-        id: &str,
-        enabled: bool,
-    ) -> Result<Option<McpApiKey>> {
+    pub async fn set_api_key_enabled(&self, id: &str, enabled: bool) -> Result<Option<McpApiKey>> {
         let result = sqlx::query("UPDATE mcp_api_keys SET enabled = ?2 WHERE id = ?1")
             .bind(id)
             .bind(i64::from(enabled))
@@ -535,24 +538,24 @@ impl Storage {
         if result.rows_affected() == 0 {
             return Ok(None);
         }
-        self.get_mcp_api_key(id).await
+        self.get_api_key(id).await
     }
 
     // ----- sessions ------------------------------------------------------
 
-    pub async fn insert_mcp_session(&self, id: &str, server_id: &str) -> Result<McpSession> {
+    pub async fn insert_session(&self, id: &str, server_id: &str) -> Result<McpSession> {
         sqlx::query("INSERT INTO mcp_sessions (id, server_id) VALUES (?1, ?2)")
             .bind(id)
             .bind(server_id)
             .execute(self.mcp_pool())
             .await
             .map_err(|err| storage_error("cannot insert mcp session", err))?;
-        self.get_mcp_session(id)
+        self.get_session(id)
             .await?
             .ok_or_else(|| Error::Storage("mcp session vanished after insert".to_string()))
     }
 
-    pub async fn get_mcp_session(&self, id: &str) -> Result<Option<McpSession>> {
+    pub async fn get_session(&self, id: &str) -> Result<Option<McpSession>> {
         let row = sqlx::query(&format!(
             "SELECT {SESSION_COLUMNS} FROM mcp_sessions WHERE id = ?1"
         ))
@@ -563,7 +566,7 @@ impl Storage {
         Ok(row.as_ref().map(decode_session))
     }
 
-    pub async fn list_mcp_sessions(&self) -> Result<Vec<McpSession>> {
+    pub async fn list_sessions(&self) -> Result<Vec<McpSession>> {
         let rows = sqlx::query(&format!(
             "SELECT {SESSION_COLUMNS} FROM mcp_sessions ORDER BY created_at DESC"
         ))
@@ -573,7 +576,7 @@ impl Storage {
         Ok(rows.iter().map(decode_session).collect())
     }
 
-    pub async fn terminate_mcp_session(&self, id: &str) -> Result<Option<McpSession>> {
+    pub async fn terminate_session(&self, id: &str) -> Result<Option<McpSession>> {
         let result = sqlx::query(
             "UPDATE mcp_sessions
                 SET status = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -587,10 +590,10 @@ impl Storage {
         if result.rows_affected() == 0 {
             return Ok(None);
         }
-        self.get_mcp_session(id).await
+        self.get_session(id).await
     }
 
-    pub async fn delete_mcp_session(&self, id: &str) -> Result<bool> {
+    pub async fn delete_session(&self, id: &str) -> Result<bool> {
         let result = sqlx::query("DELETE FROM mcp_sessions WHERE id = ?1")
             .bind(id)
             .execute(self.mcp_pool())
@@ -602,8 +605,8 @@ impl Storage {
     // ----- invocations ---------------------------------------------------
 
     /// Opens an invocation row and returns its id; the row is completed by
-    /// [`Storage::finish_mcp_invocation`].
-    pub async fn begin_mcp_invocation(
+    /// [`Storage::finish_invocation`].
+    pub async fn begin_invocation(
         &self,
         server_id: &str,
         tool_id: &str,
@@ -624,7 +627,7 @@ impl Storage {
         Ok(result.last_insert_rowid())
     }
 
-    pub async fn finish_mcp_invocation(
+    pub async fn finish_invocation(
         &self,
         id: i64,
         status: &str,
@@ -650,21 +653,21 @@ impl Storage {
     }
 
     /// Records a one-shot invocation that never reached an upstream.
-    pub async fn record_mcp_invocation(&self, record: &InvocationRecord<'_>) -> Result<i64> {
+    pub async fn record_invocation(&self, record: &InvocationRecord<'_>) -> Result<i64> {
         let id = self
-            .begin_mcp_invocation(
+            .begin_invocation(
                 record.server_id,
                 record.tool_id,
                 record.consumer_id,
                 record.request_id,
             )
             .await?;
-        self.finish_mcp_invocation(id, record.status, record.duration_ms, record.error)
+        self.finish_invocation(id, record.status, record.duration_ms, record.error)
             .await?;
         Ok(id)
     }
 
-    pub async fn get_mcp_invocation(&self, id: i64) -> Result<Option<McpInvocation>> {
+    pub async fn get_invocation(&self, id: i64) -> Result<Option<McpInvocation>> {
         let row = sqlx::query(&format!(
             "SELECT {INVOCATION_COLUMNS} FROM mcp_invocations WHERE id = ?1"
         ))
@@ -675,7 +678,7 @@ impl Storage {
         Ok(row.as_ref().map(decode_invocation))
     }
 
-    pub async fn list_mcp_invocations(
+    pub async fn list_invocations(
         &self,
         limit: i64,
         server_id: Option<&str>,
@@ -695,7 +698,7 @@ impl Storage {
     }
 
     /// True when any enabled API key exists; gates whether auth is required.
-    pub async fn has_enabled_mcp_api_keys(&self) -> Result<bool> {
+    pub async fn has_enabled_api_keys(&self) -> Result<bool> {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mcp_api_keys WHERE enabled = 1")
             .fetch_one(self.mcp_pool())
             .await
@@ -786,6 +789,7 @@ fn decode_key(row: &SqliteRow) -> McpApiKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Storage;
 
     async fn storage() -> Storage {
         Storage::connect_in_memory().await.unwrap()
@@ -815,7 +819,8 @@ mod tests {
     async fn server_crud_round_trips() {
         let storage = storage().await;
         let created = storage
-            .insert_mcp_server(&http_server("remote"))
+            .mcp
+            .insert_server(&http_server("remote"))
             .await
             .unwrap();
         assert_eq!(created.transport, Transport::Http);
@@ -824,17 +829,19 @@ mod tests {
         let mut update = http_server("renamed");
         update.enabled = false;
         let updated = storage
-            .update_mcp_server(&created.id, &update)
+            .mcp
+            .update_server(&created.id, &update)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(updated.name, "renamed");
         assert!(!updated.enabled);
 
-        assert_eq!(storage.list_mcp_servers().await.unwrap().len(), 1);
+        assert_eq!(storage.mcp.list_servers().await.unwrap().len(), 1);
         assert!(
             storage
-                .get_mcp_server_by_name("renamed")
+                .mcp
+                .get_server_by_name("renamed")
                 .await
                 .unwrap()
                 .is_some()
@@ -842,46 +849,54 @@ mod tests {
 
         assert!(
             storage
-                .insert_mcp_server(&http_server("renamed"))
+                .mcp
+                .insert_server(&http_server("renamed"))
                 .await
                 .is_err()
         );
-        assert!(storage.delete_mcp_server(&created.id).await.unwrap());
-        assert!(storage.get_mcp_server(&created.id).await.unwrap().is_none());
+        assert!(storage.mcp.delete_server(&created.id).await.unwrap());
+        assert!(storage.mcp.get_server(&created.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn tool_refresh_preserves_acl_rows() {
         let storage = storage().await;
         let server = storage
-            .insert_mcp_server(&http_server("files"))
+            .mcp
+            .insert_server(&http_server("files"))
             .await
             .unwrap();
         let tools = storage
-            .replace_mcp_tools(&server.id, &[discovered("read"), discovered("write")])
+            .mcp
+            .replace_tools(&server.id, &[discovered("read"), discovered("write")])
             .await
             .unwrap();
         assert_eq!(tools.len(), 2);
         let read = tools.iter().find(|t| t.name == "read").unwrap();
 
-        storage.ensure_consumer("c1", "consumer-one").await.unwrap();
-        storage.upsert_mcp_acl(&read.id, "c1", false).await.unwrap();
-        storage.set_mcp_tool_enabled(&read.id, false).await.unwrap();
+        storage
+            .mcp
+            .ensure_consumer("c1", "consumer-one")
+            .await
+            .unwrap();
+        storage.mcp.upsert_acl(&read.id, "c1", false).await.unwrap();
+        storage.mcp.set_tool_enabled(&read.id, false).await.unwrap();
 
         // Refresh keeps ids and enablement of surviving tools, so ACLs live on.
         let tools = storage
-            .replace_mcp_tools(&server.id, &[discovered("read"), discovered("list")])
+            .mcp
+            .replace_tools(&server.id, &[discovered("read"), discovered("list")])
             .await
             .unwrap();
         assert_eq!(tools.len(), 2);
         let read = tools.iter().find(|t| t.name == "read").unwrap();
         assert!(!read.enabled);
         assert_eq!(
-            storage.list_mcp_acls(Some(&read.id)).await.unwrap().len(),
+            storage.mcp.list_acls(Some(&read.id)).await.unwrap().len(),
             1
         );
 
-        let catalog = storage.list_mcp_catalog().await.unwrap();
+        let catalog = storage.mcp.list_catalog().await.unwrap();
         assert_eq!(catalog.len(), 2);
         assert!(catalog.iter().all(|entry| entry.server_name == "files"));
         assert_eq!(catalog[0].qualified_name(), "files__list");
@@ -891,40 +906,44 @@ mod tests {
     async fn acl_upsert_is_idempotent_per_pair() {
         let storage = storage().await;
         let server = storage
-            .insert_mcp_server(&http_server("svc"))
+            .mcp
+            .insert_server(&http_server("svc"))
             .await
             .unwrap();
         let tool = storage
-            .replace_mcp_tools(&server.id, &[discovered("do")])
+            .mcp
+            .replace_tools(&server.id, &[discovered("do")])
             .await
             .unwrap()
             .remove(0);
-        storage.ensure_consumer("c1", "one").await.unwrap();
+        storage.mcp.ensure_consumer("c1", "one").await.unwrap();
 
-        let acl = storage.upsert_mcp_acl(&tool.id, "c1", true).await.unwrap();
+        let acl = storage.mcp.upsert_acl(&tool.id, "c1", true).await.unwrap();
         assert!(acl.allowed);
-        let acl = storage.upsert_mcp_acl(&tool.id, "c1", false).await.unwrap();
+        let acl = storage.mcp.upsert_acl(&tool.id, "c1", false).await.unwrap();
         assert!(!acl.allowed);
-        assert_eq!(storage.list_mcp_acls(None).await.unwrap().len(), 1);
-        assert_eq!(storage.mcp_acl_flags(&tool.id).await.unwrap(), vec![false]);
-        assert!(!storage.mcp_acl_allows(&tool.id, "c1").await.unwrap());
-        assert!(storage.delete_mcp_acl(&acl.id).await.unwrap());
-        assert!(storage.mcp_acl_flags(&tool.id).await.unwrap().is_empty());
+        assert_eq!(storage.mcp.list_acls(None).await.unwrap().len(), 1);
+        assert_eq!(storage.mcp.acl_flags(&tool.id).await.unwrap(), vec![false]);
+        assert!(!storage.mcp.acl_allows(&tool.id, "c1").await.unwrap());
+        storage.mcp.delete_acl(&acl.id).await.unwrap();
+        assert!(storage.mcp.acl_flags(&tool.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn api_keys_resolve_only_when_enabled_and_unexpired() {
         let storage = storage().await;
-        assert!(!storage.has_enabled_mcp_api_keys().await.unwrap());
+        assert!(!storage.mcp.has_enabled_api_keys().await.unwrap());
 
         let key = storage
-            .insert_mcp_api_key("agent", "octra_abcd", "hash-1", None, None)
+            .mcp
+            .insert_api_key("agent", "octra_abcd", "hash-1", None, None)
             .await
             .unwrap();
-        assert!(storage.has_enabled_mcp_api_keys().await.unwrap());
+        assert!(storage.mcp.has_enabled_api_keys().await.unwrap());
         assert_eq!(
             storage
-                .find_active_mcp_api_key("hash-1")
+                .mcp
+                .find_active_api_key("hash-1")
                 .await
                 .unwrap()
                 .unwrap()
@@ -933,52 +952,60 @@ mod tests {
         );
 
         storage
-            .set_mcp_api_key_enabled(&key.id, false)
+            .mcp
+            .set_api_key_enabled(&key.id, false)
             .await
             .unwrap();
         assert!(
             storage
-                .find_active_mcp_api_key("hash-1")
+                .mcp
+                .find_active_api_key("hash-1")
                 .await
                 .unwrap()
                 .is_none()
         );
 
         let expired = storage
-            .insert_mcp_api_key("old", "octra_old", "hash-2", None, Some("2000-01-01"))
+            .mcp
+            .insert_api_key("old", "octra_old", "hash-2", None, Some("2000-01-01"))
             .await
             .unwrap();
         assert!(
             storage
-                .find_active_mcp_api_key("hash-2")
+                .mcp
+                .find_active_api_key("hash-2")
                 .await
                 .unwrap()
                 .is_none()
         );
-        assert!(storage.delete_mcp_api_key(&expired.id).await.unwrap());
-        assert_eq!(storage.list_mcp_api_keys().await.unwrap().len(), 1);
+        assert!(storage.mcp.delete_api_key(&expired.id).await.unwrap());
+        assert_eq!(storage.mcp.list_api_keys().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn sessions_and_invocations_are_recorded() {
         let storage = storage().await;
         let server = storage
-            .insert_mcp_server(&http_server("svc"))
+            .mcp
+            .insert_server(&http_server("svc"))
             .await
             .unwrap();
         let tool = storage
-            .replace_mcp_tools(&server.id, &[discovered("do")])
+            .mcp
+            .replace_tools(&server.id, &[discovered("do")])
             .await
             .unwrap()
             .remove(0);
 
         let session = storage
-            .insert_mcp_session("sess-1", &server.id)
+            .mcp
+            .insert_session("sess-1", &server.id)
             .await
             .unwrap();
         assert_eq!(session.status, octra_mcp_core::domain::session_status::OPEN);
         let terminated = storage
-            .terminate_mcp_session("sess-1")
+            .mcp
+            .terminate_session("sess-1")
             .await
             .unwrap()
             .unwrap();
@@ -988,14 +1015,16 @@ mod tests {
         );
 
         let id = storage
-            .begin_mcp_invocation(&server.id, &tool.id, Some("c1"), "req-1")
+            .mcp
+            .begin_invocation(&server.id, &tool.id, Some("c1"), "req-1")
             .await
             .unwrap();
         storage
-            .finish_mcp_invocation(id, octra_mcp_core::domain::status::ERROR, 42, Some("boom"))
+            .mcp
+            .finish_invocation(id, octra_mcp_core::domain::status::ERROR, 42, Some("boom"))
             .await
             .unwrap();
-        let invocation = storage.get_mcp_invocation(id).await.unwrap().unwrap();
+        let invocation = storage.mcp.get_invocation(id).await.unwrap().unwrap();
         assert_eq!(invocation.status, octra_mcp_core::domain::status::ERROR);
         assert_eq!(invocation.duration_ms, 42);
         assert_eq!(invocation.request_id, "req-1");
@@ -1003,7 +1032,8 @@ mod tests {
         assert!(invocation.finished_at.is_some());
 
         storage
-            .record_mcp_invocation(&InvocationRecord {
+            .mcp
+            .record_invocation(&InvocationRecord {
                 server_id: &server.id,
                 tool_id: &tool.id,
                 consumer_id: None,
@@ -1015,14 +1045,16 @@ mod tests {
             .await
             .unwrap();
         let listed = storage
-            .list_mcp_invocations(10, Some(&server.id))
+            .mcp
+            .list_invocations(10, Some(&server.id))
             .await
             .unwrap();
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].request_id, "req-2");
         assert!(
             storage
-                .list_mcp_invocations(10, Some("other"))
+                .mcp
+                .list_invocations(10, Some("other"))
                 .await
                 .unwrap()
                 .is_empty()
@@ -1032,12 +1064,12 @@ mod tests {
     #[tokio::test]
     async fn consumers_are_inserted_once() {
         let storage = storage().await;
-        storage.ensure_consumer("c1", "one").await.unwrap();
-        storage.ensure_consumer("c1", "one").await.unwrap();
-        assert!(storage.mcp_consumer_exists("c1").await.unwrap());
-        assert!(!storage.mcp_consumer_exists("c2").await.unwrap());
+        storage.mcp.ensure_consumer("c1", "one").await.unwrap();
+        storage.mcp.ensure_consumer("c1", "one").await.unwrap();
+        assert!(storage.mcp.consumer_exists("c1").await.unwrap());
+        assert!(!storage.mcp.consumer_exists("c2").await.unwrap());
         // A different name for the same consumer keeps the first row.
-        storage.ensure_consumer("c1", "renamed").await.unwrap();
+        storage.mcp.ensure_consumer("c1", "renamed").await.unwrap();
         let name: String = sqlx::query_scalar("SELECT username FROM consumers WHERE id = 'c1'")
             .fetch_one(storage.pool())
             .await

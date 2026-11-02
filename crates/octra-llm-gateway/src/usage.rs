@@ -134,13 +134,14 @@ pub fn spawn_record(storage: Arc<Storage>, record: UsageRecord) {
             finish_reason: record.finish_reason.clone(),
             error: record.error.clone(),
         };
-        if let Err(error) = storage.llm_insert_usage(&input).await {
+        if let Err(error) = storage.llm.insert_usage(&input).await {
             tracing::warn!(error = ?error, request_id = %record.request_id, "cannot record llm usage");
         }
         if let Some(account_id) = &record.account_id {
             let tokens = input_tokens.saturating_add(output_tokens);
             if let Err(error) = storage
-                .llm_consume_account_quota(account_id, 1, tokens, cost_micros)
+                .llm
+                .consume_account_quota(account_id, 1, tokens, cost_micros)
                 .await
             {
                 tracing::warn!(
@@ -199,7 +200,7 @@ mod tests {
 
         let mut rows = Vec::new();
         for _ in 0..50 {
-            rows = storage.llm_list_usage(10).await.unwrap();
+            rows = storage.llm.list_usage(10).await.unwrap();
             if !rows.is_empty() {
                 break;
             }

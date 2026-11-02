@@ -192,6 +192,7 @@ pub async fn list_plugin_instances(
 ) -> ControlResult<Json<Vec<PluginInstance>>> {
     let instances: Vec<PluginInstance> = state
         .storage
+        .api
         .list_plugin_instances()
         .await?
         .into_iter()
@@ -216,7 +217,7 @@ pub async fn create_plugin_instance(
     }
     let config = input.config.clone().unwrap_or_else(|| json!({}));
     validate_plugin_config(&state, &name, &config).await?;
-    let instance = state.storage.create_plugin_instance(&input).await?;
+    let instance = state.storage.api.create_plugin_instance(&input).await?;
     reload_plugin_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(instance)))
 }
@@ -228,6 +229,7 @@ pub async fn get_plugin_instance(
 ) -> ControlResult<Json<PluginInstance>> {
     state
         .storage
+        .api
         .get_plugin_instance(&id)
         .await?
         .map(Json)
@@ -244,13 +246,18 @@ pub async fn update_plugin_instance(
     input.validate()?;
     let existing = state
         .storage
+        .api
         .get_plugin_instance(&id)
         .await?
         .ok_or_else(|| ControlError::not_found(format!("plugin instance '{id}' not found")))?;
     if let Some(config) = &input.config {
         validate_plugin_config(&state, &existing.name, config).await?;
     }
-    let instance = state.storage.update_plugin_instance(&id, &input).await?;
+    let instance = state
+        .storage
+        .api
+        .update_plugin_instance(&id, &input)
+        .await?;
     reload_plugin_runtime(&state).await?;
     Ok(Json(instance))
 }
@@ -260,7 +267,7 @@ pub async fn delete_plugin_instance(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    state.storage.delete_plugin_instance(&id).await?;
+    state.storage.api.delete_plugin_instance(&id).await?;
     reload_plugin_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -317,21 +324,21 @@ fn not_found(entity: &str, id: &str) -> ControlError {
 }
 
 async fn require_service(state: &ApiControlState, id: &str) -> ControlResult<()> {
-    if state.storage.get_service(id).await?.is_none() {
+    if state.storage.api.get_service(id).await?.is_none() {
         return Err(not_found("service", id));
     }
     Ok(())
 }
 
 async fn require_upstream(state: &ApiControlState, id: &str) -> ControlResult<()> {
-    if state.storage.get_upstream(id).await?.is_none() {
+    if state.storage.api.get_upstream(id).await?.is_none() {
         return Err(not_found("upstream", id));
     }
     Ok(())
 }
 
 async fn require_consumer(state: &ApiControlState, id: &str) -> ControlResult<()> {
-    if state.storage.get_consumer(id).await?.is_none() {
+    if state.storage.api.get_consumer(id).await?.is_none() {
         return Err(not_found("consumer", id));
     }
     Ok(())
@@ -342,7 +349,7 @@ async fn require_consumer(state: &ApiControlState, id: &str) -> ControlResult<()
 pub async fn list_services(
     State(state): State<ApiControlState>,
 ) -> ControlResult<Json<Vec<Service>>> {
-    Ok(Json(state.storage.list_services().await?))
+    Ok(Json(state.storage.api.list_services().await?))
 }
 
 pub async fn get_service(
@@ -351,6 +358,7 @@ pub async fn get_service(
 ) -> ControlResult<Json<Service>> {
     state
         .storage
+        .api
         .get_service(&id)
         .await?
         .map(Json)
@@ -363,7 +371,7 @@ pub async fn create_service(
 ) -> ControlResult<(StatusCode, Json<Service>)> {
     let input = read_json(payload).await?;
     input.validate()?;
-    let service = state.storage.create_service(&input).await?;
+    let service = state.storage.api.create_service(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(service)))
 }
@@ -375,7 +383,7 @@ pub async fn update_service(
 ) -> ControlResult<Json<Service>> {
     let input = read_json(payload).await?;
     input.validate()?;
-    let service = state.storage.update_service(&id, &input).await?;
+    let service = state.storage.api.update_service(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(service))
 }
@@ -384,7 +392,7 @@ pub async fn delete_service(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    state.storage.delete_service(&id).await?;
+    state.storage.api.delete_service(&id).await?;
     reload_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -398,6 +406,7 @@ pub async fn list_routes(
     Ok(Json(
         state
             .storage
+            .api
             .list_routes(filter.service_id.as_deref())
             .await?,
     ))
@@ -409,6 +418,7 @@ pub async fn get_route(
 ) -> ControlResult<Json<Route>> {
     state
         .storage
+        .api
         .get_route(&id)
         .await?
         .map(Json)
@@ -424,7 +434,7 @@ pub async fn create_route(
     if let Some(service_id) = &input.service_id {
         require_service(&state, service_id).await?;
     }
-    let route = state.storage.create_route(&input).await?;
+    let route = state.storage.api.create_route(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(route)))
 }
@@ -439,7 +449,7 @@ pub async fn update_route(
     if let Some(Some(service_id)) = &input.service_id {
         require_service(&state, service_id).await?;
     }
-    let route = state.storage.update_route(&id, &input).await?;
+    let route = state.storage.api.update_route(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(route))
 }
@@ -448,7 +458,7 @@ pub async fn delete_route(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    state.storage.delete_route(&id).await?;
+    state.storage.api.delete_route(&id).await?;
     reload_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -458,7 +468,7 @@ pub async fn delete_route(
 pub async fn list_upstreams(
     State(state): State<ApiControlState>,
 ) -> ControlResult<Json<Vec<Upstream>>> {
-    Ok(Json(state.storage.list_upstreams().await?))
+    Ok(Json(state.storage.api.list_upstreams().await?))
 }
 
 pub async fn get_upstream(
@@ -467,6 +477,7 @@ pub async fn get_upstream(
 ) -> ControlResult<Json<Upstream>> {
     state
         .storage
+        .api
         .get_upstream(&id)
         .await?
         .map(Json)
@@ -479,7 +490,7 @@ pub async fn create_upstream(
 ) -> ControlResult<(StatusCode, Json<Upstream>)> {
     let input = read_json(payload).await?;
     input.validate()?;
-    let upstream = state.storage.create_upstream(&input).await?;
+    let upstream = state.storage.api.create_upstream(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(upstream)))
 }
@@ -491,7 +502,7 @@ pub async fn update_upstream(
 ) -> ControlResult<Json<Upstream>> {
     let input = read_json(payload).await?;
     input.validate()?;
-    let upstream = state.storage.update_upstream(&id, &input).await?;
+    let upstream = state.storage.api.update_upstream(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(upstream))
 }
@@ -500,7 +511,7 @@ pub async fn delete_upstream(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    state.storage.delete_upstream(&id).await?;
+    state.storage.api.delete_upstream(&id).await?;
     reload_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -514,6 +525,7 @@ pub async fn list_targets(
     Ok(Json(
         state
             .storage
+            .api
             .list_targets(filter.upstream_id.as_deref())
             .await?,
     ))
@@ -525,6 +537,7 @@ pub async fn get_target(
 ) -> ControlResult<Json<Target>> {
     state
         .storage
+        .api
         .get_target(&id)
         .await?
         .map(Json)
@@ -538,7 +551,7 @@ pub async fn create_target(
     let input = read_json(payload).await?;
     input.validate()?;
     require_upstream(&state, &input.upstream_id).await?;
-    let target = state.storage.create_target(&input).await?;
+    let target = state.storage.api.create_target(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(target)))
 }
@@ -553,7 +566,7 @@ pub async fn update_target(
     if let Some(upstream_id) = &input.upstream_id {
         require_upstream(&state, upstream_id).await?;
     }
-    let target = state.storage.update_target(&id, &input).await?;
+    let target = state.storage.api.update_target(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(target))
 }
@@ -562,7 +575,7 @@ pub async fn delete_target(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    state.storage.delete_target(&id).await?;
+    state.storage.api.delete_target(&id).await?;
     reload_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -572,7 +585,7 @@ pub async fn delete_target(
 pub async fn list_consumers(
     State(state): State<ApiControlState>,
 ) -> ControlResult<Json<Vec<Consumer>>> {
-    Ok(Json(state.storage.list_consumers().await?))
+    Ok(Json(state.storage.api.list_consumers().await?))
 }
 
 pub async fn get_consumer(
@@ -581,6 +594,7 @@ pub async fn get_consumer(
 ) -> ControlResult<Json<Consumer>> {
     state
         .storage
+        .api
         .get_consumer(&id)
         .await?
         .map(Json)
@@ -593,7 +607,7 @@ pub async fn create_consumer(
 ) -> ControlResult<(StatusCode, Json<Consumer>)> {
     let input = read_json(payload).await?;
     input.validate()?;
-    let consumer = state.storage.create_consumer(&input).await?;
+    let consumer = state.storage.api.create_consumer(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(consumer)))
 }
@@ -605,7 +619,7 @@ pub async fn update_consumer(
 ) -> ControlResult<Json<Consumer>> {
     let input = read_json(payload).await?;
     input.validate()?;
-    let consumer = state.storage.update_consumer(&id, &input).await?;
+    let consumer = state.storage.api.update_consumer(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(consumer))
 }
@@ -614,7 +628,7 @@ pub async fn delete_consumer(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    state.storage.delete_consumer(&id).await?;
+    state.storage.api.delete_consumer(&id).await?;
     reload_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -628,6 +642,7 @@ pub async fn list_credentials(
     Ok(Json(
         state
             .storage
+            .api
             .list_credentials(filter.consumer_id.as_deref())
             .await?,
     ))
@@ -639,6 +654,7 @@ pub async fn get_credential(
 ) -> ControlResult<Json<KeyauthCredential>> {
     state
         .storage
+        .api
         .get_credential(&id)
         .await?
         .map(Json)
@@ -655,7 +671,7 @@ pub async fn create_credential(
     if input.key.is_none() {
         input.key = Some(generate_api_key().plaintext);
     }
-    let credential = state.storage.create_credential(&input).await?;
+    let credential = state.storage.api.create_credential(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(credential)))
 }
@@ -667,7 +683,7 @@ pub async fn update_credential(
 ) -> ControlResult<Json<KeyauthCredential>> {
     let input = read_json(payload).await?;
     input.validate()?;
-    let credential = state.storage.update_credential(&id, &input).await?;
+    let credential = state.storage.api.update_credential(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(credential))
 }
@@ -676,7 +692,7 @@ pub async fn delete_credential(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    state.storage.delete_credential(&id).await?;
+    state.storage.api.delete_credential(&id).await?;
     reload_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -686,7 +702,7 @@ pub async fn delete_credential(
 pub async fn list_basicauth(
     State(state): State<ApiControlState>,
 ) -> ControlResult<Json<Vec<BasicauthCredential>>> {
-    Ok(Json(state.storage.list_basicauth().await?))
+    Ok(Json(state.storage.api.list_basicauth().await?))
 }
 
 pub async fn get_basicauth(
@@ -695,6 +711,7 @@ pub async fn get_basicauth(
 ) -> ControlResult<Json<BasicauthCredential>> {
     state
         .storage
+        .api
         .get_basicauth(&id)
         .await?
         .map(Json)
@@ -709,7 +726,7 @@ pub async fn create_basicauth(
     input.validate()?;
     require_consumer(&state, &input.consumer_id).await?;
     input.password = hash_password(input.password).await?;
-    let credential = state.storage.create_basicauth(&input).await?;
+    let credential = state.storage.api.create_basicauth(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(credential)))
 }
@@ -724,7 +741,7 @@ pub async fn update_basicauth(
     if let Some(password) = input.password.take() {
         input.password = Some(hash_password(password).await?);
     }
-    let credential = state.storage.update_basicauth(&id, &input).await?;
+    let credential = state.storage.api.update_basicauth(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(credential))
 }
@@ -733,7 +750,7 @@ pub async fn delete_basicauth(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    state.storage.delete_basicauth(&id).await?;
+    state.storage.api.delete_basicauth(&id).await?;
     reload_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -748,7 +765,7 @@ async fn hash_password(password: String) -> ControlResult<String> {
 // JWT secrets
 
 pub async fn list_jwt(State(state): State<ApiControlState>) -> ControlResult<Json<Vec<JwtSecret>>> {
-    Ok(Json(state.storage.list_jwt().await?))
+    Ok(Json(state.storage.api.list_jwt().await?))
 }
 
 pub async fn get_jwt(
@@ -757,6 +774,7 @@ pub async fn get_jwt(
 ) -> ControlResult<Json<JwtSecret>> {
     state
         .storage
+        .api
         .get_jwt(&id)
         .await?
         .map(Json)
@@ -770,7 +788,7 @@ pub async fn create_jwt(
     let input = read_json(payload).await?;
     input.validate()?;
     require_consumer(&state, &input.consumer_id).await?;
-    let credential = state.storage.create_jwt(&input).await?;
+    let credential = state.storage.api.create_jwt(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(credential)))
 }
@@ -782,7 +800,7 @@ pub async fn update_jwt(
 ) -> ControlResult<Json<JwtSecret>> {
     let input = read_json(payload).await?;
     input.validate()?;
-    let credential = state.storage.update_jwt(&id, &input).await?;
+    let credential = state.storage.api.update_jwt(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(credential))
 }
@@ -791,7 +809,7 @@ pub async fn delete_jwt(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    state.storage.delete_jwt(&id).await?;
+    state.storage.api.delete_jwt(&id).await?;
     reload_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -805,6 +823,7 @@ pub async fn list_acls(
     Ok(Json(
         state
             .storage
+            .api
             .list_acls(filter.consumer_id.as_deref())
             .await?,
     ))
@@ -816,6 +835,7 @@ pub async fn get_acl(
 ) -> ControlResult<Json<Acl>> {
     state
         .storage
+        .api
         .get_acl(&id)
         .await?
         .map(Json)
@@ -829,7 +849,7 @@ pub async fn create_acl(
     let input = read_json(payload).await?;
     input.validate()?;
     require_consumer(&state, &input.consumer_id).await?;
-    let acl = state.storage.create_acl(&input).await?;
+    let acl = state.storage.api.create_acl(&input).await?;
     reload_runtime(&state).await?;
     Ok((StatusCode::CREATED, Json(acl)))
 }
@@ -841,7 +861,7 @@ pub async fn update_acl(
 ) -> ControlResult<Json<Acl>> {
     let input = read_json(payload).await?;
     input.validate()?;
-    let acl = state.storage.update_acl(&id, &input).await?;
+    let acl = state.storage.api.update_acl(&id, &input).await?;
     reload_runtime(&state).await?;
     Ok(Json(acl))
 }
@@ -850,7 +870,7 @@ pub async fn delete_acl(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
 ) -> ControlResult<StatusCode> {
-    state.storage.delete_acl(&id).await?;
+    state.storage.api.delete_acl(&id).await?;
     reload_runtime(&state).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -874,6 +894,7 @@ pub async fn system_logs(
 ) -> ControlResult<Json<Vec<RequestLog>>> {
     let logs = state
         .storage
+        .logs
         .list_request_logs(
             query.limit.unwrap_or(100),
             query.request_id.as_deref(),
@@ -890,6 +911,7 @@ pub async fn audit_logs(
 ) -> ControlResult<Json<Vec<AuditLog>>> {
     let logs = state
         .storage
+        .logs
         .list_audit_logs(query.limit.unwrap_or(100))
         .await?;
     Ok(Json(logs))

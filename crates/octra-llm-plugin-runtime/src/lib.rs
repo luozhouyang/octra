@@ -821,7 +821,7 @@ impl LlmPluginRuntime {
         registry: Arc<LlmPluginRegistry>,
     ) -> Result<Self> {
         for manifest in registry.manifests() {
-            storage.upsert_builtin_plugin(&manifest).await?;
+            storage.llm.upsert_plugin(&manifest).await?;
         }
         let runtime = Self {
             storage: Some(storage),
@@ -841,7 +841,7 @@ impl LlmPluginRuntime {
         let Some(storage) = &self.storage else {
             return Ok(());
         };
-        let data = storage.load_plugin_data().await?;
+        let data = storage.llm.load_plugin_data().await?;
         let chains = LlmPluginChains::compile_with(data, &self.registry, &self.metrics)?;
         for manifest in self.registry.manifests() {
             self.metrics.stats(&manifest.name);

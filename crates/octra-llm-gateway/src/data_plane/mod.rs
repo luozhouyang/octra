@@ -426,7 +426,7 @@ async fn authorize(
 }
 
 async fn touch(state: &LlmDataState, key_id: &str) {
-    if let Err(error) = state.storage.llm_touch_virtual_key(key_id).await {
+    if let Err(error) = state.storage.llm.touch_virtual_key(key_id).await {
         tracing::debug!(error = ?error, key_id, "cannot update virtual key last_used_at");
     }
 }
@@ -861,7 +861,8 @@ fn spawn_cooldown(
     let until = until.to_rfc3339();
     tokio::spawn(async move {
         if let Err(error) = storage
-            .llm_set_account_cooldown(&account_id, &until, Some(&last_error))
+            .llm
+            .set_account_cooldown(&account_id, &until, Some(&last_error))
             .await
         {
             tracing::warn!(account_id, error = ?error, "cannot persist account cooldown");

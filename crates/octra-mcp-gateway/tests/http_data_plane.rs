@@ -84,7 +84,8 @@ async fn initialize_lists_and_calls_over_json_upstream() {
     // Invocations are persisted, one per call.
     let invocations = gateway
         .storage
-        .list_mcp_invocations(10, Some(&server_id))
+        .mcp
+        .list_invocations(10, Some(&server_id))
         .await
         .unwrap();
     assert_eq!(invocations.len(), 2);
@@ -360,13 +361,14 @@ async fn key_auth_gates_the_endpoint_and_resolves_consumers() {
 
     // The plaintext never reaches the database; only a 12-char prefix and the
     // SHA-256 hex digest are stored, and the digest resolves the key.
-    let stored = gateway.storage.list_mcp_api_keys().await.unwrap();
+    let stored = gateway.storage.mcp.list_api_keys().await.unwrap();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].key_prefix, &key[..12]);
     assert!(
         gateway
             .storage
-            .find_active_mcp_api_key(&octra_mcp_gateway::auth::hash_key(&key))
+            .mcp
+            .find_active_api_key(&octra_mcp_gateway::auth::hash_key(&key))
             .await
             .unwrap()
             .is_some()
@@ -374,7 +376,8 @@ async fn key_auth_gates_the_endpoint_and_resolves_consumers() {
     assert!(
         gateway
             .storage
-            .find_active_mcp_api_key(&key)
+            .mcp
+            .find_active_api_key(&key)
             .await
             .unwrap()
             .is_none(),
@@ -468,7 +471,7 @@ async fn per_tool_acl_restricts_calls_to_allowed_consumers() {
     assert_eq!(body["error"]["code"], -32005);
 
     // Denials are audited.
-    let invocations = gateway.storage.list_mcp_invocations(5, None).await.unwrap();
+    let invocations = gateway.storage.mcp.list_invocations(5, None).await.unwrap();
     let denied = invocations.iter().find(|row| row.status == "denied");
     assert!(
         denied.is_some(),

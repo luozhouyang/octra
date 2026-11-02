@@ -285,7 +285,7 @@ pub struct LlmRuntime {
 impl LlmRuntime {
     pub async fn bootstrap(storage: Arc<Storage>, config: Arc<OctraConfig>) -> Result<Self> {
         let account_pool = AccountPool::new();
-        let data = storage.llm_load_runtime_data().await?;
+        let data = storage.llm.load_runtime_data().await?;
         persist_quota_resets(&storage, account_pool.sync(&data.accounts));
         let mut snapshot = RuntimeSnapshot::build_with_pool(data, &account_pool);
         for issue in &snapshot.issues {
@@ -307,7 +307,7 @@ impl LlmRuntime {
     /// Reloads configuration and atomically swaps the snapshot. In-flight
     /// requests keep the snapshot they started with.
     pub async fn reload(&self) -> Result<()> {
-        let data = self.storage.llm_load_runtime_data().await?;
+        let data = self.storage.llm.load_runtime_data().await?;
         persist_quota_resets(&self.storage, self.account_pool.sync(&data.accounts));
         let snapshot = Arc::new(RuntimeSnapshot::build_with_pool(data, &self.account_pool));
         let mut guard = self.snapshot.write().await;
@@ -333,7 +333,8 @@ fn persist_quota_resets(storage: &Arc<Storage>, resets: Vec<crate::accounts::Quo
     tokio::spawn(async move {
         for reset in resets {
             if let Err(error) = storage
-                .llm_roll_account_quota(&reset.account_id, &reset.quota_reset_at)
+                .llm
+                .roll_account_quota(&reset.account_id, &reset.quota_reset_at)
                 .await
             {
                 tracing::warn!(
@@ -444,11 +445,13 @@ mod tests {
         assert!(runtime.snapshot().await.resolve("octra-default").is_none());
 
         let provider = storage
-            .llm_create_provider(&provider_input("local", "http://127.0.0.1:9/v1", true))
+            .llm
+            .create_provider(&provider_input("local", "http://127.0.0.1:9/v1", true))
             .await
             .unwrap();
         storage
-            .llm_create_model(&LlmModelInput {
+            .llm
+            .create_model(&LlmModelInput {
                 provider_id: provider.id.clone(),
                 model_id: "m1".into(),
                 display_name: Some("Model One".into()),
@@ -462,11 +465,13 @@ mod tests {
             .await
             .unwrap();
         let group = storage
-            .llm_create_routing_group("g", "priority")
+            .llm
+            .create_routing_group("g", "priority")
             .await
             .unwrap();
         storage
-            .llm_create_routing_target(
+            .llm
+            .create_routing_target(
                 &group.id,
                 &LlmRoutingTargetInput {
                     provider_id: provider.id.clone(),
@@ -480,7 +485,8 @@ mod tests {
             .await
             .unwrap();
         storage
-            .llm_create_route("octra-default", Some(&group.id))
+            .llm
+            .create_route("octra-default", Some(&group.id))
             .await
             .unwrap();
 
@@ -497,7 +503,8 @@ mod tests {
     async fn invalid_provider_config_is_reported_and_skipped() {
         let storage = storage().await;
         let bad = storage
-            .llm_create_provider(&LlmProviderInput {
+            .llm
+            .create_provider(&LlmProviderInput {
                 protocol: "grpc".into(),
                 ..provider_input("bad", "http://127.0.0.1:9/v1", true)
             })

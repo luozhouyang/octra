@@ -13,9 +13,7 @@ use octra_api_core::{
 };
 use octra_core::{Error, Result};
 use sqlx::sqlite::SqliteRow;
-use sqlx::{Row, Sqlite, Transaction};
-
-use crate::Storage;
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 
 const SERVICE_COLUMNS: &str = "id, name, protocol, host, port, path, retries, connect_timeout, \
      write_timeout, read_timeout, enabled, description, created_at, updated_at";
@@ -339,7 +337,7 @@ fn map_acl(row: &SqliteRow) -> Result<Acl> {
     })
 }
 
-fn map_policy(row: &SqliteRow) -> Result<octra_api_core::Policy> {
+pub(crate) fn map_policy(row: &SqliteRow) -> Result<octra_api_core::Policy> {
     let document: String = decode(row.try_get("document"), "policy")?;
     Ok(octra_api_core::Policy {
         id: decode(row.try_get("id"), "policy")?,
@@ -363,7 +361,20 @@ fn text_now() -> &'static str {
     "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 }
 
-impl Storage {
+#[derive(Clone)]
+pub struct ApiStore {
+    pool: SqlitePool,
+}
+
+impl ApiStore {
+    pub(crate) fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     // Policies (LLM authorization documents)
 
     pub async fn create_policy(
@@ -1451,7 +1462,7 @@ impl Storage {
 
     /// Loads every entity the API data plane needs in a constant number of
     /// queries (no per-service or per-upstream N+1 reads).
-    pub async fn load_api_runtime_data(&self) -> Result<ApiRuntimeData> {
+    pub async fn load_runtime_data(&self) -> Result<ApiRuntimeData> {
         let mut tx = self.begin().await?;
 
         let services =
@@ -1519,8 +1530,8 @@ impl Storage {
         })
     }
 
-    pub async fn refresh_api_runtime_data(&self) -> Result<ApiRuntimeData> {
-        self.load_api_runtime_data().await
+    pub async fn refresh_runtime_data(&self) -> Result<ApiRuntimeData> {
+        self.load_runtime_data().await
     }
 
     async fn begin(&self) -> Result<Transaction<'_, Sqlite>> {
@@ -1561,6 +1572,7 @@ async fn fetch_rows<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Storage;
 
     async fn setup() -> Storage {
         Storage::connect_in_memory().await.unwrap()
@@ -1570,6 +1582,7 @@ mod tests {
     async fn service_crud_and_unique_conflict() {
         let storage = setup().await;
         let service = storage
+            .api
             .create_service(&CreateService {
                 name: "orders".into(),
                 ..Default::default()
@@ -1580,6 +1593,7 @@ mod tests {
         assert_eq!(service.retries, 5);
 
         let duplicate = storage
+            .api
             .create_service(&CreateService {
                 id: Some("svc-2".into()),
                 name: "orders".into(),
@@ -1589,6 +1603,7 @@ mod tests {
         assert!(matches!(duplicate, Err(Error::Storage(ref msg)) if msg.contains("conflict")));
 
         let updated = storage
+            .api
             .update_service(
                 &service.id,
                 &UpdateService {
@@ -1602,10 +1617,17 @@ mod tests {
         assert_eq!(updated.retries, 2);
         assert_eq!(updated.description, "updated");
 
-        storage.delete_service(&service.id).await.unwrap();
-        assert!(storage.get_service(&service.id).await.unwrap().is_none());
+        storage.api.delete_service(&service.id).await.unwrap();
+        assert!(
+            storage
+                .api
+                .get_service(&service.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(matches!(
-            storage.delete_service(&service.id).await,
+            storage.api.delete_service(&service.id).await,
             Err(Error::NotFound(_))
         ));
     }
@@ -1614,6 +1636,7 @@ mod tests {
     async fn route_filters_and_parent_checks() {
         let storage = setup().await;
         let service = storage
+            .api
             .create_service(&CreateService {
                 name: "svc".into(),
                 ..Default::default()
@@ -1622,6 +1645,7 @@ mod tests {
             .unwrap();
 
         let route = storage
+            .api
             .create_route(&CreateRoute {
                 name: Some("api".into()),
                 service_id: Some(service.id.clone()),
@@ -1638,12 +1662,26 @@ mod tests {
         assert_eq!(route.headers["x-env"], vec!["prod".to_string()]);
 
         assert_eq!(
-            storage.list_routes(Some(&service.id)).await.unwrap().len(),
+            storage
+                .api
+                .list_routes(Some(&service.id))
+                .await
+                .unwrap()
+                .len(),
             1
         );
-        assert_eq!(storage.list_routes(Some("missing")).await.unwrap().len(), 0);
+        assert_eq!(
+            storage
+                .api
+                .list_routes(Some("missing"))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
 
         let missing = storage
+            .api
             .create_route(&CreateRoute {
                 service_id: Some("missing".into()),
                 ..Default::default()
@@ -1652,6 +1690,7 @@ mod tests {
         assert!(matches!(missing, Err(Error::NotFound(_))));
 
         let cleared = storage
+            .api
             .update_route(
                 &route.id,
                 &UpdateRoute {
@@ -1670,6 +1709,7 @@ mod tests {
     async fn targets_and_runtime_loading() {
         let storage = setup().await;
         let upstream = storage
+            .api
             .create_upstream(&CreateUpstream {
                 name: "primary".into(),
                 algorithm: Some("weighted-round-robin".into()),
@@ -1680,6 +1720,7 @@ mod tests {
         assert_eq!(upstream.algorithm, LoadBalanceAlgorithm::WeightedRoundRobin);
 
         storage
+            .api
             .create_target(&CreateTarget {
                 upstream_id: upstream.id.clone(),
                 target: "127.0.0.1:9000".into(),
@@ -1690,6 +1731,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             storage
+                .api
                 .list_targets(Some(&upstream.id))
                 .await
                 .unwrap()
@@ -1698,6 +1740,7 @@ mod tests {
         );
 
         let consumer = storage
+            .api
             .create_consumer(&CreateConsumer {
                 username: Some("team".into()),
                 ..Default::default()
@@ -1705,6 +1748,7 @@ mod tests {
             .await
             .unwrap();
         let credential = storage
+            .api
             .create_credential(&CreateKeyauthCredential {
                 consumer_id: consumer.id.clone(),
                 key: Some("ok_abcd1234".into()),
@@ -1715,6 +1759,7 @@ mod tests {
         assert_eq!(credential.key, "ok_abcd1234");
 
         let duplicate = storage
+            .api
             .create_credential(&CreateKeyauthCredential {
                 consumer_id: consumer.id.clone(),
                 key: Some("ok_abcd1234".into()),
@@ -1723,7 +1768,7 @@ mod tests {
             .await;
         assert!(matches!(duplicate, Err(Error::Storage(ref m)) if m.contains("conflict")));
 
-        let data = storage.load_api_runtime_data().await.unwrap();
+        let data = storage.api.load_runtime_data().await.unwrap();
         assert_eq!(data.upstreams.len(), 1);
         assert_eq!(data.targets.len(), 1);
         assert_eq!(data.consumers.len(), 1);

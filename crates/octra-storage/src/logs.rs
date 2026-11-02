@@ -6,8 +6,6 @@ use serde::Serialize;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
-use crate::Storage;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewRequestLog {
     pub request_id: String,
@@ -85,7 +83,20 @@ fn audit_log_from_row(row: &SqliteRow) -> Result<AuditLog> {
     })
 }
 
-impl Storage {
+#[derive(Clone)]
+pub struct LogStore {
+    pool: sqlx::SqlitePool,
+}
+
+impl LogStore {
+    pub(crate) fn new(pool: sqlx::SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    fn pool(&self) -> &sqlx::SqlitePool {
+        &self.pool
+    }
+
     pub async fn insert_request_log(&self, log: &NewRequestLog) -> Result<()> {
         sqlx::query(
             "INSERT INTO request_logs
@@ -173,12 +184,14 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Storage;
 
     #[tokio::test]
     async fn stores_and_filters_request_logs() {
         let storage = Storage::connect_in_memory().await.unwrap();
         for (request_id, route) in [("r1", "route-a"), ("r2", "route-b")] {
             storage
+                .logs
                 .insert_request_log(&NewRequestLog {
                     request_id: request_id.into(),
                     method: "GET".into(),
@@ -195,11 +208,16 @@ mod tests {
                 .unwrap();
         }
 
-        let all = storage.list_request_logs(10, None, None).await.unwrap();
+        let all = storage
+            .logs
+            .list_request_logs(10, None, None)
+            .await
+            .unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].request_id, "r2");
 
         let filtered = storage
+            .logs
             .list_request_logs(10, Some("r1"), None)
             .await
             .unwrap();
@@ -211,6 +229,7 @@ mod tests {
     async fn stores_audit_rows() {
         let storage = Storage::connect_in_memory().await.unwrap();
         storage
+            .logs
             .insert_audit_log(
                 Some("admin"),
                 "service.create",
@@ -219,7 +238,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let rows = storage.list_audit_logs(10).await.unwrap();
+        let rows = storage.logs.list_audit_logs(10).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].action, "service.create");
         assert_eq!(rows[0].detail["name"], "svc");

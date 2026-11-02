@@ -4,7 +4,7 @@ use octra_core::{Error, Result};
 use octra_plugin_api::{PluginManifest, Scope};
 use sqlx::Row;
 
-use crate::Storage;
+use super::llm::LlmStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginRecord {
@@ -87,11 +87,11 @@ fn map_error(context: &str, error: sqlx::Error) -> Error {
     Error::Storage(format!("{context}: {error}"))
 }
 
-impl Storage {
+impl LlmStore {
     /// Inserts or refreshes a built-in plugin catalog row. `enabled` is left
     /// untouched on conflict so an administrator can keep a plugin disabled
     /// across restarts.
-    pub async fn upsert_builtin_plugin(&self, manifest: &PluginManifest) -> Result<PluginRecord> {
+    pub async fn upsert_plugin(&self, manifest: &PluginManifest) -> Result<PluginRecord> {
         let id = format!("plg_{}", manifest.name);
         let manifest_json = serde_json::to_string(manifest).map_err(|error| {
             Error::Storage(format!("cannot serialize plugin manifest: {error}"))

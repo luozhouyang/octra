@@ -31,6 +31,10 @@ pub struct RuntimeData {
 
 pub struct Storage {
     pool: SqlitePool,
+    pub api: api_gateway::ApiStore,
+    pub llm: llm::LlmStore,
+    pub mcp: mcp::McpStore,
+    pub logs: logs::LogStore,
 }
 
 impl Storage {
@@ -73,7 +77,13 @@ impl Storage {
             .await
             .map_err(|err| Error::Storage(format!("cannot open sqlite: {err}")))?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            api: api_gateway::ApiStore::new(pool.clone()),
+            llm: llm::LlmStore::new(pool.clone()),
+            mcp: mcp::McpStore::new(pool.clone()),
+            logs: logs::LogStore::new(pool.clone()),
+            pool,
+        })
     }
 
     async fn migrate(&self) -> Result<()> {

@@ -113,7 +113,8 @@ impl McpRuntime {
     pub(crate) async fn refresh_server(&self, server_id: &str) -> Result<DiscoveryStats> {
         let server = self
             .storage
-            .get_mcp_server(server_id)
+            .mcp
+            .get_server(server_id)
             .await?
             .ok_or_else(|| McpError::Config(format!("MCP server {server_id} does not exist")))
             .map_err(runtime_error)?;
@@ -125,10 +126,12 @@ impl McpRuntime {
             .map_err(runtime_error)?;
         let tools = self
             .storage
-            .replace_mcp_tools(&server.id, &discovery.tools)
+            .mcp
+            .replace_tools(&server.id, &discovery.tools)
             .await?;
         self.storage
-            .mark_mcp_server_seen(&server.id, &discovery.protocol_version)
+            .mcp
+            .mark_server_seen(&server.id, &discovery.protocol_version)
             .await?;
         self.servers.invalidate(&server.id).await;
 

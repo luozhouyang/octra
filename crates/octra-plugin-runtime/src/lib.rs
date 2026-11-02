@@ -617,7 +617,7 @@ impl PluginRuntime {
         let Some(storage) = &self.storage else {
             return Ok(());
         };
-        let plugins = storage.list_plugin_instances().await?;
+        let plugins = storage.api.list_plugin_instances().await?;
         let chains = PluginChains::compile(plugins, &self.registry)?;
         *self.chains.write() = Arc::new(chains);
         Ok(())

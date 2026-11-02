@@ -636,7 +636,8 @@ async fn virtual_key_authentication() {
     assert_eq!(
         harness
             .storage
-            .llm_find_virtual_key_by_hash(&hash_key("octra-valid-key-0001"))
+            .llm
+            .find_virtual_key_by_hash(&hash_key("octra-valid-key-0001"))
             .await
             .unwrap()
             .unwrap()
@@ -645,7 +646,8 @@ async fn virtual_key_authentication() {
     );
     harness
         .storage
-        .llm_delete_virtual_key(&valid_id)
+        .llm
+        .delete_virtual_key(&valid_id)
         .await
         .unwrap();
     harness.runtime.reload().await.unwrap();
@@ -669,7 +671,7 @@ async fn virtual_key_authentication() {
     assert_eq!(status, StatusCode::OK, "body {body}");
 
     // The deleted key remains listed with its last use recorded.
-    let keys = harness.storage.llm_list_virtual_keys().await.unwrap();
+    let keys = harness.storage.llm.list_virtual_keys().await.unwrap();
     assert!(!keys.iter().any(|key| key.id == valid_id));
 }
 
@@ -756,6 +758,7 @@ async fn consumer_policies_restrict_models_and_providers() {
     let (harness, _upstream) = openai_harness().await;
     let consumer = harness
         .storage
+        .api
         .create_consumer(&CreateConsumer {
             username: Some("policy-team".into()),
             ..Default::default()
@@ -764,7 +767,8 @@ async fn consumer_policies_restrict_models_and_providers() {
         .unwrap();
     harness
         .storage
-        .llm_create_virtual_key(&LlmVirtualKeyInput {
+        .llm
+        .create_virtual_key(&LlmVirtualKeyInput {
             name: "policy-key".into(),
             key_prefix: "octra-policy".into(),
             key_hash: hash_key("octra-policy-key-0001"),
@@ -791,6 +795,7 @@ async fn consumer_policies_restrict_models_and_providers() {
     // A policy that names other models defaults the request to deny.
     let policy = harness
         .storage
+        .api
         .create_policy(&CreatePolicy {
             name: "restrict-model".into(),
             consumer_id: Some(consumer.id.clone()),
@@ -827,6 +832,7 @@ async fn consumer_policies_restrict_models_and_providers() {
     // Allow the model but name a provider the route cannot reach.
     harness
         .storage
+        .api
         .update_policy(
             &policy.id,
             &UpdatePolicy {
@@ -853,6 +859,7 @@ async fn consumer_policies_restrict_models_and_providers() {
     // Provider names are accepted as well as ids.
     harness
         .storage
+        .api
         .update_policy(
             &policy.id,
             &UpdatePolicy {
@@ -1056,7 +1063,8 @@ async fn rate_limited_account_falls_back_to_the_next() {
     for _ in 0..50 {
         let account = harness
             .storage
-            .llm_get_account(&first)
+            .llm
+            .get_account(&first)
             .await
             .unwrap()
             .unwrap();
@@ -1201,6 +1209,7 @@ async fn model_map_cannot_bypass_model_policy() {
 
     let consumer = harness
         .storage
+        .api
         .create_consumer(&CreateConsumer {
             username: Some("mapped-team".into()),
             ..Default::default()
@@ -1209,7 +1218,8 @@ async fn model_map_cannot_bypass_model_policy() {
         .unwrap();
     harness
         .storage
-        .llm_create_virtual_key(&LlmVirtualKeyInput {
+        .llm
+        .create_virtual_key(&LlmVirtualKeyInput {
             name: "mapped-key".into(),
             key_prefix: "octra-mapped".into(),
             key_hash: hash_key("octra-mapped-key-0001"),
@@ -1222,6 +1232,7 @@ async fn model_map_cannot_bypass_model_policy() {
         .unwrap();
     harness
         .storage
+        .api
         .create_policy(&CreatePolicy {
             name: "allow-octra-default".into(),
             consumer_id: Some(consumer.id),

@@ -364,7 +364,7 @@ pub struct GatewayRuntime {
 
 impl GatewayRuntime {
     pub async fn bootstrap(storage: Arc<Storage>) -> Result<Self> {
-        let data = storage.load_api_runtime_data().await?;
+        let data = storage.api.load_runtime_data().await?;
         Ok(Self {
             storage,
             snapshot: RwLock::new(Arc::new(RuntimeSnapshot::compile(data))),
@@ -372,7 +372,7 @@ impl GatewayRuntime {
     }
 
     pub async fn reload(&self) -> Result<SnapshotInfo> {
-        let data = self.storage.load_api_runtime_data().await?;
+        let data = self.storage.api.load_runtime_data().await?;
         let next = Arc::new(RuntimeSnapshot::compile(data));
         let info = next.info.clone();
         *self.snapshot.write().await = next;

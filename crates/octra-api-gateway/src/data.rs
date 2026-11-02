@@ -769,7 +769,7 @@ fn persist_request_log(state: &ApiDataState, log: NewRequestLog) {
         return;
     };
     tokio::spawn(async move {
-        if let Err(error) = storage.insert_request_log(&log).await {
+        if let Err(error) = storage.logs.insert_request_log(&log).await {
             tracing::warn!(%error, "api gateway: cannot persist request log");
         }
     });

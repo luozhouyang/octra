@@ -227,7 +227,7 @@ async fn require_session(
         JsonRpcError::new(codes::INVALID_REQUEST, "missing Mcp-Session-Id header")
     })?;
 
-    match state.storage.get_mcp_session(&session_id).await {
+    match state.storage.mcp.get_session(&session_id).await {
         Ok(Some(session)) if session.status == session_status::OPEN => Ok(session.id),
         Ok(_) => Err(JsonRpcError::new(
             codes::INVALID_REQUEST,
@@ -245,7 +245,8 @@ async fn require_session(
 async fn create_session(state: &McpDataState) -> Result<String, JsonRpcError> {
     let servers = state
         .storage
-        .list_mcp_servers()
+        .mcp
+        .list_servers()
         .await
         .map_err(storage_error)?;
     let anchor = servers
@@ -257,7 +258,8 @@ async fn create_session(state: &McpDataState) -> Result<String, JsonRpcError> {
     let id = new_request_id();
     state
         .storage
-        .insert_mcp_session(&id, &anchor.id)
+        .mcp
+        .insert_session(&id, &anchor.id)
         .await
         .map_err(storage_error)?;
     Ok(id)
@@ -266,12 +268,14 @@ async fn create_session(state: &McpDataState) -> Result<String, JsonRpcError> {
 async fn tools_list(state: &McpDataState, caller: &Caller) -> Result<Value, JsonRpcError> {
     let catalog = state
         .storage
-        .list_mcp_catalog()
+        .mcp
+        .list_catalog()
         .await
         .map_err(storage_error)?;
     let servers = state
         .storage
-        .list_mcp_servers()
+        .mcp
+        .list_servers()
         .await
         .map_err(storage_error)?;
     let enabled: std::collections::HashSet<&str> = servers
@@ -382,7 +386,8 @@ async fn resolve_tool(
     };
     let Some(server) = state
         .storage
-        .get_mcp_server_by_name(server_name)
+        .mcp
+        .get_server_by_name(server_name)
         .await
         .map_err(storage_error)?
     else {
@@ -390,7 +395,8 @@ async fn resolve_tool(
     };
     let Some(tool) = state
         .storage
-        .list_mcp_tools(&server.id)
+        .mcp
+        .list_tools(&server.id)
         .await
         .map_err(storage_error)?
         .into_iter()
@@ -430,12 +436,12 @@ async fn acl_allows(
     caller: &Caller,
     tool_id: &str,
 ) -> octra_core::Result<bool> {
-    let flags = state.storage.mcp_acl_flags(tool_id).await?;
+    let flags = state.storage.mcp.acl_flags(tool_id).await?;
     if flags.is_empty() {
         return Ok(acl_decision(flags, caller.consumer_id.is_some()));
     }
     match caller.consumer_id.as_deref() {
-        Some(consumer) => state.storage.mcp_acl_allows(tool_id, consumer).await,
+        Some(consumer) => state.storage.mcp.acl_allows(tool_id, consumer).await,
         None => Ok(false),
     }
 }
@@ -453,7 +459,8 @@ async fn record(
     let request_id = new_request_id();
     if let Err(err) = state
         .storage
-        .record_mcp_invocation(&InvocationRecord {
+        .mcp
+        .record_invocation(&InvocationRecord {
             server_id: &server.id,
             tool_id: &tool.id,
             consumer_id: caller.consumer_id.as_deref(),
@@ -479,7 +486,8 @@ async fn record_decision(
     let request_id = new_request_id();
     if let Err(err) = state
         .storage
-        .record_mcp_invocation(&InvocationRecord {
+        .mcp
+        .record_invocation(&InvocationRecord {
             server_id: &server.id,
             tool_id: &tool.id,
             consumer_id: caller.consumer_id.as_deref(),
@@ -529,7 +537,7 @@ async fn handle_delete(State(state): State<McpDataState>, headers: HeaderMap) ->
         );
     };
 
-    match state.storage.terminate_mcp_session(&session_id).await {
+    match state.storage.mcp.terminate_session(&session_id).await {
         Ok(Some(session)) if session.status == session_status::TERMINATED => {
             StatusCode::NO_CONTENT.into_response()
         }

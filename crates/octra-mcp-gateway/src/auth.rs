@@ -79,16 +79,18 @@ pub async fn authenticate(storage: &Storage, headers: &HeaderMap) -> Result<Call
     // unknown or inactive key is rejected whenever one is presented, and an
     // absent key is only tolerated when no enabled keys exist.
     let presented = presented_key(headers);
-    if !storage.has_enabled_mcp_api_keys().await? {
+    if !storage.mcp.has_enabled_api_keys().await? {
         return match presented {
             Some(key)
                 if storage
-                    .find_active_mcp_api_key(&hash_key(&key))
+                    .mcp
+                    .find_active_api_key(&hash_key(&key))
                     .await?
                     .is_some() =>
             {
                 let record = storage
-                    .find_active_mcp_api_key(&hash_key(&key))
+                    .mcp
+                    .find_active_api_key(&hash_key(&key))
                     .await?
                     .expect("key resolved above");
                 Ok(Caller {
@@ -106,7 +108,8 @@ pub async fn authenticate(storage: &Storage, headers: &HeaderMap) -> Result<Call
     let presented = presented.ok_or(AuthError::Missing)?;
     let hash = hash_key(&presented);
     let record = storage
-        .find_active_mcp_api_key(&hash)
+        .mcp
+        .find_active_api_key(&hash)
         .await?
         .ok_or(AuthError::Invalid)?;
 
@@ -197,10 +200,15 @@ mod tests {
     #[tokio::test]
     async fn key_mode_requires_a_valid_key() {
         let storage = Storage::connect_in_memory().await.unwrap();
-        storage.ensure_consumer("c1", "consumer-one").await.unwrap();
+        storage
+            .mcp
+            .ensure_consumer("c1", "consumer-one")
+            .await
+            .unwrap();
         let key = generate_key();
         storage
-            .insert_mcp_api_key(
+            .mcp
+            .insert_api_key(
                 "agent",
                 &display_prefix(&key),
                 &hash_key(&key),

@@ -375,12 +375,14 @@ impl Harness {
     ) -> String {
         let plugin = self
             .storage
+            .llm
             .get_plugin_by_name(plugin_name)
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("plugin {plugin_name} is not registered"));
         let record = self
             .storage
+            .llm
             .create_plugin_config_raw(&plugin.id, scope, scope_id, true, &config.to_string())
             .await
             .unwrap();
@@ -399,7 +401,8 @@ impl Harness {
     ) -> String {
         let record = self
             .storage
-            .llm_create_provider(&LlmProviderInput {
+            .llm
+            .create_provider(&LlmProviderInput {
                 name: name.to_string(),
                 kind: protocol.to_string(),
                 protocol: protocol.to_string(),
@@ -418,12 +421,14 @@ impl Harness {
     pub async fn route_to(&self, virtual_model: &str, targets: &[(String, i64, i64)]) {
         let group = self
             .storage
-            .llm_create_routing_group(&format!("{virtual_model}-group"), "priority")
+            .llm
+            .create_routing_group(&format!("{virtual_model}-group"), "priority")
             .await
             .unwrap();
         for (index, (provider_id, priority, weight)) in targets.iter().enumerate() {
             self.storage
-                .llm_create_routing_target(
+                .llm
+                .create_routing_target(
                     &group.id,
                     &LlmRoutingTargetInput {
                         provider_id: provider_id.clone(),
@@ -438,7 +443,8 @@ impl Harness {
                 .unwrap();
         }
         self.storage
-            .llm_create_route(virtual_model, Some(&group.id))
+            .llm
+            .create_route(virtual_model, Some(&group.id))
             .await
             .unwrap();
         self.runtime.reload().await.unwrap();
@@ -450,7 +456,8 @@ impl Harness {
 
     pub async fn model_priced(&self, provider_id: &str, model_id: &str, pricing_json: &str) {
         self.storage
-            .llm_create_model(&LlmModelInput {
+            .llm
+            .create_model(&LlmModelInput {
                 provider_id: provider_id.to_string(),
                 model_id: model_id.to_string(),
                 display_name: None,
@@ -478,7 +485,8 @@ impl Harness {
     ) -> String {
         let record = self
             .storage
-            .llm_create_account(
+            .llm
+            .create_account(
                 provider_id,
                 &LlmProviderAccountInput {
                     name: name.to_string(),
@@ -496,7 +504,8 @@ impl Harness {
             .unwrap();
         if quota_used > 0 {
             self.storage
-                .llm_consume_account_quota(&record.id, quota_used, 0, 0)
+                .llm
+                .consume_account_quota(&record.id, quota_used, 0, 0)
                 .await
                 .unwrap();
         }
@@ -518,7 +527,8 @@ impl Harness {
         });
         let record = self
             .storage
-            .llm_create_virtual_key(&octra_storage::LlmVirtualKeyInput {
+            .llm
+            .create_virtual_key(&octra_storage::LlmVirtualKeyInput {
                 name: name.to_string(),
                 key_prefix: plaintext.chars().take(12).collect(),
                 key_hash: octra_llm_gateway::keys::hash_key(plaintext),
@@ -576,13 +586,13 @@ pub async fn wait_for_usage(
     expected: usize,
 ) -> Vec<octra_storage::LlmUsageRecord> {
     for _ in 0..200 {
-        let rows = storage.llm_list_usage(50).await.unwrap();
+        let rows = storage.llm.list_usage(50).await.unwrap();
         if rows.len() >= expected {
             return rows;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    storage.llm_list_usage(50).await.unwrap()
+    storage.llm.list_usage(50).await.unwrap()
 }
 
 pub fn openai_body(model: &str, stream: bool) -> Value {

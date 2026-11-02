@@ -225,7 +225,8 @@ pub struct ServerResponse {
 async fn server_response(state: &McpControlState, server: McpServer) -> ApiResult<ServerResponse> {
     let tool_count = state
         .storage
-        .list_mcp_tools(&server.id)
+        .mcp
+        .list_tools(&server.id)
         .await
         .map_err(storage)?
         .len();
@@ -236,7 +237,7 @@ async fn list_servers(
     State(state): State<McpControlState>,
 ) -> ApiResult<Json<Vec<ServerResponse>>> {
     let mut servers = Vec::new();
-    for server in state.storage.list_mcp_servers().await.map_err(storage)? {
+    for server in state.storage.mcp.list_servers().await.map_err(storage)? {
         servers.push(server_response(&state, server).await?);
     }
     Ok(Json(servers))
@@ -249,7 +250,8 @@ async fn create_server(State(state): State<McpControlState>, body: Body) -> ApiR
 
     let server = state
         .storage
-        .insert_mcp_server(&new_server)
+        .mcp
+        .insert_server(&new_server)
         .await
         .map_err(|err| conflict_on_unique(err, &format!("MCP server '{display_name}'")))?;
 
@@ -262,7 +264,8 @@ async fn create_server(State(state): State<McpControlState>, body: Body) -> ApiR
 
     match state
         .storage
-        .get_mcp_server(&server.id)
+        .mcp
+        .get_server(&server.id)
         .await
         .map_err(storage)?
     {
@@ -281,7 +284,8 @@ async fn get_server(
 ) -> ApiResult<Json<ServerResponse>> {
     let server = state
         .storage
-        .get_mcp_server(&id)
+        .mcp
+        .get_server(&id)
         .await
         .map_err(storage)?
         .ok_or_else(|| ApiError::not_found("MCP server"))?;
@@ -295,7 +299,8 @@ async fn update_server(
 ) -> ApiResult<Json<ServerResponse>> {
     let existing = state
         .storage
-        .get_mcp_server(&id)
+        .mcp
+        .get_server(&id)
         .await
         .map_err(storage)?
         .ok_or_else(|| ApiError::not_found("MCP server"))?;
@@ -309,7 +314,8 @@ async fn update_server(
     let display_name = candidate.name.clone();
     let updated = state
         .storage
-        .update_mcp_server(&id, &candidate)
+        .mcp
+        .update_server(&id, &candidate)
         .await
         .map_err(|err| conflict_on_unique(err, &format!("MCP server '{display_name}'")))?
         .ok_or_else(|| ApiError::not_found("MCP server"))?;
@@ -325,7 +331,8 @@ async fn update_server(
 
     let updated = state
         .storage
-        .get_mcp_server(&id)
+        .mcp
+        .get_server(&id)
         .await
         .map_err(storage)?
         .unwrap_or(updated);
@@ -347,7 +354,8 @@ async fn delete_server(
 ) -> ApiResult<StatusCode> {
     let deleted = state
         .storage
-        .delete_mcp_server(&id)
+        .mcp
+        .delete_server(&id)
         .await
         .map_err(storage)?;
     if !deleted {
@@ -435,13 +443,15 @@ async fn list_tools(
     if let Some(server_id) = query.server_id.as_deref() {
         let server = state
             .storage
-            .get_mcp_server(server_id)
+            .mcp
+            .get_server(server_id)
             .await
             .map_err(storage)?
             .ok_or_else(|| ApiError::not_found("MCP server"))?;
         let tools = state
             .storage
-            .list_mcp_tools(server_id)
+            .mcp
+            .list_tools(server_id)
             .await
             .map_err(storage)?;
         return Ok(Json(
@@ -452,7 +462,7 @@ async fn list_tools(
         ));
     }
 
-    let catalog = state.storage.list_mcp_catalog().await.map_err(storage)?;
+    let catalog = state.storage.mcp.list_catalog().await.map_err(storage)?;
     Ok(Json(
         catalog
             .into_iter()
@@ -464,7 +474,8 @@ async fn list_tools(
 async fn resolve_server(state: &McpControlState, server_id: &str) -> ApiResult<McpServer> {
     state
         .storage
-        .get_mcp_server(server_id)
+        .mcp
+        .get_server(server_id)
         .await
         .map_err(storage)?
         .ok_or_else(|| ApiError::bad_request(format!("unknown server_id: {server_id}")))
@@ -473,13 +484,15 @@ async fn resolve_server(state: &McpControlState, server_id: &str) -> ApiResult<M
 async fn find_tool(state: &McpControlState, id: &str) -> ApiResult<(McpTool, McpServer)> {
     let tool = state
         .storage
-        .get_mcp_tool(id)
+        .mcp
+        .get_tool(id)
         .await
         .map_err(storage)?
         .ok_or_else(|| ApiError::not_found("MCP tool"))?;
     let server = state
         .storage
-        .get_mcp_server(&tool.server_id)
+        .mcp
+        .get_server(&tool.server_id)
         .await
         .map_err(storage)?
         .ok_or_else(|| ApiError::not_found("MCP server"))?;
@@ -520,7 +533,8 @@ async fn create_tool(
     if !request.enabled {
         state
             .storage
-            .set_mcp_tool_enabled(&tool.id, false)
+            .mcp
+            .set_tool_enabled(&tool.id, false)
             .await
             .map_err(storage)?;
     }
@@ -528,7 +542,8 @@ async fn create_tool(
 
     let tool = state
         .storage
-        .get_mcp_tool(&tool.id)
+        .mcp
+        .get_tool(&tool.id)
         .await
         .map_err(storage)?
         .ok_or_else(|| ApiError::internal("tool vanished after creation"))?;
@@ -542,7 +557,8 @@ async fn current_tool_set(
 ) -> ApiResult<Vec<DiscoveredTool>> {
     Ok(state
         .storage
-        .list_mcp_tools(server_id)
+        .mcp
+        .list_tools(server_id)
         .await
         .map_err(storage)?
         .into_iter()
@@ -563,7 +579,8 @@ async fn replace_tool_set(
 ) -> ApiResult<()> {
     state
         .storage
-        .replace_mcp_tools(server_id, tools)
+        .mcp
+        .replace_tools(server_id, tools)
         .await
         .map_err(storage)?;
     Ok(())
@@ -576,7 +593,8 @@ async fn find_tool_by_name(
 ) -> ApiResult<McpTool> {
     state
         .storage
-        .list_mcp_tools(server_id)
+        .mcp
+        .list_tools(server_id)
         .await
         .map_err(storage)?
         .into_iter()
@@ -622,7 +640,8 @@ async fn update_tool(
     if let Some(enabled) = request.enabled {
         state
             .storage
-            .set_mcp_tool_enabled(&tool.id, enabled)
+            .mcp
+            .set_tool_enabled(&tool.id, enabled)
             .await
             .map_err(storage)?;
     }
@@ -653,7 +672,7 @@ async fn list_sessions(
     State(state): State<McpControlState>,
 ) -> ApiResult<Json<Vec<octra_mcp_core::McpSession>>> {
     Ok(Json(
-        state.storage.list_mcp_sessions().await.map_err(storage)?,
+        state.storage.mcp.list_sessions().await.map_err(storage)?,
     ))
 }
 
@@ -663,7 +682,8 @@ async fn get_session(
 ) -> ApiResult<Json<octra_mcp_core::McpSession>> {
     state
         .storage
-        .get_mcp_session(&id)
+        .mcp
+        .get_session(&id)
         .await
         .map_err(storage)?
         .map(Json)
@@ -676,7 +696,8 @@ async fn delete_session(
 ) -> ApiResult<Json<octra_mcp_core::McpSession>> {
     state
         .storage
-        .terminate_mcp_session(&id)
+        .mcp
+        .terminate_session(&id)
         .await
         .map_err(storage)?
         .map(Json)
@@ -700,7 +721,8 @@ async fn list_invocations(
     Ok(Json(
         state
             .storage
-            .list_mcp_invocations(limit, query.server_id.as_deref())
+            .mcp
+            .list_invocations(limit, query.server_id.as_deref())
             .await
             .map_err(storage)?,
     ))
@@ -712,7 +734,8 @@ async fn get_invocation(
 ) -> ApiResult<Json<octra_mcp_core::McpInvocation>> {
     state
         .storage
-        .get_mcp_invocation(id)
+        .mcp
+        .get_invocation(id)
         .await
         .map_err(storage)?
         .map(Json)
@@ -740,7 +763,7 @@ pub struct CreatedKey {
 
 async fn list_keys(State(state): State<McpControlState>) -> ApiResult<Json<Vec<McpApiKey>>> {
     Ok(Json(
-        state.storage.list_mcp_api_keys().await.map_err(storage)?,
+        state.storage.mcp.list_api_keys().await.map_err(storage)?,
     ))
 }
 
@@ -769,7 +792,8 @@ async fn create_key(
         (Some(id), _) => {
             if !state
                 .storage
-                .mcp_consumer_exists(&id)
+                .mcp
+                .consumer_exists(&id)
                 .await
                 .map_err(storage)?
             {
@@ -781,6 +805,7 @@ async fn create_key(
             let id = format!("consumer-{}", uuid::Uuid::new_v4());
             state
                 .storage
+                .mcp
                 .ensure_consumer(&id, name.trim())
                 .await
                 .map_err(|err| conflict_on_unique(err, &format!("consumer '{}'", name.trim())))?;
@@ -792,7 +817,8 @@ async fn create_key(
     let plaintext = generate_key();
     let key = state
         .storage
-        .insert_mcp_api_key(
+        .mcp
+        .insert_api_key(
             request.name.trim(),
             &display_prefix(&plaintext),
             &hash_key(&plaintext),
@@ -831,7 +857,8 @@ async fn get_key(
 ) -> ApiResult<Json<McpApiKey>> {
     state
         .storage
-        .get_mcp_api_key(&id)
+        .mcp
+        .get_api_key(&id)
         .await
         .map_err(storage)?
         .map(Json)
@@ -844,7 +871,8 @@ async fn delete_key(
 ) -> ApiResult<StatusCode> {
     if state
         .storage
-        .delete_mcp_api_key(&id)
+        .mcp
+        .delete_api_key(&id)
         .await
         .map_err(storage)?
     {
@@ -893,7 +921,8 @@ async fn list_acls(
     if let Some(tool_id) = query.tool_id.as_deref()
         && state
             .storage
-            .get_mcp_tool(tool_id)
+            .mcp
+            .get_tool(tool_id)
             .await
             .map_err(storage)?
             .is_none()
@@ -903,7 +932,8 @@ async fn list_acls(
     Ok(Json(
         state
             .storage
-            .list_mcp_acls(query.tool_id.as_deref())
+            .mcp
+            .list_acls(query.tool_id.as_deref())
             .await
             .map_err(storage)?,
     ))
@@ -916,7 +946,8 @@ async fn create_acl(
     let request: AclRequest = json_body(&state, body).await?;
     if state
         .storage
-        .get_mcp_tool(&request.tool_id)
+        .mcp
+        .get_tool(&request.tool_id)
         .await
         .map_err(storage)?
         .is_none()
@@ -928,7 +959,8 @@ async fn create_acl(
     }
     if !state
         .storage
-        .mcp_consumer_exists(&request.consumer_id)
+        .mcp
+        .consumer_exists(&request.consumer_id)
         .await
         .map_err(storage)?
     {
@@ -940,7 +972,8 @@ async fn create_acl(
 
     let acl = state
         .storage
-        .upsert_mcp_acl(&request.tool_id, &request.consumer_id, request.allowed)
+        .mcp
+        .upsert_acl(&request.tool_id, &request.consumer_id, request.allowed)
         .await
         .map_err(storage)?;
     state.runtime.reload_after_mutation().await;
@@ -953,7 +986,8 @@ async fn get_acl(
 ) -> ApiResult<Json<octra_mcp_core::McpToolAcl>> {
     state
         .storage
-        .get_mcp_acl(&id)
+        .mcp
+        .get_acl(&id)
         .await
         .map_err(storage)?
         .map(Json)
@@ -967,7 +1001,8 @@ async fn update_acl(
 ) -> ApiResult<Json<octra_mcp_core::McpToolAcl>> {
     let existing = state
         .storage
-        .get_mcp_acl(&id)
+        .mcp
+        .get_acl(&id)
         .await
         .map_err(storage)?
         .ok_or_else(|| ApiError::not_found("MCP ACL"))?;
@@ -976,7 +1011,8 @@ async fn update_acl(
 
     let acl = state
         .storage
-        .upsert_mcp_acl(&existing.tool_id, &existing.consumer_id, allowed)
+        .mcp
+        .upsert_acl(&existing.tool_id, &existing.consumer_id, allowed)
         .await
         .map_err(storage)?;
     state.runtime.reload_after_mutation().await;
@@ -987,7 +1023,7 @@ async fn delete_acl(
     State(state): State<McpControlState>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    if state.storage.delete_mcp_acl(&id).await.map_err(storage)? {
+    if state.storage.mcp.delete_acl(&id).await.map_err(storage)? {
         state.runtime.reload_after_mutation().await;
         Ok(StatusCode::NO_CONTENT)
     } else {

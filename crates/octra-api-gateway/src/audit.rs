@@ -35,6 +35,7 @@ pub async fn record_control_audit(
     let detail = serde_json::json!({ "method": method.as_str(), "path": path, "status": status });
     tokio::spawn(async move {
         if let Err(error) = storage
+            .logs
             .insert_audit_log(
                 Some("admin"),
                 &format!("control.{action}"),

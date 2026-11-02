@@ -3,9 +3,22 @@
 use chrono::{DateTime, Utc};
 use octra_api_core::Policy;
 use octra_core::{Error, Result};
-use sqlx::Row;
+use sqlx::{Row, SqlitePool};
 
-use crate::Storage;
+#[derive(Clone)]
+pub struct LlmStore {
+    pub(crate) pool: SqlitePool,
+}
+
+impl LlmStore {
+    pub(crate) fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmProviderRecord {
@@ -468,37 +481,38 @@ fn usage_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmUsageRecord {
     }
 }
 
-impl Storage {
-    pub async fn llm_load_runtime_data(&self) -> Result<LlmRuntimeData> {
+impl LlmStore {
+    pub async fn load_runtime_data(&self) -> Result<LlmRuntimeData> {
         let providers = self
-            .llm_list_providers()
+            .list_providers()
             .await
             .map_err(|err| err.into_octra())?;
-        let models = self
-            .llm_list_models()
-            .await
-            .map_err(|err| err.into_octra())?;
+        let models = self.list_models().await.map_err(|err| err.into_octra())?;
         let groups = self
-            .llm_list_routing_groups()
+            .list_routing_groups()
             .await
             .map_err(|err| err.into_octra())?;
-        let routes = self
-            .llm_list_routes()
-            .await
-            .map_err(|err| err.into_octra())?;
+        let routes = self.list_routes().await.map_err(|err| err.into_octra())?;
         let targets = self
-            .llm_list_routing_targets()
+            .list_routing_targets()
             .await
             .map_err(|err| err.into_octra())?;
-        let accounts = self
-            .llm_list_accounts()
-            .await
-            .map_err(|err| err.into_octra())?;
+        let accounts = self.list_accounts().await.map_err(|err| err.into_octra())?;
         let virtual_keys = self
-            .llm_list_virtual_keys()
+            .list_virtual_keys()
             .await
             .map_err(|err| err.into_octra())?;
-        let policies = self.list_policies().await?;
+        let policy_rows = sqlx::query(
+            "SELECT id, name, scope, consumer_id, document, created_at, updated_at \
+             FROM policies ORDER BY name ASC, id ASC",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(|err| Error::Storage(format!("cannot load policies: {err}")))?;
+        let policies = policy_rows
+            .iter()
+            .map(crate::api_gateway::map_policy)
+            .collect::<Result<Vec<Policy>>>()?;
         Ok(LlmRuntimeData {
             providers,
             policies,
@@ -513,7 +527,7 @@ impl Storage {
 
     // Providers
 
-    pub async fn llm_list_providers(&self) -> LlmResult<Vec<LlmProviderRecord>> {
+    pub async fn list_providers(&self) -> LlmResult<Vec<LlmProviderRecord>> {
         let sql =
             format!("SELECT {PROVIDER_COLUMNS} FROM llm_providers ORDER BY priority ASC, name ASC");
         let rows = sqlx::query(&sql)
@@ -523,7 +537,7 @@ impl Storage {
         Ok(rows.iter().map(provider_from_row).collect())
     }
 
-    pub async fn llm_get_provider(&self, id: &str) -> LlmResult<Option<LlmProviderRecord>> {
+    pub async fn get_provider(&self, id: &str) -> LlmResult<Option<LlmProviderRecord>> {
         let sql = format!("SELECT {PROVIDER_COLUMNS} FROM llm_providers WHERE id = ?");
         let row = sqlx::query(&sql)
             .bind(id)
@@ -533,10 +547,7 @@ impl Storage {
         Ok(row.as_ref().map(provider_from_row))
     }
 
-    pub async fn llm_create_provider(
-        &self,
-        input: &LlmProviderInput,
-    ) -> LlmResult<LlmProviderRecord> {
+    pub async fn create_provider(&self, input: &LlmProviderInput) -> LlmResult<LlmProviderRecord> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO llm_providers (id, name, kind, protocol, auth_type, base_url, secret_ref, priority, config_json, enabled)
@@ -561,12 +572,12 @@ impl Storage {
                 conflict(err)
             }
         })?;
-        self.llm_get_provider(&id)
+        self.get_provider(&id)
             .await?
             .ok_or_else(|| backend(sqlx::Error::RowNotFound))
     }
 
-    pub async fn llm_update_provider(
+    pub async fn update_provider(
         &self,
         id: &str,
         input: &LlmProviderInput,
@@ -594,12 +605,12 @@ impl Storage {
         if affected == 0 {
             return Err(not_found("provider", id));
         }
-        self.llm_get_provider(id)
+        self.get_provider(id)
             .await?
             .ok_or_else(|| not_found("provider", id))
     }
 
-    pub async fn llm_delete_provider(&self, id: &str) -> LlmResult<bool> {
+    pub async fn delete_provider(&self, id: &str) -> LlmResult<bool> {
         let affected = sqlx::query("DELETE FROM llm_providers WHERE id = ?")
             .bind(id)
             .execute(self.pool())
@@ -609,7 +620,7 @@ impl Storage {
         Ok(affected > 0)
     }
 
-    pub async fn llm_provider_exists(&self, id: &str) -> LlmResult<bool> {
+    pub async fn provider_exists(&self, id: &str) -> LlmResult<bool> {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM llm_providers WHERE id = ?")
             .bind(id)
             .fetch_one(self.pool())
@@ -620,7 +631,7 @@ impl Storage {
 
     // Provider accounts
 
-    pub async fn llm_list_accounts(&self) -> LlmResult<Vec<LlmProviderAccountRecord>> {
+    pub async fn list_accounts(&self) -> LlmResult<Vec<LlmProviderAccountRecord>> {
         let sql = format!(
             "SELECT {ACCOUNT_COLUMNS} FROM llm_provider_accounts \
              ORDER BY provider_id ASC, priority ASC, name ASC"
@@ -632,7 +643,7 @@ impl Storage {
         Ok(rows.iter().map(account_from_row).collect())
     }
 
-    pub async fn llm_list_provider_accounts(
+    pub async fn list_provider_accounts(
         &self,
         provider_id: &str,
     ) -> LlmResult<Vec<LlmProviderAccountRecord>> {
@@ -648,7 +659,7 @@ impl Storage {
         Ok(rows.iter().map(account_from_row).collect())
     }
 
-    pub async fn llm_get_account(&self, id: &str) -> LlmResult<Option<LlmProviderAccountRecord>> {
+    pub async fn get_account(&self, id: &str) -> LlmResult<Option<LlmProviderAccountRecord>> {
         let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM llm_provider_accounts WHERE id = ?");
         let row = sqlx::query(&sql)
             .bind(id)
@@ -658,12 +669,12 @@ impl Storage {
         Ok(row.as_ref().map(account_from_row))
     }
 
-    pub async fn llm_create_account(
+    pub async fn create_account(
         &self,
         provider_id: &str,
         input: &LlmProviderAccountInput,
     ) -> LlmResult<LlmProviderAccountRecord> {
-        if !self.llm_provider_exists(provider_id).await? {
+        if !self.provider_exists(provider_id).await? {
             return Err(not_found("provider", provider_id));
         }
         validate_account_input(input)?;
@@ -687,12 +698,12 @@ impl Storage {
         .execute(self.pool())
         .await
         .map_err(conflict)?;
-        self.llm_get_account(&id)
+        self.get_account(&id)
             .await?
             .ok_or_else(|| backend(sqlx::Error::RowNotFound))
     }
 
-    pub async fn llm_update_account(
+    pub async fn update_account(
         &self,
         id: &str,
         input: &LlmProviderAccountInput,
@@ -721,12 +732,12 @@ impl Storage {
         if affected == 0 {
             return Err(not_found("account", id));
         }
-        self.llm_get_account(id)
+        self.get_account(id)
             .await?
             .ok_or_else(|| not_found("account", id))
     }
 
-    pub async fn llm_delete_account(&self, id: &str) -> LlmResult<bool> {
+    pub async fn delete_account(&self, id: &str) -> LlmResult<bool> {
         let affected = sqlx::query("DELETE FROM llm_provider_accounts WHERE id = ?")
             .bind(id)
             .execute(self.pool())
@@ -737,7 +748,7 @@ impl Storage {
     }
 
     /// Clears the rolling quota counter and the persisted cooldown.
-    pub async fn llm_reset_account_quota(&self, id: &str) -> LlmResult<bool> {
+    pub async fn reset_account_quota(&self, id: &str) -> LlmResult<bool> {
         let affected = sqlx::query(
             "UPDATE llm_provider_accounts SET quota_used = 0, quota_reset_at = NULL,
                  cooldown_until = NULL, last_error = NULL,
@@ -754,7 +765,7 @@ impl Storage {
 
     /// Adds one request's consumption to the account quota. The increment is
     /// applied to the counter matching the account's configured unit.
-    pub async fn llm_consume_account_quota(
+    pub async fn consume_account_quota(
         &self,
         id: &str,
         requests: i64,
@@ -781,7 +792,7 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn llm_set_account_cooldown(
+    pub async fn set_account_cooldown(
         &self,
         id: &str,
         until: &str,
@@ -802,7 +813,7 @@ impl Storage {
     }
 
     /// Persists a rolled quota period: counter back to zero, next boundary.
-    pub async fn llm_roll_account_quota(&self, id: &str, reset_at: &str) -> LlmResult<()> {
+    pub async fn roll_account_quota(&self, id: &str, reset_at: &str) -> LlmResult<()> {
         sqlx::query(
             "UPDATE llm_provider_accounts SET quota_used = 0, quota_reset_at = ?,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -817,7 +828,7 @@ impl Storage {
     }
 
     /// Aggregates persisted usage for an account since an ISO timestamp.
-    pub async fn llm_account_usage_since(
+    pub async fn account_usage_since(
         &self,
         account_id: &str,
         since: Option<&str>,
@@ -844,7 +855,7 @@ impl Storage {
 
     // Models
 
-    pub async fn llm_list_models(&self) -> LlmResult<Vec<LlmModelRecord>> {
+    pub async fn list_models(&self) -> LlmResult<Vec<LlmModelRecord>> {
         let sql = format!(
             "SELECT {MODEL_COLUMNS} FROM llm_models ORDER BY provider_id ASC, model_id ASC"
         );
@@ -855,7 +866,7 @@ impl Storage {
         Ok(rows.iter().map(model_from_row).collect())
     }
 
-    pub async fn llm_get_model(&self, id: &str) -> LlmResult<Option<LlmModelRecord>> {
+    pub async fn get_model(&self, id: &str) -> LlmResult<Option<LlmModelRecord>> {
         let sql = format!("SELECT {MODEL_COLUMNS} FROM llm_models WHERE id = ?");
         let row = sqlx::query(&sql)
             .bind(id)
@@ -865,8 +876,8 @@ impl Storage {
         Ok(row.as_ref().map(model_from_row))
     }
 
-    pub async fn llm_create_model(&self, input: &LlmModelInput) -> LlmResult<LlmModelRecord> {
-        if !self.llm_provider_exists(&input.provider_id).await? {
+    pub async fn create_model(&self, input: &LlmModelInput) -> LlmResult<LlmModelRecord> {
+        if !self.provider_exists(&input.provider_id).await? {
             return Err(not_found("provider", &input.provider_id));
         }
         let id = uuid::Uuid::new_v4().to_string();
@@ -888,17 +899,13 @@ impl Storage {
         .execute(self.pool())
         .await
         .map_err(conflict)?;
-        self.llm_get_model(&id)
+        self.get_model(&id)
             .await?
             .ok_or_else(|| backend(sqlx::Error::RowNotFound))
     }
 
-    pub async fn llm_update_model(
-        &self,
-        id: &str,
-        input: &LlmModelInput,
-    ) -> LlmResult<LlmModelRecord> {
-        if !self.llm_provider_exists(&input.provider_id).await? {
+    pub async fn update_model(&self, id: &str, input: &LlmModelInput) -> LlmResult<LlmModelRecord> {
+        if !self.provider_exists(&input.provider_id).await? {
             return Err(not_found("provider", &input.provider_id));
         }
         let affected = sqlx::query(
@@ -923,12 +930,12 @@ impl Storage {
         if affected == 0 {
             return Err(not_found("model", id));
         }
-        self.llm_get_model(id)
+        self.get_model(id)
             .await?
             .ok_or_else(|| not_found("model", id))
     }
 
-    pub async fn llm_delete_model(&self, id: &str) -> LlmResult<bool> {
+    pub async fn delete_model(&self, id: &str) -> LlmResult<bool> {
         let affected = sqlx::query("DELETE FROM llm_models WHERE id = ?")
             .bind(id)
             .execute(self.pool())
@@ -940,7 +947,7 @@ impl Storage {
 
     // Routing groups
 
-    pub async fn llm_list_routing_groups(&self) -> LlmResult<Vec<LlmRoutingGroupRecord>> {
+    pub async fn list_routing_groups(&self) -> LlmResult<Vec<LlmRoutingGroupRecord>> {
         let rows = sqlx::query(
             "SELECT id, name, strategy, created_at FROM llm_routing_groups ORDER BY name ASC",
         )
@@ -950,10 +957,7 @@ impl Storage {
         Ok(rows.iter().map(group_from_row).collect())
     }
 
-    pub async fn llm_get_routing_group(
-        &self,
-        id: &str,
-    ) -> LlmResult<Option<LlmRoutingGroupRecord>> {
+    pub async fn get_routing_group(&self, id: &str) -> LlmResult<Option<LlmRoutingGroupRecord>> {
         let row = sqlx::query(
             "SELECT id, name, strategy, created_at FROM llm_routing_groups WHERE id = ?",
         )
@@ -964,7 +968,7 @@ impl Storage {
         Ok(row.as_ref().map(group_from_row))
     }
 
-    pub async fn llm_create_routing_group(
+    pub async fn create_routing_group(
         &self,
         name: &str,
         strategy: &str,
@@ -977,12 +981,12 @@ impl Storage {
             .execute(self.pool())
             .await
             .map_err(conflict)?;
-        self.llm_get_routing_group(&id)
+        self.get_routing_group(&id)
             .await?
             .ok_or_else(|| backend(sqlx::Error::RowNotFound))
     }
 
-    pub async fn llm_update_routing_group(
+    pub async fn update_routing_group(
         &self,
         id: &str,
         name: &str,
@@ -1000,12 +1004,12 @@ impl Storage {
         if affected == 0 {
             return Err(not_found("routing group", id));
         }
-        self.llm_get_routing_group(id)
+        self.get_routing_group(id)
             .await?
             .ok_or_else(|| not_found("routing group", id))
     }
 
-    pub async fn llm_delete_routing_group(&self, id: &str) -> LlmResult<bool> {
+    pub async fn delete_routing_group(&self, id: &str) -> LlmResult<bool> {
         let affected = sqlx::query("DELETE FROM llm_routing_groups WHERE id = ?")
             .bind(id)
             .execute(self.pool())
@@ -1015,7 +1019,7 @@ impl Storage {
         Ok(affected > 0)
     }
 
-    pub async fn llm_group_exists(&self, id: &str) -> LlmResult<bool> {
+    pub async fn group_exists(&self, id: &str) -> LlmResult<bool> {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM llm_routing_groups WHERE id = ?")
             .bind(id)
             .fetch_one(self.pool())
@@ -1036,7 +1040,7 @@ impl Storage {
             return Ok(());
         };
         let account = self
-            .llm_get_account(account_id)
+            .get_account(account_id)
             .await?
             .ok_or_else(|| not_found("account", account_id))?;
         if account.provider_id != provider_id {
@@ -1047,7 +1051,7 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn llm_list_routing_targets(&self) -> LlmResult<Vec<LlmRoutingTargetRecord>> {
+    pub async fn list_routing_targets(&self) -> LlmResult<Vec<LlmRoutingTargetRecord>> {
         let rows = sqlx::query(
             "SELECT id, group_id, provider_id, model_id, account_id, weight, priority, position,
                  created_at, updated_at
@@ -1059,10 +1063,7 @@ impl Storage {
         Ok(rows.iter().map(target_from_row).collect())
     }
 
-    pub async fn llm_get_routing_target(
-        &self,
-        id: &str,
-    ) -> LlmResult<Option<LlmRoutingTargetRecord>> {
+    pub async fn get_routing_target(&self, id: &str) -> LlmResult<Option<LlmRoutingTargetRecord>> {
         let row = sqlx::query(
             "SELECT id, group_id, provider_id, model_id, account_id, weight, priority, position,
                  created_at, updated_at
@@ -1075,15 +1076,15 @@ impl Storage {
         Ok(row.as_ref().map(target_from_row))
     }
 
-    pub async fn llm_create_routing_target(
+    pub async fn create_routing_target(
         &self,
         group_id: &str,
         input: &LlmRoutingTargetInput,
     ) -> LlmResult<LlmRoutingTargetRecord> {
-        if !self.llm_group_exists(group_id).await? {
+        if !self.group_exists(group_id).await? {
             return Err(not_found("routing group", group_id));
         }
-        if !self.llm_provider_exists(&input.provider_id).await? {
+        if !self.provider_exists(&input.provider_id).await? {
             return Err(not_found("provider", &input.provider_id));
         }
         self.check_target_account(&input.provider_id, input.account_id.as_deref())
@@ -1105,17 +1106,17 @@ impl Storage {
         .execute(self.pool())
         .await
         .map_err(conflict)?;
-        self.llm_get_routing_target(&id)
+        self.get_routing_target(&id)
             .await?
             .ok_or_else(|| backend(sqlx::Error::RowNotFound))
     }
 
-    pub async fn llm_update_routing_target(
+    pub async fn update_routing_target(
         &self,
         id: &str,
         input: &LlmRoutingTargetInput,
     ) -> LlmResult<LlmRoutingTargetRecord> {
-        if !self.llm_provider_exists(&input.provider_id).await? {
+        if !self.provider_exists(&input.provider_id).await? {
             return Err(not_found("provider", &input.provider_id));
         }
         self.check_target_account(&input.provider_id, input.account_id.as_deref())
@@ -1140,12 +1141,12 @@ impl Storage {
         if affected == 0 {
             return Err(not_found("routing target", id));
         }
-        self.llm_get_routing_target(id)
+        self.get_routing_target(id)
             .await?
             .ok_or_else(|| not_found("routing target", id))
     }
 
-    pub async fn llm_delete_routing_target(&self, id: &str) -> LlmResult<bool> {
+    pub async fn delete_routing_target(&self, id: &str) -> LlmResult<bool> {
         let affected = sqlx::query("DELETE FROM llm_routing_targets WHERE id = ?")
             .bind(id)
             .execute(self.pool())
@@ -1157,7 +1158,7 @@ impl Storage {
 
     // Routes
 
-    pub async fn llm_list_routes(&self) -> LlmResult<Vec<LlmRouteRecord>> {
+    pub async fn list_routes(&self) -> LlmResult<Vec<LlmRouteRecord>> {
         let rows = sqlx::query(
             "SELECT id, virtual_model_id, routing_group_id, created_at, updated_at FROM llm_routes ORDER BY virtual_model_id ASC",
         )
@@ -1167,7 +1168,7 @@ impl Storage {
         Ok(rows.iter().map(route_from_row).collect())
     }
 
-    pub async fn llm_get_route(&self, id: &str) -> LlmResult<Option<LlmRouteRecord>> {
+    pub async fn get_route(&self, id: &str) -> LlmResult<Option<LlmRouteRecord>> {
         let row = sqlx::query(
             "SELECT id, virtual_model_id, routing_group_id, created_at, updated_at FROM llm_routes WHERE id = ?",
         )
@@ -1178,13 +1179,13 @@ impl Storage {
         Ok(row.as_ref().map(route_from_row))
     }
 
-    pub async fn llm_create_route(
+    pub async fn create_route(
         &self,
         virtual_model_id: &str,
         routing_group_id: Option<&str>,
     ) -> LlmResult<LlmRouteRecord> {
         if let Some(group_id) = routing_group_id
-            && !self.llm_group_exists(group_id).await?
+            && !self.group_exists(group_id).await?
         {
             return Err(not_found("routing group", group_id));
         }
@@ -1198,19 +1199,19 @@ impl Storage {
         .execute(self.pool())
         .await
         .map_err(conflict)?;
-        self.llm_get_route(&id)
+        self.get_route(&id)
             .await?
             .ok_or_else(|| backend(sqlx::Error::RowNotFound))
     }
 
-    pub async fn llm_update_route(
+    pub async fn update_route(
         &self,
         id: &str,
         virtual_model_id: &str,
         routing_group_id: Option<&str>,
     ) -> LlmResult<LlmRouteRecord> {
         if let Some(group_id) = routing_group_id
-            && !self.llm_group_exists(group_id).await?
+            && !self.group_exists(group_id).await?
         {
             return Err(not_found("routing group", group_id));
         }
@@ -1228,12 +1229,12 @@ impl Storage {
         if affected == 0 {
             return Err(not_found("route", id));
         }
-        self.llm_get_route(id)
+        self.get_route(id)
             .await?
             .ok_or_else(|| not_found("route", id))
     }
 
-    pub async fn llm_delete_route(&self, id: &str) -> LlmResult<bool> {
+    pub async fn delete_route(&self, id: &str) -> LlmResult<bool> {
         let affected = sqlx::query("DELETE FROM llm_routes WHERE id = ?")
             .bind(id)
             .execute(self.pool())
@@ -1245,7 +1246,7 @@ impl Storage {
 
     // Virtual keys
 
-    pub async fn llm_list_virtual_keys(&self) -> LlmResult<Vec<LlmVirtualKeyRecord>> {
+    pub async fn list_virtual_keys(&self) -> LlmResult<Vec<LlmVirtualKeyRecord>> {
         let sql = format!(
             "SELECT {VIRTUAL_KEY_COLUMNS} FROM llm_virtual_keys ORDER BY created_at DESC, rowid DESC"
         );
@@ -1256,7 +1257,7 @@ impl Storage {
         Ok(rows.iter().map(virtual_key_from_row).collect())
     }
 
-    pub async fn llm_get_virtual_key(&self, id: &str) -> LlmResult<Option<LlmVirtualKeyRecord>> {
+    pub async fn get_virtual_key(&self, id: &str) -> LlmResult<Option<LlmVirtualKeyRecord>> {
         let sql = format!("SELECT {VIRTUAL_KEY_COLUMNS} FROM llm_virtual_keys WHERE id = ?");
         let row = sqlx::query(&sql)
             .bind(id)
@@ -1266,7 +1267,7 @@ impl Storage {
         Ok(row.as_ref().map(virtual_key_from_row))
     }
 
-    pub async fn llm_find_virtual_key_by_hash(
+    pub async fn find_virtual_key_by_hash(
         &self,
         key_hash: &str,
     ) -> LlmResult<Option<LlmVirtualKeyRecord>> {
@@ -1279,7 +1280,7 @@ impl Storage {
         Ok(row.as_ref().map(virtual_key_from_row))
     }
 
-    pub async fn llm_create_virtual_key(
+    pub async fn create_virtual_key(
         &self,
         input: &LlmVirtualKeyInput,
     ) -> LlmResult<LlmVirtualKeyRecord> {
@@ -1309,12 +1310,12 @@ impl Storage {
         .execute(self.pool())
         .await
         .map_err(conflict)?;
-        self.llm_get_virtual_key(&id)
+        self.get_virtual_key(&id)
             .await?
             .ok_or_else(|| backend(sqlx::Error::RowNotFound))
     }
 
-    pub async fn llm_update_virtual_key(
+    pub async fn update_virtual_key(
         &self,
         id: &str,
         input: &LlmVirtualKeyInput,
@@ -1336,12 +1337,12 @@ impl Storage {
         if affected == 0 {
             return Err(not_found("virtual key", id));
         }
-        self.llm_get_virtual_key(id)
+        self.get_virtual_key(id)
             .await?
             .ok_or_else(|| not_found("virtual key", id))
     }
 
-    pub async fn llm_delete_virtual_key(&self, id: &str) -> LlmResult<bool> {
+    pub async fn delete_virtual_key(&self, id: &str) -> LlmResult<bool> {
         let affected = sqlx::query("DELETE FROM llm_virtual_keys WHERE id = ?")
             .bind(id)
             .execute(self.pool())
@@ -1351,7 +1352,7 @@ impl Storage {
         Ok(affected > 0)
     }
 
-    pub async fn llm_touch_virtual_key(&self, id: &str) -> LlmResult<()> {
+    pub async fn touch_virtual_key(&self, id: &str) -> LlmResult<()> {
         sqlx::query("UPDATE llm_virtual_keys SET last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
             .bind(id)
             .execute(self.pool())
@@ -1363,7 +1364,7 @@ impl Storage {
     // Usage
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn llm_insert_usage(&self, input: &LlmUsageInput) -> LlmResult<()> {
+    pub async fn insert_usage(&self, input: &LlmUsageInput) -> LlmResult<()> {
         sqlx::query(
             "INSERT INTO llm_usage (request_id, virtual_model_id, provider_id, model_id,
                  account_id, account_name, api_key_id, protocol, status_code, latency_ms,
@@ -1396,7 +1397,7 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn llm_list_usage(&self, limit: i64) -> LlmResult<Vec<LlmUsageRecord>> {
+    pub async fn list_usage(&self, limit: i64) -> LlmResult<Vec<LlmUsageRecord>> {
         let rows = sqlx::query(
             "SELECT id, request_id, virtual_model_id, provider_id, model_id, account_id,
                  account_name, api_key_id, protocol, status_code, latency_ms, input_tokens,
@@ -1411,7 +1412,7 @@ impl Storage {
         Ok(rows.iter().map(usage_from_row).collect())
     }
 
-    pub async fn llm_usage_summary(&self) -> LlmResult<Vec<LlmUsageSummaryRow>> {
+    pub async fn usage_summary(&self) -> LlmResult<Vec<LlmUsageSummaryRow>> {
         let rows = sqlx::query(
             "SELECT virtual_model_id, COUNT(*) AS requests,
                  SUM(CASE WHEN error IS NOT NULL OR status_code >= 400 THEN 1 ELSE 0 END) AS errors,
@@ -1433,7 +1434,7 @@ impl Storage {
             .collect())
     }
 
-    pub async fn llm_usage_totals(&self) -> LlmResult<LlmUsageSummaryRow> {
+    pub async fn usage_totals(&self) -> LlmResult<LlmUsageSummaryRow> {
         let row = sqlx::query(
             "SELECT COUNT(*) AS requests,
                  SUM(CASE WHEN error IS NOT NULL OR status_code >= 400 THEN 1 ELSE 0 END) AS errors,
@@ -1456,6 +1457,7 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Storage;
 
     async fn storage() -> Storage {
         Storage::connect_in_memory().await.unwrap()
@@ -1479,17 +1481,18 @@ mod tests {
     async fn provider_crud_round_trip() {
         let storage = storage().await;
         let created = storage
-            .llm_create_provider(&provider("openai"))
+            .llm
+            .create_provider(&provider("openai"))
             .await
             .unwrap();
         assert_eq!(created.protocol, "openai");
         assert!(created.enabled);
 
-        assert_eq!(storage.llm_list_providers().await.unwrap().len(), 1);
+        assert_eq!(storage.llm.list_providers().await.unwrap().len(), 1);
 
         // Duplicate names conflict.
         assert!(matches!(
-            storage.llm_create_provider(&provider("openai")).await,
+            storage.llm.create_provider(&provider("openai")).await,
             Err(LlmStorageError::Conflict(_))
         ));
 
@@ -1497,7 +1500,8 @@ mod tests {
         update.priority = 5;
         update.enabled = false;
         let updated = storage
-            .llm_update_provider(&created.id, &update)
+            .llm
+            .update_provider(&created.id, &update)
             .await
             .unwrap();
         assert_eq!(updated.name, "openai-main");
@@ -1505,12 +1509,12 @@ mod tests {
         assert!(!updated.enabled);
 
         assert!(matches!(
-            storage.llm_update_provider("missing", &update).await,
+            storage.llm.update_provider("missing", &update).await,
             Err(LlmStorageError::Missing(_))
         ));
 
-        assert!(storage.llm_delete_provider(&created.id).await.unwrap());
-        assert!(!storage.llm_delete_provider(&created.id).await.unwrap());
+        assert!(storage.llm.delete_provider(&created.id).await.unwrap());
+        assert!(!storage.llm.delete_provider(&created.id).await.unwrap());
     }
 
     #[tokio::test]
@@ -1528,48 +1532,53 @@ mod tests {
             enabled: true,
         };
         assert!(matches!(
-            storage.llm_create_model(&model).await,
+            storage.llm.create_model(&model).await,
             Err(LlmStorageError::Missing(_))
         ));
 
         let created_provider = storage
-            .llm_create_provider(&provider("openai"))
+            .llm
+            .create_provider(&provider("openai"))
             .await
             .unwrap();
         model.provider_id = created_provider.id.clone();
-        let created = storage.llm_create_model(&model).await.unwrap();
+        let created = storage.llm.create_model(&model).await.unwrap();
         assert_eq!(created.model_id, "gpt-4o");
         assert!(matches!(
-            storage.llm_create_model(&model).await,
+            storage.llm.create_model(&model).await,
             Err(LlmStorageError::Conflict(_))
         ));
 
-        assert_eq!(storage.llm_list_models().await.unwrap().len(), 1);
-        assert!(storage.llm_delete_model(&created.id).await.unwrap());
+        assert_eq!(storage.llm.list_models().await.unwrap().len(), 1);
+        assert!(storage.llm.delete_model(&created.id).await.unwrap());
 
         // Deleting the provider cascades to its models.
-        let model2 = storage.llm_create_model(&model).await.unwrap();
+        let model2 = storage.llm.create_model(&model).await.unwrap();
         storage
-            .llm_delete_provider(&created_provider.id)
+            .llm
+            .delete_provider(&created_provider.id)
             .await
             .unwrap();
-        assert!(storage.llm_get_model(&model2.id).await.unwrap().is_none());
+        assert!(storage.llm.get_model(&model2.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn routing_group_targets_and_routes() {
         let storage = storage().await;
         let provider = storage
-            .llm_create_provider(&provider("openai"))
+            .llm
+            .create_provider(&provider("openai"))
             .await
             .unwrap();
         let group = storage
-            .llm_create_routing_group("primary", "priority")
+            .llm
+            .create_routing_group("primary", "priority")
             .await
             .unwrap();
 
         let target = storage
-            .llm_create_routing_target(
+            .llm
+            .create_routing_target(
                 &group.id,
                 &LlmRoutingTargetInput {
                     provider_id: provider.id.clone(),
@@ -1587,7 +1596,8 @@ mod tests {
 
         assert!(matches!(
             storage
-                .llm_create_routing_target(
+                .llm
+                .create_routing_target(
                     "ghost-group",
                     &LlmRoutingTargetInput {
                         provider_id: provider.id.clone(),
@@ -1603,33 +1613,35 @@ mod tests {
         ));
 
         let route = storage
-            .llm_create_route("octra-default", Some(&group.id))
+            .llm
+            .create_route("octra-default", Some(&group.id))
             .await
             .unwrap();
         assert_eq!(route.virtual_model_id, "octra-default");
         assert!(matches!(
-            storage.llm_create_route("octra-default", None).await,
+            storage.llm.create_route("octra-default", None).await,
             Err(LlmStorageError::Conflict(_))
         ));
         assert!(matches!(
-            storage.llm_create_route("other", Some("ghost")).await,
+            storage.llm.create_route("other", Some("ghost")).await,
             Err(LlmStorageError::Missing(_))
         ));
 
         let updated = storage
-            .llm_update_route(&route.id, "octra-default", None)
+            .llm
+            .update_route(&route.id, "octra-default", None)
             .await
             .unwrap();
         assert!(updated.routing_group_id.is_none());
 
-        let data = storage.llm_load_runtime_data().await.unwrap();
+        let data = storage.llm.load_runtime_data().await.unwrap();
         assert_eq!(data.providers.len(), 1);
         assert_eq!(data.targets.len(), 1);
         assert_eq!(data.routes.len(), 1);
 
         // Deleting the group cascades to targets and nulls the route reference.
-        storage.llm_delete_routing_group(&group.id).await.unwrap();
-        let data = storage.llm_load_runtime_data().await.unwrap();
+        storage.llm.delete_routing_group(&group.id).await.unwrap();
+        let data = storage.llm.load_runtime_data().await.unwrap();
         assert!(data.groups.is_empty());
         assert!(data.targets.is_empty());
     }
@@ -1638,7 +1650,8 @@ mod tests {
     async fn virtual_keys_and_usage() {
         let storage = storage().await;
         let key = storage
-            .llm_create_virtual_key(&LlmVirtualKeyInput {
+            .llm
+            .create_virtual_key(&LlmVirtualKeyInput {
                 name: "default".to_string(),
                 key_prefix: "octra-abc".to_string(),
                 key_hash: "deadbeef".to_string(),
@@ -1653,17 +1666,19 @@ mod tests {
         assert!(key.expires_at.is_none());
 
         let found = storage
-            .llm_find_virtual_key_by_hash("deadbeef")
+            .llm
+            .find_virtual_key_by_hash("deadbeef")
             .await
             .unwrap();
         assert_eq!(found.unwrap().id, key.id);
 
-        storage.llm_touch_virtual_key(&key.id).await.unwrap();
-        let touched = storage.llm_get_virtual_key(&key.id).await.unwrap().unwrap();
+        storage.llm.touch_virtual_key(&key.id).await.unwrap();
+        let touched = storage.llm.get_virtual_key(&key.id).await.unwrap().unwrap();
         assert!(touched.last_used_at.is_some());
 
         storage
-            .llm_insert_usage(&LlmUsageInput {
+            .llm
+            .insert_usage(&LlmUsageInput {
                 request_id: "req-1".into(),
                 virtual_model_id: "octra-default".into(),
                 provider_id: Some("prov-1".into()),
@@ -1679,7 +1694,8 @@ mod tests {
             .await
             .unwrap();
         storage
-            .llm_insert_usage(&LlmUsageInput {
+            .llm
+            .insert_usage(&LlmUsageInput {
                 request_id: "req-2".into(),
                 virtual_model_id: "octra-default".into(),
                 protocol: Some("anthropic".into()),
@@ -1691,25 +1707,26 @@ mod tests {
             .await
             .unwrap();
 
-        let usage = storage.llm_list_usage(10).await.unwrap();
+        let usage = storage.llm.list_usage(10).await.unwrap();
         assert_eq!(usage.len(), 2);
         assert_eq!(usage[0].request_id, "req-2");
         assert_eq!(usage[1].input_tokens, 100);
 
-        let summary = storage.llm_usage_summary().await.unwrap();
+        let summary = storage.llm.usage_summary().await.unwrap();
         assert_eq!(summary.len(), 1);
         assert_eq!(summary[0].requests, 2);
         assert_eq!(summary[0].errors, 1);
         assert_eq!(summary[0].input_tokens, 100);
         assert_eq!(summary[0].output_tokens, 50);
 
-        let totals = storage.llm_usage_totals().await.unwrap();
+        let totals = storage.llm.usage_totals().await.unwrap();
         assert_eq!(totals.requests, 2);
 
-        assert!(storage.llm_delete_virtual_key(&key.id).await.unwrap());
+        assert!(storage.llm.delete_virtual_key(&key.id).await.unwrap());
         assert!(
             storage
-                .llm_find_virtual_key_by_hash("deadbeef")
+                .llm
+                .find_virtual_key_by_hash("deadbeef")
                 .await
                 .unwrap()
                 .is_none()
