@@ -2860,8 +2860,11 @@ dependencies = [
  "octra-llm-plugin-api",
  "octra-llm-plugin-runtime",
  "octra-plugin-api",
+ "regex",
+ "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

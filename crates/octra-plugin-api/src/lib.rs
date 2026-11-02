@@ -144,6 +144,8 @@ pub struct PluginManifest {
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
     #[serde(default)]
+    pub fail_policy: FailPolicy,
+    #[serde(default)]
     pub capabilities: Vec<Capability>,
     #[serde(default)]
     pub config_schema: Option<Value>,
@@ -159,8 +161,10 @@ impl PluginManifest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FailPolicy {
+    #[default]
     Open,
     Closed,
 }

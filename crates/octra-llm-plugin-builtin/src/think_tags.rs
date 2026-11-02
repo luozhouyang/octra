@@ -147,6 +147,7 @@ fn longest_suffix_prefix(value: &str, tag: &str) -> usize {
 mod tests {
     use super::*;
     use octra_llm_core::{FinishReason, Protocol};
+    use octra_llm_plugin_api::LlmRequestMeta;
 
     struct Harness {
         plugin: Arc<dyn LlmPlugin>,
@@ -162,9 +163,15 @@ mod tests {
         }
 
         async fn event(&mut self, mut event: StreamEvent) -> Vec<StreamEvent> {
-            let mut cx = LlmStreamContext {
+            let meta = LlmRequestMeta {
                 request_id: "r",
                 ingress: Protocol::Openai,
+                consumer_id: None,
+                virtual_key_id: None,
+                session_id: None,
+            };
+            let mut cx = LlmStreamContext {
+                meta: &meta,
                 event: &mut event,
                 state: &mut self.state,
             };
@@ -238,9 +245,15 @@ mod tests {
         let mut event = StreamEvent::TextDelta {
             text: "<think>x</think>".into(),
         };
-        let mut cx = LlmStreamContext {
+        let meta = LlmRequestMeta {
             request_id: "r",
             ingress: Protocol::Openai,
+            consumer_id: None,
+            virtual_key_id: None,
+            session_id: None,
+        };
+        let mut cx = LlmStreamContext {
+            meta: &meta,
             event: &mut event,
             state: &mut state,
         };

@@ -43,6 +43,7 @@ pub(crate) fn manifest(
         priority,
         description: description.to_string(),
         timeout_ms: 250,
+        fail_policy: octra_plugin_api::FailPolicy::Open,
         capabilities,
         config_schema: Some(config_schema),
     }

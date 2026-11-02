@@ -459,6 +459,7 @@ mod tests {
             priority,
             description: String::new(),
             timeout_ms: 1000,
+            fail_policy: octra_plugin_api::FailPolicy::Open,
             capabilities: vec![Capability::RequestHeaders],
             config_schema: None,
         }

@@ -4,16 +4,21 @@
 //! mutation. The data plane only performs map lookups and in-memory calls, so
 //! configuration changes never parse JSON on the request path.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+// Rejections carry the full gateway error, as in `octra-llm-gateway`; boxing
+// would only obscure the data-plane flow.
+#![allow(clippy::result_large_err)]
+
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use octra_core::{Error, Result};
-use octra_llm_core::{GatewayError, Protocol, StreamEvent};
+use octra_llm_core::{GatewayError, StreamEvent};
 use octra_llm_plugin_api::{
-    LlmAction, LlmErrorContext, LlmLogContext, LlmPlugin, LlmPluginFactory, LlmPluginResult,
-    LlmProviderRequestContext, LlmRequestContext, LlmResponseContext, LlmScope, LlmStreamAction,
-    LlmStreamContext, LlmStreamResult,
+    LlmAction, LlmErrorContext, LlmLogContext, LlmLogEvent, LlmPlugin, LlmPluginFactory,
+    LlmPluginResult, LlmProviderInfo, LlmProviderRequestContext, LlmRequestContext, LlmRequestMeta,
+    LlmRequestState, LlmResponseContext, LlmScope, LlmStreamAction, LlmStreamContext,
+    LlmStreamResult,
 };
 use octra_plugin_api::{FailPolicy, PluginError, PluginManifest};
 use octra_storage::Storage;
@@ -69,6 +74,7 @@ struct LlmEntry {
     name: String,
     priority: i64,
     timeout: Duration,
+    fail_policy: FailPolicy,
     plugin: Arc<dyn LlmPlugin>,
 }
 
@@ -94,6 +100,9 @@ pub struct LlmPluginChain {
     entries: Vec<LlmEntry>,
 }
 
+/// Upper bound on the number of events a plugin may emit for one input event.
+const MAX_STREAM_EVENTS: usize = 256;
+
 impl LlmPluginChain {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -105,10 +114,17 @@ impl LlmPluginChain {
 
     pub async fn on_request(
         &self,
-        cx: &mut LlmRequestContext<'_>,
+        meta: &LlmRequestMeta<'_>,
+        request: &mut octra_llm_core::ChatRequest,
+        state: &mut LlmRequestState,
     ) -> std::result::Result<Option<GatewayError>, LlmChainError> {
         for entry in &self.entries {
-            match run_stage(entry, entry.plugin.on_request(cx)).await? {
+            let mut cx = LlmRequestContext {
+                meta,
+                request,
+                state: state.slot(&entry.name),
+            };
+            match run_stage(entry, entry.plugin.on_request(&mut cx)).await? {
                 LlmAction::Continue => {}
                 LlmAction::Reject(error) => return Ok(Some(error)),
             }
@@ -118,10 +134,19 @@ impl LlmPluginChain {
 
     pub async fn on_provider_request(
         &self,
-        cx: &mut LlmProviderRequestContext<'_>,
+        meta: &LlmRequestMeta<'_>,
+        provider: &LlmProviderInfo<'_>,
+        request: &mut octra_llm_core::ChatRequest,
+        state: &mut LlmRequestState,
     ) -> std::result::Result<Option<GatewayError>, LlmChainError> {
         for entry in &self.entries {
-            match run_stage(entry, entry.plugin.on_provider_request(cx)).await? {
+            let mut cx = LlmProviderRequestContext {
+                meta,
+                provider,
+                request,
+                state: state.slot(&entry.name),
+            };
+            match run_stage(entry, entry.plugin.on_provider_request(&mut cx)).await? {
                 LlmAction::Continue => {}
                 LlmAction::Reject(error) => return Ok(Some(error)),
             }
@@ -129,12 +154,24 @@ impl LlmPluginChain {
         Ok(None)
     }
 
+    /// Response stages unwind in reverse order so reversible transforms nest.
     pub async fn on_response(
         &self,
-        cx: &mut LlmResponseContext<'_>,
+        meta: &LlmRequestMeta<'_>,
+        request_model: &str,
+        response: &mut octra_llm_core::ChatResponse,
+        usage: &mut octra_llm_core::Usage,
+        state: &mut LlmRequestState,
     ) -> std::result::Result<Option<GatewayError>, LlmChainError> {
-        for entry in &self.entries {
-            match run_stage(entry, entry.plugin.on_response(cx)).await? {
+        for entry in self.entries.iter().rev() {
+            let mut cx = LlmResponseContext {
+                meta,
+                request_model,
+                response,
+                usage,
+                state: state.slot(&entry.name),
+            };
+            match run_stage(entry, entry.plugin.on_response(&mut cx)).await? {
                 LlmAction::Continue => {}
                 LlmAction::Reject(error) => return Ok(Some(error)),
             }
@@ -144,13 +181,24 @@ impl LlmPluginChain {
 
     pub async fn on_error(
         &self,
-        cx: &mut LlmErrorContext<'_>,
+        meta: &LlmRequestMeta<'_>,
+        provider_id: Option<&str>,
+        account_id: Option<&str>,
+        error: &mut GatewayError,
+        state: &mut LlmRequestState,
     ) -> std::result::Result<(), LlmChainError> {
-        for entry in &self.entries {
-            match run_stage(entry, entry.plugin.on_error(cx)).await? {
+        for entry in self.entries.iter().rev() {
+            let mut cx = LlmErrorContext {
+                meta,
+                provider_id,
+                account_id,
+                error,
+                state: state.slot(&entry.name),
+            };
+            match run_stage(entry, entry.plugin.on_error(&mut cx)).await? {
                 LlmAction::Continue => {}
-                LlmAction::Reject(error) => {
-                    *cx.error = error;
+                LlmAction::Reject(replacement) => {
+                    *cx.error = replacement;
                 }
             }
         }
@@ -158,37 +206,45 @@ impl LlmPluginChain {
     }
 
     /// Runs observational log hooks; failures never affect the response.
-    pub async fn on_log(&self, cx: &LlmLogContext<'_>) {
-        for entry in &self.entries {
-            if tokio::time::timeout(entry.timeout, entry.plugin.on_log(cx))
+    pub async fn on_log(
+        &self,
+        meta: &LlmRequestMeta<'_>,
+        event: &LlmLogEvent<'_>,
+        state: &mut LlmRequestState,
+    ) {
+        for entry in self.entries.iter().rev() {
+            let mut cx = LlmLogContext {
+                meta,
+                event,
+                state: state.slot(&entry.name),
+            };
+            if tokio::time::timeout(entry.timeout, entry.plugin.on_log(&cx))
                 .await
                 .is_err()
             {
                 tracing::warn!(plugin = %entry.name, "LLM plugin log hook timed out");
             }
+            let _ = &mut cx;
         }
     }
 
-    /// Runs every event through each plugin, letting a plugin split or drop
-    /// events. State is preserved per plugin for the lifetime of one stream.
+    /// Runs every event through each plugin in reverse order, letting a plugin
+    /// split or drop events. State is preserved per plugin for one stream.
     pub async fn on_stream_events(
         &self,
-        request_id: &str,
-        ingress: Protocol,
+        meta: &LlmRequestMeta<'_>,
         events: Vec<StreamEvent>,
-        state: &mut LlmStreamState,
+        state: &mut LlmRequestState,
     ) -> std::result::Result<Vec<StreamEvent>, LlmChainError> {
         let mut current = events;
-        for entry in &self.entries {
+        for entry in self.entries.iter().rev() {
             let mut next = Vec::with_capacity(current.len());
             for mut event in current {
-                let slot = state.slot(&entry.name);
                 let action = {
                     let mut cx = LlmStreamContext {
-                        request_id,
-                        ingress,
+                        meta,
                         event: &mut event,
-                        state: slot,
+                        state: state.slot(&entry.name),
                     };
                     run_stream_stage(entry, entry.plugin.on_stream_event(&mut cx)).await?
                 };
@@ -197,26 +253,16 @@ impl LlmPluginChain {
                     LlmStreamAction::Replace(events) => next.extend(events),
                     LlmStreamAction::Reject(error) => return Err(LlmChainError::Rejected(error)),
                 }
+                if next.len() > MAX_STREAM_EVENTS {
+                    return Err(LlmChainError::Plugin(PluginError::fail_closed(format!(
+                        "LLM plugin '{}' expanded a stream event beyond {MAX_STREAM_EVENTS}",
+                        entry.name
+                    ))));
+                }
             }
             current = next;
         }
         Ok(current)
-    }
-}
-
-/// Per-stream plugin state.
-#[derive(Debug, Default)]
-pub struct LlmStreamState {
-    values: BTreeMap<String, Value>,
-}
-
-impl LlmStreamState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn slot(&mut self, name: &str) -> &mut Value {
-        self.values.entry(name.to_string()).or_insert(Value::Null)
     }
 }
 
@@ -226,17 +272,8 @@ where
 {
     match tokio::time::timeout(entry.timeout, future).await {
         Ok(Ok(action)) => Ok(action),
-        Ok(Err(error)) => match error.fail_policy {
-            FailPolicy::Open => {
-                tracing::warn!(plugin = %entry.name, error = %error, "LLM plugin failed; continuing");
-                Ok(LlmAction::Continue)
-            }
-            FailPolicy::Closed => Err(LlmChainError::Plugin(error)),
-        },
-        Err(_) => Err(LlmChainError::Plugin(PluginError::fail_closed(format!(
-            "LLM plugin '{}' timed out",
-            entry.name
-        )))),
+        Ok(Err(error)) => handle_plugin_error(entry, error),
+        Err(_) => timeout_error(entry),
     }
 }
 
@@ -249,17 +286,37 @@ where
 {
     match tokio::time::timeout(entry.timeout, future).await {
         Ok(Ok(action)) => Ok(action),
-        Ok(Err(error)) => match error.fail_policy {
-            FailPolicy::Open => {
-                tracing::warn!(plugin = %entry.name, error = %error, "LLM stream plugin failed; continuing");
-                Ok(LlmStreamAction::Continue)
-            }
-            FailPolicy::Closed => Err(LlmChainError::Plugin(error)),
+        Ok(Err(error)) => match handle_plugin_error(entry, error)? {
+            LlmAction::Continue => Ok(LlmStreamAction::Continue),
+            LlmAction::Reject(_) => unreachable!("stream errors never reject this way"),
         },
-        Err(_) => Err(LlmChainError::Plugin(PluginError::fail_closed(format!(
-            "LLM plugin '{}' timed out",
-            entry.name
-        )))),
+        Err(_) => match timeout_error(entry)? {
+            LlmAction::Continue => Ok(LlmStreamAction::Continue),
+            LlmAction::Reject(_) => unreachable!("stream timeouts never reject this way"),
+        },
+    }
+}
+
+fn handle_plugin_error(
+    entry: &LlmEntry,
+    error: PluginError,
+) -> std::result::Result<LlmAction, LlmChainError> {
+    let closed = entry.fail_policy == FailPolicy::Closed || error.fail_policy == FailPolicy::Closed;
+    if closed {
+        Err(LlmChainError::Plugin(error))
+    } else {
+        tracing::warn!(plugin = %entry.name, error = %error, "LLM plugin failed; continuing");
+        Ok(LlmAction::Continue)
+    }
+}
+
+fn timeout_error(entry: &LlmEntry) -> std::result::Result<LlmAction, LlmChainError> {
+    let error = PluginError::fail_closed(format!("LLM plugin '{}' timed out", entry.name));
+    if entry.fail_policy == FailPolicy::Closed {
+        Err(LlmChainError::Plugin(error))
+    } else {
+        tracing::warn!(plugin = %entry.name, "LLM plugin timed out; continuing");
+        Ok(LlmAction::Continue)
     }
 }
 
@@ -387,12 +444,14 @@ fn compile_config(
             plugin.name
         )));
     }
+    let manifest = instance.manifest();
     Ok(Some((
         (scope, config.scope_id.clone()),
         LlmEntry {
             name: plugin.name.clone(),
             priority: plugin.priority,
-            timeout: instance.manifest().timeout(),
+            timeout: manifest.timeout(),
+            fail_policy: manifest.fail_policy,
             plugin: instance,
         },
     )))
@@ -483,7 +542,7 @@ impl LlmPluginRuntime {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use octra_llm_core::{ChatRequest, ChatResponse, FinishReason, Usage};
+    use octra_llm_core::{ChatRequest, ChatResponse, FinishReason, Protocol, Usage};
     use octra_llm_plugin_api::LlmPluginResult;
     use octra_plugin_api::{Capability, PluginKind, PluginRuntimeKind};
 
@@ -530,6 +589,7 @@ mod tests {
             priority: 0,
             description: String::new(),
             timeout_ms: 100,
+            fail_policy: FailPolicy::Open,
             capabilities: Vec::<Capability>::new(),
             config_schema: None,
         }
@@ -615,14 +675,21 @@ mod tests {
         let chains = LlmPluginChains::compile(data, &registry()).unwrap();
         let chain = chains.chain_for(None, None, "m", None);
         let mut request = ChatRequest::new("m", Vec::new());
-        let mut cx = LlmRequestContext {
+        let meta = LlmRequestMeta {
             request_id: "r",
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
-            request: &mut request,
+            session_id: None,
         };
-        assert!(chain.on_request(&mut cx).await.unwrap().is_none());
+        let mut state = LlmRequestState::new();
+        assert!(
+            chain
+                .on_request(&meta, &mut request, &mut state)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(request.extra.get("marked"), Some(&Value::Bool(true)));
     }
 
@@ -678,17 +745,260 @@ mod tests {
         };
         let chains = LlmPluginChains::compile(data, &registry).unwrap();
         let chain = chains.chain_for(None, None, "m", None);
-        let mut state = LlmStreamState::new();
+        let meta = LlmRequestMeta {
+            request_id: "r",
+            ingress: Protocol::Openai,
+            consumer_id: None,
+            virtual_key_id: None,
+            session_id: None,
+        };
+        let mut state = LlmRequestState::new();
         let events = chain
             .on_stream_events(
-                "r",
-                Protocol::Openai,
+                &meta,
                 vec![StreamEvent::TextDelta { text: "hi".into() }],
                 &mut state,
             )
             .await
             .unwrap();
         assert_eq!(events.len(), 2);
+    }
+
+    struct Recorder {
+        manifest: PluginManifest,
+        log: Arc<parking_lot::Mutex<Vec<String>>>,
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl LlmPlugin for Recorder {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn on_request(&self, _cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
+            self.log.lock().push(format!("request:{}", self.name));
+            Ok(LlmAction::Continue)
+        }
+
+        async fn on_response(&self, _cx: &mut LlmResponseContext<'_>) -> LlmPluginResult {
+            self.log.lock().push(format!("response:{}", self.name));
+            Ok(LlmAction::Continue)
+        }
+    }
+
+    struct RecorderFactory {
+        manifest: PluginManifest,
+        log: Arc<parking_lot::Mutex<Vec<String>>>,
+        name: &'static str,
+    }
+
+    impl LlmPluginFactory for RecorderFactory {
+        fn manifest(&self) -> PluginManifest {
+            self.manifest.clone()
+        }
+
+        fn create(&self, _config: Value) -> std::result::Result<Arc<dyn LlmPlugin>, PluginError> {
+            Ok(Arc::new(Recorder {
+                manifest: self.manifest.clone(),
+                log: self.log.clone(),
+                name: self.name,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn response_stage_unwinds_in_reverse() {
+        let log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let mut registry = LlmPluginRegistry::new();
+        registry.register(RecorderFactory {
+            manifest: manifest("alpha"),
+            log: log.clone(),
+            name: "alpha",
+        });
+        registry.register(RecorderFactory {
+            manifest: manifest("beta"),
+            log: log.clone(),
+            name: "beta",
+        });
+        let data = PluginData {
+            plugins: vec![
+                plugin("alpha", "p1", "llm", true),
+                plugin("beta", "p2", "llm", true),
+            ],
+            configs: vec![
+                config("c1", "p1", "global", ""),
+                config("c2", "p2", "global", ""),
+            ],
+        };
+        let chains = LlmPluginChains::compile(data, &registry).unwrap();
+        let chain = chains.chain_for(None, None, "m", None);
+        let meta = LlmRequestMeta {
+            request_id: "r",
+            ingress: Protocol::Openai,
+            consumer_id: None,
+            virtual_key_id: None,
+            session_id: None,
+        };
+        let mut request = ChatRequest::new("m", Vec::new());
+        let mut state = LlmRequestState::new();
+        chain
+            .on_request(&meta, &mut request, &mut state)
+            .await
+            .unwrap();
+        let mut response = ChatResponse::new(
+            "id",
+            "m",
+            octra_llm_core::Message::new(octra_llm_core::Role::Assistant),
+        );
+        let mut usage = Usage::default();
+        chain
+            .on_response(&meta, "m", &mut response, &mut usage, &mut state)
+            .await
+            .unwrap();
+        assert_eq!(
+            *log.lock(),
+            vec![
+                "request:alpha".to_string(),
+                "request:beta".to_string(),
+                "response:beta".to_string(),
+                "response:alpha".to_string()
+            ]
+        );
+    }
+
+    struct FailPlugin {
+        manifest: PluginManifest,
+    }
+
+    #[async_trait]
+    impl LlmPlugin for FailPlugin {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn on_request(&self, _cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
+            Err(PluginError::fail_open("boom"))
+        }
+    }
+
+    struct FailFactory(PluginManifest);
+
+    impl LlmPluginFactory for FailFactory {
+        fn manifest(&self) -> PluginManifest {
+            self.0.clone()
+        }
+
+        fn create(&self, _config: Value) -> std::result::Result<Arc<dyn LlmPlugin>, PluginError> {
+            Ok(Arc::new(FailPlugin {
+                manifest: self.0.clone(),
+            }))
+        }
+    }
+
+    fn chain_with_failure(policy: FailPolicy) -> Arc<LlmPluginChain> {
+        let mut registry = LlmPluginRegistry::new();
+        let mut entry = manifest("failing");
+        entry.fail_policy = policy;
+        registry.register(FailFactory(entry));
+        let data = PluginData {
+            plugins: vec![plugin("failing", "p1", "llm", true)],
+            configs: vec![config("c1", "p1", "global", "")],
+        };
+        LlmPluginChains::compile(data, &registry)
+            .unwrap()
+            .chain_for(None, None, "m", None)
+    }
+
+    #[tokio::test]
+    async fn manifest_fail_policy_controls_timeouts_and_errors() {
+        let meta = LlmRequestMeta {
+            request_id: "r",
+            ingress: Protocol::Openai,
+            consumer_id: None,
+            virtual_key_id: None,
+            session_id: None,
+        };
+        let mut request = ChatRequest::new("m", Vec::new());
+        let mut state = LlmRequestState::new();
+        let open = chain_with_failure(FailPolicy::Open);
+        assert!(
+            open.on_request(&meta, &mut request, &mut state)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let closed = chain_with_failure(FailPolicy::Closed);
+        assert!(matches!(
+            closed.on_request(&meta, &mut request, &mut state).await,
+            Err(LlmChainError::Plugin(_))
+        ));
+    }
+
+    struct ExpandPlugin {
+        manifest: PluginManifest,
+    }
+
+    #[async_trait]
+    impl LlmPlugin for ExpandPlugin {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn on_stream_event(&self, _cx: &mut LlmStreamContext<'_>) -> LlmStreamResult {
+            Ok(LlmStreamAction::Replace(
+                (0..MAX_STREAM_EVENTS + 1)
+                    .map(|_| StreamEvent::TextDelta {
+                        text: "x".to_string(),
+                    })
+                    .collect(),
+            ))
+        }
+    }
+
+    struct ExpandFactory;
+
+    impl LlmPluginFactory for ExpandFactory {
+        fn manifest(&self) -> PluginManifest {
+            manifest("expand")
+        }
+
+        fn create(&self, _config: Value) -> std::result::Result<Arc<dyn LlmPlugin>, PluginError> {
+            Ok(Arc::new(ExpandPlugin {
+                manifest: manifest("expand"),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_expansion_is_bounded() {
+        let mut registry = LlmPluginRegistry::new();
+        registry.register(ExpandFactory);
+        let data = PluginData {
+            plugins: vec![plugin("expand", "p1", "llm", true)],
+            configs: vec![config("c1", "p1", "global", "")],
+        };
+        let chains = LlmPluginChains::compile(data, &registry).unwrap();
+        let chain = chains.chain_for(None, None, "m", None);
+        let meta = LlmRequestMeta {
+            request_id: "r",
+            ingress: Protocol::Openai,
+            consumer_id: None,
+            virtual_key_id: None,
+            session_id: None,
+        };
+        let mut state = LlmRequestState::new();
+        assert!(matches!(
+            chain
+                .on_stream_events(
+                    &meta,
+                    vec![StreamEvent::TextDelta { text: "hi".into() }],
+                    &mut state
+                )
+                .await,
+            Err(LlmChainError::Plugin(_))
+        ));
     }
 
     #[test]

@@ -15,10 +15,7 @@ use chrono::{DateTime, Utc};
 use octra_llm_core::{
     AssistantContent, ChatRequest, ContentPart, GatewayError, Protocol, Usage, UserContent,
 };
-use octra_llm_plugin_api::{
-    LlmErrorContext, LlmLogContext, LlmProviderRequestContext, LlmRequestContext,
-    LlmResponseContext,
-};
+use octra_llm_plugin_api::{LlmLogEvent, LlmProviderInfo, LlmRequestMeta, LlmRequestState};
 use octra_llm_plugin_runtime::LlmPluginChain;
 use octra_llm_protocol::decode_request;
 use serde_json::Value;
@@ -508,19 +505,21 @@ async fn handle(
     }
 
     let virtual_key_id = key.as_ref().map(|key| key.id.clone());
+    let session = header_str(&request, &state.config.llm.session_header).map(str::to_string);
+    let meta = LlmRequestMeta {
+        request_id: &request_id,
+        ingress,
+        consumer_id,
+        virtual_key_id: virtual_key_id.as_deref(),
+        session_id: session.as_deref(),
+    };
+    let mut request_state = LlmRequestState::new();
     let request_chain = state
         .plugins
         .as_ref()
         .map(|plugins| plugins.request_chain(consumer_id, virtual_key_id.as_deref(), &ir.model));
     if let Some(chain) = &request_chain {
-        let mut cx = LlmRequestContext {
-            request_id: &request_id,
-            ingress,
-            consumer_id,
-            virtual_key_id: virtual_key_id.as_deref(),
-            request: &mut ir,
-        };
-        let rejection = match chain.on_request(&mut cx).await {
+        let rejection = match chain.on_request(&meta, &mut ir, &mut request_state).await {
             Ok(rejection) => rejection,
             Err(error) => Some(chain_error(error)),
         };
@@ -553,32 +552,27 @@ async fn handle(
     }
     let effective_model = ir.model.clone();
 
-    let session = header_str(&request, &state.config.llm.session_header).map(str::to_string);
     let response = execute(
         &state,
         &snapshot,
-        consumer_id,
-        virtual_key_id.as_deref(),
+        &meta,
         &requested_model,
         &effective_model,
         &ir,
         tracker,
         ingress,
-        session.as_deref(),
+        &mut request_state,
     )
     .await;
     match response {
         Ok(response) => with_request_id(response, &request_id),
         Err(mut error) => {
-            if let Some(chain) = &request_chain {
-                let mut cx = LlmErrorContext {
-                    request_id: &request_id,
-                    ingress,
-                    error: &mut error,
-                };
-                if let Err(chain_error) = chain.on_error(&mut cx).await {
-                    error = crate::error::chain_error(chain_error);
-                }
+            if let Some(chain) = &request_chain
+                && let Err(chain_error) = chain
+                    .on_error(&meta, None, None, &mut error, &mut request_state)
+                    .await
+            {
+                error = crate::error::chain_error(chain_error);
             }
             with_request_id(protocol_response(ingress, &error), &request_id)
         }
@@ -609,14 +603,13 @@ fn fail_request(
 async fn execute(
     state: &LlmDataState,
     snapshot: &RuntimeSnapshot,
-    consumer_id: Option<&str>,
-    virtual_key_id: Option<&str>,
+    meta: &LlmRequestMeta<'_>,
     requested_model: &str,
     effective_model: &str,
     ir: &ChatRequest,
     mut tracker: UsageTracker,
     ingress: Protocol,
-    session: Option<&str>,
+    request_state: &mut LlmRequestState,
 ) -> LlmResult<Response> {
     let Some(plan) = snapshot.resolve(effective_model) else {
         let error = GatewayError::not_found(format!(
@@ -657,7 +650,7 @@ async fn execute(
             );
             continue;
         }
-        if !snapshot.permits_provider(consumer_id, &provider.id, &provider.name) {
+        if !snapshot.permits_provider(meta.consumer_id, &provider.id, &provider.name) {
             last_error = Some(
                 GatewayError::forbidden(format!(
                     "consumer is not allowed to use provider '{}'",
@@ -677,7 +670,7 @@ async fn execute(
                 accounts,
                 target.account_id.as_deref(),
                 &plan.strategy,
-                session,
+                meta.session_id,
                 tick,
                 now_ms,
             );
@@ -730,8 +723,22 @@ async fn execute(
             tracker.record.pricing = snapshot.model_pricing(&provider.id, &target.model_id);
 
             let provider_chain = state.plugins.as_ref().map(|plugins| {
-                plugins.provider_chain(consumer_id, virtual_key_id, effective_model, &provider.id)
+                plugins.provider_chain(
+                    meta.consumer_id,
+                    meta.virtual_key_id,
+                    effective_model,
+                    &provider.id,
+                )
             });
+            let provider_info = LlmProviderInfo {
+                attempt: budget as u32,
+                target_model_id: &target.model_id,
+                provider_id: &provider.id,
+                provider_name: &provider.name,
+                protocol: target.protocol,
+                account_id: account.as_ref().map(|account| account.record.id.as_str()),
+                account_name: account.as_ref().map(|account| account.record.name.as_str()),
+            };
             match try_attempt(
                 state,
                 snapshot,
@@ -745,6 +752,9 @@ async fn execute(
                 account_secret_ref,
                 provider_chain.as_ref(),
                 requested_model,
+                meta,
+                &provider_info,
+                request_state,
             )
             .await
             {
@@ -761,18 +771,14 @@ async fn execute(
                             consume_account(account, &tracker);
                         }
                         if let Some(chain) = &provider_chain {
-                            let cx = LlmLogContext {
-                                request_id: &tracker.record.request_id,
-                                ingress,
-                                consumer_id,
-                                virtual_key_id,
+                            let event = LlmLogEvent {
                                 model: effective_model,
                                 status: 200,
                                 latency_ms: tracker.elapsed_ms(),
                                 usage: &tracker.record.usage,
                                 error: None,
                             };
-                            chain.on_log(&cx).await;
+                            chain.on_log(meta, &event, request_state).await;
                         }
                         usage::spawn_record(state.storage.clone(), tracker.record.clone());
                     }
@@ -881,18 +887,16 @@ async fn try_attempt(
     account_secret_ref: Option<&str>,
     chain: Option<&Arc<LlmPluginChain>>,
     requested_model: &str,
+    meta: &LlmRequestMeta<'_>,
+    provider_info: &LlmProviderInfo<'_>,
+    request_state: &mut LlmRequestState,
 ) -> LlmResult<AttemptOutcome> {
     let mut ir = ir.clone();
     if let Some(chain) = chain {
-        let mut cx = LlmProviderRequestContext {
-            request_id: &tracker.record.request_id,
-            target_model_id: &target.model_id,
-            provider_id: &provider.id,
-            protocol: target.protocol,
-            account_id: account.map(|account| account.record.id.as_str()),
-            request: &mut ir,
-        };
-        match chain.on_provider_request(&mut cx).await {
+        match chain
+            .on_provider_request(meta, provider_info, &mut ir, request_state)
+            .await
+        {
             Ok(None) => {}
             Ok(Some(error)) => return Err(error),
             Err(error) => return Err(chain_error(error)),
@@ -932,6 +936,14 @@ async fn try_attempt(
             tracker.clone(),
             account.cloned(),
             chain.cloned(),
+            stream::StreamMeta {
+                request_id: meta.request_id.to_string(),
+                ingress,
+                consumer_id: meta.consumer_id.map(str::to_string),
+                virtual_key_id: meta.virtual_key_id.map(str::to_string),
+                session_id: meta.session_id.map(str::to_string),
+            },
+            std::mem::take(request_state),
         );
         return Ok(AttemptOutcome {
             response,
@@ -950,13 +962,16 @@ async fn try_attempt(
     response.model = requested_model.to_string();
     if let Some(chain) = chain {
         let mut usage = response.usage.clone();
-        let mut cx = LlmResponseContext {
-            request_id: &tracker.record.request_id,
-            ingress,
-            response: &mut response,
-            usage: &mut usage,
-        };
-        match chain.on_response(&mut cx).await {
+        match chain
+            .on_response(
+                meta,
+                requested_model,
+                &mut response,
+                &mut usage,
+                request_state,
+            )
+            .await
+        {
             Ok(None) => {}
             Ok(Some(error)) => return Err(error),
             Err(error) => return Err(chain_error(error)),

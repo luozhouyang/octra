@@ -73,15 +73,28 @@ impl LlmPlugin for ModelMap {
 mod tests {
     use super::*;
     use octra_llm_core::{ChatRequest, Protocol};
+    use octra_llm_plugin_api::LlmRequestMeta;
     use serde_json::json;
 
-    fn context<'a>(request: &'a mut ChatRequest) -> LlmRequestContext<'a> {
+    fn context<'a>(
+        meta: &'a LlmRequestMeta<'a>,
+        request: &'a mut ChatRequest,
+        state: &'a mut serde_json::Value,
+    ) -> LlmRequestContext<'a> {
         LlmRequestContext {
+            meta,
+            request,
+            state,
+        }
+    }
+
+    fn meta() -> LlmRequestMeta<'static> {
+        LlmRequestMeta {
             request_id: "r",
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
-            request,
+            session_id: None,
         }
     }
 
@@ -91,7 +104,9 @@ mod tests {
             .create(json!({"map": {"fast": "gpt-4o-mini"}}))
             .unwrap();
         let mut request = ChatRequest::new("fast", Vec::new());
-        let mut cx = context(&mut request);
+        let meta = meta();
+        let mut state = serde_json::Value::Null;
+        let mut cx = context(&meta, &mut request, &mut state);
         plugin.on_request(&mut cx).await.unwrap();
         assert_eq!(request.model, "gpt-4o-mini");
         assert_eq!(
@@ -106,7 +121,9 @@ mod tests {
             .create(json!({"map": {"fast": "gpt-4o-mini"}}))
             .unwrap();
         let mut request = ChatRequest::new("other", Vec::new());
-        let mut cx = context(&mut request);
+        let meta = meta();
+        let mut state = serde_json::Value::Null;
+        let mut cx = context(&meta, &mut request, &mut state);
         plugin.on_request(&mut cx).await.unwrap();
         assert_eq!(request.model, "other");
         assert!(request.extra.is_empty());

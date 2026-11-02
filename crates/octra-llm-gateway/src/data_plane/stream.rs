@@ -17,7 +17,8 @@ use futures_util::stream::unfold;
 use octra_config::OctraConfig;
 use octra_data_plane::sse::SseDecoder;
 use octra_llm_core::{GatewayError, Protocol, StreamEvent, Usage};
-use octra_llm_plugin_runtime::{LlmPluginChain, LlmStreamState};
+use octra_llm_plugin_api::{LlmRequestMeta, LlmRequestState};
+use octra_llm_plugin_runtime::LlmPluginChain;
 use octra_llm_protocol::{StreamDecoder, StreamEncoder};
 use octra_storage::Storage;
 use reqwest::Response as UpstreamResponse;
@@ -38,6 +39,8 @@ pub fn start(
     tracker: UsageTracker,
     account: Option<Arc<AccountRuntime>>,
     plugins: Option<Arc<LlmPluginChain>>,
+    meta: StreamMeta,
+    plugin_state: LlmRequestState,
 ) -> Response {
     let idle = Duration::from_secs(config.llm.stream_idle_timeout_secs.max(1));
     let state = BridgeState {
@@ -50,7 +53,8 @@ pub fn start(
         tracker,
         account,
         plugins,
-        plugin_state: LlmStreamState::new(),
+        meta,
+        plugin_state,
         idle,
         finished: false,
         saw_finish: false,
@@ -66,7 +70,7 @@ pub fn start(
             let bytes = match chunk {
                 Ok(Ok(Some(bytes))) => bytes,
                 Ok(Ok(None)) => {
-                    let out = state.finish_stream(None);
+                    let out = state.finish_stream(None).await;
                     state.finished = true;
                     if out.is_empty() {
                         return None;
@@ -81,14 +85,14 @@ pub fn start(
                     };
                     let error =
                         GatewayError::upstream(502, message).with_code("stream_interrupted");
-                    let out = state.fail_stream(error);
+                    let out = state.fail_stream(error).await;
                     state.finished = true;
                     return Some((Ok(Bytes::from(out)), state));
                 }
                 Err(_) => {
                     let error = GatewayError::timeout("upstream stream idle timeout exceeded")
                         .with_code("stream_idle_timeout");
-                    let out = state.fail_stream(error);
+                    let out = state.fail_stream(error).await;
                     state.finished = true;
                     return Some((Ok(Bytes::from(out)), state));
                 }
@@ -113,10 +117,9 @@ pub fn start(
                 };
                 let events = match state.plugins.clone() {
                     Some(chain) => {
-                        let request_id = state.tracker.record.request_id.clone();
-                        let ingress = state.ingress;
+                        let meta = state.meta.as_meta();
                         match chain
-                            .on_stream_events(&request_id, ingress, events, &mut state.plugin_state)
+                            .on_stream_events(&meta, events, &mut state.plugin_state)
                             .await
                         {
                             Ok(events) => events,
@@ -133,7 +136,7 @@ pub fn start(
                 }
             }
             if let Some(error) = failed {
-                out.extend(state.fail_stream(error));
+                out.extend(state.fail_stream(error).await);
                 return Some((Ok(Bytes::from(out)), state));
             }
             if state.finished && out.is_empty() {
@@ -161,6 +164,27 @@ pub fn start(
         })
 }
 
+/// Owned request metadata for the stream's lifetime.
+pub struct StreamMeta {
+    pub request_id: String,
+    pub ingress: Protocol,
+    pub consumer_id: Option<String>,
+    pub virtual_key_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
+impl StreamMeta {
+    fn as_meta(&self) -> LlmRequestMeta<'_> {
+        LlmRequestMeta {
+            request_id: &self.request_id,
+            ingress: self.ingress,
+            consumer_id: self.consumer_id.as_deref(),
+            virtual_key_id: self.virtual_key_id.as_deref(),
+            session_id: self.session_id.as_deref(),
+        }
+    }
+}
+
 struct BridgeState {
     upstream: UpstreamResponse,
     decoder: SseDecoder,
@@ -171,7 +195,8 @@ struct BridgeState {
     tracker: UsageTracker,
     account: Option<Arc<AccountRuntime>>,
     plugins: Option<Arc<LlmPluginChain>>,
-    plugin_state: LlmStreamState,
+    meta: StreamMeta,
+    plugin_state: LlmRequestState,
     idle: Duration,
     finished: bool,
     saw_finish: bool,
@@ -193,27 +218,55 @@ impl BridgeState {
         }
     }
 
+    /// Runs the plugin tail: decoder leftovers plus a synthetic Finish so
+    /// plugins can flush buffered state even when the upstream did not end
+    /// cleanly.
+    async fn flush_pending(&mut self) -> Result<Vec<u8>, GatewayError> {
+        let mut out = Vec::new();
+        let mut events = self.protocol_decoder.finish();
+        if !events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Finish { .. }))
+        {
+            events.push(StreamEvent::Finish {
+                reason: octra_llm_core::FinishReason::Stop,
+            });
+        }
+        let events = match self.plugins.clone() {
+            Some(chain) => {
+                let meta = self.meta.as_meta();
+                chain
+                    .on_stream_events(&meta, events, &mut self.plugin_state)
+                    .await
+                    .map_err(crate::error::chain_error)?
+            }
+            None => events,
+        };
+        for event in &events {
+            self.encode(event, &mut out);
+        }
+        Ok(out)
+    }
+
     /// Emits the protocol tail when the upstream closed the stream: any
     /// pending decoder events, a synthetic finish, and the encoder's own
     /// tail (usage frames and the `[DONE]` / `message_stop` terminator).
-    fn finish_stream(&mut self, _error: Option<GatewayError>) -> Vec<u8> {
-        let mut out = Vec::new();
+    async fn finish_stream(&mut self, _error: Option<GatewayError>) -> Vec<u8> {
         if self.finished {
-            return out;
+            return Vec::new();
         }
-        let decoder_events = self.protocol_decoder.finish();
-        for event in decoder_events {
-            self.encode(&event, &mut out);
-        }
-        let saw_finish = self.saw_finish;
-        if !saw_finish {
-            let finish = StreamEvent::Finish {
-                reason: octra_llm_core::FinishReason::Stop,
-            };
-            self.encode(&finish, &mut out);
-        }
-        // Forward the tail usage before the encoder's own terminator so the
-        // encoder buffers it for the final usage frame.
+        let mut out = match self.flush_pending().await {
+            Ok(out) => out,
+            Err(error) => {
+                let mut out = Vec::new();
+                for frame in octra_llm_protocol::encode_stream_error(self.ingress, &error) {
+                    out.extend(frame.to_bytes());
+                }
+                self.record(Some(error));
+                self.finished = true;
+                return out;
+            }
+        };
         if !self.usage.is_empty() {
             self.encode(&StreamEvent::Usage(self.usage.clone()), &mut out);
         }
@@ -225,15 +278,16 @@ impl BridgeState {
         out
     }
 
-    /// Emits an error frame and records the failure.
-    fn fail_stream(&mut self, error: GatewayError) -> Vec<u8> {
-        let frames = octra_llm_protocol::encode_stream_error(self.ingress, &error);
+    /// Emits an error frame and records the failure. Buffered plugin output
+    /// is flushed first so the client sees partial text before the error.
+    async fn fail_stream(&mut self, error: GatewayError) -> Vec<u8> {
+        let mut out = self.flush_pending().await.unwrap_or_default();
+        for frame in octra_llm_protocol::encode_stream_error(self.ingress, &error) {
+            out.extend(frame.to_bytes());
+        }
         self.record(Some(error));
         self.finished = true;
-        frames
-            .into_iter()
-            .flat_map(|frame| frame.to_bytes())
-            .collect()
+        out
     }
 
     fn record(&mut self, error: Option<GatewayError>) {

@@ -89,16 +89,23 @@ impl LlmPlugin for SystemPromptPlugin {
 mod tests {
     use super::*;
     use octra_llm_core::{ChatRequest, Protocol, SystemPrompt};
+    use octra_llm_plugin_api::LlmRequestMeta;
     use serde_json::json;
 
     async fn apply(config: Value, request: &mut ChatRequest) {
         let plugin = SystemPromptFactory.create(config).unwrap();
-        let mut cx = LlmRequestContext {
+        let meta = LlmRequestMeta {
             request_id: "r",
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            session_id: None,
+        };
+        let mut state = serde_json::Value::Null;
+        let mut cx = LlmRequestContext {
+            meta: &meta,
             request,
+            state: &mut state,
         };
         plugin.on_request(&mut cx).await.unwrap();
     }

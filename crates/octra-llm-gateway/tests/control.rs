@@ -729,3 +729,26 @@ async fn provider_scoped_plugin_config_binds_to_the_provider() {
     assert_eq!(body["scope"], "provider");
     assert_eq!(body["scope_id"], provider_id);
 }
+
+#[tokio::test]
+async fn redaction_plugin_is_registered_and_validates_config() {
+    let harness = Harness::new().await;
+    let id = plugin_id(&harness, "llm-pii-redaction").await;
+    let configs = format!("{PLUGINS}/{id}/configs");
+
+    let (status, body) = create(&harness, &configs, json!({"scope": "global", "config": {}})).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_eq!(body["config"], json!({}));
+
+    let (status, body) = create(
+        &harness,
+        &configs,
+        json!({
+            "scope": "consumer",
+            "scope_id": "missing-consumer",
+            "config": {"custom_patterns": [{"name": "x", "regex": "("}]}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}

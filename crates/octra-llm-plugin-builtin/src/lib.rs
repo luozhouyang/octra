@@ -5,16 +5,18 @@
 
 mod model_map;
 mod param_override;
+mod redaction;
 mod system_prompt;
 mod think_tags;
 
 pub use model_map::ModelMapFactory;
 pub use param_override::ParamOverrideFactory;
+pub use redaction::RedactionFactory;
 pub use system_prompt::SystemPromptFactory;
 pub use think_tags::ThinkTagsFactory;
 
 use octra_llm_plugin_runtime::LlmPluginRegistry;
-use octra_plugin_api::{Capability, PluginKind, PluginManifest, PluginRuntimeKind};
+use octra_plugin_api::{Capability, FailPolicy, PluginKind, PluginManifest, PluginRuntimeKind};
 
 /// Builds a registry with every built-in LLM plugin. The API Gateway keeps
 /// its own registry; the two are separate catalogs filtered by kind.
@@ -22,6 +24,7 @@ pub fn registry() -> LlmPluginRegistry {
     let mut registry = LlmPluginRegistry::new();
     registry.register(ModelMapFactory);
     registry.register(ParamOverrideFactory);
+    registry.register(RedactionFactory);
     registry.register(SystemPromptFactory);
     registry.register(ThinkTagsFactory);
     registry
@@ -36,6 +39,7 @@ pub(crate) fn manifest(name: &str, description: &str) -> PluginManifest {
         priority: 0,
         description: description.to_string(),
         timeout_ms: 100,
+        fail_policy: FailPolicy::Open,
         capabilities: vec![Capability::RequestBody],
         config_schema: None,
     }

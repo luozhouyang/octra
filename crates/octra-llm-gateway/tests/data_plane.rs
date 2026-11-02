@@ -1317,3 +1317,167 @@ async fn think_tags_strips_reasoning_from_streams() {
     assert!(!body.contains("secret reasoning"), "body: {body}");
     assert!(body.contains("hello"), "body: {body}");
 }
+
+// ---------------------------------------------------------------------------
+// PII redaction
+
+fn prompt_text(request: &Captured) -> String {
+    request.body["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "user")
+        })
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn echo_upstream(request: Captured) -> axum::response::Response {
+    json_response(openai_completion(&prompt_text(&request)))
+}
+
+fn echo_stream(request: Captured) -> axum::response::Response {
+    let text = prompt_text(&request);
+    let mut out = String::new();
+    out.push_str(&openai_chunk(json!({"role": "assistant"}), None));
+    for chunk in text.as_bytes().chunks(5) {
+        let chunk = String::from_utf8_lossy(chunk);
+        out.push_str(&openai_chunk(json!({"content": chunk}), None));
+    }
+    out.push_str(&openai_chunk(json!({}), Some("stop")));
+    out.push_str("data: [DONE]\n\n");
+    sse_response(out)
+}
+
+async fn redaction_harness(
+    handler: fn(Captured) -> axum::response::Response,
+) -> (Harness, MockUpstream) {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, handler).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+    (harness, upstream)
+}
+
+#[tokio::test]
+async fn pii_redaction_masks_upstream_and_restores_client() {
+    let (harness, upstream) = redaction_harness(echo_upstream).await;
+    harness
+        .plugin_config("llm-pii-redaction", "global", None, json!({}))
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        json!({
+            "model": "octra-default",
+            "messages": [{"role": "user", "content": "email me at a@b.com today"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "email me at a@b.com today"
+    );
+
+    let sent = prompt_text(&upstream.requests()[0]);
+    assert!(!sent.contains("a@b.com"), "upstream saw: {sent}");
+    assert!(sent.contains("[[octra:"), "upstream saw: {sent}");
+}
+
+#[tokio::test]
+async fn pii_redaction_restores_split_stream_placeholders() {
+    let (harness, upstream) = redaction_harness(echo_stream).await;
+    harness
+        .plugin_config("llm-pii-redaction", "global", None, json!({}))
+        .await;
+
+    let (status, _, body) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[],
+        Some(json!({
+            "model": "octra-default",
+            "messages": [{"role": "user", "content": "email a@b.com now"}],
+            "stream": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("a@b.com"), "body: {body}");
+    assert!(!body.contains("[[octra:"), "body: {body}");
+
+    let sent = prompt_text(&upstream.requests()[0]);
+    assert!(!sent.contains("a@b.com"), "upstream saw: {sent}");
+}
+
+#[tokio::test]
+async fn irreversible_redaction_keeps_placeholders_for_the_client() {
+    let (harness, _upstream) = redaction_harness(echo_upstream).await;
+    harness
+        .plugin_config(
+            "llm-pii-redaction",
+            "global",
+            None,
+            json!({"mode": "irreversible"}),
+        )
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        json!({
+            "model": "octra-default",
+            "messages": [{"role": "user", "content": "email a@b.com"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap();
+    assert!(content.contains("[[octra:"), "body: {body}");
+    assert!(!content.contains("a@b.com"), "body: {body}");
+}
+
+#[tokio::test]
+async fn redaction_state_is_isolated_between_concurrent_requests() {
+    let (harness, _upstream) = redaction_harness(echo_upstream).await;
+    harness
+        .plugin_config("llm-pii-redaction", "global", None, json!({}))
+        .await;
+
+    let first = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        json!({
+            "model": "octra-default",
+            "messages": [{"role": "user", "content": "first@one.com"}]
+        }),
+    );
+    let second = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        json!({
+            "model": "octra-default",
+            "messages": [{"role": "user", "content": "second@two.com"}]
+        }),
+    );
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.0, StatusCode::OK, "body: {}", first.2);
+    assert_eq!(second.0, StatusCode::OK, "body: {}", second.2);
+    assert_eq!(first.2["choices"][0]["message"]["content"], "first@one.com");
+    assert_eq!(
+        second.2["choices"][0]["message"]["content"],
+        "second@two.com"
+    );
+}

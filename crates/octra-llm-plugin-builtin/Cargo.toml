@@ -11,7 +11,10 @@ octra-llm-core.workspace = true
 octra-llm-plugin-api.workspace = true
 octra-llm-plugin-runtime.workspace = true
 octra-plugin-api.workspace = true
+regex.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

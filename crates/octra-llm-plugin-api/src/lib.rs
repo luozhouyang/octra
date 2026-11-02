@@ -83,54 +83,95 @@ pub enum LlmStreamAction {
 
 pub type LlmStreamResult = Result<LlmStreamAction, PluginError>;
 
-pub struct LlmRequestContext<'a> {
+/// Read-only request metadata shared by every stage.
+pub struct LlmRequestMeta<'a> {
     pub request_id: &'a str,
     pub ingress: Protocol,
     pub consumer_id: Option<&'a str>,
     pub virtual_key_id: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+}
+
+/// Per-request, per-plugin state. Plugins receive their own slot, so one
+/// request can buffer data across stages without touching shared instances.
+#[derive(Debug, Default)]
+pub struct LlmRequestState {
+    values: std::collections::BTreeMap<String, Value>,
+}
+
+impl LlmRequestState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn slot(&mut self, plugin: &str) -> &mut Value {
+        self.values.entry(plugin.to_string()).or_insert(Value::Null)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+/// Provider-specific metadata available once a routing attempt is bound.
+pub struct LlmProviderInfo<'a> {
+    pub attempt: u32,
+    pub target_model_id: &'a str,
+    pub provider_id: &'a str,
+    pub provider_name: &'a str,
+    pub protocol: Protocol,
+    pub account_id: Option<&'a str>,
+    pub account_name: Option<&'a str>,
+}
+
+pub struct LlmRequestContext<'a> {
+    pub meta: &'a LlmRequestMeta<'a>,
     pub request: &'a mut ChatRequest,
+    pub state: &'a mut Value,
 }
 
 pub struct LlmProviderRequestContext<'a> {
-    pub request_id: &'a str,
-    pub target_model_id: &'a str,
-    pub provider_id: &'a str,
-    pub protocol: Protocol,
-    pub account_id: Option<&'a str>,
+    pub meta: &'a LlmRequestMeta<'a>,
+    pub provider: &'a LlmProviderInfo<'a>,
     pub request: &'a mut ChatRequest,
+    pub state: &'a mut Value,
 }
 
 pub struct LlmResponseContext<'a> {
-    pub request_id: &'a str,
-    pub ingress: Protocol,
+    pub meta: &'a LlmRequestMeta<'a>,
+    pub request_model: &'a str,
     pub response: &'a mut ChatResponse,
     pub usage: &'a mut Usage,
+    pub state: &'a mut Value,
 }
 
 pub struct LlmStreamContext<'a> {
-    pub request_id: &'a str,
-    pub ingress: Protocol,
+    pub meta: &'a LlmRequestMeta<'a>,
     pub event: &'a mut StreamEvent,
-    /// Per-request, per-plugin state so a plugin can buffer across chunks.
     pub state: &'a mut Value,
 }
 
 pub struct LlmErrorContext<'a> {
-    pub request_id: &'a str,
-    pub ingress: Protocol,
+    pub meta: &'a LlmRequestMeta<'a>,
+    pub provider_id: Option<&'a str>,
+    pub account_id: Option<&'a str>,
     pub error: &'a mut GatewayError,
+    pub state: &'a mut Value,
 }
 
-pub struct LlmLogContext<'a> {
-    pub request_id: &'a str,
-    pub ingress: Protocol,
-    pub consumer_id: Option<&'a str>,
-    pub virtual_key_id: Option<&'a str>,
+/// Content-free observation data; never carries prompt or response text.
+pub struct LlmLogEvent<'a> {
     pub model: &'a str,
     pub status: u16,
     pub latency_ms: u64,
     pub usage: &'a Usage,
     pub error: Option<&'a str>,
+}
+
+pub struct LlmLogContext<'a> {
+    pub meta: &'a LlmRequestMeta<'a>,
+    pub event: &'a LlmLogEvent<'a>,
+    pub state: &'a mut Value,
 }
 
 /// LLM plugin stages. Every stage defaults to continuing unchanged.
