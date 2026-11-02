@@ -16,7 +16,7 @@ use octra_api_plugin_types::{
     LogContext, PluginAction, PluginError, PluginManifest, PluginPhase, RequestBodyContext,
     RequestContext, ResponseBodyContext, ResponseContext, UpstreamRequestContext,
 };
-use octra_core::{Error, Result};
+use octra_core::Result;
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
 

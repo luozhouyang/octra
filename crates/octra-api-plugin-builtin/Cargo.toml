@@ -31,3 +31,6 @@ tracing.workspace = true
 [dev-dependencies]
 chrono.workspace = true
 octra-api-core.workspace = true
+
+[lints]
+workspace = true

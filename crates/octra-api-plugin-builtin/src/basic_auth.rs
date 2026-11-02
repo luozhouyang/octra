@@ -91,30 +91,29 @@ impl ApiGatewayPlugin for BasicAuthPlugin {
             .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
             .and_then(|bytes| String::from_utf8(bytes).ok());
 
-        if let Some(credentials) = credentials {
-            if let Some((username, password)) = credentials.split_once(':') {
-                if let Some(entry) = cx.state.basicauth.get(username).cloned() {
-                    let hash = entry.password.clone();
-                    let password = password.to_string();
-                    let valid = tokio::task::spawn_blocking(move || {
-                        bcrypt::verify(password, &hash).unwrap_or(false)
-                    })
-                    .await
-                    .unwrap_or(false);
-                    if valid {
-                        set_consumer(
-                            cx.state,
-                            &entry.consumer_id,
-                            &entry.credential_id,
-                            "basic-auth",
-                            &entry.username,
-                        );
-                        if self.config.hide_credentials {
-                            cx.headers.remove(header::AUTHORIZATION);
-                        }
-                        return Ok(PluginAction::Continue);
-                    }
+        if let Some(credentials) = credentials
+            && let Some((username, password)) = credentials.split_once(':')
+            && let Some(entry) = cx.state.basicauth.get(username).cloned()
+        {
+            let hash = entry.password.clone();
+            let password = password.to_string();
+            let valid = tokio::task::spawn_blocking(move || {
+                bcrypt::verify(password, &hash).unwrap_or(false)
+            })
+            .await
+            .unwrap_or(false);
+            if valid {
+                set_consumer(
+                    cx.state,
+                    &entry.consumer_id,
+                    &entry.credential_id,
+                    "basic-auth",
+                    &entry.username,
+                );
+                if self.config.hide_credentials {
+                    cx.headers.remove(header::AUTHORIZATION);
                 }
+                return Ok(PluginAction::Continue);
             }
         }
 

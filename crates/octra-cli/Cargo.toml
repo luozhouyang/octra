@@ -11,3 +11,6 @@ clap.workspace = true
 octra-config.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

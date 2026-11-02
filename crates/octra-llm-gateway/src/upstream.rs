@@ -325,6 +325,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn resolves_env_secret() {
         // SAFETY: test-only environment mutation with a unique variable name.
         unsafe {

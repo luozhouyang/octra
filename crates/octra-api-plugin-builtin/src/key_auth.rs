@@ -122,13 +122,14 @@ impl ApiGatewayPlugin for KeyAuthPlugin {
                 }
             }
         }
-        if key.is_none() && self.config.key_in_query {
-            if let Some(query) = cx.uri.query() {
-                for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
-                    if self.config.key_names.iter().any(|key| key == name.as_ref()) {
-                        key = Some(value.into_owned());
-                        break;
-                    }
+        if key.is_none()
+            && self.config.key_in_query
+            && let Some(query) = cx.uri.query()
+        {
+            for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+                if self.config.key_names.iter().any(|key| key == name.as_ref()) {
+                    key = Some(value.into_owned());
+                    break;
                 }
             }
         }
@@ -141,24 +142,24 @@ impl ApiGatewayPlugin for KeyAuthPlugin {
             body_name = Some(name);
         }
 
-        if let Some(key) = key.as_deref() {
-            if let Some(entry) = cx.state.keyauth.get(key) {
-                let consumer_id = entry.consumer_id.clone();
-                let credential_id = entry.credential_id.clone();
-                set_consumer(cx.state, &consumer_id, &credential_id, "key-auth", key);
-                if self.config.hide_credentials {
-                    for name in &self.config.key_names {
-                        cx.headers.remove(name.as_str());
-                    }
-                    if let Some(uri) = remove_query_key(cx.uri, &self.config.key_names) {
-                        *cx.uri = uri;
-                    }
-                    if let Some(name) = body_name {
-                        cx.state.values.insert(BODY_KEY.into(), Value::String(name));
-                    }
+        if let Some(key) = key.as_deref()
+            && let Some(entry) = cx.state.keyauth.get(key)
+        {
+            let consumer_id = entry.consumer_id.clone();
+            let credential_id = entry.credential_id.clone();
+            set_consumer(cx.state, &consumer_id, &credential_id, "key-auth", key);
+            if self.config.hide_credentials {
+                for name in &self.config.key_names {
+                    cx.headers.remove(name.as_str());
                 }
-                return Ok(PluginAction::Continue);
+                if let Some(uri) = remove_query_key(cx.uri, &self.config.key_names) {
+                    *cx.uri = uri;
+                }
+                if let Some(name) = body_name {
+                    cx.state.values.insert(BODY_KEY.into(), Value::String(name));
+                }
             }
+            return Ok(PluginAction::Continue);
         }
 
         if let Some(consumer_id) = resolve_anonymous(cx.state, self.config.anonymous.as_deref()) {

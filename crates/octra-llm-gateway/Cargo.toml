@@ -34,3 +34,6 @@ octra-llm-plugin-builtin.workspace = true
 octra-api-core.workspace = true
 http-body-util.workspace = true
 tower.workspace = true
+
+[lints]
+workspace = true

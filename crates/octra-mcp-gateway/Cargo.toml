@@ -35,3 +35,6 @@ path = "src/bin/mock_mcp_stdio.rs"
 [dev-dependencies]
 http-body-util.workspace = true
 tower.workspace = true
+
+[lints]
+workspace = true

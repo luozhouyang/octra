@@ -66,13 +66,13 @@ impl ApiStore {
         id: &str,
         input: &UpdateKeyauthCredential,
     ) -> Result<KeyauthCredential> {
-        let result = sqlx::query(&format!(
+        let result = sqlx::query(
             "UPDATE keyauth_credentials SET \
                 key = COALESCE(?, key), \
                 ttl = COALESCE(?, ttl), \
                 tags = COALESCE(?, tags) \
              WHERE id = ?",
-        ))
+        )
         .bind(&input.key)
         .bind(input.ttl)
         .bind(input.tags.as_ref().map(encode_json).transpose()?)
@@ -148,13 +148,13 @@ impl ApiStore {
         id: &str,
         input: &UpdateBasicauthCredential,
     ) -> Result<BasicauthCredential> {
-        let result = sqlx::query(&format!(
+        let result = sqlx::query(
             "UPDATE basicauth_credentials SET \
                 username = COALESCE(?, username), \
                 password = COALESCE(?, password), \
                 tags = COALESCE(?, tags) \
              WHERE id = ?",
-        ))
+        )
         .bind(&input.username)
         .bind(&input.password)
         .bind(input.tags.as_ref().map(encode_json).transpose()?)
@@ -226,7 +226,7 @@ impl ApiStore {
 
     pub async fn update_jwt(&self, id: &str, input: &UpdateJwtSecret) -> Result<JwtSecret> {
         let rsa_set = input.rsa_public_key.is_some();
-        let result = sqlx::query(&format!(
+        let result = sqlx::query(
             "UPDATE jwt_secrets SET \
                 key = COALESCE(?, key), \
                 secret = COALESCE(?, secret), \
@@ -234,7 +234,7 @@ impl ApiStore {
                 rsa_public_key = CASE WHEN ? THEN ? ELSE rsa_public_key END, \
                 tags = COALESCE(?, tags) \
              WHERE id = ?",
-        ))
+        )
         .bind(&input.key)
         .bind(&input.secret)
         .bind(&input.algorithm)

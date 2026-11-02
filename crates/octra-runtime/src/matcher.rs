@@ -331,13 +331,10 @@ impl CompiledRoute {
         }
 
         for (name, expected) in &self.headers {
-            let Some(value) = input
+            let value = input
                 .headers
                 .get(name.as_str())
-                .and_then(|value| value.to_str().ok())
-            else {
-                return None;
-            };
+                .and_then(|value| value.to_str().ok())?;
             if !expected.iter().any(|expected| expected == value) {
                 return None;
             }

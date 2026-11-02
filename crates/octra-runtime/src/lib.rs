@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use octra_api_core::{
-    Acl, BasicauthCredential, Consumer, JwtSecret, KeyauthCredential, LoadBalanceAlgorithm, Route,
-    Service, Target, Upstream,
+    Acl, BasicauthCredential, Consumer, JwtSecret, KeyauthCredential, Route, Service, Target,
+    Upstream,
 };
 use octra_core::{Result, SnapshotCounts, SnapshotInfo};
 use octra_storage::Storage;
@@ -478,7 +478,7 @@ mod tests {
             upstreams: vec![Upstream {
                 id: "u".into(),
                 name: "up".into(),
-                algorithm: LoadBalanceAlgorithm::RoundRobin,
+                algorithm: octra_api_core::LoadBalanceAlgorithm::RoundRobin,
                 hash_on: "none".into(),
                 hash_fallback: "none".into(),
                 slots: 10000,

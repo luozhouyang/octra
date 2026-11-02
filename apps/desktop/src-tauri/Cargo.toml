@@ -19,3 +19,6 @@ serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }
 toml.workspace = true
+
+[lints]
+workspace = true

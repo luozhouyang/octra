@@ -231,10 +231,10 @@ impl ApiGatewayPlugin for RequestTransformerPlugin {
             replace_uri(cx.uri, uri);
         }
 
-        if let Some(method) = &self.config.http_method {
-            if let Ok(method) = Method::from_bytes(method.to_uppercase().as_bytes()) {
-                cx.state.method_override = Some(method);
-            }
+        if let Some(method) = &self.config.http_method
+            && let Ok(method) = Method::from_bytes(method.to_uppercase().as_bytes())
+        {
+            cx.state.method_override = Some(method);
         }
 
         apply_header_ops(

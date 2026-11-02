@@ -135,17 +135,17 @@ impl ApiGatewayPlugin for JwtPlugin {
         }
 
         let token = self.find_token(cx);
-        if let Some(token) = token {
-            if let Some(credentials) = self.verify(cx.state, &token) {
-                set_consumer(
-                    cx.state,
-                    &credentials.consumer_id,
-                    &credentials.credential_id,
-                    "jwt",
-                    &credentials.key,
-                );
-                return Ok(PluginAction::Continue);
-            }
+        if let Some(token) = token
+            && let Some(credentials) = self.verify(cx.state, &token)
+        {
+            set_consumer(
+                cx.state,
+                &credentials.consumer_id,
+                &credentials.credential_id,
+                "jwt",
+                &credentials.key,
+            );
+            return Ok(PluginAction::Continue);
         }
 
         if let Some(consumer_id) = resolve_anonymous(cx.state, self.config.anonymous.as_deref()) {

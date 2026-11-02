@@ -48,10 +48,10 @@ impl ApiStore {
     }
 
     pub async fn update_acl(&self, id: &str, input: &UpdateAcl) -> Result<Acl> {
-        let result = sqlx::query(&format!(
+        let result = sqlx::query(
             "UPDATE acls SET \"group\" = COALESCE(?, \"group\"), tags = COALESCE(?, tags) \
              WHERE id = ?",
-        ))
+        )
         .bind(&input.group)
         .bind(input.tags.as_ref().map(encode_json).transpose()?)
         .bind(id)

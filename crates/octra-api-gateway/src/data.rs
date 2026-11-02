@@ -186,14 +186,16 @@ pub async fn proxy(
             state.metrics.record(response.status().as_u16(), elapsed, 0);
             let request_headers = parts.headers.clone();
             let response = match apply_response_plugins(
-                &[pre_chain.as_ref()],
-                &request_id,
-                &mut auth_state,
-                &request_headers,
-                None,
-                route,
-                service,
-                "",
+                ResponsePluginContext {
+                    chains: &[pre_chain.as_ref()],
+                    request_id: &request_id,
+                    auth_state: &mut auth_state,
+                    request_headers: &request_headers,
+                    consumer_id: None,
+                    route,
+                    service,
+                    target_url: "",
+                },
                 response,
             )
             .await
@@ -261,14 +263,16 @@ pub async fn proxy(
             state.metrics.record(response.status().as_u16(), elapsed, 0);
             let request_headers = parts.headers.clone();
             let response = match apply_response_plugins(
-                &[pre_chain.as_ref(), post_chain.as_ref()],
-                &request_id,
-                &mut auth_state,
-                &request_headers,
-                consumer_id.as_deref(),
-                route,
-                service,
-                "",
+                ResponsePluginContext {
+                    chains: &[pre_chain.as_ref(), post_chain.as_ref()],
+                    request_id: &request_id,
+                    auth_state: &mut auth_state,
+                    request_headers: &request_headers,
+                    consumer_id: consumer_id.as_deref(),
+                    route,
+                    service,
+                    target_url: "",
+                },
                 response,
             )
             .await
@@ -620,10 +624,9 @@ pub async fn proxy(
                         response_parts.headers.remove(header::CONTENT_LENGTH);
                         if response_parts.status != StatusCode::NO_CONTENT
                             && response_parts.status != StatusCode::NOT_MODIFIED
+                            && let Ok(value) = HeaderValue::from_str(&bytes.len().to_string())
                         {
-                            if let Ok(value) = HeaderValue::from_str(&bytes.len().to_string()) {
-                                response_parts.headers.insert(header::CONTENT_LENGTH, value);
-                            }
+                            response_parts.headers.insert(header::CONTENT_LENGTH, value);
                         }
                         Body::from(bytes)
                     }
@@ -703,72 +706,73 @@ pub async fn proxy(
 }
 
 fn build_gateway_state(auth: AuthSnapshot) -> GatewayState {
-    let mut state = GatewayState::default();
-    state.consumers = auth
-        .consumers
-        .into_iter()
-        .map(|(id, consumer)| {
-            (
-                id,
-                ConsumerInfo {
-                    id: consumer.id,
-                    username: consumer.username,
-                    custom_id: consumer.custom_id,
-                    acl_groups: consumer.acl_groups,
-                    group_ids: consumer.group_ids,
-                    groups: consumer.groups,
-                },
-            )
-        })
-        .collect();
-    state.consumer_by_username = auth.consumer_by_username;
-    state.consumer_by_custom_id = auth.consumer_by_custom_id;
-    state.keyauth = auth
-        .keyauth
-        .into_iter()
-        .map(|(key, entry)| {
-            (
-                key,
-                AuthKey {
-                    credential_id: entry.id,
-                    consumer_id: entry.consumer_id,
-                },
-            )
-        })
-        .collect();
-    state.basicauth = auth
-        .basicauth
-        .into_iter()
-        .map(|(username, entry)| {
-            (
-                username,
-                AuthBasic {
-                    credential_id: entry.id,
-                    consumer_id: entry.consumer_id,
-                    username: entry.username,
-                    password: entry.password,
-                },
-            )
-        })
-        .collect();
-    state.jwt = auth
-        .jwt
-        .into_iter()
-        .map(|(key, entry)| {
-            (
-                key,
-                AuthJwt {
-                    credential_id: entry.id,
-                    consumer_id: entry.consumer_id,
-                    key: entry.key,
-                    secret: entry.secret,
-                    algorithm: entry.algorithm,
-                    rsa_public_key: entry.rsa_public_key,
-                },
-            )
-        })
-        .collect();
-    state
+    GatewayState {
+        consumers: auth
+            .consumers
+            .into_iter()
+            .map(|(id, consumer)| {
+                (
+                    id,
+                    ConsumerInfo {
+                        id: consumer.id,
+                        username: consumer.username,
+                        custom_id: consumer.custom_id,
+                        acl_groups: consumer.acl_groups,
+                        group_ids: consumer.group_ids,
+                        groups: consumer.groups,
+                    },
+                )
+            })
+            .collect(),
+        consumer_by_username: auth.consumer_by_username,
+        consumer_by_custom_id: auth.consumer_by_custom_id,
+        keyauth: auth
+            .keyauth
+            .into_iter()
+            .map(|(key, entry)| {
+                (
+                    key,
+                    AuthKey {
+                        credential_id: entry.id,
+                        consumer_id: entry.consumer_id,
+                    },
+                )
+            })
+            .collect(),
+        basicauth: auth
+            .basicauth
+            .into_iter()
+            .map(|(username, entry)| {
+                (
+                    username,
+                    AuthBasic {
+                        credential_id: entry.id,
+                        consumer_id: entry.consumer_id,
+                        username: entry.username,
+                        password: entry.password,
+                    },
+                )
+            })
+            .collect(),
+        jwt: auth
+            .jwt
+            .into_iter()
+            .map(|(key, entry)| {
+                (
+                    key,
+                    AuthJwt {
+                        credential_id: entry.id,
+                        consumer_id: entry.consumer_id,
+                        key: entry.key,
+                        secret: entry.secret,
+                        algorithm: entry.algorithm,
+                        rsa_public_key: entry.rsa_public_key,
+                    },
+                )
+            })
+            .collect(),
+        ..GatewayState::default()
+    }
 }
 
 fn inject_consumer_headers(headers: &mut HeaderMap, state: &GatewayState) {
@@ -844,19 +848,33 @@ struct LogSubject<'a> {
     consumer: Option<String>,
 }
 
+struct ResponsePluginContext<'a> {
+    chains: &'a [&'a PluginChain],
+    request_id: &'a str,
+    auth_state: &'a mut GatewayState,
+    request_headers: &'a HeaderMap,
+    consumer_id: Option<&'a str>,
+    route: &'a Route,
+    service: &'a Service,
+    target_url: &'a str,
+}
+
 /// Runs response phases for a short-circuited response, mirroring the response
 /// pipeline used for upstream responses.
 async fn apply_response_plugins(
-    chains: &[&PluginChain],
-    request_id: &str,
-    auth_state: &mut GatewayState,
-    request_headers: &HeaderMap,
-    consumer_id: Option<&str>,
-    route: &Route,
-    service: &Service,
-    target_url: &str,
+    cx: ResponsePluginContext<'_>,
     response: Response,
 ) -> std::result::Result<Response, PluginError> {
+    let ResponsePluginContext {
+        chains,
+        request_id,
+        auth_state,
+        request_headers,
+        consumer_id,
+        route,
+        service,
+        target_url,
+    } = cx;
     let mut response = response;
     for chain in chains {
         let (mut parts, body) = response.into_parts();

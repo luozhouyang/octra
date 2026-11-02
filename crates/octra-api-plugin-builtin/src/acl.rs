@@ -103,11 +103,12 @@ impl ApiGatewayPlugin for AclPlugin {
             )));
         }
 
-        if !self.config.hide_groups_header && !groups.is_empty() {
-            if let Ok(value) = HeaderValue::from_str(&groups.join(", ")) {
-                cx.headers
-                    .insert(HeaderName::from_static("x-consumer-groups"), value);
-            }
+        if !self.config.hide_groups_header
+            && !groups.is_empty()
+            && let Ok(value) = HeaderValue::from_str(&groups.join(", "))
+        {
+            cx.headers
+                .insert(HeaderName::from_static("x-consumer-groups"), value);
         }
         Ok(PluginAction::Continue)
     }

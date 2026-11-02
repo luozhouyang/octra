@@ -38,3 +38,6 @@ url.workspace = true
 [dev-dependencies]
 jsonwebtoken = "9"
 octra-api-plugin-builtin.workspace = true
+
+[lints]
+workspace = true
