@@ -3375,10 +3375,12 @@ version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "async-trait",
+ "futures-util",
  "octra-api-plugin-types",
  "octra-llm-core",
  "octra-llm-plugin-runtime",
  "octra-llm-plugin-types",
+ "octra-pii-types",
  "regex",
  "serde",
  "serde_json",
@@ -3473,6 +3475,13 @@ dependencies = [
  "octra-core",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "octra-pii-types"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
 ]
 
 [[package]]

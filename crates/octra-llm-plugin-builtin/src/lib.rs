@@ -29,13 +29,21 @@ use octra_llm_plugin_runtime::LlmPluginRegistry;
 /// Builds a registry with every built-in LLM plugin. The API Gateway keeps
 /// its own registry; the two are separate catalogs filtered by kind.
 pub fn registry() -> LlmPluginRegistry {
+    registry_with(None)
+}
+
+/// Like [`registry`], but lets rule-based plugins resolve host-managed
+/// detection engines (for example a model sidecar) by configured name.
+pub fn registry_with(
+    engines: Option<std::sync::Arc<dyn octra_pii_types::PiiEngineResolver>>,
+) -> LlmPluginRegistry {
     let mut registry = LlmPluginRegistry::new();
     registry.register(BudgetGuardFactory);
     registry.register(IntentHintFactory);
     registry.register(RequestAuditFactory);
     registry.register(ModelMapFactory);
     registry.register(ParamOverrideFactory);
-    registry.register(RedactionFactory);
+    registry.register(RedactionFactory::new(engines));
     registry.register(SystemPromptFactory);
     registry.register(ThinkTagsFactory);
     registry

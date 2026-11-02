@@ -9,17 +9,17 @@ license.workspace = true
 aho-corasick.workspace = true
 async-trait.workspace = true
 octra-llm-core.workspace = true
+octra-pii-types.workspace = true
 octra-llm-plugin-types.workspace = true
 octra-llm-plugin-runtime.workspace = true
 octra-api-plugin-types.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-
-[dev-dependencies]
-tokio.workspace = true
 
 [lints]
 workspace = true

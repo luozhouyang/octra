@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use octra_api_plugin_types::{Capability, FailPolicy, PluginError, PluginManifest};
@@ -19,6 +20,11 @@ use octra_llm_plugin_types::{
     LlmRequestContext, LlmResponseContext, LlmStreamAction, LlmStreamContext, LlmStreamResult,
 };
 use aho_corasick::AhoCorasick;
+use futures_util::future::BoxFuture;
+use octra_pii_types::{
+    DetectRequest, Detection, EngineReadiness, PiiDetector, PiiDetectorClient, PiiEngineResolver,
+    PiiKind,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,47 +38,8 @@ const HARD_MAX_PLACEHOLDERS: usize = 10_000;
 const DEFAULT_MAX_DICTIONARY_TERMS: usize = 10_000;
 const HARD_MAX_DICTIONARY_TERMS: usize = 100_000;
 const MAX_DICTIONARY_FILE_BYTES: u64 = 8 * 1024 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PiiKind {
-    Email,
-    Phone,
-    IdCard,
-    BankCard,
-    ApiKey,
-    Ip,
-    Custom(String),
-}
-
-impl PiiKind {
-    fn label(&self) -> &str {
-        match self {
-            Self::Email => "email",
-            Self::Phone => "phone",
-            Self::IdCard => "id_card",
-            Self::BankCard => "bank_card",
-            Self::ApiKey => "api_key",
-            Self::Ip => "ip",
-            Self::Custom(name) => name,
-        }
-    }
-}
-
-/// Part of the detector contract; consumers may use confidence or detector
-/// provenance when chaining multiple detectors.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct Detection {
-    pub kind: PiiKind,
-    pub start: usize,
-    pub end: usize,
-    pub confidence: f32,
-    pub detector: &'static str,
-}
-
-pub trait PiiDetector: Send + Sync {
-    fn detect(&self, text: &str) -> Vec<Detection>;
-}
+const DEFAULT_ENGINE_MAX_BYTES: usize = 1024 * 1024;
+const DEFAULT_ENGINE_TIMEOUT_MS: u64 = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -348,11 +315,65 @@ impl Default for RulesConfig {
     }
 }
 
+enum EngineBinding {
+    Client {
+        name: String,
+        client: Arc<dyn PiiDetectorClient>,
+    },
+    Missing {
+        name: String,
+    },
+}
+
+impl std::fmt::Debug for EngineBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Client { name, .. } => formatter
+                .debug_struct("Client")
+                .field("name", name)
+                .finish(),
+            Self::Missing { name } => formatter
+                .debug_struct("Missing")
+                .field("name", name)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnUnavailable {
+    Reject,
+    RulesOnly,
+}
+
+#[derive(Debug)]
+struct EngineConfig {
+    binding: Option<EngineBinding>,
+    on_unavailable: OnUnavailable,
+    timeout: Duration,
+    max_bytes: usize,
+}
+
+impl EngineConfig {
+    fn disabled() -> Self {
+        Self {
+            binding: None,
+            on_unavailable: OnUnavailable::Reject,
+            timeout: Duration::from_millis(200),
+            max_bytes: DEFAULT_ENGINE_MAX_BYTES,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Redaction {
     manifest: PluginManifest,
     mode: Mode,
     detector: RuleDetector,
+    engine: Option<EngineBinding>,
+    engine_on_unavailable: OnUnavailable,
+    engine_timeout: Duration,
+    engine_max_bytes: usize,
     max_placeholders: usize,
     redact_system: bool,
     redact_assistant: bool,
@@ -360,10 +381,16 @@ pub struct Redaction {
     redact_tools: bool,
 }
 
-pub struct RedactionFactory;
+pub struct RedactionFactory {
+    engines: Option<Arc<dyn PiiEngineResolver>>,
+}
 
 impl RedactionFactory {
-    fn parse(config: &Value) -> Result<Redaction, PluginError> {
+    pub fn new(engines: Option<Arc<dyn PiiEngineResolver>>) -> Self {
+        Self { engines }
+    }
+
+    fn parse(&self, config: &Value) -> Result<Redaction, PluginError> {
         let mode = match config.get("mode").and_then(Value::as_str) {
             None | Some("reversible") => Mode::Reversible,
             Some("irreversible") => Mode::Irreversible,
@@ -423,6 +450,7 @@ impl RedactionFactory {
                 custom.push((name.to_string(), regex.to_string()));
             }
         }
+        let engine = self.parse_engine(config)?;
         let dictionary = compile_dictionary(config)?;
         let max_placeholders = config
             .get("max_placeholders")
@@ -441,11 +469,92 @@ impl RedactionFactory {
             manifest: Self::manifest(),
             mode,
             detector: RuleDetector::compile(&flags, &custom, dictionary)?,
+            engine: engine.binding,
+            engine_on_unavailable: engine.on_unavailable,
+            engine_timeout: engine.timeout,
+            engine_max_bytes: engine.max_bytes,
             max_placeholders,
             redact_system: flag("redact_system", true),
             redact_assistant: flag("redact_assistant", true),
             redact_tool_results: flag("redact_tool_results", true),
             redact_tools: flag("redact_tools", false),
+        })
+    }
+
+    fn parse_engine(&self, config: &Value) -> Result<EngineConfig, PluginError> {
+        let Some(detector) = config.get("detector") else {
+            return Ok(EngineConfig::disabled());
+        };
+        let object = detector.as_object().ok_or_else(|| {
+            PluginError::fail_closed("llm-pii-redaction `detector` must be an object")
+        })?;
+        for key in object.keys() {
+            if !matches!(
+                key.as_str(),
+                "engine" | "timeout_ms" | "fail_closed" | "on_unavailable" | "max_bytes"
+            ) {
+                return Err(PluginError::fail_closed(format!(
+                    "unknown PII detector option '{key}'"
+                )));
+            }
+        }
+        let name = object
+            .get("engine")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                PluginError::fail_closed("llm-pii-redaction `detector.engine` is required")
+            })?;
+        let fail_closed = object
+            .get("fail_closed")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let on_unavailable = match object.get("on_unavailable").and_then(Value::as_str) {
+            None => {
+                if fail_closed {
+                    OnUnavailable::Reject
+                } else {
+                    OnUnavailable::RulesOnly
+                }
+            }
+            Some("reject") => OnUnavailable::Reject,
+            Some("rules_only") => OnUnavailable::RulesOnly,
+            Some(other) => {
+                return Err(PluginError::fail_closed(format!(
+                    "llm-pii-redaction `detector.on_unavailable` must be reject or rules_only, got '{other}'"
+                )));
+            }
+        };
+        let timeout_ms = object
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_ENGINE_TIMEOUT_MS)
+            .max(1);
+        let max_bytes = object
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(DEFAULT_ENGINE_MAX_BYTES);
+        if max_bytes == 0 {
+            return Err(PluginError::fail_closed(
+                "llm-pii-redaction `detector.max_bytes` must be positive",
+            ));
+        }
+        let binding = match self.engines.as_ref().and_then(|engines| engines.resolve(name)) {
+            Some(client) => EngineBinding::Client {
+                name: name.to_string(),
+                client,
+            },
+            None => EngineBinding::Missing {
+                name: name.to_string(),
+            },
+        };
+        Ok(EngineConfig {
+            binding: Some(binding),
+            on_unavailable,
+            timeout: Duration::from_millis(timeout_ms),
+            max_bytes,
         })
     }
 
@@ -467,7 +576,7 @@ impl LlmPluginFactory for RedactionFactory {
     }
 
     fn create(&self, config: Value) -> Result<Arc<dyn LlmPlugin>, PluginError> {
-        Ok(Arc::new(Self::parse(&config)?))
+        Ok(Arc::new(self.parse(&config)?))
     }
 }
 
@@ -476,8 +585,11 @@ impl Redaction {
         self.mode == Mode::Reversible
     }
 
-    fn mask(&self, text: &str, state: &mut State) -> Result<String, PluginError> {
+    async fn mask(&self, text: &str, state: &mut State) -> Result<String, PluginError> {
         let mut detections = self.detector.detect(text);
+        if let Some(binding) = &self.engine {
+            detections.extend(self.engine_detections(binding, text).await?);
+        }
         resolve_overlaps(&mut detections);
         if detections.is_empty() {
             return Ok(text.to_string());
@@ -520,11 +632,63 @@ impl Redaction {
         Ok(out)
     }
 
-    fn mask_parts(&self, parts: &mut [ContentPart], state: &mut State) -> Result<(), PluginError> {
+    async fn engine_detections(
+        &self,
+        binding: &EngineBinding,
+        text: &str,
+    ) -> Result<Vec<Detection>, PluginError> {
+        let client = match binding {
+            EngineBinding::Client { client, .. } => client,
+            EngineBinding::Missing { name } => {
+                return self.engine_unavailable(format!("PII engine '{name}' is not configured"));
+            }
+        };
+        if client.readiness() != EngineReadiness::Ready {
+            return self.engine_unavailable("PII engine is not ready".to_string());
+        }
+        if text.len() > self.engine_max_bytes {
+            return self.engine_unavailable(format!(
+                "PII engine input exceeds {} bytes",
+                self.engine_max_bytes
+            ));
+        }
+        let request = DetectRequest {
+            text,
+            locale: None,
+            kinds: &[],
+            max_bytes: self.engine_max_bytes,
+        };
+        match tokio::time::timeout(self.engine_timeout, client.detect(request)).await {
+            Ok(Ok(detections)) => Ok(detections),
+            Ok(Err(error)) => self.engine_unavailable(format!("PII engine failed: {error}")),
+            Err(_) => self.engine_unavailable(format!(
+                "PII engine timed out after {}ms",
+                self.engine_timeout.as_millis()
+            )),
+        }
+    }
+
+    fn engine_unavailable(&self, message: String) -> Result<Vec<Detection>, PluginError> {
+        match self.engine_on_unavailable {
+            OnUnavailable::Reject => Err(PluginError::fail_closed(format!(
+                "llm-pii-redaction: {message}"
+            ))),
+            OnUnavailable::RulesOnly => {
+                tracing::warn!("{message}; continuing with rule detection only");
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    async fn mask_parts(
+        &self,
+        parts: &mut [ContentPart],
+        state: &mut State,
+    ) -> Result<(), PluginError> {
         for part in parts {
             match part {
                 ContentPart::Text { text, .. } | ContentPart::Reasoning { text, .. } => {
-                    *text = self.mask(text, state)?;
+                    *text = self.mask(text, state).await?;
                 }
                 ContentPart::Image(_) | ContentPart::File(_) | ContentPart::Unsupported { .. } => {}
             }
@@ -532,9 +696,13 @@ impl Redaction {
         Ok(())
     }
 
-    fn mask_message(&self, message: &mut Message, state: &mut State) -> Result<(), PluginError> {
+    async fn mask_message(
+        &self,
+        message: &mut Message,
+        state: &mut State,
+    ) -> Result<(), PluginError> {
         if let Some(content) = &mut message.content {
-            self.mask_parts(&mut content.parts, state)?;
+            self.mask_parts(&mut content.parts, state).await?;
         }
         if self.redact_assistant {
             for block in &mut message.assistant {
@@ -542,13 +710,13 @@ impl Redaction {
                     AssistantContent::Text { text }
                     | AssistantContent::Reasoning { text, .. }
                     | AssistantContent::Refusal { text } => {
-                        *text = self.mask(text, state)?;
+                        *text = self.mask(text, state).await?;
                     }
                     AssistantContent::ToolCall { arguments, .. } => {
-                        mask_value(arguments, state, self)?;
+                        mask_value(arguments, state, self).await?;
                     }
                     AssistantContent::ToolResult { content, .. } => {
-                        mask_value(content, state, self)?;
+                        mask_value(content, state, self).await?;
                     }
                     AssistantContent::Raw { .. } => {}
                 }
@@ -556,24 +724,24 @@ impl Redaction {
         }
         if self.redact_tool_results {
             for result in &mut message.tool_results {
-                self.mask_parts(&mut result.content.parts, state)?;
+                self.mask_parts(&mut result.content.parts, state).await?;
             }
         }
         Ok(())
     }
 
-    fn mask_request(
+    async fn mask_request(
         &self,
         request: &mut ChatRequest,
         state: &mut State,
     ) -> Result<(), PluginError> {
         if self.redact_system {
             for block in &mut request.system.blocks {
-                *block = self.mask(block, state)?;
+                *block = self.mask(block, state).await?;
             }
         }
         for message in &mut request.messages {
-            self.mask_message(message, state)?;
+            self.mask_message(message, state).await?;
         }
         if self.redact_tools {
             for tool in &mut request.tools {
@@ -581,10 +749,10 @@ impl Redaction {
                     continue;
                 };
                 if let Some(description) = &mut function.description {
-                    *description = self.mask(description, state)?;
+                    *description = self.mask(description, state).await?;
                 }
                 if let Some(parameters) = &mut function.parameters {
-                    mask_value(parameters, state, self)?;
+                    mask_value(parameters, state, self).await?;
                 }
             }
         }
@@ -700,7 +868,7 @@ impl LlmPlugin for Redaction {
             nonce: uuid::Uuid::new_v4().simple().to_string(),
             ..State::default()
         };
-        self.mask_request(cx.request, &mut state)?;
+        self.mask_request(cx.request, &mut state).await?;
         state.store(cx.state);
         Ok(LlmAction::Continue)
     }
@@ -810,22 +978,28 @@ fn replace_reasoning(text: &str) -> LlmStreamAction {
     }
 }
 
-fn mask_value(value: &mut Value, state: &mut State, plugin: &Redaction) -> Result<(), PluginError> {
-    match value {
-        Value::String(text) => *text = plugin.mask(text, state)?,
-        Value::Array(values) => {
-            for value in values {
-                mask_value(value, state, plugin)?;
+fn mask_value<'a>(
+    value: &'a mut Value,
+    state: &'a mut State,
+    plugin: &'a Redaction,
+) -> BoxFuture<'a, Result<(), PluginError>> {
+    Box::pin(async move {
+        match value {
+            Value::String(text) => *text = plugin.mask(text, state).await?,
+            Value::Array(values) => {
+                for value in values {
+                    mask_value(value, state, plugin).await?;
+                }
             }
-        }
-        Value::Object(object) => {
-            for value in object.values_mut() {
-                mask_value(value, state, plugin)?;
+            Value::Object(object) => {
+                for value in object.values_mut() {
+                    mask_value(value, state, plugin).await?;
+                }
             }
+            _ => {}
         }
-        _ => {}
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn resolve_overlaps(detections: &mut Vec<Detection>) {
@@ -922,7 +1096,7 @@ mod tests {
     }
 
     fn plugin(config: Value) -> Arc<dyn LlmPlugin> {
-        RedactionFactory.create(config).unwrap()
+        RedactionFactory::new(None).create(config).unwrap()
     }
 
     fn text_request(text: &str) -> ChatRequest {
@@ -1102,6 +1276,130 @@ mod tests {
         assert_eq!(emit, "contact a@b.com now");
     }
 
+    struct FakeEngine {
+        readiness: EngineReadiness,
+        detections: Vec<Detection>,
+    }
+
+    #[async_trait]
+    impl PiiDetectorClient for FakeEngine {
+        fn readiness(&self) -> EngineReadiness {
+            self.readiness
+        }
+
+        async fn detect(
+            &self,
+            _request: DetectRequest<'_>,
+        ) -> Result<Vec<Detection>, octra_pii_types::PiiEngineError> {
+            Ok(self.detections.clone())
+        }
+    }
+
+    struct FakeResolver {
+        name: &'static str,
+        engine: Arc<FakeEngine>,
+    }
+
+    impl PiiEngineResolver for FakeResolver {
+        fn resolve(&self, name: &str) -> Option<Arc<dyn PiiDetectorClient>> {
+            (name == self.name).then(|| self.engine.clone() as Arc<dyn PiiDetectorClient>)
+        }
+    }
+
+    fn plugin_with(
+        engines: Option<Arc<dyn PiiEngineResolver>>,
+        config: Value,
+    ) -> Arc<dyn LlmPlugin> {
+        RedactionFactory::new(engines).create(config).unwrap()
+    }
+
+    fn engine_span(kind: PiiKind, text: &str, needle: &str) -> Detection {
+        let start = text.find(needle).unwrap();
+        Detection {
+            kind,
+            start,
+            end: start + needle.len(),
+            confidence: 0.99,
+            detector: "engine",
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_detections_are_masked() {
+        let text = "Alice says hi";
+        let engine = Arc::new(FakeEngine {
+            readiness: EngineReadiness::Ready,
+            detections: vec![engine_span(PiiKind::Custom("person".into()), text, "Alice")],
+        });
+        let resolver = Arc::new(FakeResolver {
+            name: "fake",
+            engine: engine.clone(),
+        });
+        let plugin = plugin_with(
+            Some(resolver),
+            json!({"detector": {"engine": "fake"}}),
+        );
+        let mut request = text_request(text);
+        let mut state = Value::Null;
+        mask_request(&plugin, &mut request, &mut state).await;
+        let masked = request_text(&request);
+        assert!(!masked.contains("Alice"), "{masked}");
+        assert!(masked.contains(PLACEHOLDER_PREFIX), "{masked}");
+    }
+
+    #[tokio::test]
+    async fn missing_engine_fails_closed_by_default() {
+        let plugin = plugin_with(None, json!({"detector": {"engine": "missing"}}));
+        let mut request = text_request("hello");
+        let mut state = Value::Null;
+        let meta = meta();
+        let mut cx = LlmRequestContext {
+            meta: &meta,
+            request: &mut request,
+            state: &mut state,
+        };
+        assert!(plugin.on_request(&mut cx).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rules_only_falls_back_when_engine_is_missing() {
+        let plugin = plugin_with(
+            None,
+            json!({"detector": {"engine": "missing", "on_unavailable": "rules_only"}}),
+        );
+        let mut request = text_request("mail a@b.com");
+        let mut state = Value::Null;
+        mask_request(&plugin, &mut request, &mut state).await;
+        let masked = request_text(&request);
+        assert!(!masked.contains("a@b.com"), "{masked}");
+        assert!(masked.contains(PLACEHOLDER_PREFIX), "{masked}");
+    }
+
+    #[tokio::test]
+    async fn unready_engine_fails_closed() {
+        let engine = Arc::new(FakeEngine {
+            readiness: EngineReadiness::Starting,
+            detections: Vec::new(),
+        });
+        let resolver = Arc::new(FakeResolver {
+            name: "fake",
+            engine,
+        });
+        let plugin = plugin_with(
+            Some(resolver),
+            json!({"detector": {"engine": "fake"}}),
+        );
+        let mut request = text_request("hello");
+        let mut state = Value::Null;
+        let meta = meta();
+        let mut cx = LlmRequestContext {
+            meta: &meta,
+            request: &mut request,
+            state: &mut state,
+        };
+        assert!(plugin.on_request(&mut cx).await.is_err());
+    }
+
     #[tokio::test]
     async fn dictionary_terms_are_masked_and_restored() {
         let plugin = plugin(json!({"dictionary": ["张三", "Project Falcon"]}));
@@ -1167,27 +1465,27 @@ mod tests {
     #[test]
     fn rejects_bad_dictionary_configuration() {
         assert!(
-            RedactionFactory
+            RedactionFactory::new(None)
                 .create(json!({"dictionary": [""]}))
                 .is_err()
         );
         assert!(
-            RedactionFactory
+            RedactionFactory::new(None)
                 .create(json!({"dictionary": ["acme"], "max_dictionary_terms": 0}))
                 .is_err()
         );
         assert!(
-            RedactionFactory
+            RedactionFactory::new(None)
                 .create(json!({"dictionary": ["acme"], "max_dictionary_terms": 1}))
                 .is_ok()
         );
         assert!(
-            RedactionFactory
+            RedactionFactory::new(None)
                 .create(json!({"dictionary": ["a", "b"], "max_dictionary_terms": 1}))
                 .is_err()
         );
         assert!(
-            RedactionFactory
+            RedactionFactory::new(None)
                 .create(json!({"dictionary_file": "/nonexistent/octra-dictionary.txt"}))
                 .is_err()
         );
@@ -1206,19 +1504,19 @@ mod tests {
 
     #[test]
     fn rejects_bad_configuration() {
-        assert!(RedactionFactory.create(json!({"mode": "maybe"})).is_err());
+        assert!(RedactionFactory::new(None).create(json!({"mode": "maybe"})).is_err());
         assert!(
-            RedactionFactory
+            RedactionFactory::new(None)
                 .create(json!({"custom_patterns": [{"name": "x", "regex": "("}]}))
                 .is_err()
         );
         assert!(
-            RedactionFactory
+            RedactionFactory::new(None)
                 .create(json!({"rules": {"email": "yes"}}))
                 .is_err()
         );
         assert!(
-            RedactionFactory
+            RedactionFactory::new(None)
                 .create(json!({"rules": {"unknown": true}}))
                 .is_err()
         );

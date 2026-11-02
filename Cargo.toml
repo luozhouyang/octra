@@ -80,6 +80,7 @@ octra-data-plane = { path = "crates/octra-data-plane" }
 octra-types = { path = "crates/octra-types" }
 octra-runtime = { path = "crates/octra-runtime" }
 octra-llm-core = { path = "crates/octra-llm-core" }
+octra-pii-types = { path = "crates/octra-pii-types" }
 octra-llm-gateway = { path = "crates/octra-llm-gateway" }
 octra-llm-plugin-types = { path = "crates/octra-llm-plugin-types" }
 octra-llm-plugin-builtin = { path = "crates/octra-llm-plugin-builtin" }
