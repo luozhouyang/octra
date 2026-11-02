@@ -2,10 +2,11 @@
 
 mod common;
 
+use axum::Router;
 use axum::http::{Method, StatusCode};
 use common::{
-    COMPLETION_PATH, Harness, json_response, openai_body, openai_completion, post_json, send,
-    wait_for_usage,
+    COMPLETION_PATH, Harness, json_response, mock_token_endpoint, openai_body, openai_completion,
+    post_json, send, wait_for_usage,
 };
 use serde_json::{Value, json};
 
@@ -987,4 +988,177 @@ async fn pii_engine_rejects_invalid_configuration() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
+}
+
+// ---------------------------------------------------------------------------
+// Provider account OAuth
+
+fn oauth_provider_body(name: &str, token_url: &str) -> Value {
+    json!({
+        "name": name,
+        "protocol": "openai",
+        "base_url": "https://api.example.test/v1",
+        "secret_ref": "env:OCTRA_TEST_UNUSED_SECRET",
+        "config": {
+            "wire": "openai",
+            "oauth": {
+                "authorize_url": "https://auth.example.test/authorize",
+                "token_url": token_url,
+                "client_id": "client-1",
+                "scopes": ["read", "offline_access"],
+                "redirect_uri": "http://localhost:1455/callback",
+                "extra_authorize_params": {"audience": "api"}
+            }
+        }
+    })
+}
+
+/// Sends through one persistent router, so per-router state (pending OAuth
+/// flows) survives across calls.
+async fn call_router(
+    router: &Router,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let (status, _, text) = send(router.clone(), method, path, &[], body).await;
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::String(text)),
+    )
+}
+
+#[tokio::test]
+async fn oauth_account_lifecycle() {
+    let harness = Harness::new().await;
+    let tokens = mock_token_endpoint().await;
+    let control = harness.control_router();
+
+    let post = |path: String, body: Value| {
+        let control = control.clone();
+        async move { call_router(&control, Method::POST, &path, Some(body)).await }
+    };
+
+    let (status, provider) = post(
+        PROVIDERS.to_string(),
+        oauth_provider_body("oauth-main", &tokens.url),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {provider}");
+    let provider_id = provider["id"].as_str().unwrap().to_string();
+
+    let accounts = format!("{PROVIDERS}/{provider_id}/accounts");
+    let (status, account) = post(accounts.clone(), json!({"name": "acct"})).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {account}");
+    let account_id = account["id"].as_str().unwrap().to_string();
+    assert_eq!(account["oauth_status"], "none");
+    assert_eq!(account["credential_kind"], "static");
+
+    let base = format!("{PROVIDERS}/{provider_id}/accounts/{account_id}/oauth");
+
+    let (status, start) = call_router(&control, Method::POST, &format!("{base}/start"), None).await;
+    assert_eq!(status, StatusCode::OK, "body: {start}");
+    let state_token = start["state"].as_str().unwrap().to_string();
+    assert_eq!(start["redirect_uri"], "http://localhost:1455/callback");
+    let authorize = start["authorize_url"].as_str().unwrap();
+    assert!(authorize.starts_with("https://auth.example.test/authorize?"));
+    assert!(authorize.contains("client_id=client-1"));
+    assert!(authorize.contains("code_challenge_method=S256"));
+    assert!(authorize.contains("audience=api"));
+    assert!(authorize.contains(&format!("state={state_token}")));
+
+    // A state the flow store never issued is rejected.
+    let (status, _) = post(
+        format!("{base}/complete"),
+        json!({"code": "c", "state": "bogus"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Completing with a state that belongs to another account is rejected.
+    let (status, other) = post(accounts.clone(), json!({"name": "other"})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let other_id = other["id"].as_str().unwrap();
+    let (status, _) = post(
+        format!("{PROVIDERS}/{provider_id}/accounts/{other_id}/oauth/complete"),
+        json!({"code": "c", "state": state_token}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The state was consumed by the failed attempt, so start again.
+    let (_, start) = call_router(&control, Method::POST, &format!("{base}/start"), None).await;
+    let state_token = start["state"].as_str().unwrap().to_string();
+    let (status, completed) = post(
+        format!("{base}/complete"),
+        json!({"code": "code-1", "state": state_token}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {completed}");
+    assert_eq!(completed["oauth_status"], "authorized");
+    assert_eq!(completed["credential_kind"], "oauth");
+    assert!(completed["oauth_expires_at"].is_string());
+
+    let forms = tokens.forms.lock().unwrap().clone();
+    assert_eq!(forms.len(), 1, "forms: {forms:?}");
+    assert!(forms[0].contains("grant_type=authorization_code"));
+    assert!(forms[0].contains("code=code-1"));
+    assert!(forms[0].contains("code_verifier="));
+
+    let (status, refreshed) =
+        call_router(&control, Method::POST, &format!("{base}/refresh"), None).await;
+    assert_eq!(status, StatusCode::OK, "body: {refreshed}");
+    assert_eq!(refreshed["oauth_status"], "authorized");
+    let forms = tokens.forms.lock().unwrap().clone();
+    assert_eq!(forms.len(), 2);
+    assert!(forms[1].contains("grant_type=refresh_token"));
+    assert!(forms[1].contains("refresh_token=refresh-1"));
+
+    let (status, _) = call_router(&control, Method::DELETE, &base, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, status_body) =
+        call_router(&control, Method::GET, &format!("{base}/status"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status_body["oauth_status"], "none");
+    assert_eq!(status_body["oauth_expires_at"], Value::Null);
+}
+
+#[tokio::test]
+async fn oauth_requires_provider_configuration() {
+    let harness = Harness::new().await;
+    let (_, provider) = create(
+        &harness,
+        PROVIDERS,
+        provider_body("plain", "https://api.openai.com/v1"),
+    )
+    .await;
+    let provider_id = provider["id"].as_str().unwrap().to_string();
+    let (status, account) = create(
+        &harness,
+        &format!("{PROVIDERS}/{provider_id}/accounts"),
+        json!({"name": "acct"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let account_id = account["id"].as_str().unwrap();
+
+    let (status, body) = call(
+        &harness,
+        Method::POST,
+        &format!("{PROVIDERS}/{provider_id}/accounts/{account_id}/oauth/start"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+
+    // The provider check runs before the account lookup, so a missing account
+    // still surfaces the missing OAuth configuration.
+    let (status, _) = call(
+        &harness,
+        Method::POST,
+        &format!("{PROVIDERS}/{provider_id}/accounts/missing/oauth/start"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

@@ -3,7 +3,7 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::http::StatusCode;
 use common::*;
@@ -2230,4 +2230,148 @@ async fn models_listing_respects_virtual_key_permissions() {
             .iter()
             .all(|model| model["id"] != "octra-default")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Provider account OAuth
+
+#[derive(Clone)]
+struct RecordedUpstream {
+    calls: Arc<Mutex<Vec<Option<String>>>>,
+    reject: Arc<Mutex<usize>>,
+}
+
+struct RecordingUpstream {
+    base_url: String,
+    calls: Arc<Mutex<Vec<Option<String>>>>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for RecordingUpstream {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+async fn recorded_upstream_handler(
+    axum::extract::State(state): axum::extract::State<RecordedUpstream>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    state.calls.lock().unwrap().push(
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+    );
+    let mut reject = state.reject.lock().unwrap();
+    if *reject > 0 {
+        *reject -= 1;
+        json_status(
+            StatusCode::UNAUTHORIZED,
+            json!({"error": {"message": "token expired"}}),
+        )
+    } else {
+        json_response(openai_completion("Hello from OAuth"))
+    }
+}
+
+async fn recording_upstream(reject: usize) -> RecordingUpstream {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let app = axum::Router::new()
+        .route("/{*path}", axum::routing::post(recorded_upstream_handler))
+        .with_state(RecordedUpstream {
+            calls: calls.clone(),
+            reject: Arc::new(Mutex::new(reject)),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    RecordingUpstream {
+        base_url: format!("http://{address}/v1"),
+        calls,
+        handle,
+    }
+}
+
+async fn oauth_harness(
+    reject: usize,
+    access_token: &str,
+) -> (Harness, RecordingUpstream, common::MockTokenEndpoint) {
+    let harness = Harness::new().await;
+    let tokens = mock_token_endpoint().await;
+    let upstream = recording_upstream(reject).await;
+    let config = json!({
+        "wire": "openai",
+        "oauth": {
+            "authorize_url": "https://auth.example.test/authorize",
+            "token_url": tokens.url,
+            "client_id": "client-1",
+            "redirect_uri": "http://localhost:1455/callback"
+        }
+    })
+    .to_string();
+    let provider = harness
+        .provider_with_config("oauth", "openai", &upstream.base_url, "bearer", 0, &config)
+        .await;
+    let account = harness.account(&provider, "acct", 0, 1, None, 0).await;
+    harness
+        .storage
+        .llm
+        .upsert_oauth_token(&octra_storage::LlmOAuthTokenRecord {
+            account_id: account,
+            access_token: access_token.to_string(),
+            refresh_token: Some("refresh-seed".to_string()),
+            token_type: "Bearer".to_string(),
+            scope: "read".to_string(),
+            expires_at: Some("2099-01-01T00:00:00Z".to_string()),
+            extra_json: "{}".to_string(),
+        })
+        .await
+        .unwrap();
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+    (harness, upstream, tokens)
+}
+
+#[tokio::test]
+async fn oauth_account_uses_its_stored_access_token() {
+    let (harness, upstream, tokens) = oauth_harness(0, "stored-token").await;
+    let (status, _, body) = post_json(
+        harness.data_router_plain(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        upstream.calls.lock().unwrap().clone(),
+        vec![Some("Bearer stored-token".to_string())]
+    );
+    assert!(tokens.forms.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn oauth_401_refreshes_and_retries_once() {
+    let (harness, upstream, tokens) = oauth_harness(1, "stale-token").await;
+    let (status, _, body) = post_json(
+        harness.data_router_plain(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        upstream.calls.lock().unwrap().clone(),
+        vec![
+            Some("Bearer stale-token".to_string()),
+            Some("Bearer access-1".to_string()),
+        ]
+    );
+    let forms = tokens.forms.lock().unwrap().clone();
+    assert_eq!(forms.len(), 1);
+    assert!(forms[0].contains("grant_type=refresh_token"));
+    assert!(forms[0].contains("refresh_token="));
 }

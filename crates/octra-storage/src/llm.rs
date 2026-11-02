@@ -134,6 +134,9 @@ pub struct LlmProviderAccountRecord {
     pub quota_reset_at: Option<String>,
     pub cooldown_until: Option<String>,
     pub last_error: Option<String>,
+    pub credential_kind: String,
+    pub oauth_status: String,
+    pub oauth_expires_at: Option<String>,
     pub config_json: String,
     pub created_at: String,
     pub updated_at: String,
@@ -288,6 +291,18 @@ pub enum LlmStorageError {
     Missing(String),
     Backend(String),
 }
+
+impl std::fmt::Display for LlmStorageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict(message) => write!(formatter, "conflict: {message}"),
+            Self::Missing(message) => write!(formatter, "missing: {message}"),
+            Self::Backend(message) => write!(formatter, "backend: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for LlmStorageError {}
 
 impl LlmStorageError {
     pub fn into_octra(self) -> Error {
@@ -451,6 +466,9 @@ fn account_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmProviderAccountRecord {
         quota_reset_at: row.get("quota_reset_at"),
         cooldown_until: row.get("cooldown_until"),
         last_error: row.get("last_error"),
+        credential_kind: row.get("credential_kind"),
+        oauth_status: row.get("oauth_status"),
+        oauth_expires_at: row.get("oauth_expires_at"),
         config_json: row.get("config_json"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -459,7 +477,8 @@ fn account_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmProviderAccountRecord {
 
 const ACCOUNT_COLUMNS: &str = "id, provider_id, name, secret_ref, weight, priority, enabled, \
      quota_limit, quota_unit, quota_period, quota_used, quota_reset_at, cooldown_until, \
-     last_error, config_json, created_at, updated_at";
+     last_error, credential_kind, oauth_status, oauth_expires_at, config_json, created_at, \
+     updated_at";
 
 fn virtual_key_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmVirtualKeyRecord {
     LlmVirtualKeyRecord {
@@ -1543,6 +1562,128 @@ impl LlmStore {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth tokens
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmOAuthTokenRecord {
+    pub account_id: String,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub token_type: String,
+    pub scope: String,
+    pub expires_at: Option<String>,
+    pub extra_json: String,
+}
+
+impl LlmStore {
+    pub async fn get_oauth_token(
+        &self,
+        account_id: &str,
+    ) -> LlmResult<Option<LlmOAuthTokenRecord>> {
+        let row = sqlx::query(
+            "SELECT account_id, access_token, refresh_token, token_type, scope, expires_at,
+                    extra_json
+             FROM llm_provider_oauth_tokens WHERE account_id = ?",
+        )
+        .bind(account_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(backend)?;
+        Ok(row.map(|row| LlmOAuthTokenRecord {
+            account_id: row.get("account_id"),
+            access_token: row.get("access_token"),
+            refresh_token: row.get("refresh_token"),
+            token_type: row.get("token_type"),
+            scope: row.get("scope"),
+            expires_at: row.get("expires_at"),
+            extra_json: row.get("extra_json"),
+        }))
+    }
+
+    pub async fn upsert_oauth_token(&self, token: &LlmOAuthTokenRecord) -> LlmResult<()> {
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        sqlx::query(
+            "INSERT INTO llm_provider_oauth_tokens
+                (account_id, access_token, refresh_token, token_type, scope, expires_at,
+                 extra_json, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT(account_id) DO UPDATE SET
+                access_token = excluded.access_token,
+                refresh_token = COALESCE(excluded.refresh_token, refresh_token),
+                token_type = excluded.token_type,
+                scope = excluded.scope,
+                expires_at = excluded.expires_at,
+                extra_json = excluded.extra_json,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        )
+        .bind(&token.account_id)
+        .bind(&token.access_token)
+        .bind(&token.refresh_token)
+        .bind(&token.token_type)
+        .bind(&token.scope)
+        .bind(&token.expires_at)
+        .bind(&token.extra_json)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        sqlx::query(
+            "UPDATE llm_provider_accounts
+             SET credential_kind = 'oauth', oauth_status = 'authorized',
+                 oauth_expires_at = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?",
+        )
+        .bind(&token.expires_at)
+        .bind(&token.account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)
+    }
+
+    pub async fn delete_oauth_token(&self, account_id: &str) -> LlmResult<bool> {
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        let result = sqlx::query("DELETE FROM llm_provider_oauth_tokens WHERE account_id = ?")
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        sqlx::query(
+            "UPDATE llm_provider_accounts
+             SET oauth_status = 'none', oauth_expires_at = NULL,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?",
+        )
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn mark_oauth_reauth(&self, account_id: &str, _reason: &str) -> LlmResult<()> {
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        sqlx::query("DELETE FROM llm_provider_oauth_tokens WHERE account_id = ?")
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        sqlx::query(
+            "UPDATE llm_provider_accounts
+             SET oauth_status = 'reauth_required', oauth_expires_at = NULL,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?",
+        )
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PII engines
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2163,5 +2304,89 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(requests, 2);
+    }
+
+    #[tokio::test]
+    async fn oauth_tokens_round_trip_and_cascade() {
+        let storage = storage().await;
+        let provider = storage
+            .llm
+            .create_provider(&provider("oauth"))
+            .await
+            .unwrap();
+        let account = storage
+            .llm
+            .create_account(
+                &provider.id,
+                &LlmProviderAccountInput {
+                    name: "subscription".into(),
+                    secret_ref: None,
+                    weight: 1,
+                    priority: 0,
+                    enabled: true,
+                    quota_limit: None,
+                    quota_unit: "requests".into(),
+                    quota_period: "none".into(),
+                    config_json: "{}".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(account.credential_kind, "static");
+        assert_eq!(account.oauth_status, "none");
+
+        let token = LlmOAuthTokenRecord {
+            account_id: account.id.clone(),
+            access_token: "access".into(),
+            refresh_token: Some("refresh".into()),
+            token_type: "Bearer".into(),
+            scope: "chat".into(),
+            expires_at: Some("2030-01-01T00:00:00.000Z".into()),
+            extra_json: "{}".into(),
+        };
+        storage.llm.upsert_oauth_token(&token).await.unwrap();
+        let loaded = storage
+            .llm
+            .get_oauth_token(&account.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.access_token, "access");
+        assert_eq!(loaded.refresh_token.as_deref(), Some("refresh"));
+        let updated = storage.llm.get_account(&account.id).await.unwrap().unwrap();
+        assert_eq!(updated.credential_kind, "oauth");
+        assert_eq!(updated.oauth_status, "authorized");
+        assert_eq!(
+            updated.oauth_expires_at.as_deref(),
+            Some("2030-01-01T00:00:00.000Z")
+        );
+
+        storage
+            .llm
+            .mark_oauth_reauth(&account.id, "invalid_grant")
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .llm
+                .get_oauth_token(&account.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let updated = storage.llm.get_account(&account.id).await.unwrap().unwrap();
+        assert_eq!(updated.oauth_status, "reauth_required");
+        assert!(updated.oauth_expires_at.is_none());
+
+        storage.llm.upsert_oauth_token(&token).await.unwrap();
+        assert!(storage.llm.delete_account(&account.id).await.unwrap());
+        let orphaned: Option<String> = sqlx::query_scalar(
+            "SELECT account_id FROM llm_provider_oauth_tokens WHERE account_id = ?",
+        )
+        .bind(&account.id)
+        .fetch_optional(storage.pool())
+        .await
+        .unwrap();
+        assert!(orphaned.is_none());
     }
 }

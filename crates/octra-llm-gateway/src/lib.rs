@@ -16,6 +16,7 @@ pub mod config;
 pub mod control;
 pub mod pii;
 pub mod cost;
+pub mod credentials;
 pub mod data_plane;
 pub mod error;
 pub mod keys;

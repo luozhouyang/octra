@@ -500,6 +500,9 @@ mod tests {
             cooldown_until: None,
             last_error: None,
             config_json: "{}".into(),
+            credential_kind: "static".into(),
+            oauth_status: "none".into(),
+            oauth_expires_at: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

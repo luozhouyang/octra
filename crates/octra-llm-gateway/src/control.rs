@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+use crate::config::ProviderConfig;
 use crate::keys;
 use crate::pii::EngineStatus;
 use crate::runtime::{LlmControlState, LlmRuntime};
@@ -51,6 +52,26 @@ pub fn router(state: LlmControlState) -> Router {
         .route(
             "/admin/llm/accounts/{id}/quota/reset",
             post(reset_account_quota),
+        )
+        .route(
+            "/admin/llm/providers/{id}/accounts/{account}/oauth/start",
+            post(oauth_start),
+        )
+        .route(
+            "/admin/llm/providers/{id}/accounts/{account}/oauth/complete",
+            post(oauth_complete),
+        )
+        .route(
+            "/admin/llm/providers/{id}/accounts/{account}/oauth/refresh",
+            post(oauth_refresh),
+        )
+        .route(
+            "/admin/llm/providers/{id}/accounts/{account}/oauth/status",
+            get(oauth_status),
+        )
+        .route(
+            "/admin/llm/providers/{id}/accounts/{account}/oauth",
+            axum::routing::delete(oauth_delete),
         );
     let models = Router::new()
         .route("/admin/llm/models", get(list_models).post(create_model))
@@ -930,6 +951,9 @@ pub struct AccountView {
     pub quota_reset_at: Option<String>,
     pub cooldown_until: Option<String>,
     pub last_error: Option<String>,
+    pub credential_kind: String,
+    pub oauth_status: String,
+    pub oauth_expires_at: Option<String>,
     pub config: Value,
     pub created_at: String,
     pub updated_at: String,
@@ -952,6 +976,9 @@ impl From<LlmProviderAccountRecord> for AccountView {
             quota_reset_at: record.quota_reset_at,
             cooldown_until: record.cooldown_until,
             last_error: record.last_error,
+            credential_kind: record.credential_kind,
+            oauth_status: record.oauth_status,
+            oauth_expires_at: record.oauth_expires_at,
             config: serde_json::from_str(&record.config_json).unwrap_or_else(|_| json!({})),
             created_at: record.created_at,
             updated_at: record.updated_at,
@@ -2560,4 +2587,141 @@ async fn restart_pii_engine(
         "status": "restarted",
         "engine": pii.get_status(&record.name),
     })))
+}
+
+// ---------------------------------------------------------------------------
+// OAuth credentials
+
+#[derive(Debug, Deserialize)]
+pub struct OAuthCompleteBody {
+    pub code: String,
+    pub state: String,
+}
+
+async fn oauth_provider(state: &LlmControlState, provider_id: &str) -> ApiResult<ProviderConfig> {
+    let record = state
+        .storage
+        .llm
+        .get_provider(provider_id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("provider", provider_id))?;
+    let provider = ProviderConfig::from_record(&record)
+        .map_err(|error| ApiError::bad_request(format!("{error:?}")))?;
+    if provider.oauth.is_none() {
+        return Err(ApiError::bad_request(
+            "provider has no `oauth` configuration",
+        ));
+    }
+    Ok(provider)
+}
+
+async fn oauth_account(
+    state: &LlmControlState,
+    provider_id: &str,
+    account_id: &str,
+) -> ApiResult<LlmProviderAccountRecord> {
+    let account = state
+        .storage
+        .llm
+        .get_account(account_id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("account", account_id))?;
+    if account.provider_id != provider_id {
+        return Err(ApiError::bad_request(
+            "account does not belong to this provider",
+        ));
+    }
+    Ok(account)
+}
+
+fn oauth_error(error: octra_llm_core::GatewayError) -> ApiError {
+    ApiError::new(StatusCode::BAD_GATEWAY, error.message)
+}
+
+async fn oauth_start(
+    State(state): State<LlmControlState>,
+    Path((provider_id, account_id)): Path<(String, String)>,
+) -> ApiResult<extract::Json<crate::credentials::FlowStart>> {
+    let provider = oauth_provider(&state, &provider_id).await?;
+    let account = oauth_account(&state, &provider_id, &account_id).await?;
+    let flow = state
+        .oauth_flows
+        .begin(&provider, &account.id)
+        .map_err(ApiError::bad_request)?;
+    Ok(extract::Json(flow))
+}
+
+async fn oauth_complete(
+    State(state): State<LlmControlState>,
+    Path((provider_id, account_id)): Path<(String, String)>,
+    extract::Json(body): extract::Json<OAuthCompleteBody>,
+) -> ApiResult<extract::Json<Value>> {
+    let provider = oauth_provider(&state, &provider_id).await?;
+    let account = oauth_account(&state, &provider_id, &account_id).await?;
+    let flow = state
+        .oauth_flows
+        .take(&body.state)
+        .ok_or_else(|| ApiError::bad_request("unknown or expired OAuth state"))?;
+    if flow.provider_id != provider_id || flow.account_id != account.id {
+        return Err(ApiError::bad_request(
+            "OAuth state does not match this account",
+        ));
+    }
+    state
+        .oauth
+        .exchange_code(
+            &provider,
+            &account.id,
+            &body.code,
+            &flow.verifier,
+            &flow.redirect_uri,
+        )
+        .await
+        .map_err(oauth_error)?;
+    oauth_status(State(state), Path((provider_id, account_id))).await
+}
+
+async fn oauth_refresh(
+    State(state): State<LlmControlState>,
+    Path((provider_id, account_id)): Path<(String, String)>,
+) -> ApiResult<extract::Json<Value>> {
+    let provider = oauth_provider(&state, &provider_id).await?;
+    let account = oauth_account(&state, &provider_id, &account_id).await?;
+    state
+        .oauth
+        .refresh_account(&provider, &account.id)
+        .await
+        .map_err(oauth_error)?;
+    oauth_status(State(state), Path((provider_id, account_id))).await
+}
+
+async fn oauth_status(
+    State(state): State<LlmControlState>,
+    Path((provider_id, account_id)): Path<(String, String)>,
+) -> ApiResult<extract::Json<Value>> {
+    let account = oauth_account(&state, &provider_id, &account_id).await?;
+    Ok(extract::Json(json!({
+        "account_id": account.id,
+        "provider_id": account.provider_id,
+        "credential_kind": account.credential_kind,
+        "oauth_status": account.oauth_status,
+        "oauth_expires_at": account.oauth_expires_at,
+    })))
+}
+
+async fn oauth_delete(
+    State(state): State<LlmControlState>,
+    Path((provider_id, account_id)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let account = oauth_account(&state, &provider_id, &account_id).await?;
+    state
+        .storage
+        .llm
+        .delete_oauth_token(&account.id)
+        .await
+        .map_err(ApiError::from_storage)?;
+    state.oauth.invalidate(&account.id);
+    Ok(StatusCode::NO_CONTENT)
 }

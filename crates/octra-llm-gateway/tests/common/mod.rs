@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use axum::response::Response;
-use axum::routing::any;
+use axum::routing::{any, post};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use octra_config::OctraConfig;
@@ -139,6 +139,63 @@ pub fn json_status(status: StatusCode, value: Value) -> Response {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(value.to_string()))
         .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// OAuth token endpoint mock
+
+#[derive(Clone)]
+struct TokenEndpointState {
+    forms: Arc<Mutex<Vec<String>>>,
+    issued: Arc<Mutex<u64>>,
+}
+
+/// A local OAuth token endpoint that records form bodies and issues sequential
+/// access/refresh token pairs.
+pub struct MockTokenEndpoint {
+    pub url: String,
+    pub forms: Arc<Mutex<Vec<String>>>,
+    handle: JoinHandle<()>,
+}
+
+impl Drop for MockTokenEndpoint {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+async fn issue_token(State(state): State<TokenEndpointState>, body: String) -> axum::Json<Value> {
+    state.forms.lock().unwrap().push(body);
+    let mut issued = state.issued.lock().unwrap();
+    *issued += 1;
+    axum::Json(json!({
+        "access_token": format!("access-{issued}"),
+        "refresh_token": format!("refresh-{issued}"),
+        "token_type": "Bearer",
+        "expires_in": 3600,
+        "scope": "read offline_access"
+    }))
+}
+
+pub async fn mock_token_endpoint() -> MockTokenEndpoint {
+    let forms = Arc::new(Mutex::new(Vec::new()));
+    let state = TokenEndpointState {
+        forms: forms.clone(),
+        issued: Arc::new(Mutex::new(0)),
+    };
+    let app = Router::new()
+        .route("/token", post(issue_token))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    MockTokenEndpoint {
+        url: format!("http://{address}/token"),
+        forms,
+        handle,
+    }
 }
 
 pub fn sse_response(body: String) -> Response {
@@ -361,6 +418,18 @@ impl Harness {
         .into_router()
     }
 
+    /// Data plane router with the real credential resolution and OAuth cache,
+    /// without the fixed test key.
+    pub fn data_router_plain(&self) -> Router {
+        LlmDataState::new(
+            self.runtime.clone(),
+            self.storage.clone(),
+            self.config.clone(),
+        )
+        .with_plugins(self.plugins.clone())
+        .into_router()
+    }
+
     pub fn control_router(&self) -> Router {
         control_router(
             LlmControlState::new(self.runtime.clone(), self.storage.clone())
@@ -403,6 +472,20 @@ impl Harness {
         auth_type: &str,
         priority: i64,
     ) -> String {
+        self.provider_with_config(name, protocol, base_url, auth_type, priority, "{}")
+            .await
+    }
+
+    /// Creates a provider with an explicit `config_json` (for example OAuth).
+    pub async fn provider_with_config(
+        &self,
+        name: &str,
+        protocol: &str,
+        base_url: &str,
+        auth_type: &str,
+        priority: i64,
+        config_json: &str,
+    ) -> String {
         let record = self
             .storage
             .llm
@@ -414,7 +497,7 @@ impl Harness {
                 base_url: Some(base_url.to_string()),
                 secret_ref: Some("env:OCTRA_TEST_UNUSED_SECRET".to_string()),
                 priority,
-                config_json: "{}".to_string(),
+                config_json: config_json.to_string(),
                 enabled: true,
             })
             .await

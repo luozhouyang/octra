@@ -408,6 +408,7 @@ async fn supervise(
     cancel: CancellationToken,
 ) {
     let mut attempt = 0u32;
+    #[allow(unused_assignments)]
     let mut last_error: Option<String> = None;
     loop {
         if cancel.is_cancelled() {

@@ -41,6 +41,100 @@ impl AuthType {
 
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthTokenAuth {
+    Form,
+    Basic,
+}
+
+/// OAuth 2.0 settings for an account credential. Endpoints are configuration,
+/// not hardcoded, because subscription providers do not publish stable APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthProfile {
+    pub authorize_url: String,
+    pub token_url: String,
+    pub client_id: String,
+    pub client_secret_ref: Option<String>,
+    pub scopes: Vec<String>,
+    pub redirect_uri: Option<String>,
+    pub token_auth: OAuthTokenAuth,
+    pub extra_authorize_params: Vec<(String, String)>,
+    pub extra_token_params: Vec<(String, String)>,
+}
+
+impl OAuthProfile {
+    pub fn from_value(value: &Value) -> Result<Self, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "`oauth` must be an object".to_string())?;
+        let string = |key: &str| {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        let authorize_url = string("authorize_url")
+            .ok_or_else(|| "`oauth.authorize_url` is required".to_string())?;
+        let token_url =
+            string("token_url").ok_or_else(|| "`oauth.token_url` is required".to_string())?;
+        for (name, url) in [("authorize_url", &authorize_url), ("token_url", &token_url)] {
+            let parsed = reqwest::Url::parse(url)
+                .map_err(|error| format!("invalid oauth.{name}: {error}"))?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(format!("oauth.{name} must be http(s)"));
+            }
+        }
+        let client_id =
+            string("client_id").ok_or_else(|| "`oauth.client_id` is required".to_string())?;
+        let scopes = object
+            .get("scopes")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let token_auth = match string("token_auth").as_deref() {
+            None | Some("form") => OAuthTokenAuth::Form,
+            Some("basic") => OAuthTokenAuth::Basic,
+            Some(other) => {
+                return Err(format!(
+                    "oauth.token_auth must be form or basic, got '{other}'"
+                ));
+            }
+        };
+        let params = |key: &str| -> Vec<(String, String)> {
+            object
+                .get(key)
+                .and_then(Value::as_object)
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(key, value)| {
+                            value.as_str().map(|value| (key.clone(), value.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Ok(Self {
+            authorize_url,
+            token_url,
+            client_id,
+            client_secret_ref: string("client_secret_ref"),
+            scopes,
+            redirect_uri: string("redirect_uri"),
+            token_auth,
+            extra_authorize_params: params("extra_authorize_params"),
+            extra_token_params: params("extra_token_params"),
+        })
+    }
+}
+
 /// Fully resolved provider settings used by the request path.
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
@@ -55,6 +149,7 @@ pub struct ProviderConfig {
     /// Extra headers from `config_json.headers`.
     pub headers: Vec<(String, String)>,
     pub anthropic_version: String,
+    pub oauth: Option<OAuthProfile>,
 }
 
 #[derive(Debug)]
@@ -113,6 +208,13 @@ impl ProviderConfig {
             _ => default_base_url(protocol).to_string(),
         };
 
+        let oauth = match config.get("oauth") {
+            Some(value) => Some(OAuthProfile::from_value(value).map_err(|message| {
+                ProviderConfigError::Invalid(format!("provider {}: {message}", record.name))
+            })?),
+            None => None,
+        };
+
         let mut headers = Vec::new();
         if let Some(map) = config.get("headers").and_then(Value::as_object) {
             for (name, value) in map {
@@ -139,6 +241,7 @@ impl ProviderConfig {
                 .and_then(Value::as_str)
                 .unwrap_or(ANTHROPIC_VERSION)
                 .to_string(),
+            oauth,
         })
     }
 

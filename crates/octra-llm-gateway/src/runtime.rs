@@ -433,16 +433,18 @@ pub struct LlmDataState {
     pub config: Arc<OctraConfig>,
     pub upstream: Option<Arc<crate::upstream::Upstream>>,
     pub plugins: Option<Arc<crate::LlmPluginRuntime>>,
+    pub oauth: Arc<crate::credentials::OAuthTokenCache>,
 }
 
 impl LlmDataState {
     pub fn new(runtime: Arc<LlmRuntime>, storage: Arc<Storage>, config: Arc<OctraConfig>) -> Self {
         Self {
             runtime,
-            storage,
+            storage: storage.clone(),
             config,
             upstream: None,
             plugins: None,
+            oauth: Arc::new(crate::credentials::OAuthTokenCache::new(storage)),
         }
     }
 
@@ -463,9 +465,9 @@ impl LlmDataState {
     }
 
     pub(crate) fn upstream(&self) -> Arc<crate::upstream::Upstream> {
-        self.upstream
-            .clone()
-            .unwrap_or_else(|| Arc::new(crate::upstream::Upstream::new(&self.config)))
+        self.upstream.clone().unwrap_or_else(|| {
+            Arc::new(crate::upstream::Upstream::new(&self.config).with_oauth(self.oauth.clone()))
+        })
     }
 }
 
@@ -475,15 +477,19 @@ pub struct LlmControlState {
     pub storage: Arc<Storage>,
     pub plugins: Option<Arc<crate::LlmPluginRuntime>>,
     pub pii: Option<Arc<crate::pii::PiiEngineRuntime>>,
+    pub oauth: Arc<crate::credentials::OAuthTokenCache>,
+    pub oauth_flows: Arc<crate::credentials::OAuthFlowStore>,
 }
 
 impl LlmControlState {
     pub fn new(runtime: Arc<LlmRuntime>, storage: Arc<Storage>) -> Self {
         Self {
             runtime,
-            storage,
+            storage: storage.clone(),
             plugins: None,
             pii: None,
+            oauth: Arc::new(crate::credentials::OAuthTokenCache::new(storage)),
+            oauth_flows: Arc::new(crate::credentials::OAuthFlowStore::new()),
         }
     }
 

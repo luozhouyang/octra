@@ -4,6 +4,7 @@
 //! carries the upstream credential resolved from a secret reference; the
 //! credential never appears in logs or responses.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use octra_config::OctraConfig;
@@ -11,7 +12,9 @@ use octra_llm_core::{GatewayError, Protocol, Value};
 use octra_llm_protocol::UpstreamProtocol;
 use reqwest::{Client, RequestBuilder, Response, StatusCode, header};
 
+use crate::accounts::AccountRuntime;
 use crate::config::ProviderConfig;
+use crate::credentials::OAuthTokenCache;
 
 #[derive(Debug, Clone)]
 pub struct Upstream {
@@ -19,6 +22,7 @@ pub struct Upstream {
     request_timeout: Duration,
     stream_idle_timeout: Duration,
     test_api_key_env: Option<String>,
+    oauth: Option<Arc<OAuthTokenCache>>,
 }
 
 impl Upstream {
@@ -28,7 +32,14 @@ impl Upstream {
             request_timeout: Duration::from_secs(config.llm.request_timeout_secs.max(1)),
             stream_idle_timeout: Duration::from_secs(config.llm.stream_idle_timeout_secs.max(1)),
             test_api_key_env: None,
+            oauth: None,
         }
+    }
+
+    /// Attaches the process-wide OAuth token cache used by account credentials.
+    pub fn with_oauth(mut self, oauth: Arc<OAuthTokenCache>) -> Self {
+        self.oauth = Some(oauth);
+        self
     }
 
     /// Transport that bypasses secret references with a fixed key.
@@ -126,6 +137,69 @@ impl Upstream {
         account_secret_ref: Option<&str>,
     ) -> Result<RequestBuilder, GatewayError> {
         let key = self.resolve_secret_for(provider, account_secret_ref)?;
+        self.build_json(provider, url, body, stream, key)
+    }
+
+    /// Like [`Upstream::post_json`], resolving account credentials asynchronously.
+    /// OAuth accounts refresh their access token before the request is built.
+    pub async fn post_json_with_account(
+        &self,
+        provider: &ProviderConfig,
+        url: &str,
+        body: &Value,
+        stream: bool,
+        account: Option<&AccountRuntime>,
+    ) -> Result<RequestBuilder, GatewayError> {
+        let key = self.secret_for_account(provider, account).await?;
+        self.build_json(provider, url, body, stream, key)
+    }
+
+    async fn secret_for_account(
+        &self,
+        provider: &ProviderConfig,
+        account: Option<&AccountRuntime>,
+    ) -> Result<Option<String>, GatewayError> {
+        if let Some(key) = &self.test_api_key_env {
+            return Ok(Some(key.clone()));
+        }
+        if account.is_some_and(|account| account.record.credential_kind == "oauth") {
+            let account = account.expect("checked above");
+            let cache = self.oauth.as_ref().ok_or_else(|| {
+                GatewayError::config("OAuth credential cache is not configured")
+                    .with_code("secret_unavailable")
+            })?;
+            return cache
+                .access_token(provider, &account.record.id)
+                .await
+                .map(Some);
+        }
+        self.resolve_secret_for(
+            provider,
+            account.and_then(|account| account.record.secret_ref.as_deref()),
+        )
+    }
+
+    /// Forces an OAuth refresh for an account, used after an upstream 401.
+    pub async fn force_refresh(
+        &self,
+        provider: &ProviderConfig,
+        account: &AccountRuntime,
+    ) -> Result<(), GatewayError> {
+        let cache = self.oauth.as_ref().ok_or_else(|| {
+            GatewayError::config("OAuth credential cache is not configured")
+                .with_code("secret_unavailable")
+        })?;
+        cache.force_refresh(provider, &account.record.id).await
+    }
+
+    fn build_json(
+        &self,
+        provider: &ProviderConfig,
+        url: &str,
+        body: &Value,
+        stream: bool,
+        key: Option<String>,
+    ) -> Result<RequestBuilder, GatewayError> {
         let mut builder = self
             .client
             .post(url)

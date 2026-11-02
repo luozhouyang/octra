@@ -848,11 +848,15 @@ async fn execute(
             let account_secret_ref = account
                 .as_ref()
                 .and_then(|account| account.record.secret_ref.as_deref());
+            let oauth_account = account
+                .as_ref()
+                .is_some_and(|account| account.record.credential_kind == "oauth");
             // Any provider that authenticates needs a resolvable secret
-            // reference; without one the attempt would only end in a 401.
+            // reference; OAuth accounts resolve theirs from the token store.
             if provider.requires_secret()
                 && provider.secret_ref.is_none()
                 && account_secret_ref.is_none()
+                && !oauth_account
                 && upstream.test_key().is_none()
             {
                 last_error = Some(
@@ -901,7 +905,6 @@ async fn execute(
                 &tracker,
                 ingress,
                 account.as_ref(),
-                account_secret_ref,
                 provider_chain.as_ref(),
                 requested_model,
                 meta,
@@ -1132,6 +1135,10 @@ struct AttemptOutcome {
     streaming: bool,
 }
 
+fn is_unauthorized(error: &GatewayError) -> bool {
+    error.status == 401
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn try_attempt(
     state: &LlmDataState,
@@ -1143,7 +1150,6 @@ async fn try_attempt(
     tracker: &UsageTracker,
     ingress: Protocol,
     account: Option<&Arc<AccountRuntime>>,
-    account_secret_ref: Option<&str>,
     chain: Option<&Arc<LlmPluginChain>>,
     requested_model: &str,
     meta: &LlmRequestMeta<'_>,
@@ -1173,18 +1179,39 @@ async fn try_attempt(
     }
 
     let url = upstream.endpoint(provider, &target.model_id, ir.stream == Some(true))?;
-    let builder = upstream.post_json_with_secret(
-        provider,
-        &url,
-        &body,
-        ir.stream == Some(true),
-        account_secret_ref,
-    )?;
 
     if ir.stream == Some(true) {
-        let upstream_response = timeout(upstream.request_timeout(), upstream.send_stream(builder))
-            .await
-            .map_err(|_| GatewayError::timeout("upstream did not start streaming in time"))??;
+        let mut refreshed = false;
+        let upstream_response = loop {
+            let builder = upstream
+                .post_json_with_account(
+                    provider,
+                    &url,
+                    &body,
+                    true,
+                    account.map(|account| account.as_ref()),
+                )
+                .await?;
+            match timeout(upstream.request_timeout(), upstream.send_stream(builder)).await {
+                Err(_) => {
+                    return Err(GatewayError::timeout(
+                        "upstream did not start streaming in time",
+                    ));
+                }
+                Ok(Ok(response)) => break response,
+                Ok(Err(error)) => {
+                    if !refreshed
+                        && is_unauthorized(&error)
+                        && let Some(account) = account
+                    {
+                        upstream.force_refresh(provider, account).await?;
+                        refreshed = true;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        };
         let response = stream::start(
             &state.config,
             upstream_response,
@@ -1218,9 +1245,33 @@ async fn try_attempt(
         });
     }
 
-    let value = timeout(upstream.request_timeout(), upstream.send_json(builder))
-        .await
-        .map_err(|_| GatewayError::timeout("upstream request timed out"))??;
+    let mut refreshed = false;
+    let value = loop {
+        let builder = upstream
+            .post_json_with_account(
+                provider,
+                &url,
+                &body,
+                false,
+                account.map(|account| account.as_ref()),
+            )
+            .await?;
+        match timeout(upstream.request_timeout(), upstream.send_json(builder)).await {
+            Err(_) => return Err(GatewayError::timeout("upstream request timed out")),
+            Ok(Ok(value)) => break value,
+            Ok(Err(error)) => {
+                if !refreshed
+                    && is_unauthorized(&error)
+                    && let Some(account) = account
+                {
+                    upstream.force_refresh(provider, account).await?;
+                    refreshed = true;
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    };
     let mut response = translate::decode_response(target.protocol, value)?;
     // Clients see the model name they asked for, not the routed provider
     // model, so a model alias stays opaque.
