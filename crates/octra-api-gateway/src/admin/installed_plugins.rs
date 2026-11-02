@@ -544,6 +544,36 @@ mod tests {
     use super::*;
     use ed25519_dalek::Signer;
 
+    fn manifest(capabilities: &[&str]) -> PluginManifest {
+        serde_json::from_value(json!({
+            "name": "demo",
+            "version": "1.0.0",
+            "kind": "api",
+            "runtime": "wasm",
+            "priority": 100,
+            "description": "",
+            "capabilities": capabilities,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn capability_approval_must_match_the_manifest() {
+        let manifest = manifest(&["storage_entities"]);
+        assert!(ensure_capabilities(&manifest, &[Capability::StorageEntities]).is_ok());
+        assert!(ensure_capabilities(&manifest, &[]).is_err());
+        assert!(
+            ensure_capabilities(&manifest, &[Capability::StorageEntities, Capability::Log])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_capabilities_the_runtime_cannot_enforce() {
+        let manifest = manifest(&["network"]);
+        assert!(ensure_capabilities(&manifest, &[Capability::Network]).is_err());
+    }
+
     fn signed(hash: &str) -> (String, String) {
         let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let key = BASE64.encode(signing.verifying_key().as_bytes());
