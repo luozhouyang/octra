@@ -143,6 +143,8 @@ async fn main() -> anyhow::Result<()> {
             artifact_dir: workspace.plugin_artifact_dir(&config),
             max_artifact_bytes: u64::try_from(config.plugins.max_artifact_bytes)
                 .unwrap_or(u64::MAX),
+            trusted_keys: config.plugins.trusted_keys.clone(),
+            allow_unsigned: config.plugins.allow_unsigned,
         }));
         Arc::new(runtime)
     } else {

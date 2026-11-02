@@ -90,6 +90,9 @@ pub struct WasmControlState {
     pub storage_root: Arc<PluginStorageRoot>,
     pub artifact_dir: PathBuf,
     pub max_artifact_bytes: u64,
+    /// Base64 Ed25519 public keys; empty disables signature checks.
+    pub trusted_keys: Vec<String>,
+    pub allow_unsigned: bool,
 }
 
 #[derive(Clone)]

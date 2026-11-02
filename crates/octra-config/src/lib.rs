@@ -80,7 +80,10 @@ pub struct PluginsConfig {
     pub artifact_dir: String,
     pub wasm_enabled: bool,
     pub strict_boot: bool,
+    /// Accept artifacts without a signature when `trusted_keys` is set.
     pub allow_unsigned: bool,
+    /// Base64-encoded Ed25519 public keys. Empty disables signature checks.
+    pub trusted_keys: Vec<String>,
     pub max_artifact_bytes: usize,
     pub max_fuel: u64,
     pub max_memory_bytes: usize,
@@ -161,6 +164,7 @@ impl Default for PluginsConfig {
             wasm_enabled: true,
             strict_boot: false,
             allow_unsigned: false,
+            trusted_keys: Vec::new(),
             max_artifact_bytes: 16 * 1024 * 1024,
             max_fuel: 10_000_000,
             max_memory_bytes: 64 * 1024 * 1024,

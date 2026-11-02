@@ -7,6 +7,9 @@ use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use ed25519_dalek::{Signature, VerifyingKey};
 use octra_api_plugin_types::{
     Capability, EntityQuery, PluginError, PluginManifest, PluginRuntimeKind,
 };
@@ -101,6 +104,13 @@ pub async fn upload_artifact(
             wasm.max_artifact_bytes
         )));
     }
+
+    verify_signature(
+        &wasm.trusted_keys,
+        wasm.allow_unsigned,
+        &layout.hash,
+        input.signature.as_deref(),
+    )?;
 
     if let Some(existing) = state
         .storage
@@ -367,6 +377,13 @@ async fn resolve_artifact(
             "artifact files do not match the recorded hash",
         ));
     }
+    let wasm_state = wasm(state)?;
+    verify_signature(
+        &wasm_state.trusted_keys,
+        wasm_state.allow_unsigned,
+        &layout.hash,
+        artifact.signature.as_deref(),
+    )?;
     if layout.manifest.name != name
         || layout.manifest.name != artifact.name
         || layout.manifest.version != artifact.version
@@ -379,6 +396,55 @@ async fn resolve_artifact(
         return Err(AdminError::schema("artifact is not a wasm plugin"));
     }
     Ok((layout.manifest, artifact, directory))
+}
+
+/// Verifies an optional Ed25519 signature over the artifact hash.
+///
+/// With no trusted keys configured, signatures are recorded but not checked,
+/// which keeps the existing local-upload workflow. Once at least one key is
+/// configured, every artifact must carry a signature that verifies under one
+/// of them unless `allow_unsigned` is set.
+fn verify_signature(
+    trusted_keys: &[String],
+    allow_unsigned: bool,
+    hash: &str,
+    signature: Option<&str>,
+) -> AdminResult<()> {
+    if trusted_keys.is_empty() {
+        return Ok(());
+    }
+
+    let Some(signature) = signature else {
+        return if allow_unsigned {
+            Ok(())
+        } else {
+            Err(AdminError::schema("artifact signature is required"))
+        };
+    };
+
+    let bytes = BASE64
+        .decode(signature)
+        .map_err(|_| AdminError::schema("signature is not valid base64"))?;
+    let signature = Signature::from_slice(&bytes)
+        .map_err(|_| AdminError::schema("signature must be 64 bytes"))?;
+
+    for key in trusted_keys {
+        let bytes = BASE64
+            .decode(key)
+            .map_err(|_| AdminError::schema("trusted key is not valid base64"))?;
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| AdminError::schema("trusted key must be 32 bytes"))?;
+        let key = VerifyingKey::from_bytes(&bytes)
+            .map_err(|_| AdminError::schema("trusted key is not a valid ed25519 key"))?;
+        if key.verify_strict(hash.as_bytes(), &signature).is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err(AdminError::schema(
+        "artifact signature does not match a trusted key",
+    ))
 }
 
 fn ensure_capabilities(manifest: &PluginManifest, approved: &[Capability]) -> AdminResult<()> {
@@ -414,4 +480,68 @@ fn storage_error(error: impl std::fmt::Display) -> AdminError {
 
 fn plugin_error(error: PluginError) -> AdminError {
     AdminError::schema(error.message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::Signer;
+
+    fn signed(hash: &str) -> (String, String) {
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let key = BASE64.encode(signing.verifying_key().as_bytes());
+        let signature = BASE64.encode(signing.sign(hash.as_bytes()).to_bytes());
+        (key, signature)
+    }
+
+    #[test]
+    fn signatures_are_optional_without_trusted_keys() {
+        assert!(verify_signature(&[], false, "hash", None).is_ok());
+    }
+
+    #[test]
+    fn accepts_a_signature_from_a_trusted_key() {
+        let (key, signature) = signed("hash");
+        assert!(verify_signature(&[key], false, "hash", Some(&signature)).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_signature_for_a_different_hash() {
+        let (key, signature) = signed("hash");
+        assert!(verify_signature(&[key], false, "other", Some(&signature)).is_err());
+    }
+
+    #[test]
+    fn requires_a_signature_when_keys_are_configured() {
+        let (key, signature) = signed("hash");
+        let keys = std::slice::from_ref(&key);
+        assert!(verify_signature(keys, false, "hash", None).is_err());
+        assert!(verify_signature(keys, true, "hash", None).is_ok());
+        assert!(verify_signature(keys, false, "hash", Some(&signature)).is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_keys_and_signatures() {
+        let (key, signature) = signed("hash");
+        assert!(
+            verify_signature(
+                &["not base64!".to_string()],
+                false,
+                "hash",
+                Some(&signature)
+            )
+            .is_err()
+        );
+        assert!(
+            verify_signature(
+                std::slice::from_ref(&key),
+                false,
+                "hash",
+                Some("not base64!")
+            )
+            .is_err()
+        );
+        let short = BASE64.encode([0u8; 63]);
+        assert!(verify_signature(&[key], false, "hash", Some(&short)).is_err());
+    }
 }
