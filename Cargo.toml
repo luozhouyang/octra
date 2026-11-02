@@ -90,5 +90,6 @@ octra-observability = { path = "crates/octra-observability" }
 octra-api-plugin-types = { path = "crates/octra-api-plugin-types" }
 octra-api-plugin-builtin = { path = "crates/octra-api-plugin-builtin" }
 octra-api-plugin-runtime = { path = "crates/octra-api-plugin-runtime" }
+octra-api-plugin-wasm = { path = "crates/octra-api-plugin-wasm" }
 octra-plugin-storage = { path = "crates/octra-plugin-storage" }
 octra-storage = { path = "crates/octra-storage" }

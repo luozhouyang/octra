@@ -2,11 +2,12 @@
 
 use octra_api_plugin_types::{Capability, PluginManifest, Scope};
 use octra_core::{Error, Result};
+use serde::Serialize;
 use sqlx::Row;
 
 use super::llm::LlmStore;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PluginRecord {
     pub id: String,
     pub name: String,
@@ -27,7 +28,7 @@ pub struct PluginRecord {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PluginArtifactRecord {
     pub id: String,
     pub name: String,
@@ -376,10 +377,22 @@ impl LlmStore {
             .ok_or_else(|| Error::Storage("installed plugin vanished after upsert".to_string()))
     }
 
+    /// Removes a WASM plugin catalog row; `plugin_instances` cascade with it.
+    pub async fn delete_installed_plugin(&self, name: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM plugins WHERE name = ?1 AND source = 'wasm' AND runtime_type = 'wasm'",
+        )
+        .bind(name)
+        .execute(self.pool())
+        .await
+        .map_err(|error| map_error("cannot delete installed plugin", error))?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn list_installed_wasm_plugins(&self) -> Result<Vec<PluginRecord>> {
         let rows = sqlx::query(&format!(
             "SELECT {PLUGIN_COLUMNS} FROM plugins
-              WHERE source = 'wasm' AND runtime_type = 'wasm'
+              WHERE source = 'wasm' AND runtime_type = 'wasm' AND enabled = 1
               ORDER BY name ASC"
         ))
         .fetch_all(self.pool())
@@ -703,6 +716,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!record.enabled);
+        assert!(
+            storage
+                .llm
+                .list_installed_wasm_plugins()
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         assert!(
             storage
@@ -711,5 +732,7 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(storage.llm.delete_installed_plugin("demo-plugin").await.unwrap());
+        assert!(storage.llm.get_plugin_by_name("demo-plugin").await.unwrap().is_none());
     }
 }

@@ -3,19 +3,20 @@ use std::path::{Component, Path, PathBuf};
 
 use octra_api_plugin_types::{EntitySpec, MigrationSpec};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::error::PluginStorageError;
 use crate::kv::now_unix;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AppliedMigration {
     pub version: String,
     pub checksum: String,
     pub applied_at: i64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MigrationReport {
     pub applied: Vec<AppliedMigration>,
     pub skipped: Vec<String>,

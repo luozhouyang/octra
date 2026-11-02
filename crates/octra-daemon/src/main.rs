@@ -6,8 +6,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use axum::Router;
-use octra_api_gateway::{ApiControlState, ApiDataState, ApiMetrics, AuditState};
-use octra_api_plugin_runtime::{PluginRegistry, PluginRuntime};
+use octra_api_gateway::{
+    ApiControlState, ApiDataState, ApiMetrics, AuditState, WasmControlState,
+};
+use octra_api_plugin_runtime::{
+    CompositePluginFactoryResolver, PluginFactoryResolver, PluginRegistry, PluginRuntime,
+};
+use octra_api_plugin_types::PluginManifest;
+use octra_api_plugin_wasm::{
+    InstalledWasmPlugin, WasmEngine, WasmHostProvider, WasmLimits, WasmPluginCatalog,
+    WasmPluginFactory,
+};
+use octra_plugin_storage::PluginStorageRoot;
 use octra_config::Workspace;
 use octra_llm_gateway::{LlmControlState, LlmDataState, LlmPluginRuntime, LlmRuntime};
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
@@ -52,15 +62,99 @@ async fn main() -> anyhow::Result<()> {
 
     let mut plugin_registry = PluginRegistry::new();
     octra_api_plugin_builtin::register(&mut plugin_registry);
+    let plugin_registry = Arc::new(plugin_registry);
     let plugin_instances = storage
         .api
         .list_plugin_instances()
         .await
         .context("cannot load plugin instances")?;
-    let plugin_runtime = Arc::new(
-        PluginRuntime::with_plugins(Arc::new(plugin_registry), plugin_instances)
-            .context("cannot build the plugin runtime")?,
-    );
+
+    let mut wasm_control: Option<Arc<WasmControlState>> = None;
+    let plugin_runtime = if config.plugins.wasm_enabled {
+        let engine = Arc::new(
+            WasmEngine::new(WasmLimits {
+                max_fuel: config.plugins.max_fuel,
+                max_memory_bytes: config.plugins.max_memory_bytes,
+                timeout: Duration::from_millis(config.plugins.default_timeout_ms),
+            })
+            .context("cannot create the wasm plugin engine")?,
+        );
+        let storage_root = Arc::new(PluginStorageRoot::new(workspace.plugin_dir(&config)));
+        let catalog = Arc::new(WasmPluginCatalog::new());
+        let mut installed = Vec::new();
+
+        for record in storage
+            .llm
+            .list_installed_wasm_plugins()
+            .await
+            .context("cannot load installed wasm plugins")?
+        {
+            let manifest: PluginManifest = match serde_json::from_str(&record.manifest_json) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    if config.plugins.strict_boot {
+                        return Err(anyhow::anyhow!(
+                            "cannot parse manifest for plugin '{}': {error}",
+                            record.name
+                        ));
+                    }
+                    tracing::warn!(plugin = %record.name, %error, "skipping invalid plugin manifest");
+                    continue;
+                }
+            };
+            let Some(path) = record.artifact_path.as_deref() else {
+                tracing::warn!(plugin = %record.name, "installed plugin has no artifact path");
+                continue;
+            };
+            let factory =
+                match WasmPluginFactory::from_artifact(&engine, std::path::Path::new(path)) {
+                    Ok(factory) => factory,
+                    Err(error) => {
+                        if config.plugins.strict_boot {
+                            return Err(anyhow::anyhow!(
+                                "cannot load plugin '{}': {error}",
+                                record.name
+                            ));
+                        }
+                        tracing::warn!(plugin = %record.name, %error, "skipping wasm plugin");
+                        continue;
+                    }
+                };
+            catalog.insert(Arc::new(factory));
+            installed.push(InstalledWasmPlugin::new(
+                manifest,
+                record.approved_capabilities.clone(),
+            ));
+        }
+
+        let resolver: Arc<dyn PluginFactoryResolver> = Arc::new(
+            CompositePluginFactoryResolver::new(plugin_registry.clone(), catalog.clone()),
+        );
+        let host_provider = Arc::new(WasmHostProvider::new(storage_root.clone(), installed));
+        let runtime = PluginRuntime::with_resolver(
+            plugin_registry,
+            resolver,
+            host_provider.clone(),
+        );
+        runtime
+            .reload(plugin_instances)
+            .context("cannot build the plugin runtime")?;
+        wasm_control = Some(Arc::new(WasmControlState {
+            engine,
+            catalog,
+            host_provider,
+            storage_root,
+            artifact_dir: workspace.plugin_artifact_dir(&config),
+            max_artifact_bytes: u64::try_from(config.plugins.max_artifact_bytes)
+                .unwrap_or(u64::MAX),
+        }));
+        Arc::new(runtime)
+    } else {
+        Arc::new(
+            PluginRuntime::with_plugins(plugin_registry, plugin_instances)
+                .context("cannot build the plugin runtime")?,
+        )
+    };
 
     let llm_plugin_runtime = Arc::new(
         LlmPluginRuntime::bootstrap(
@@ -85,16 +179,19 @@ async fn main() -> anyhow::Result<()> {
 
     let api_metrics = Arc::new(ApiMetrics::default());
 
+    let mut api_control = ApiControlState::with_plugins(
+        storage.clone(),
+        api_runtime.clone(),
+        api_metrics.clone(),
+        plugin_runtime.clone(),
+    );
+    if let Some(wasm) = wasm_control {
+        api_control = api_control.with_wasm(wasm);
+    }
+
     let control_app = Router::new()
         .merge(octra_types::core_router(app_state))
-        .merge(octra_api_gateway::control_router(
-            ApiControlState::with_plugins(
-                storage.clone(),
-                api_runtime.clone(),
-                api_metrics.clone(),
-                plugin_runtime.clone(),
-            ),
-        ))
+        .merge(octra_api_gateway::control_router(api_control))
         .merge(octra_llm_gateway::control_router(
             LlmControlState::new(llm_runtime.clone(), storage.clone())
                 .with_plugins(llm_plugin_runtime.clone()),

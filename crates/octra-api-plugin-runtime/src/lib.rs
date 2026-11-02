@@ -82,6 +82,43 @@ impl PluginFactoryResolver for PluginRegistry {
     }
 }
 
+/// Consults the built-in registry first, then a dynamic catalog (installed
+/// WASM plugins). Built-in names always win so a third-party artifact cannot
+/// shadow a trusted plugin.
+pub struct CompositePluginFactoryResolver {
+    builtins: Arc<dyn PluginFactoryResolver>,
+    dynamic: Arc<dyn PluginFactoryResolver>,
+}
+
+impl CompositePluginFactoryResolver {
+    pub fn new(
+        builtins: Arc<dyn PluginFactoryResolver>,
+        dynamic: Arc<dyn PluginFactoryResolver>,
+    ) -> Self {
+        Self { builtins, dynamic }
+    }
+}
+
+impl PluginFactoryResolver for CompositePluginFactoryResolver {
+    fn factory(&self, name: &str) -> Option<Arc<dyn ApiGatewayPluginFactory>> {
+        self.builtins
+            .factory(name)
+            .or_else(|| self.dynamic.factory(name))
+    }
+
+    fn manifests(&self) -> Vec<PluginManifest> {
+        let mut seen = HashSet::new();
+        let mut manifests = Vec::new();
+        for manifest in self.builtins.manifests().into_iter().chain(self.dynamic.manifests()) {
+            if seen.insert(manifest.name.clone()) {
+                manifests.push(manifest);
+            }
+        }
+        manifests.sort_by(|left, right| left.name.cmp(&right.name));
+        manifests
+    }
+}
+
 /// Builds the host handle passed to a factory for one configured instance.
 pub trait PluginHostProvider: Send + Sync {
     fn host_for(&self, instance: &PluginInstance) -> Arc<dyn PluginHost>;
