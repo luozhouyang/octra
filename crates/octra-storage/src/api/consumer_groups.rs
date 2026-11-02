@@ -5,6 +5,19 @@ use super::*;
 impl ApiStore {
     // Consumer groups
 
+    pub async fn list_consumer_groups_page(&self, page: &ListPage) -> Result<Page<ConsumerGroup>> {
+        self.page_rows(
+            "consumer_groups",
+            CONSUMER_GROUP_COLUMNS,
+            None,
+            None,
+            page,
+            map_consumer_group,
+            |group| (group.created_at, group.id.clone()),
+        )
+        .await
+    }
+
     pub async fn list_consumer_groups(&self) -> Result<Vec<ConsumerGroup>> {
         let rows = sqlx::query(&format!(
             "SELECT {CONSUMER_GROUP_COLUMNS} FROM consumer_groups ORDER BY name ASC, id ASC"
@@ -93,6 +106,28 @@ impl ApiStore {
         affected(result.rows_affected(), "consumer group")
     }
 
+    pub async fn list_consumer_group_members_page(
+        &self,
+        consumer_group_id: &str,
+        page: &ListPage,
+    ) -> Result<Page<Consumer>> {
+        self.page_rows(
+            "consumers",
+            CONSUMER_COLUMNS,
+            None,
+            Some((
+                "id IN (SELECT consumer_id FROM consumer_group_consumers \
+                 WHERE consumer_group_id = ",
+                ")",
+                consumer_group_id,
+            )),
+            page,
+            map_consumer,
+            |consumer| (consumer.created_at, consumer.id.clone()),
+        )
+        .await
+    }
+
     pub async fn list_consumer_group_members(
         &self,
         consumer_group_id: &str,
@@ -108,6 +143,28 @@ impl ApiStore {
         .await
         .map_err(|e| map_db_error(e, "consumer group members"))?;
         rows.iter().map(map_consumer).collect()
+    }
+
+    pub async fn list_consumer_groups_for_consumer_page(
+        &self,
+        consumer_id: &str,
+        page: &ListPage,
+    ) -> Result<Page<ConsumerGroup>> {
+        self.page_rows(
+            "consumer_groups",
+            CONSUMER_GROUP_COLUMNS,
+            None,
+            Some((
+                "id IN (SELECT consumer_group_id FROM consumer_group_consumers \
+                 WHERE consumer_id = ",
+                ")",
+                consumer_id,
+            )),
+            page,
+            map_consumer_group,
+            |group| (group.created_at, group.id.clone()),
+        )
+        .await
     }
 
     pub async fn list_consumer_groups_for_consumer(

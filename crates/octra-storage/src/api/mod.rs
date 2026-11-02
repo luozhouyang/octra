@@ -27,15 +27,38 @@ use octra_api_core::{
 };
 use octra_core::{Error, Result};
 use sqlx::sqlite::SqliteRow;
-use sqlx::{Row, Sqlite, SqlitePool, Transaction};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
+
+/// One cursor-keyed page request. `tags` holds ANDed terms, each a set of
+/// ORed tag names.
+#[derive(Debug, Clone, Default)]
+pub struct ListPage {
+    pub limit: usize,
+    pub after: Option<PageCursor>,
+    pub tags: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageCursor {
+    pub created_at: i64,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub next: Option<PageCursor>,
+}
 
 const SERVICE_COLUMNS: &str = "id, name, protocol, host, port, path, retries, connect_timeout, \
      write_timeout, read_timeout, enabled, description, tags, created_at, updated_at";
 const ROUTE_COLUMNS: &str = "id, name, protocols, methods, hosts, paths, headers, strip_path, \
      preserve_host, request_buffering, response_buffering, regex_priority, service_id, enabled, \
      tags, created_at, updated_at";
-const UPSTREAM_COLUMNS: &str = "id, name, algorithm, hash_on, hash_fallback, slots, healthchecks, \
-     host_header, tags, created_at, updated_at";
+const UPSTREAM_COLUMNS: &str = "id, name, algorithm, hash_on, hash_fallback, hash_on_header, \
+     hash_fallback_header, hash_on_cookie, hash_on_cookie_path, hash_on_query_arg, \
+     hash_fallback_query_arg, hash_on_uri_capture, hash_fallback_uri_capture, slots, \
+     healthchecks, host_header, tags, created_at, updated_at";
 const TARGET_COLUMNS: &str = "id, upstream_id, target, weight, tags, created_at, updated_at";
 const CONSUMER_COLUMNS: &str = "id, username, custom_id, tags, created_at, updated_at";
 const PLUGIN_COLUMNS: &str = "id, name, instance_name, config, enabled, protocols, ordering, \
@@ -305,4 +328,82 @@ async fn fetch_rows<T>(
     .await
     .map_err(|e| map_db_error(e, table))?;
     rows.iter().map(mapper).collect()
+}
+
+impl ApiStore {
+    async fn page_rows<T>(
+        &self,
+        table: &str,
+        columns: &str,
+        parent: Option<(&str, &str)>,
+        extra: Option<(&str, &str, &str)>,
+        page: &ListPage,
+        mapper: fn(&SqliteRow) -> Result<T>,
+        cursor_of: impl Fn(&T) -> (i64, String),
+    ) -> Result<Page<T>> {
+        let limit = page.limit.clamp(1, 1000);
+        let mut query =
+            QueryBuilder::<Sqlite>::new(format!("SELECT {columns} FROM {table} WHERE 1 = 1"));
+
+        if let Some((column, value)) = parent {
+            query.push(format!(" AND {column} = ")).push_bind(value);
+        }
+        if let Some((before, after, value)) = extra {
+            query
+                .push(" AND ")
+                .push(before)
+                .push_bind(value)
+                .push(after);
+        }
+        if let Some(cursor) = &page.after {
+            query
+                .push(" AND (created_at > ")
+                .push_bind(cursor.created_at)
+                .push(" OR (created_at = ")
+                .push_bind(cursor.created_at)
+                .push(" AND id > ")
+                .push_bind(cursor.id.clone())
+                .push("))");
+        }
+        for term in &page.tags {
+            let term: Vec<&String> = term.iter().filter(|tag| !tag.trim().is_empty()).collect();
+            if term.is_empty() {
+                continue;
+            }
+            query
+                .push(" AND EXISTS (SELECT 1 FROM json_each(")
+                .push(table)
+                .push(".tags) WHERE value IN (");
+            for (index, tag) in term.iter().enumerate() {
+                if index > 0 {
+                    query.push(", ");
+                }
+                query.push_bind((*tag).clone());
+            }
+            query.push("))");
+        }
+        query
+            .push(" ORDER BY created_at ASC, id ASC LIMIT ")
+            .push_bind((limit + 1) as i64);
+
+        let rows = query
+            .build()
+            .fetch_all(self.pool())
+            .await
+            .map_err(|e| map_db_error(e, table))?;
+        let mut items = rows.iter().map(mapper).collect::<Result<Vec<T>>>()?;
+        let has_more = items.len() > limit;
+        if has_more {
+            items.truncate(limit);
+        }
+        let next = if has_more {
+            items.last().map(|item| {
+                let (created_at, id) = cursor_of(item);
+                PageCursor { created_at, id }
+            })
+        } else {
+            None
+        };
+        Ok(Page { items, next })
+    }
 }

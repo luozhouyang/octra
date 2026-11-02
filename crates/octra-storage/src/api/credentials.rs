@@ -5,6 +5,23 @@ use super::*;
 impl ApiStore {
     // Key-auth credentials
 
+    pub async fn list_credentials_page(
+        &self,
+        consumer_id: Option<&str>,
+        page: &ListPage,
+    ) -> Result<Page<KeyauthCredential>> {
+        self.page_rows(
+            "keyauth_credentials",
+            KEYAUTH_COLUMNS,
+            consumer_id.map(|id| ("consumer_id", id)),
+            None,
+            page,
+            map_keyauth,
+            |credential| (credential.created_at, credential.id.clone()),
+        )
+        .await
+    }
+
     pub async fn list_credentials(
         &self,
         consumer_id: Option<&str>,
@@ -97,6 +114,23 @@ impl ApiStore {
 
     // Basic-auth credentials
 
+    pub async fn list_basicauth_page(
+        &self,
+        consumer_id: Option<&str>,
+        page: &ListPage,
+    ) -> Result<Page<BasicauthCredential>> {
+        self.page_rows(
+            "basicauth_credentials",
+            BASICAUTH_COLUMNS,
+            consumer_id.map(|id| ("consumer_id", id)),
+            None,
+            page,
+            map_basicauth,
+            |credential| (credential.created_at, credential.id.clone()),
+        )
+        .await
+    }
+
     pub async fn list_basicauth(&self) -> Result<Vec<BasicauthCredential>> {
         let rows = sqlx::query(&format!(
             "SELECT {BASICAUTH_COLUMNS} FROM basicauth_credentials ORDER BY username ASC"
@@ -178,6 +212,23 @@ impl ApiStore {
     }
 
     // JWT secrets
+
+    pub async fn list_jwt_page(
+        &self,
+        consumer_id: Option<&str>,
+        page: &ListPage,
+    ) -> Result<Page<JwtSecret>> {
+        self.page_rows(
+            "jwt_secrets",
+            JWT_COLUMNS,
+            consumer_id.map(|id| ("consumer_id", id)),
+            None,
+            page,
+            map_jwt,
+            |credential| (credential.created_at, credential.id.clone()),
+        )
+        .await
+    }
 
     pub async fn list_jwt(&self) -> Result<Vec<JwtSecret>> {
         let rows = sqlx::query(&format!(

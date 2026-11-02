@@ -36,7 +36,7 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/services/{id}",
             get(services::get)
                 .patch(services::update)
-                .put(services::update)
+                .put(services::upsert)
                 .delete(services::delete),
         )
         .route(
@@ -52,7 +52,7 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/routes/{id}",
             get(routes::get)
                 .patch(routes::update)
-                .put(routes::update)
+                .put(routes::upsert)
                 .delete(routes::delete),
         )
         .route(
@@ -67,7 +67,7 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/upstreams/{id}",
             get(upstreams::get)
                 .patch(upstreams::update)
-                .put(upstreams::update)
+                .put(upstreams::upsert)
                 .delete(upstreams::delete),
         )
         .route(
@@ -82,7 +82,7 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/targets/{id}",
             get(upstreams::get_target)
                 .patch(upstreams::update_target)
-                .put(upstreams::update_target)
+                .put(upstreams::upsert_target)
                 .delete(upstreams::delete_target),
         )
         .route(
@@ -93,7 +93,7 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/consumers/{id}",
             get(consumers::get)
                 .patch(consumers::update)
-                .put(consumers::update)
+                .put(consumers::upsert)
                 .delete(consumers::delete),
         )
         .route(
@@ -130,7 +130,7 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/consumer_groups/{id}",
             get(consumer_groups::get)
                 .patch(consumer_groups::update)
-                .put(consumer_groups::update)
+                .put(consumer_groups::upsert)
                 .delete(consumer_groups::delete),
         )
         .route(
@@ -151,7 +151,7 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/plugins/{id}",
             get(plugins::get)
                 .patch(plugins::update)
-                .put(plugins::update)
+                .put(plugins::upsert)
                 .delete(plugins::delete),
         )
         .route(
@@ -162,7 +162,7 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/key-auths/{id}",
             get(credentials::get_keyauth)
                 .patch(credentials::update_keyauth)
-                .put(credentials::update_keyauth)
+                .put(credentials::upsert_keyauth)
                 .delete(credentials::delete_keyauth),
         )
         .route(
@@ -173,7 +173,7 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/basic-auths/{id}",
             get(credentials::get_basicauth)
                 .patch(credentials::update_basicauth)
-                .put(credentials::update_basicauth)
+                .put(credentials::upsert_basicauth)
                 .delete(credentials::delete_basicauth),
         )
         .route(
@@ -184,7 +184,7 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/jwts/{id}",
             get(credentials::get_jwt)
                 .patch(credentials::update_jwt)
-                .put(credentials::update_jwt)
+                .put(credentials::upsert_jwt)
                 .delete(credentials::delete_jwt),
         )
         .route(
@@ -195,7 +195,7 @@ pub fn router() -> Router<ApiControlState> {
             "/admin/acls/{id}",
             get(credentials::get_acl)
                 .patch(credentials::update_acl)
-                .put(credentials::update_acl)
+                .put(credentials::upsert_acl)
                 .delete(credentials::delete_acl),
         )
         .route("/admin/schemas/plugins", get(schemas::list))

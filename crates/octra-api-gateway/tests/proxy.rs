@@ -930,3 +930,120 @@ async fn control_mutations_write_audit_rows() {
     assert_eq!(status, StatusCode::OK);
     assert!(!json.as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn plugin_protocols_filter_requests() {
+    let (addr, _calls) = spawn_mock("proto").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-proto",
+        &format!("http://{addr}"),
+        false,
+        "/proto",
+        true,
+    )
+    .await;
+    gateway
+        .storage
+        .api
+        .create_plugin_instance(&octra_api_core::CreatePluginInstance {
+            name: "request-transformer".into(),
+            service_id: Some("svc-proto".into()),
+            protocols: Some(vec!["https".into()]),
+            config: Some(serde_json::json!({
+                "add": { "headers": ["x-proto:1"] }
+            })),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    let (status, _, json) = gateway.send(get("/proto/items")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(json["headers"]["x-proto"].is_null());
+
+    let mut req = get("/proto/items");
+    req.headers_mut()
+        .insert("x-forwarded-proto", header_default("https"));
+    let (status, _, json) = gateway.send(req).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["headers"]["x-proto"], "1");
+}
+
+#[tokio::test]
+async fn consistent_hashing_pins_requests_by_header() {
+    let (addr_a, _calls_a) = spawn_mock("hash-a").await;
+    let (addr_b, _calls_b) = spawn_mock("hash-b").await;
+    let gateway = gateway().await;
+
+    let service = gateway
+        .storage
+        .api
+        .create_service(&CreateService {
+            id: Some("svc-hash".into()),
+            name: "svc-hash".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let upstream = gateway
+        .storage
+        .api
+        .create_upstream(&CreateUpstream {
+            id: Some("up-hash".into()),
+            name: "svc-hash".into(),
+            algorithm: Some("consistent-hashing".into()),
+            hash_on: Some("header".into()),
+            hash_on_header: Some("x-user".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for (id, addr) in [("t-hash-a", addr_a), ("t-hash-b", addr_b)] {
+        gateway
+            .storage
+            .api
+            .create_target(&CreateTarget {
+                id: Some(id.into()),
+                upstream_id: upstream.id.clone(),
+                target: addr.to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    gateway
+        .storage
+        .api
+        .create_route(&CreateRoute {
+            id: Some("r-hash".into()),
+            service_id: Some(service.id),
+            paths: Some(vec!["/hash".into()]),
+            strip_path: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    for user in ["alice", "bob"] {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..4 {
+            let mut req = get("/hash/items");
+            req.headers_mut().insert("x-user", header_default(user));
+            let (status, headers, _) = gateway.send(req).await;
+            assert_eq!(status, StatusCode::CREATED);
+            seen.insert(
+                headers
+                    .get("x-upstream")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        assert_eq!(seen.len(), 1, "user {user} was not pinned: {seen:?}");
+    }
+}

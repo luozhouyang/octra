@@ -20,7 +20,9 @@ use tokio::sync::RwLock;
 pub mod balancer;
 pub mod matcher;
 
-pub use balancer::{Endpoint, TargetPool, algorithm_from_str};
+pub use balancer::{
+    Endpoint, HashConfig, HashInput, HealthConfig, HealthStore, TargetPool, algorithm_from_str,
+};
 pub use matcher::{
     CompiledRoute, CompiledService, MatchInput, RouteMatch, RouteMatcher, ServiceLimits,
     strip_matched_prefix,
@@ -84,9 +86,9 @@ pub enum ServiceEndpoint {
 }
 
 impl ServiceEndpoint {
-    pub fn attempts(&self) -> Vec<Arc<Endpoint>> {
+    pub fn attempts(&self, hash: Option<&HashInput<'_>>) -> Vec<Arc<Endpoint>> {
         match self {
-            Self::Pool(pool) => pool.ordered_attempts(),
+            Self::Pool(pool) => pool.ordered_attempts(hash),
             Self::Direct(endpoint) => vec![Arc::clone(endpoint)],
         }
     }
@@ -128,8 +130,13 @@ impl std::fmt::Debug for RuntimeSnapshot {
 
 impl RuntimeSnapshot {
     pub fn compile(data: ApiRuntimeData) -> Self {
+        Self::compile_with_health(data, &HealthStore::default())
+    }
+
+    pub fn compile_with_health(data: ApiRuntimeData, health_store: &HealthStore) -> Self {
         let matcher = RouteMatcher::compile(&data.services, &data.routes);
-        let endpoints = compile_endpoints(&data.services, &data.upstreams, &data.targets);
+        let endpoints =
+            compile_endpoints(&data.services, &data.upstreams, &data.targets, health_store);
 
         let acl_groups = group_acls(&data.acls);
         let consumer_groups =
@@ -205,6 +212,20 @@ impl RuntimeSnapshot {
         self.endpoints.get(service_id).cloned()
     }
 
+    /// Pools with active health checks enabled. Used by the background
+    /// health-check loop.
+    pub fn pools(&self) -> Vec<Arc<TargetPool>> {
+        let mut pools: Vec<Arc<TargetPool>> = Vec::new();
+        for endpoint in self.endpoints.values() {
+            if let ServiceEndpoint::Pool(pool) = endpoint
+                && !pools.iter().any(|existing| Arc::ptr_eq(existing, pool))
+            {
+                pools.push(Arc::clone(pool));
+            }
+        }
+        pools
+    }
+
     pub fn service(&self, service_id: &str) -> Option<&Service> {
         self.services
             .iter()
@@ -249,6 +270,7 @@ fn compile_endpoints(
     services: &[Service],
     upstreams: &[Upstream],
     targets: &[Target],
+    health_store: &HealthStore,
 ) -> HashMap<String, ServiceEndpoint> {
     let mut targets_by_upstream: HashMap<&str, Vec<&Target>> = HashMap::new();
     for target in targets {
@@ -287,11 +309,12 @@ fn compile_endpoints(
             if pool_targets.is_empty() {
                 continue;
             }
-            ServiceEndpoint::Pool(Arc::new(TargetPool::new(
-                algorithm_from_str(upstream.algorithm.as_str()),
+            ServiceEndpoint::Pool(Arc::new(TargetPool::from_upstream(
+                upstream,
                 &pool_targets,
                 scheme,
                 pool_seed(&service.id),
+                health_store,
             )))
         } else {
             let url = format!("{}://{}:{}", scheme, service.host, service.port);
@@ -395,20 +418,25 @@ fn pool_seed(service_id: &str) -> u64 {
 pub struct GatewayRuntime {
     storage: Arc<Storage>,
     snapshot: RwLock<Arc<RuntimeSnapshot>>,
+    health: HealthStore,
 }
 
 impl GatewayRuntime {
     pub async fn bootstrap(storage: Arc<Storage>) -> Result<Self> {
         let data = storage.api.load_runtime_data().await?;
+        let health = HealthStore::default();
         Ok(Self {
             storage,
-            snapshot: RwLock::new(Arc::new(RuntimeSnapshot::compile(data))),
+            snapshot: RwLock::new(Arc::new(RuntimeSnapshot::compile_with_health(
+                data, &health,
+            ))),
+            health,
         })
     }
 
     pub async fn reload(&self) -> Result<SnapshotInfo> {
         let data = self.storage.api.load_runtime_data().await?;
-        let next = Arc::new(RuntimeSnapshot::compile(data));
+        let next = Arc::new(RuntimeSnapshot::compile_with_health(data, &self.health));
         let info = next.info.clone();
         *self.snapshot.write().await = next;
         Ok(info)
@@ -420,6 +448,18 @@ impl GatewayRuntime {
 
     pub fn storage(&self) -> &Storage {
         &self.storage
+    }
+
+    /// Runs one round of active health checks over the current snapshot.
+    /// Targets that are not due are skipped, so the caller may tick faster
+    /// than the configured intervals.
+    pub async fn check_health(&self) {
+        let snapshot = self.snapshot().await;
+        for pool in snapshot.pools() {
+            if pool.active_health_enabled() {
+                pool.check_active().await;
+            }
+        }
     }
 }
 
@@ -482,6 +522,14 @@ mod tests {
                 algorithm: octra_api_core::LoadBalanceAlgorithm::RoundRobin,
                 hash_on: "none".into(),
                 hash_fallback: "none".into(),
+                hash_on_header: "X-Consumer-ID".into(),
+                hash_fallback_header: "X-Consumer-ID".into(),
+                hash_on_cookie: "kong".into(),
+                hash_on_cookie_path: "/".into(),
+                hash_on_query_arg: String::new(),
+                hash_fallback_query_arg: String::new(),
+                hash_on_uri_capture: String::new(),
+                hash_fallback_uri_capture: String::new(),
                 slots: 10000,
                 healthchecks: serde_json::json!({}),
                 host_header: None,

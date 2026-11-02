@@ -11,7 +11,8 @@ use crate::ApiControlState;
 
 use super::error::{AdminError, AdminResult};
 use super::list::{
-    ListQuery, ListResponse, deserialize, list_response, normalize_fk, read_json_body, to_value,
+    ListQuery, ListResponse, deserialize, list_page, list_response, normalize_fk, page_values,
+    read_json_body, set_id, to_value,
 };
 use super::{reload_all, require_consumer};
 
@@ -19,12 +20,13 @@ pub async fn list(
     State(state): State<ApiControlState>,
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
-    let groups = state.storage.api.list_consumer_groups().await?;
-    let items = groups
-        .iter()
-        .map(to_value)
-        .collect::<AdminResult<Vec<_>>>()?;
-    Ok(list_response("/admin/consumer_groups", items, &query))
+    let page = state
+        .storage
+        .api
+        .list_consumer_groups_page(&list_page(&query))
+        .await?;
+    let (items, next) = page_values(page)?;
+    Ok(list_response("/admin/consumer_groups", items, next, &query))
 }
 
 pub async fn get(
@@ -62,6 +64,33 @@ pub async fn update(
     Ok(Json(to_value(&group)?))
 }
 
+pub async fn upsert(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> AdminResult<Json<Value>> {
+    let mut body = read_json_body(payload)?;
+    let group = match state.storage.api.get_consumer_group(&id).await? {
+        Some(group) => {
+            let input: UpdateConsumerGroup = deserialize(body)?;
+            input.validate()?;
+            state
+                .storage
+                .api
+                .update_consumer_group(&group.id, &input)
+                .await?
+        }
+        None => {
+            set_id(&mut body, &id);
+            let input: CreateConsumerGroup = deserialize(body)?;
+            input.validate()?;
+            state.storage.api.create_consumer_group(&input).await?
+        }
+    };
+    reload_all(&state).await?;
+    Ok(Json(to_value(&group)?))
+}
+
 pub async fn delete(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
@@ -78,18 +107,16 @@ pub async fn list_members(
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
     let group = resolve(&state, &id).await?;
-    let consumers = state
+    let page = state
         .storage
         .api
-        .list_consumer_group_members(&group.id)
+        .list_consumer_group_members_page(&group.id, &list_page(&query))
         .await?;
-    let items = consumers
-        .iter()
-        .map(to_value)
-        .collect::<AdminResult<Vec<_>>>()?;
+    let (items, next) = page_values(page)?;
     Ok(list_response(
         &format!("/admin/consumer_groups/{}/consumers", group.id),
         items,
+        next,
         &query,
     ))
 }
@@ -100,18 +127,16 @@ pub async fn list_for_consumer(
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
     require_consumer(&state, &consumer_id).await?;
-    let groups = state
+    let page = state
         .storage
         .api
-        .list_consumer_groups_for_consumer(&consumer_id)
+        .list_consumer_groups_for_consumer_page(&consumer_id, &list_page(&query))
         .await?;
-    let items = groups
-        .iter()
-        .map(to_value)
-        .collect::<AdminResult<Vec<_>>>()?;
+    let (items, next) = page_values(page)?;
     Ok(list_response(
         &format!("/admin/consumers/{consumer_id}/consumer_groups"),
         items,
+        next,
         &query,
     ))
 }

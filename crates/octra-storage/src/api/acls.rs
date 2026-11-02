@@ -5,6 +5,23 @@ use super::*;
 impl ApiStore {
     // ACL entries
 
+    pub async fn list_acls_page(
+        &self,
+        consumer_id: Option<&str>,
+        page: &ListPage,
+    ) -> Result<Page<Acl>> {
+        self.page_rows(
+            "acls",
+            ACL_COLUMNS,
+            consumer_id.map(|id| ("consumer_id", id)),
+            None,
+            page,
+            map_acl,
+            |acl| (acl.created_at, acl.id.clone()),
+        )
+        .await
+    }
+
     pub async fn list_acls(&self, consumer_id: Option<&str>) -> Result<Vec<Acl>> {
         let rows = sqlx::query(&format!(
             "SELECT {ACL_COLUMNS} FROM acls \

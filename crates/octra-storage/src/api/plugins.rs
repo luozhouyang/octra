@@ -5,6 +5,23 @@ use super::*;
 impl ApiStore {
     // Plugin instances
 
+    pub async fn list_plugin_instances_page(
+        &self,
+        scope: Option<(&str, &str)>,
+        page: &ListPage,
+    ) -> Result<Page<PluginInstance>> {
+        self.page_rows(
+            "plugin_instances",
+            PLUGIN_COLUMNS,
+            scope,
+            None,
+            page,
+            map_plugin,
+            |plugin| (plugin.created_at, plugin.id.clone()),
+        )
+        .await
+    }
+
     pub async fn list_plugin_instances(&self) -> Result<Vec<PluginInstance>> {
         let rows = sqlx::query(&format!(
             "SELECT {PLUGIN_COLUMNS} FROM plugin_instances ORDER BY name ASC, id ASC"

@@ -5,6 +5,19 @@ use super::*;
 impl ApiStore {
     // Consumers
 
+    pub async fn list_consumers_page(&self, page: &ListPage) -> Result<Page<Consumer>> {
+        self.page_rows(
+            "consumers",
+            CONSUMER_COLUMNS,
+            None,
+            None,
+            page,
+            map_consumer,
+            |consumer| (consumer.created_at, consumer.id.clone()),
+        )
+        .await
+    }
+
     pub async fn list_consumers(&self) -> Result<Vec<Consumer>> {
         let rows = sqlx::query(&format!(
             "SELECT {CONSUMER_COLUMNS} FROM consumers ORDER BY username ASC, id ASC"

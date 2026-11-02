@@ -2,7 +2,7 @@ mod token;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use axum::Router;
@@ -38,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("cannot build the API gateway snapshot")?,
     );
+    let health_runtime = api_runtime.clone();
     let llm_runtime = Arc::new(
         LlmRuntime::bootstrap(storage.clone(), config.clone())
             .await
@@ -159,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
 
     let shutdown = CancellationToken::new();
     tokio::spawn(shutdown_signal(shutdown.clone()));
+    tokio::spawn(health_check_loop(health_runtime, shutdown.clone()));
 
     let control_server = axum::serve(control_listener, control_app)
         .with_graceful_shutdown(wait_for_shutdown(shutdown.clone()));
@@ -179,6 +181,17 @@ async fn main() -> anyhow::Result<()> {
 
 async fn wait_for_shutdown(cancel: CancellationToken) {
     cancel.cancelled().await;
+}
+
+async fn health_check_loop(runtime: Arc<GatewayRuntime>, shutdown: CancellationToken) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = ticker.tick() => runtime.check_health().await,
+        }
+    }
 }
 
 async fn shutdown_signal(cancel: CancellationToken) {

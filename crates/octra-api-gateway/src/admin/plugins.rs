@@ -12,8 +12,8 @@ use crate::ApiControlState;
 
 use super::error::{AdminError, AdminResult};
 use super::list::{
-    ListQuery, ListResponse, deserialize, list_response, normalize_fk, read_json_body, to_value,
-    with_ref,
+    ListQuery, ListResponse, deserialize, list_page, list_response, normalize_fk, read_json_body,
+    set_id, to_value, with_ref,
 };
 use super::{
     reload_all, require_consumer, require_route, require_service, resolve_consumer_group_id,
@@ -23,12 +23,18 @@ pub async fn list(
     State(state): State<ApiControlState>,
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
-    let plugins = state.storage.api.list_plugin_instances().await?;
-    let items = plugins
+    let page = state
+        .storage
+        .api
+        .list_plugin_instances_page(None, &list_page(&query))
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
         .iter()
         .map(plugin_view)
         .collect::<AdminResult<Vec<_>>>()?;
-    Ok(list_response("/admin/plugins", items, &query))
+    Ok(list_response("/admin/plugins", items, next, &query))
 }
 
 pub async fn enabled(State(state): State<ApiControlState>) -> Json<Value> {
@@ -62,13 +68,24 @@ pub async fn list_for_service(
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
     require_service(&state, &service_id).await?;
-    let items = filtered(&state, |plugin| {
-        plugin.service_id.as_deref() == Some(service_id.as_str())
-    })
-    .await?;
+    let page = state
+        .storage
+        .api
+        .list_plugin_instances_page(
+            Some(("service_id", service_id.as_str())),
+            &list_page(&query),
+        )
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
+        .iter()
+        .map(plugin_view)
+        .collect::<AdminResult<Vec<_>>>()?;
     Ok(list_response(
         &format!("/admin/services/{service_id}/plugins"),
         items,
+        next,
         &query,
     ))
 }
@@ -79,13 +96,21 @@ pub async fn list_for_route(
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
     require_route(&state, &route_id).await?;
-    let items = filtered(&state, |plugin| {
-        plugin.route_id.as_deref() == Some(route_id.as_str())
-    })
-    .await?;
+    let page = state
+        .storage
+        .api
+        .list_plugin_instances_page(Some(("route_id", route_id.as_str())), &list_page(&query))
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
+        .iter()
+        .map(plugin_view)
+        .collect::<AdminResult<Vec<_>>>()?;
     Ok(list_response(
         &format!("/admin/routes/{route_id}/plugins"),
         items,
+        next,
         &query,
     ))
 }
@@ -96,13 +121,24 @@ pub async fn list_for_consumer(
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
     require_consumer(&state, &consumer_id).await?;
-    let items = filtered(&state, |plugin| {
-        plugin.consumer_id.as_deref() == Some(consumer_id.as_str())
-    })
-    .await?;
+    let page = state
+        .storage
+        .api
+        .list_plugin_instances_page(
+            Some(("consumer_id", consumer_id.as_str())),
+            &list_page(&query),
+        )
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
+        .iter()
+        .map(plugin_view)
+        .collect::<AdminResult<Vec<_>>>()?;
     Ok(list_response(
         &format!("/admin/consumers/{consumer_id}/plugins"),
         items,
+        next,
         &query,
     ))
 }
@@ -113,13 +149,24 @@ pub async fn list_for_consumer_group(
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
     let group_id = resolve_consumer_group_id(&state, &group_id).await?;
-    let items = filtered(&state, |plugin| {
-        plugin.consumer_group_id.as_deref() == Some(group_id.as_str())
-    })
-    .await?;
+    let page = state
+        .storage
+        .api
+        .list_plugin_instances_page(
+            Some(("consumer_group_id", group_id.as_str())),
+            &list_page(&query),
+        )
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
+        .iter()
+        .map(plugin_view)
+        .collect::<AdminResult<Vec<_>>>()?;
     Ok(list_response(
         &format!("/admin/consumer_groups/{group_id}/plugins"),
         items,
+        next,
         &query,
     ))
 }
@@ -179,12 +226,31 @@ pub async fn update(
     payload: Result<Json<Value>, JsonRejection>,
 ) -> AdminResult<Json<Value>> {
     let body = normalized(read_json_body(payload)?);
+    apply_update(&state, &id, body).await
+}
+
+pub async fn upsert(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> AdminResult<Json<Value>> {
+    let mut body = normalized(read_json_body(payload)?);
+    if state.storage.api.get_plugin_instance(&id).await?.is_some() {
+        apply_update(&state, &id, body).await
+    } else {
+        set_id(&mut body, &id);
+        let plugin = create_instance(&state, body).await?;
+        Ok(Json(plugin_view(&plugin)?))
+    }
+}
+
+async fn apply_update(state: &ApiControlState, id: &str, body: Value) -> AdminResult<Json<Value>> {
     let input: UpdatePluginInstance = deserialize(body)?;
     input.validate()?;
     let existing = state
         .storage
         .api
-        .get_plugin_instance(&id)
+        .get_plugin_instance(id)
         .await?
         .ok_or_else(|| AdminError::not_found(format!("plugin '{id}' not found")))?;
 
@@ -196,7 +262,7 @@ pub async fn update(
         .consumer_group_id
         .clone()
         .unwrap_or_else(|| existing.consumer_group_id.clone());
-    let factory = factory(&state, &existing.name)?;
+    let factory = factory(state, &existing.name)?;
     if consumer_id.is_some() && consumer_group_id.is_some() {
         return Err(AdminError::schema(
             "plugin cannot be scoped to both consumer and consumer_group",
@@ -208,15 +274,11 @@ pub async fn update(
         ));
     }
     if let Some(config) = &input.config {
-        validate_config(&state, &existing.name, config)?;
+        validate_config(state, &existing.name, config)?;
     }
 
-    let plugin = state
-        .storage
-        .api
-        .update_plugin_instance(&id, &input)
-        .await?;
-    reload_all(&state).await?;
+    let plugin = state.storage.api.update_plugin_instance(id, &input).await?;
+    reload_all(state).await?;
     Ok(Json(plugin_view(&plugin)?))
 }
 
@@ -256,18 +318,6 @@ async fn create_instance(state: &ApiControlState, body: Value) -> AdminResult<Pl
     let plugin = state.storage.api.create_plugin_instance(&input).await?;
     reload_all(state).await?;
     Ok(plugin)
-}
-
-async fn filtered(
-    state: &ApiControlState,
-    keep: impl Fn(&PluginInstance) -> bool,
-) -> AdminResult<Vec<Value>> {
-    let plugins = state.storage.api.list_plugin_instances().await?;
-    plugins
-        .iter()
-        .filter(|plugin| keep(plugin))
-        .map(plugin_view)
-        .collect()
 }
 
 fn normalized(mut body: Value) -> Value {

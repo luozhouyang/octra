@@ -123,7 +123,7 @@ pub async fn proxy(
     let mut auth_state = build_gateway_state(snapshot.auth_snapshot());
     let pre_chain = state
         .plugins
-        .pre_auth_chain(Some(&route_id), service_id.as_deref());
+        .pre_auth_chain(Some(&route_id), service_id.as_deref(), scheme);
 
     let subject = LogSubject {
         request_id: &request_id,
@@ -208,7 +208,7 @@ pub async fn proxy(
                 &pre_chain,
                 &state
                     .plugins
-                    .pre_auth_chain(Some(&route_id), service_id.as_deref()),
+                    .pre_auth_chain(Some(&route_id), service_id.as_deref(), scheme),
                 &subject,
                 &mut auth_state,
                 Finish {
@@ -240,6 +240,7 @@ pub async fn proxy(
         consumer_id.as_deref(),
         group_ids,
         groups,
+        scheme,
     );
 
     let credential_id = auth_state.credential.as_ref().map(|c| c.id.clone());
@@ -352,7 +353,18 @@ pub async fn proxy(
         .await;
     };
 
-    let mut attempts = endpoint.attempts();
+    let hash_path = parts
+        .uri
+        .path_and_query()
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| parts.uri.path().to_string());
+    let hash_input = octra_runtime::HashInput {
+        headers: &parts.headers,
+        path: &hash_path,
+        client_ip: Some(peer.ip()),
+        consumer_id: consumer_id.as_deref(),
+    };
+    let mut attempts = endpoint.attempts(Some(&hash_input));
     let retry_limit = 1 + usize::try_from(
         dispatch
             .service
@@ -1200,6 +1212,7 @@ async fn forward(
         match builder.send().await {
             Ok(response) => {
                 let status = response.status();
+                endpoint.report_status(status.as_u16());
                 let mut response_headers = response.headers().clone();
                 sanitize_response_headers(&mut response_headers);
                 response_headers.remove(header::CONTENT_LENGTH);
@@ -1219,6 +1232,11 @@ async fn forward(
                     error = %err,
                     "api gateway upstream attempt failed"
                 );
+                if err.is_timeout() {
+                    endpoint.report_timeout();
+                } else {
+                    endpoint.report_tcp_failure();
+                }
                 last_error = Some(classify_reqwest_error(&err));
             }
         }

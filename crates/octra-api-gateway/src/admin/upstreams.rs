@@ -11,8 +11,8 @@ use crate::ApiControlState;
 
 use super::error::{AdminError, AdminResult};
 use super::list::{
-    ListQuery, ListResponse, deserialize, list_response, normalize_fk, read_json_body, to_value,
-    with_ref,
+    ListQuery, ListResponse, deserialize, list_page, list_response, normalize_fk, page_values,
+    read_json_body, set_id, to_value, with_ref,
 };
 use super::{reload_all, require_upstream};
 
@@ -20,12 +20,13 @@ pub async fn list(
     State(state): State<ApiControlState>,
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
-    let upstreams = state.storage.api.list_upstreams().await?;
-    let items = upstreams
-        .iter()
-        .map(to_value)
-        .collect::<AdminResult<Vec<_>>>()?;
-    Ok(list_response("/admin/upstreams", items, &query))
+    let page = state
+        .storage
+        .api
+        .list_upstreams_page(&list_page(&query))
+        .await?;
+    let (items, next) = page_values(page)?;
+    Ok(list_response("/admin/upstreams", items, next, &query))
 }
 
 pub async fn get(
@@ -64,6 +65,26 @@ pub async fn update(
     Ok(Json(to_value(&upstream)?))
 }
 
+pub async fn upsert(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> AdminResult<Json<Value>> {
+    let mut body = read_json_body(payload)?;
+    let upstream = if state.storage.api.get_upstream(&id).await?.is_some() {
+        let input: UpdateUpstream = deserialize(body)?;
+        input.validate()?;
+        state.storage.api.update_upstream(&id, &input).await?
+    } else {
+        set_id(&mut body, &id);
+        let input: CreateUpstream = deserialize(body)?;
+        input.validate()?;
+        state.storage.api.create_upstream(&input).await?
+    };
+    reload_all(&state).await?;
+    Ok(Json(to_value(&upstream)?))
+}
+
 pub async fn delete(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
@@ -77,12 +98,18 @@ pub async fn list_all_targets(
     State(state): State<ApiControlState>,
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
-    let targets = state.storage.api.list_targets(None).await?;
-    let items = targets
+    let page = state
+        .storage
+        .api
+        .list_targets_page(None, &list_page(&query))
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
         .iter()
         .map(target_view)
         .collect::<AdminResult<Vec<_>>>()?;
-    Ok(list_response("/admin/targets", items, &query))
+    Ok(list_response("/admin/targets", items, next, &query))
 }
 
 pub async fn list_targets(
@@ -91,14 +118,21 @@ pub async fn list_targets(
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
     require_upstream(&state, &upstream_id).await?;
-    let targets = state.storage.api.list_targets(Some(&upstream_id)).await?;
-    let items = targets
+    let page = state
+        .storage
+        .api
+        .list_targets_page(Some(&upstream_id), &list_page(&query))
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
         .iter()
         .map(target_view)
         .collect::<AdminResult<Vec<_>>>()?;
     Ok(list_response(
         &format!("/admin/upstreams/{upstream_id}/targets"),
         items,
+        next,
         &query,
     ))
 }
@@ -157,6 +191,27 @@ pub async fn update_target(
     let input: UpdateTarget = deserialize(body)?;
     input.validate()?;
     let target = state.storage.api.update_target(&id, &input).await?;
+    reload_all(&state).await?;
+    Ok(Json(target_view(&target)?))
+}
+
+pub async fn upsert_target(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> AdminResult<Json<Value>> {
+    let mut body = read_json_body(payload)?;
+    normalize_fk(&mut body, "upstream", "upstream_id");
+    let target = if state.storage.api.get_target(&id).await?.is_some() {
+        let input: UpdateTarget = deserialize(body)?;
+        input.validate()?;
+        state.storage.api.update_target(&id, &input).await?
+    } else {
+        set_id(&mut body, &id);
+        let input: CreateTarget = deserialize(body)?;
+        input.validate()?;
+        state.storage.api.create_target(&input).await?
+    };
     reload_all(&state).await?;
     Ok(Json(target_view(&target)?))
 }

@@ -75,6 +75,14 @@ pub(super) fn map_upstream(row: &SqliteRow) -> Result<Upstream> {
         })?,
         hash_on: decode(row.try_get("hash_on"), "upstream")?,
         hash_fallback: decode(row.try_get("hash_fallback"), "upstream")?,
+        hash_on_header: decode(row.try_get("hash_on_header"), "upstream")?,
+        hash_fallback_header: decode(row.try_get("hash_fallback_header"), "upstream")?,
+        hash_on_cookie: decode(row.try_get("hash_on_cookie"), "upstream")?,
+        hash_on_cookie_path: decode(row.try_get("hash_on_cookie_path"), "upstream")?,
+        hash_on_query_arg: decode(row.try_get("hash_on_query_arg"), "upstream")?,
+        hash_fallback_query_arg: decode(row.try_get("hash_fallback_query_arg"), "upstream")?,
+        hash_on_uri_capture: decode(row.try_get("hash_on_uri_capture"), "upstream")?,
+        hash_fallback_uri_capture: decode(row.try_get("hash_fallback_uri_capture"), "upstream")?,
         slots: decode(row.try_get("slots"), "upstream")?,
         healthchecks: decode_optional_json(
             row.try_get::<Option<String>, _>("healthchecks")

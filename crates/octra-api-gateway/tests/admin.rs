@@ -317,3 +317,54 @@ async fn instance_named_plugins_all_run() {
     assert_eq!(json["headers"]["x-one"], "1");
     assert_eq!(json["headers"]["x-two"], "2");
 }
+
+#[tokio::test]
+async fn put_upserts_services_and_routes() {
+    let gateway = gateway().await;
+
+    let (status, _, created) = gateway
+        .send_control(json_request(
+            "PUT",
+            "/admin/services/svc-put",
+            json!({"name": "first", "host": "127.0.0.1", "port": 8080}),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["id"], "svc-put");
+    assert_eq!(created["name"], "first");
+
+    let (status, _, updated) = gateway
+        .send_control(json_request(
+            "PUT",
+            "/admin/services/svc-put",
+            json!({"name": "second", "host": "127.0.0.2", "port": 9090}),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["id"], "svc-put");
+    assert_eq!(updated["name"], "second");
+    assert_eq!(updated["port"], 9090);
+
+    let (status, _, routes) = gateway
+        .send_control(get("/admin/services/svc-put/routes"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(routes["data"].as_array().unwrap().len(), 0);
+
+    let (status, _, route) = gateway
+        .send_control(json_request(
+            "PUT",
+            "/admin/routes/route-put",
+            json!({"paths": ["/put"], "service": {"id": "svc-put"}}),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{route}");
+    assert_eq!(route["id"], "route-put");
+
+    let (status, _, listed) = gateway
+        .send_control(get("/admin/services/svc-put/routes"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["data"][0]["id"], "route-put");
+}

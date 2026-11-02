@@ -5,6 +5,19 @@ use super::*;
 impl ApiStore {
     // Upstreams
 
+    pub async fn list_upstreams_page(&self, page: &ListPage) -> Result<Page<Upstream>> {
+        self.page_rows(
+            "upstreams",
+            UPSTREAM_COLUMNS,
+            None,
+            None,
+            page,
+            map_upstream,
+            |upstream| (upstream.created_at, upstream.id.clone()),
+        )
+        .await
+    }
+
     pub async fn list_upstreams(&self) -> Result<Vec<Upstream>> {
         let rows = sqlx::query(&format!(
             "SELECT {UPSTREAM_COLUMNS} FROM upstreams ORDER BY name ASC, id ASC"
@@ -40,9 +53,12 @@ impl ApiStore {
             .unwrap_or_default();
 
         sqlx::query(&format!(
-            "INSERT INTO upstreams (id, name, algorithm, hash_on, hash_fallback, slots, \
-             healthchecks, host_header, tags, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, {now}, {now})",
+            "INSERT INTO upstreams (id, name, algorithm, hash_on, hash_fallback, \
+             hash_on_header, hash_fallback_header, hash_on_cookie, hash_on_cookie_path, \
+             hash_on_query_arg, hash_fallback_query_arg, hash_on_uri_capture, \
+             hash_fallback_uri_capture, slots, healthchecks, host_header, tags, created_at, \
+             updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now}, {now})",
             now = epoch_now()
         ))
         .bind(&id)
@@ -50,6 +66,34 @@ impl ApiStore {
         .bind(algorithm.as_str())
         .bind(input.hash_on.clone().unwrap_or_else(|| "none".into()))
         .bind(input.hash_fallback.clone().unwrap_or_else(|| "none".into()))
+        .bind(
+            input
+                .hash_on_header
+                .clone()
+                .unwrap_or_else(|| "X-Consumer-ID".into()),
+        )
+        .bind(
+            input
+                .hash_fallback_header
+                .clone()
+                .unwrap_or_else(|| "X-Consumer-ID".into()),
+        )
+        .bind(
+            input
+                .hash_on_cookie
+                .clone()
+                .unwrap_or_else(|| "kong".into()),
+        )
+        .bind(
+            input
+                .hash_on_cookie_path
+                .clone()
+                .unwrap_or_else(|| "/".into()),
+        )
+        .bind(input.hash_on_query_arg.clone().unwrap_or_default())
+        .bind(input.hash_fallback_query_arg.clone().unwrap_or_default())
+        .bind(input.hash_on_uri_capture.clone().unwrap_or_default())
+        .bind(input.hash_fallback_uri_capture.clone().unwrap_or_default())
         .bind(input.slots.unwrap_or(10_000))
         .bind(encode_json(
             input
@@ -87,6 +131,14 @@ impl ApiStore {
                 algorithm = COALESCE(?, algorithm), \
                 hash_on = COALESCE(?, hash_on), \
                 hash_fallback = COALESCE(?, hash_fallback), \
+                hash_on_header = COALESCE(?, hash_on_header), \
+                hash_fallback_header = COALESCE(?, hash_fallback_header), \
+                hash_on_cookie = COALESCE(?, hash_on_cookie), \
+                hash_on_cookie_path = COALESCE(?, hash_on_cookie_path), \
+                hash_on_query_arg = COALESCE(?, hash_on_query_arg), \
+                hash_fallback_query_arg = COALESCE(?, hash_fallback_query_arg), \
+                hash_on_uri_capture = COALESCE(?, hash_on_uri_capture), \
+                hash_fallback_uri_capture = COALESCE(?, hash_fallback_uri_capture), \
                 slots = COALESCE(?, slots), \
                 healthchecks = COALESCE(?, healthchecks), \
                 host_header = COALESCE(?, host_header), \
@@ -99,6 +151,14 @@ impl ApiStore {
         .bind(algorithm)
         .bind(&input.hash_on)
         .bind(&input.hash_fallback)
+        .bind(&input.hash_on_header)
+        .bind(&input.hash_fallback_header)
+        .bind(&input.hash_on_cookie)
+        .bind(&input.hash_on_cookie_path)
+        .bind(&input.hash_on_query_arg)
+        .bind(&input.hash_fallback_query_arg)
+        .bind(&input.hash_on_uri_capture)
+        .bind(&input.hash_fallback_uri_capture)
         .bind(input.slots)
         .bind(input.healthchecks.as_ref().map(encode_json).transpose()?)
         .bind(&input.host_header)
@@ -124,6 +184,23 @@ impl ApiStore {
     }
 
     // Targets
+
+    pub async fn list_targets_page(
+        &self,
+        upstream_id: Option<&str>,
+        page: &ListPage,
+    ) -> Result<Page<Target>> {
+        self.page_rows(
+            "targets",
+            TARGET_COLUMNS,
+            upstream_id.map(|id| ("upstream_id", id)),
+            None,
+            page,
+            map_target,
+            |target| (target.created_at, target.id.clone()),
+        )
+        .await
+    }
 
     pub async fn list_targets(&self, upstream_id: Option<&str>) -> Result<Vec<Target>> {
         let rows = sqlx::query(&format!(

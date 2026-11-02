@@ -5,6 +5,23 @@ use super::*;
 impl ApiStore {
     // Routes
 
+    pub async fn list_routes_page(
+        &self,
+        service_id: Option<&str>,
+        page: &ListPage,
+    ) -> Result<Page<Route>> {
+        self.page_rows(
+            "routes",
+            ROUTE_COLUMNS,
+            service_id.map(|id| ("service_id", id)),
+            None,
+            page,
+            map_route,
+            |route| (route.created_at, route.id.clone()),
+        )
+        .await
+    }
+
     pub async fn list_routes(&self, service_id: Option<&str>) -> Result<Vec<Route>> {
         let rows = sqlx::query(&format!(
             "SELECT {ROUTE_COLUMNS} FROM routes WHERE (?1 IS NULL OR service_id = ?1) \

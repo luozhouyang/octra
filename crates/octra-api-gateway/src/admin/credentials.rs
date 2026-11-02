@@ -15,8 +15,8 @@ use crate::key::generate_api_key;
 
 use super::error::{AdminError, AdminResult};
 use super::list::{
-    ListQuery, ListResponse, deserialize, list_response, normalize_fk, read_json_body, to_value,
-    with_ref,
+    ListQuery, ListResponse, deserialize, list_page, list_response, normalize_fk, read_json_body,
+    set_id, to_value, with_ref,
 };
 use super::{reload_all, require_consumer};
 
@@ -26,12 +26,18 @@ pub async fn list_keyauth(
     State(state): State<ApiControlState>,
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
-    let credentials = state.storage.api.list_credentials(None).await?;
-    let items = credentials
+    let page = state
+        .storage
+        .api
+        .list_credentials_page(None, &list_page(&query))
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
         .iter()
         .map(keyauth_view)
         .collect::<AdminResult<Vec<_>>>()?;
-    Ok(list_response("/admin/key-auth", items, &query))
+    Ok(list_response("/admin/key-auths", items, next, &query))
 }
 
 pub async fn list_keyauth_for_consumer(
@@ -40,18 +46,21 @@ pub async fn list_keyauth_for_consumer(
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
     require_consumer(&state, &consumer_id).await?;
-    let credentials = state
+    let page = state
         .storage
         .api
-        .list_credentials(Some(&consumer_id))
+        .list_credentials_page(Some(&consumer_id), &list_page(&query))
         .await?;
-    let items = credentials
+    let next = page.next;
+    let items = page
+        .items
         .iter()
         .map(keyauth_view)
         .collect::<AdminResult<Vec<_>>>()?;
     Ok(list_response(
         &format!("/admin/consumers/{consumer_id}/key-auth"),
         items,
+        next,
         &query,
     ))
 }
@@ -118,6 +127,30 @@ pub async fn update_keyauth(
     Ok(Json(keyauth_view(&credential)?))
 }
 
+pub async fn upsert_keyauth(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> AdminResult<Json<Value>> {
+    let mut body = read_json_body(payload)?;
+    normalize_fk(&mut body, "consumer", "consumer_id");
+    let credential = if state.storage.api.get_credential(&id).await?.is_some() {
+        let input: UpdateKeyauthCredential = deserialize(body)?;
+        input.validate()?;
+        state.storage.api.update_credential(&id, &input).await?
+    } else {
+        set_id(&mut body, &id);
+        let mut input: CreateKeyauthCredential = deserialize(body)?;
+        if input.key.is_none() {
+            input.key = Some(generate_api_key().plaintext);
+        }
+        input.validate()?;
+        state.storage.api.create_credential(&input).await?
+    };
+    reload_all(&state).await?;
+    Ok(Json(keyauth_view(&credential)?))
+}
+
 pub async fn delete_keyauth(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
@@ -133,12 +166,18 @@ pub async fn list_basicauth(
     State(state): State<ApiControlState>,
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
-    let credentials = state.storage.api.list_basicauth().await?;
-    let items = credentials
+    let page = state
+        .storage
+        .api
+        .list_basicauth_page(None, &list_page(&query))
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
         .iter()
         .map(basicauth_view)
         .collect::<AdminResult<Vec<_>>>()?;
-    Ok(list_response("/admin/basic-auth", items, &query))
+    Ok(list_response("/admin/basic-auths", items, next, &query))
 }
 
 pub async fn list_basicauth_for_consumer(
@@ -147,15 +186,21 @@ pub async fn list_basicauth_for_consumer(
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
     require_consumer(&state, &consumer_id).await?;
-    let credentials = state.storage.api.list_basicauth().await?;
-    let items = credentials
+    let page = state
+        .storage
+        .api
+        .list_basicauth_page(Some(&consumer_id), &list_page(&query))
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
         .iter()
-        .filter(|credential| credential.consumer_id == consumer_id)
         .map(basicauth_view)
         .collect::<AdminResult<Vec<_>>>()?;
     Ok(list_response(
         &format!("/admin/consumers/{consumer_id}/basic-auth"),
         items,
+        next,
         &query,
     ))
 }
@@ -221,6 +266,31 @@ pub async fn update_basicauth(
     Ok(Json(basicauth_view(&credential)?))
 }
 
+pub async fn upsert_basicauth(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> AdminResult<Json<Value>> {
+    let mut body = read_json_body(payload)?;
+    normalize_fk(&mut body, "consumer", "consumer_id");
+    let credential = if state.storage.api.get_basicauth(&id).await?.is_some() {
+        let mut input: UpdateBasicauthCredential = deserialize(body)?;
+        input.validate()?;
+        if let Some(password) = input.password.take() {
+            input.password = Some(hash_password(password).await?);
+        }
+        state.storage.api.update_basicauth(&id, &input).await?
+    } else {
+        set_id(&mut body, &id);
+        let mut input: CreateBasicauthCredential = deserialize(body)?;
+        input.validate()?;
+        input.password = hash_password(input.password).await?;
+        state.storage.api.create_basicauth(&input).await?
+    };
+    reload_all(&state).await?;
+    Ok(Json(basicauth_view(&credential)?))
+}
+
 pub async fn delete_basicauth(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
@@ -236,12 +306,18 @@ pub async fn list_jwt(
     State(state): State<ApiControlState>,
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
-    let credentials = state.storage.api.list_jwt().await?;
-    let items = credentials
+    let page = state
+        .storage
+        .api
+        .list_jwt_page(None, &list_page(&query))
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
         .iter()
         .map(jwt_view)
         .collect::<AdminResult<Vec<_>>>()?;
-    Ok(list_response("/admin/jwt", items, &query))
+    Ok(list_response("/admin/jwts", items, next, &query))
 }
 
 pub async fn list_jwt_for_consumer(
@@ -250,15 +326,21 @@ pub async fn list_jwt_for_consumer(
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
     require_consumer(&state, &consumer_id).await?;
-    let credentials = state.storage.api.list_jwt().await?;
-    let items = credentials
+    let page = state
+        .storage
+        .api
+        .list_jwt_page(Some(&consumer_id), &list_page(&query))
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
         .iter()
-        .filter(|credential| credential.consumer_id == consumer_id)
         .map(jwt_view)
         .collect::<AdminResult<Vec<_>>>()?;
     Ok(list_response(
         &format!("/admin/consumers/{consumer_id}/jwt"),
         items,
+        next,
         &query,
     ))
 }
@@ -319,6 +401,27 @@ pub async fn update_jwt(
     Ok(Json(jwt_view(&credential)?))
 }
 
+pub async fn upsert_jwt(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> AdminResult<Json<Value>> {
+    let mut body = read_json_body(payload)?;
+    normalize_fk(&mut body, "consumer", "consumer_id");
+    let credential = if state.storage.api.get_jwt(&id).await?.is_some() {
+        let input: UpdateJwtSecret = deserialize(body)?;
+        input.validate()?;
+        state.storage.api.update_jwt(&id, &input).await?
+    } else {
+        set_id(&mut body, &id);
+        let input: CreateJwtSecret = deserialize(body)?;
+        input.validate()?;
+        state.storage.api.create_jwt(&input).await?
+    };
+    reload_all(&state).await?;
+    Ok(Json(jwt_view(&credential)?))
+}
+
 pub async fn delete_jwt(
     State(state): State<ApiControlState>,
     Path(id): Path<String>,
@@ -334,9 +437,18 @@ pub async fn list_acls(
     State(state): State<ApiControlState>,
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
-    let acls = state.storage.api.list_acls(None).await?;
-    let items = acls.iter().map(acl_view).collect::<AdminResult<Vec<_>>>()?;
-    Ok(list_response("/admin/acls", items, &query))
+    let page = state
+        .storage
+        .api
+        .list_acls_page(None, &list_page(&query))
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
+        .iter()
+        .map(acl_view)
+        .collect::<AdminResult<Vec<_>>>()?;
+    Ok(list_response("/admin/acls", items, next, &query))
 }
 
 pub async fn list_acls_for_consumer(
@@ -345,11 +457,21 @@ pub async fn list_acls_for_consumer(
     Query(query): Query<ListQuery>,
 ) -> AdminResult<Json<ListResponse>> {
     require_consumer(&state, &consumer_id).await?;
-    let acls = state.storage.api.list_acls(Some(&consumer_id)).await?;
-    let items = acls.iter().map(acl_view).collect::<AdminResult<Vec<_>>>()?;
+    let page = state
+        .storage
+        .api
+        .list_acls_page(Some(&consumer_id), &list_page(&query))
+        .await?;
+    let next = page.next;
+    let items = page
+        .items
+        .iter()
+        .map(acl_view)
+        .collect::<AdminResult<Vec<_>>>()?;
     Ok(list_response(
         &format!("/admin/consumers/{consumer_id}/acls"),
         items,
+        next,
         &query,
     ))
 }
@@ -406,6 +528,27 @@ pub async fn update_acl(
     let input: UpdateAcl = deserialize(read_json_body(payload)?)?;
     input.validate()?;
     let acl = state.storage.api.update_acl(&id, &input).await?;
+    reload_all(&state).await?;
+    Ok(Json(acl_view(&acl)?))
+}
+
+pub async fn upsert_acl(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> AdminResult<Json<Value>> {
+    let mut body = read_json_body(payload)?;
+    normalize_fk(&mut body, "consumer", "consumer_id");
+    let acl = if state.storage.api.get_acl(&id).await?.is_some() {
+        let input: UpdateAcl = deserialize(body)?;
+        input.validate()?;
+        state.storage.api.update_acl(&id, &input).await?
+    } else {
+        set_id(&mut body, &id);
+        let input: CreateAcl = deserialize(body)?;
+        input.validate()?;
+        state.storage.api.create_acl(&input).await?
+    };
     reload_all(&state).await?;
     Ok(Json(acl_view(&acl)?))
 }
