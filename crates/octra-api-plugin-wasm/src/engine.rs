@@ -82,10 +82,7 @@ impl WasmEngine {
             return Ok(component.clone());
         }
         let component = Arc::new(Component::from_file(self.engine(), path).map_err(|error| {
-            anyhow::anyhow!(
-                "cannot compile wasm component {}: {error}",
-                path.display()
-            )
+            anyhow::anyhow!("cannot compile wasm component {}: {error}", path.display())
         })?);
         self.components
             .write()

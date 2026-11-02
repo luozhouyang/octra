@@ -35,10 +35,7 @@ pub struct WasmHostProvider {
 }
 
 impl WasmHostProvider {
-    pub fn new(
-        storage_root: Arc<PluginStorageRoot>,
-        installed: Vec<InstalledWasmPlugin>,
-    ) -> Self {
+    pub fn new(storage_root: Arc<PluginStorageRoot>, installed: Vec<InstalledWasmPlugin>) -> Self {
         let installed = installed
             .into_iter()
             .map(|plugin| (plugin.manifest.name.clone(), plugin))
@@ -54,9 +51,10 @@ impl WasmHostProvider {
     /// dropped so the next host opens it with the new entity declarations.
     pub fn install(&self, manifest: PluginManifest, approved_capabilities: Vec<Capability>) {
         let name = manifest.name.clone();
-        self.installed
-            .write()
-            .insert(name.clone(), InstalledWasmPlugin::new(manifest, approved_capabilities));
+        self.installed.write().insert(
+            name.clone(),
+            InstalledWasmPlugin::new(manifest, approved_capabilities),
+        );
         self.stores.lock().remove(&name);
     }
 
@@ -174,7 +172,12 @@ impl PluginStorage for UnavailableStorage {
         Err(StorageError::Unavailable)
     }
 
-    fn kv_put(&self, _key: &str, _value: &[u8], _ttl: Option<std::time::Duration>) -> Result<(), StorageError> {
+    fn kv_put(
+        &self,
+        _key: &str,
+        _value: &[u8],
+        _ttl: Option<std::time::Duration>,
+    ) -> Result<(), StorageError> {
         Err(StorageError::Unavailable)
     }
 
@@ -182,7 +185,12 @@ impl PluginStorage for UnavailableStorage {
         Err(StorageError::Unavailable)
     }
 
-    fn kv_incr(&self, _key: &str, _delta: i64, _ttl: Option<std::time::Duration>) -> Result<i64, StorageError> {
+    fn kv_incr(
+        &self,
+        _key: &str,
+        _delta: i64,
+        _ttl: Option<std::time::Duration>,
+    ) -> Result<i64, StorageError> {
         Err(StorageError::Unavailable)
     }
 

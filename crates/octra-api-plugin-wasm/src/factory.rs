@@ -26,9 +26,10 @@ impl WasmPluginFactory {
     }
 
     pub fn from_artifact(engine: &WasmEngine, artifact_dir: &Path) -> Result<Self, PluginError> {
-        let layout = octra_plugin_storage::validate_artifact_dir(artifact_dir).map_err(|error| {
-            PluginError::fail_closed(format!("invalid plugin artifact: {error}"))
-        })?;
+        let layout =
+            octra_plugin_storage::validate_artifact_dir(artifact_dir).map_err(|error| {
+                PluginError::fail_closed(format!("invalid plugin artifact: {error}"))
+            })?;
         let component = engine
             .component(&layout.hash, &artifact_dir.join("plugin.wasm"))
             .map_err(|error| {
@@ -49,11 +50,7 @@ impl ApiGatewayPluginFactory for WasmPluginFactory {
         self.manifest.clone()
     }
 
-    fn create(
-        &self,
-        _id: &str,
-        _config: Value,
-    ) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
+    fn create(&self, _id: &str, _config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
         Err(PluginError::fail_closed(
             "wasm plugins require a plugin host and cannot be created without one",
         ))

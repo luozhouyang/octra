@@ -4,7 +4,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use octra_api_plugin_types::{
     Capability, EntityQuery, LogLevel as ApiLogLevel, PluginHost, PluginStorage,
 };
+use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::octra::api_plugin::{host as bindings, types as wit};
 
@@ -12,6 +14,8 @@ pub struct HostState {
     pub host: Arc<dyn PluginHost>,
     pub request_id: String,
     pub limits: StoreLimits,
+    wasi: WasiCtx,
+    wasi_table: ResourceTable,
 }
 
 impl HostState {
@@ -22,6 +26,8 @@ impl HostState {
             limits: StoreLimitsBuilder::new()
                 .memory_size(max_memory_bytes)
                 .build(),
+            wasi: WasiCtxBuilder::new().build(),
+            wasi_table: ResourceTable::new(),
         }
     }
 
@@ -35,6 +41,15 @@ impl HostState {
 
     fn storage(&self) -> &dyn PluginStorage {
         self.host.storage()
+    }
+}
+
+impl WasiView for HostState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.wasi_table,
+        }
     }
 }
 
@@ -57,7 +72,10 @@ impl bindings::Host for HostState {
 
     fn kv_get(&mut self, key: String) -> Result<Option<String>, String> {
         self.require(Capability::KeyValue)?;
-        let value = self.storage().kv_get(&key).map_err(|error| error.to_string())?;
+        let value = self
+            .storage()
+            .kv_get(&key)
+            .map_err(|error| error.to_string())?;
         Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
     }
 
@@ -94,11 +112,7 @@ impl bindings::Host for HostState {
             .map_err(|error| error.to_string())
     }
 
-    fn entity_get(
-        &mut self,
-        entity: String,
-        key_json: String,
-    ) -> Result<Option<String>, String> {
+    fn entity_get(&mut self, entity: String, key_json: String) -> Result<Option<String>, String> {
         self.require(Capability::StorageEntities)?;
         let key = parse_json(&key_json)?;
         let value = self

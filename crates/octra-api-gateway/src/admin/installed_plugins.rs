@@ -19,9 +19,7 @@ use serde_json::{Value, json};
 use crate::ApiControlState;
 
 use super::error::{AdminError, AdminResult};
-use super::list::{
-    ListQuery, ListResponse, deserialize, list_response, read_json_body, to_value,
-};
+use super::list::{ListQuery, ListResponse, deserialize, list_response, read_json_body, to_value};
 use super::reload_all;
 
 #[derive(Debug, Deserialize)]
@@ -62,7 +60,12 @@ pub async fn list_artifacts(
         .iter()
         .map(to_value)
         .collect::<AdminResult<Vec<_>>>()?;
-    Ok(list_response("/admin/plugin-artifacts", items, None, &query))
+    Ok(list_response(
+        "/admin/plugin-artifacts",
+        items,
+        None,
+        &query,
+    ))
 }
 
 pub async fn get_artifact(
@@ -87,14 +90,11 @@ pub async fn upload_artifact(
     let source = PathBuf::from(&input.path);
     let layout = validate_artifact_dir(&source)
         .map_err(|error| AdminError::schema(format!("invalid artifact: {error}")))?;
-    let size_bytes = layout
-        .files
-        .iter()
-        .try_fold(0u64, |total, file| {
-            std::fs::metadata(source.join(file))
-                .map(|metadata| total + metadata.len())
-                .map_err(|error| AdminError::schema(format!("cannot stat artifact file: {error}")))
-        })?;
+    let size_bytes = layout.files.iter().try_fold(0u64, |total, file| {
+        std::fs::metadata(source.join(file))
+            .map(|metadata| total + metadata.len())
+            .map_err(|error| AdminError::schema(format!("cannot stat artifact file: {error}")))
+    })?;
     if size_bytes > wasm.max_artifact_bytes {
         return Err(AdminError::schema(format!(
             "artifact is {size_bytes} bytes; the limit is {}",
@@ -160,8 +160,8 @@ pub async fn install(
         resolve_artifact(&state, &name, input.artifact_id.as_deref()).await?;
     ensure_capabilities(&manifest, &input.approve_capabilities)?;
 
-    let factory = WasmPluginFactory::from_artifact(&wasm.engine, &artifact_dir)
-        .map_err(plugin_error)?;
+    let factory =
+        WasmPluginFactory::from_artifact(&wasm.engine, &artifact_dir).map_err(plugin_error)?;
     let store = wasm
         .storage_root
         .open(&name, manifest.entities.clone())
@@ -220,8 +220,8 @@ pub async fn upgrade(
         resolve_artifact(&state, &name, input.artifact_id.as_deref()).await?;
     ensure_capabilities(&manifest, &input.approve_capabilities)?;
 
-    let factory = WasmPluginFactory::from_artifact(&wasm.engine, &artifact_dir)
-        .map_err(plugin_error)?;
+    let factory =
+        WasmPluginFactory::from_artifact(&wasm.engine, &artifact_dir).map_err(plugin_error)?;
     let store = wasm
         .storage_root
         .open(&name, manifest.entities.clone())
@@ -334,10 +334,7 @@ fn wasm(state: &ApiControlState) -> AdminResult<&Arc<crate::WasmControlState>> {
         .ok_or_else(|| AdminError::schema("the wasm plugin runtime is disabled"))
 }
 
-async fn installed_manifest(
-    state: &ApiControlState,
-    name: &str,
-) -> AdminResult<PluginManifest> {
+async fn installed_manifest(state: &ApiControlState, name: &str) -> AdminResult<PluginManifest> {
     let record = state
         .storage
         .llm
@@ -353,8 +350,7 @@ async fn resolve_artifact(
     name: &str,
     artifact_id: Option<&str>,
 ) -> AdminResult<(PluginManifest, PluginArtifactRecord, PathBuf)> {
-    let artifact_id = artifact_id
-        .ok_or_else(|| AdminError::schema("artifact_id is required"))?;
+    let artifact_id = artifact_id.ok_or_else(|| AdminError::schema("artifact_id is required"))?;
     let artifact = state
         .storage
         .llm
@@ -385,10 +381,7 @@ async fn resolve_artifact(
     Ok((layout.manifest, artifact, directory))
 }
 
-fn ensure_capabilities(
-    manifest: &PluginManifest,
-    approved: &[Capability],
-) -> AdminResult<()> {
+fn ensure_capabilities(manifest: &PluginManifest, approved: &[Capability]) -> AdminResult<()> {
     for capability in &manifest.capabilities {
         if matches!(
             capability,
@@ -404,7 +397,9 @@ fn ensure_capabilities(
     }
     let requested = &manifest.capabilities;
     if requested.len() != approved.len()
-        || !requested.iter().all(|capability| approved.contains(capability))
+        || !requested
+            .iter()
+            .all(|capability| approved.contains(capability))
     {
         return Err(AdminError::schema(
             "approve_capabilities must match the manifest capabilities",

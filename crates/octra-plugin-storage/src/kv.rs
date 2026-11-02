@@ -5,10 +5,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::PluginStorageError;
 
-pub(crate) fn get(
-    conn: &Connection,
-    key: &str,
-) -> Result<Option<Vec<u8>>, PluginStorageError> {
+pub(crate) fn get(conn: &Connection, key: &str) -> Result<Option<Vec<u8>>, PluginStorageError> {
     let now = now_unix();
     let row: Option<(SqlValue, Option<i64>)> = conn
         .query_row(

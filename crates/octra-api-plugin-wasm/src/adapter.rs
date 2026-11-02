@@ -52,9 +52,7 @@ impl WasmCallError {
                 fail_policy: manifest.fail_policy,
             },
             Self::Trap(message) => PluginError::fail_closed(message),
-            Self::Unavailable => {
-                PluginError::fail_closed("wasm plugin instance is unavailable")
-            }
+            Self::Unavailable => PluginError::fail_closed("wasm plugin instance is unavailable"),
         }
     }
 }
@@ -144,15 +142,25 @@ impl WasmPluginInner {
         );
         store.limiter(|state| &mut state.limits);
 
+        store
+            .set_fuel(self.limits.max_fuel)
+            .map_err(|error| PluginError::fail_closed(format!("cannot arm wasm fuel: {error}")))?;
+        store.set_epoch_deadline(epoch_ticks(self.limits.timeout));
+
         let mut linker = Linker::new(self.component.engine());
-        Plugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-            .map_err(|error| {
-                PluginError::fail_closed(format!("cannot link wasm plugin: {error}"))
-            })?;
-        let bindings = Plugin::instantiate(&mut store, &self.component, &linker)
-            .map_err(|error| {
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+            .map_err(|error| PluginError::fail_closed(format!("cannot link wasi: {error}")))?;
+        Plugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state).map_err(|error| {
+            PluginError::fail_closed(format!("cannot link wasm plugin: {error}"))
+        })?;
+        let bindings =
+            Plugin::instantiate(&mut store, &self.component, &linker).map_err(|error| {
                 PluginError::fail_closed(format!("cannot instantiate wasm plugin: {error}"))
             })?;
+        store
+            .set_fuel(self.limits.max_fuel)
+            .map_err(|error| PluginError::fail_closed(format!("cannot arm wasm fuel: {error}")))?;
+        store.set_epoch_deadline(epoch_ticks(self.limits.timeout));
         let configured = bindings
             .octra_api_plugin_plugin_api()
             .call_configure(&mut store, &self.config_json)
@@ -323,7 +331,9 @@ fn apply_response_action(
             apply_response_mutation(cx, mutation, capabilities)?;
             Ok(PluginAction::Continue)
         }
-        wit::ResponseAction::Reject(reject) => Ok(PluginAction::ShortCircuit(build_reject(reject)?)),
+        wit::ResponseAction::Reject(reject) => {
+            Ok(PluginAction::ShortCircuit(build_reject(reject)?))
+        }
     }
 }
 
@@ -343,9 +353,7 @@ fn apply_request_mutation(
     }
 
     if mutation.path.is_some() || mutation.query.is_some() {
-        let path = mutation
-            .path
-            .unwrap_or_else(|| cx.uri.path().to_string());
+        let path = mutation.path.unwrap_or_else(|| cx.uri.path().to_string());
         let query = mutation
             .query
             .unwrap_or_else(|| cx.uri.query().unwrap_or("").to_string());
@@ -575,7 +583,12 @@ mod tests {
         .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
-            response.headers().get("retry-after").unwrap().to_str().unwrap(),
+            response
+                .headers()
+                .get("retry-after")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "10"
         );
     }

@@ -63,7 +63,10 @@ pub fn validate_artifact_dir(dir: &Path) -> Result<ArtifactLayout, PluginStorage
     })
 }
 
-pub fn copy_artifact(source: &Path, destination: &Path) -> Result<ArtifactLayout, PluginStorageError> {
+pub fn copy_artifact(
+    source: &Path,
+    destination: &Path,
+) -> Result<ArtifactLayout, PluginStorageError> {
     let layout = validate_artifact_dir(source)?;
     if destination.exists() {
         let mut entries = std::fs::read_dir(destination)?;

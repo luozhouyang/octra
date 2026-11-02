@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use octra_api_plugin_types::{EntityFilter, EntityQuery, EntitySpec, FilterOp};
 use rusqlite::types::Value as SqlValue;
-use serde_json::Value;
 use rusqlite::{Connection, params_from_iter};
+use serde_json::Value;
 
 use crate::error::PluginStorageError;
 
@@ -143,9 +143,7 @@ pub(crate) fn upsert(
     let updates: Vec<String> = spec
         .fields
         .iter()
-        .filter(|field| {
-            object.contains_key(&field.name) && !spec.primary_key.contains(&field.name)
-        })
+        .filter(|field| object.contains_key(&field.name) && !spec.primary_key.contains(&field.name))
         .map(|field| {
             format!(
                 "{} = excluded.{}",
@@ -158,7 +156,10 @@ pub(crate) fn upsert(
     let suffix = if updates.is_empty() {
         format!("ON CONFLICT({conflict}) DO NOTHING")
     } else {
-        format!("ON CONFLICT({conflict}) DO UPDATE SET {}", updates.join(", "))
+        format!(
+            "ON CONFLICT({conflict}) DO UPDATE SET {}",
+            updates.join(", ")
+        )
     };
     let sql = format!(
         "INSERT INTO {} ({}) VALUES ({placeholders}) {suffix}",
@@ -279,9 +280,7 @@ pub(crate) fn increment(
         updates.join(", "),
         quote_ident(field)
     );
-    let value = conn.query_row(&sql, params_from_iter(params), |row| {
-        row.get::<_, i64>(0)
-    })?;
+    let value = conn.query_row(&sql, params_from_iter(params), |row| row.get::<_, i64>(0))?;
     Ok(value)
 }
 
@@ -312,7 +311,11 @@ pub(crate) fn query(
         append_filter(spec, filter, &mut clauses, &mut params)?;
     }
 
-    let mut sql = format!("SELECT {} FROM {}", select_fields(spec), quote_ident(&spec.name));
+    let mut sql = format!(
+        "SELECT {} FROM {}",
+        select_fields(spec),
+        quote_ident(&spec.name)
+    );
     if !clauses.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&clauses.join(" AND "));
@@ -517,10 +520,7 @@ fn json_to_sql(value: &Value) -> Result<SqlValue, PluginStorageError> {
     }
 }
 
-fn row_to_json(
-    row: &rusqlite::Row<'_>,
-    spec: &EntitySpec,
-) -> Result<Value, PluginStorageError> {
+fn row_to_json(row: &rusqlite::Row<'_>, spec: &EntitySpec) -> Result<Value, PluginStorageError> {
     let mut object = serde_json::Map::new();
     for (index, field) in spec.fields.iter().enumerate() {
         let value: SqlValue = row.get(index)?;

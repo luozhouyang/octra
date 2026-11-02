@@ -6,9 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use axum::Router;
-use octra_api_gateway::{
-    ApiControlState, ApiDataState, ApiMetrics, AuditState, WasmControlState,
-};
+use octra_api_gateway::{ApiControlState, ApiDataState, ApiMetrics, AuditState, WasmControlState};
 use octra_api_plugin_runtime::{
     CompositePluginFactoryResolver, PluginFactoryResolver, PluginRegistry, PluginRuntime,
 };
@@ -17,10 +15,10 @@ use octra_api_plugin_wasm::{
     InstalledWasmPlugin, WasmEngine, WasmHostProvider, WasmLimits, WasmPluginCatalog,
     WasmPluginFactory,
 };
-use octra_plugin_storage::PluginStorageRoot;
 use octra_config::Workspace;
 use octra_llm_gateway::{LlmControlState, LlmDataState, LlmPluginRuntime, LlmRuntime};
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
+use octra_plugin_storage::PluginStorageRoot;
 use octra_runtime::GatewayRuntime;
 use octra_types::{AppState, AuthState};
 use tokio_util::sync::CancellationToken;
@@ -131,11 +129,8 @@ async fn main() -> anyhow::Result<()> {
             CompositePluginFactoryResolver::new(plugin_registry.clone(), catalog.clone()),
         );
         let host_provider = Arc::new(WasmHostProvider::new(storage_root.clone(), installed));
-        let runtime = PluginRuntime::with_resolver(
-            plugin_registry,
-            resolver,
-            host_provider.clone(),
-        );
+        let runtime =
+            PluginRuntime::with_resolver(plugin_registry, resolver, host_provider.clone());
         runtime
             .reload(plugin_instances)
             .context("cannot build the plugin runtime")?;

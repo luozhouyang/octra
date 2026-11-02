@@ -254,10 +254,7 @@ impl LlmStore {
             .ok_or_else(|| Error::Storage("plugin artifact vanished after insert".to_string()))
     }
 
-    pub async fn get_plugin_artifact(
-        &self,
-        id: &str,
-    ) -> Result<Option<PluginArtifactRecord>> {
+    pub async fn get_plugin_artifact(&self, id: &str) -> Result<Option<PluginArtifactRecord>> {
         let row = sqlx::query(&format!(
             "SELECT {ARTIFACT_COLUMNS} FROM plugin_artifacts WHERE id = ?1"
         ))
@@ -329,9 +326,8 @@ impl LlmStore {
             .transpose()
             .map_err(|error| Error::Storage(format!("cannot serialize plugin schema: {error}")))?
             .unwrap_or_else(|| "{}".to_string());
-        let capabilities_json = serde_json::to_string(approved_capabilities).map_err(|error| {
-            Error::Storage(format!("cannot serialize capabilities: {error}"))
-        })?;
+        let capabilities_json = serde_json::to_string(approved_capabilities)
+            .map_err(|error| Error::Storage(format!("cannot serialize capabilities: {error}")))?;
 
         sqlx::query(
             "INSERT INTO plugins
@@ -705,7 +701,12 @@ mod tests {
             vec![Capability::StorageEntities]
         );
         assert_eq!(
-            storage.llm.list_installed_wasm_plugins().await.unwrap().len(),
+            storage
+                .llm
+                .list_installed_wasm_plugins()
+                .await
+                .unwrap()
+                .len(),
             1
         );
 
@@ -732,7 +733,20 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(storage.llm.delete_installed_plugin("demo-plugin").await.unwrap());
-        assert!(storage.llm.get_plugin_by_name("demo-plugin").await.unwrap().is_none());
+        assert!(
+            storage
+                .llm
+                .delete_installed_plugin("demo-plugin")
+                .await
+                .unwrap()
+        );
+        assert!(
+            storage
+                .llm
+                .get_plugin_by_name("demo-plugin")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -109,7 +109,12 @@ impl PluginFactoryResolver for CompositePluginFactoryResolver {
     fn manifests(&self) -> Vec<PluginManifest> {
         let mut seen = HashSet::new();
         let mut manifests = Vec::new();
-        for manifest in self.builtins.manifests().into_iter().chain(self.dynamic.manifests()) {
+        for manifest in self
+            .builtins
+            .manifests()
+            .into_iter()
+            .chain(self.dynamic.manifests())
+        {
             if seen.insert(manifest.name.clone()) {
                 manifests.push(manifest);
             }
@@ -201,11 +206,7 @@ impl PluginStorage for NoopPluginStorage {
         Err(StorageError::Unavailable)
     }
 
-    fn get(
-        &self,
-        _entity: &str,
-        _key: &Value,
-    ) -> std::result::Result<Option<Value>, StorageError> {
+    fn get(&self, _entity: &str, _key: &Value) -> std::result::Result<Option<Value>, StorageError> {
         Err(StorageError::Unavailable)
     }
 
@@ -966,11 +967,7 @@ impl PluginRuntime {
         manifests
     }
 
-    pub fn validate(
-        &self,
-        name: &str,
-        config: &Value,
-    ) -> std::result::Result<(), PluginError> {
+    pub fn validate(&self, name: &str, config: &Value) -> std::result::Result<(), PluginError> {
         self.factory(name)
             .ok_or_else(|| PluginError::fail_closed(format!("unknown plugin '{name}'")))?
             .validate(config)

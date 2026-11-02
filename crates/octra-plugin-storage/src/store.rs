@@ -2,9 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use octra_api_plugin_types::{
-    EntityQuery, EntitySpec, MigrationSpec, PluginStorage, StorageError,
-};
+use octra_api_plugin_types::{EntityQuery, EntitySpec, MigrationSpec, PluginStorage, StorageError};
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -255,8 +253,7 @@ pub(crate) fn validate_version(version: &str) -> Result<(), PluginStorageError> 
         && !version.contains("..")
         && (first.is_ascii_alphanumeric())
         && chars.all(|character| {
-            character.is_ascii_alphanumeric()
-                || matches!(character, '.' | '_' | '+' | '-')
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-')
         });
     if valid {
         Ok(())

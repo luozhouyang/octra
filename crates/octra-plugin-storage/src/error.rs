@@ -29,15 +29,9 @@ pub enum PluginStorageError {
     #[error("unknown field '{field}' on entity '{entity}'")]
     UnknownField { entity: String, field: String },
     #[error("entity '{entity}' is missing declared fields: {fields:?}")]
-    EntityMismatch {
-        entity: String,
-        fields: Vec<String>,
-    },
+    EntityMismatch { entity: String, fields: Vec<String> },
     #[error("entity '{entity}' primary key mismatch: {fields:?}")]
-    PrimaryKeyMismatch {
-        entity: String,
-        fields: Vec<String>,
-    },
+    PrimaryKeyMismatch { entity: String, fields: Vec<String> },
     #[error("invalid storage request: {0}")]
     InvalidRequest(String),
 }
@@ -45,17 +39,11 @@ pub enum PluginStorageError {
 impl From<PluginStorageError> for StorageError {
     fn from(error: PluginStorageError) -> Self {
         match error {
-            PluginStorageError::EntityNotDeclared { entity } => {
-                StorageError::NotDeclared(entity)
-            }
-            PluginStorageError::UnknownField { entity, field } => {
-                StorageError::InvalidRequest(format!(
-                    "unknown field '{field}' on entity '{entity}'"
-                ))
-            }
-            PluginStorageError::InvalidRequest(message) => {
-                StorageError::InvalidRequest(message)
-            }
+            PluginStorageError::EntityNotDeclared { entity } => StorageError::NotDeclared(entity),
+            PluginStorageError::UnknownField { entity, field } => StorageError::InvalidRequest(
+                format!("unknown field '{field}' on entity '{entity}'"),
+            ),
+            PluginStorageError::InvalidRequest(message) => StorageError::InvalidRequest(message),
             other => StorageError::Backend(other.to_string()),
         }
     }

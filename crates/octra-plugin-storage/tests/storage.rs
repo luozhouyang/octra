@@ -103,10 +103,7 @@ fn rejects_checksum_changes() {
     let error = store
         .apply_migrations(dir.path(), &migrations, false)
         .unwrap_err();
-    assert!(matches!(
-        error,
-        PluginStorageError::ChecksumMismatch { .. }
-    ));
+    assert!(matches!(error, PluginStorageError::ChecksumMismatch { .. }));
 }
 
 #[test]
@@ -117,7 +114,9 @@ fn destructive_migrations_need_approval() {
     let mut spec = migration("000_base", "migrations/000_base.sql");
     spec.destructive = true;
 
-    let error = store.apply_migrations(dir.path(), &[spec], false).unwrap_err();
+    let error = store
+        .apply_migrations(dir.path(), &[spec], false)
+        .unwrap_err();
     assert!(matches!(
         error,
         PluginStorageError::DestructiveMigration { .. }
@@ -153,10 +152,7 @@ fn rejects_entity_schema_drift() {
             false,
         )
         .unwrap_err();
-    assert!(matches!(
-        error,
-        PluginStorageError::EntityMismatch { .. }
-    ));
+    assert!(matches!(error, PluginStorageError::EntityMismatch { .. }));
 }
 
 #[test]
@@ -179,7 +175,13 @@ fn entity_crud_and_query() {
     assert_eq!(row["count"], 5);
 
     let count = store
-        .increment("quota_usage", &key, "count", 2, Some(&json!({ "updated_at": 2 })))
+        .increment(
+            "quota_usage",
+            &key,
+            "count",
+            2,
+            Some(&json!({ "updated_at": 2 })),
+        )
         .unwrap();
     assert_eq!(count, 7);
     let row = store.get("quota_usage", &key).unwrap().unwrap();
@@ -260,7 +262,10 @@ fn rejects_undeclared_entities_and_fields() {
     assert!(matches!(error, StorageError::NotDeclared(_)));
 
     let error = store
-        .upsert("quota_usage", &json!({ "consumer_id": "c1", "window_start": 1, "nope": 1 }))
+        .upsert(
+            "quota_usage",
+            &json!({ "consumer_id": "c1", "window_start": 1, "nope": 1 }),
+        )
         .unwrap_err();
     assert!(matches!(error, StorageError::InvalidRequest(_)));
 }

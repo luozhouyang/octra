@@ -164,10 +164,7 @@ pub(crate) fn ledger(conn: &Connection) -> Result<Vec<AppliedMigration>, PluginS
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-fn ledger_checksum(
-    conn: &Connection,
-    version: &str,
-) -> Result<Option<String>, PluginStorageError> {
+fn ledger_checksum(conn: &Connection, version: &str) -> Result<Option<String>, PluginStorageError> {
     Ok(conn
         .query_row(
             "SELECT checksum FROM _octra_plugin_migrations WHERE version = ?1",
