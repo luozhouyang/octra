@@ -331,6 +331,9 @@ async fn fetch_rows<T>(
 }
 
 impl ApiStore {
+    // The parameters mirror the SQL pagination dimensions; grouping them into
+    // a struct would only move the same fields one level down.
+    #[allow(clippy::too_many_arguments)]
     async fn page_rows<T>(
         &self,
         table: &str,

@@ -1,3 +1,4 @@
+mod maintenance;
 mod token;
 
 use std::net::SocketAddr;
@@ -161,6 +162,13 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     tokio::spawn(shutdown_signal(shutdown.clone()));
     tokio::spawn(health_check_loop(health_runtime, shutdown.clone()));
+    if config.storage.retention.enabled {
+        maintenance::spawn(
+            storage.clone(),
+            config.storage.retention.clone(),
+            shutdown.clone(),
+        );
+    }
 
     let control_server = axum::serve(control_listener, control_app)
         .with_graceful_shutdown(wait_for_shutdown(shutdown.clone()));

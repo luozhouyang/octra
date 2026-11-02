@@ -24,6 +24,18 @@ tool_call_timeout_secs = 120
 [storage]
 path = "octra.db"
 
+[storage.retention]
+# Days: 0 keeps rows forever. llm_usage_days must be 0 or >= 32 so a
+# monthly virtual key limit still sees a full window.
+enabled = true
+llm_usage_days = 90
+request_logs_days = 30
+mcp_invocations_days = 90
+audit_logs_days = 365
+usage_rollup_days = 400
+interval_secs = 3600
+batch_size = 5000
+
 [logging]
 level = "info"
 format = "pretty"
