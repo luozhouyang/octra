@@ -36,4 +36,5 @@ url.workspace = true
 
 
 [dev-dependencies]
+jsonwebtoken = "9"
 octra-plugin-builtin.workspace = true

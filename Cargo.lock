@@ -2728,6 +2728,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "jsonwebtoken",
  "octra-api-core",
  "octra-config",
  "octra-core",
