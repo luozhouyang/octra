@@ -215,6 +215,13 @@ impl MultipartBody {
         output
     }
 
+    pub(crate) fn value(&self, name: &str) -> Option<String> {
+        self.parts
+            .iter()
+            .find(|part| part.name() == Some(name))
+            .and_then(|part| String::from_utf8(part.body.clone()).ok())
+    }
+
     pub(crate) fn remove(&mut self, name: &str) {
         self.parts
             .retain(|part| part.name().is_none_or(|part_name| part_name != name));

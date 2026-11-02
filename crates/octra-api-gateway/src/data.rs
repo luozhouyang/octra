@@ -12,9 +12,7 @@ use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
-use chrono::Utc;
 use http_body::Body as _;
-use http_body_util::BodyExt as _;
 use octra_api_core::{Route, Service};
 use octra_api_plugin_runtime::PluginChain;
 use octra_api_plugin_types::{
@@ -28,8 +26,8 @@ use octra_data_plane::{
 };
 use octra_runtime::balancer::Endpoint;
 use octra_runtime::{
-    AuthSnapshot, CompiledRoute, CompiledService, MatchInput, RuntimeSnapshot, ServiceLimits,
-    normalize_host, strip_matched_prefix,
+    AuthSnapshot, CompiledRoute, CompiledService, MatchInput, ServiceLimits, normalize_host,
+    strip_matched_prefix,
 };
 use octra_storage::NewRequestLog;
 
@@ -135,6 +133,38 @@ pub async fn proxy(
         service,
         consumer: None,
     };
+
+    let max_body = state.config.gateway.max_body_bytes;
+    let mut body = Some(body);
+    let mut early_body = None;
+    if pre_chain.has_capability(Capability::RequestBody) {
+        let raw = body.take().expect("request body is available");
+        match axum::body::to_bytes(raw, max_body).await {
+            Ok(bytes) => {
+                auth_state.request_body = Some(bytes.clone());
+                early_body = Some(bytes);
+            }
+            Err(_) => {
+                let response = payload_too_large();
+                let elapsed = started.elapsed();
+                state.metrics.record(response.status().as_u16(), elapsed, 0);
+                return complete(
+                    &state,
+                    &pre_chain,
+                    &PluginChain::default(),
+                    &subject,
+                    &mut auth_state,
+                    Finish {
+                        latency: elapsed,
+                        target: None,
+                        error: None,
+                    },
+                    response,
+                )
+                .await;
+            }
+        }
+    }
 
     let mut request_cx = RequestContext {
         request_id: &request_id,
@@ -403,7 +433,6 @@ pub async fn proxy(
         request_id: &request_id,
     };
 
-    let max_body = state.config.gateway.max_body_bytes;
     let declared_length = parts
         .headers
         .get(header::CONTENT_LENGTH)
@@ -431,8 +460,11 @@ pub async fn proxy(
 
     let request_body_plugins = pre_chain.has_capability(Capability::RequestBody)
         || post_chain.has_capability(Capability::RequestBody);
-    let payload = if attempts.len() > 1 || request_body_plugins {
-        match axum::body::to_bytes(body, max_body).await {
+    let payload = if let Some(bytes) = early_body {
+        RequestBody::Buffered(bytes)
+    } else if attempts.len() > 1 || request_body_plugins {
+        let raw = body.take().expect("request body is available");
+        match axum::body::to_bytes(raw, max_body).await {
             Ok(bytes) => RequestBody::Buffered(bytes),
             Err(_) => {
                 let response = payload_too_large();
@@ -455,7 +487,10 @@ pub async fn proxy(
             }
         }
     } else {
-        RequestBody::Stream(Body::new(http_body_util::Limited::new(body, max_body)))
+        RequestBody::Stream(Body::new(http_body_util::Limited::new(
+            body.take().expect("request body is available"),
+            max_body,
+        )))
     };
 
     let payload = if request_body_plugins {
@@ -979,14 +1014,6 @@ fn json_error(status: StatusCode, code: &'static str, message: &str) -> Response
 
 fn not_found() -> Response {
     json_error(StatusCode::NOT_FOUND, "no_route", "no matching route")
-}
-
-fn forbidden() -> Response {
-    json_error(
-        StatusCode::FORBIDDEN,
-        "forbidden",
-        "consumer policy does not grant this route",
-    )
 }
 
 fn bad_gateway(message: &str) -> Response {

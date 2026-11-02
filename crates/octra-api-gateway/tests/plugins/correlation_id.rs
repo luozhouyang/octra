@@ -1,6 +1,6 @@
 //! End-to-end coverage for the `correlation-id` plugin.
 
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use serde_json::json;
 
 use crate::common::{

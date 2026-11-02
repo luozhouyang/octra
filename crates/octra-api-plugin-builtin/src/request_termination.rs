@@ -5,8 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use http::{HeaderValue, StatusCode, header};
 use octra_api_plugin_types::{
-    ApiGatewayPlugin, ApiGatewayPluginFactory, Capability, PluginAction, PluginError,
-    PluginManifest, PluginPhase, PluginResult, RequestContext,
+    ApiGatewayPlugin, ApiGatewayPluginFactory, PluginAction, PluginError, PluginManifest,
+    PluginPhase, PluginResult, RequestContext,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};

@@ -58,13 +58,15 @@ impl ApiGatewayPluginFactory for BasicAuthFactory {
 struct Config {
     hide_credentials: bool,
     anonymous: Option<String>,
+    realm: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            hide_credentials: true,
+            hide_credentials: false,
             anonymous: None,
+            realm: "service".into(),
         }
     }
 }
@@ -132,10 +134,11 @@ impl ApiGatewayPlugin for BasicAuthPlugin {
         }
 
         let mut response = plugin_response(StatusCode::UNAUTHORIZED, "Unauthorized");
-        response.headers_mut().insert(
-            header::WWW_AUTHENTICATE,
-            HeaderValue::from_static("Basic realm=\"octra\""),
-        );
+        let realm = HeaderValue::from_str(&format!("Basic realm=\"{}\"", self.config.realm))
+            .unwrap_or_else(|_| HeaderValue::from_static("Basic"));
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, realm);
         Ok(PluginAction::ShortCircuit(response))
     }
 }

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use http::{HeaderValue, StatusCode, header};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode_header};
 use octra_api_plugin_types::{
@@ -29,11 +30,16 @@ impl ApiGatewayPluginFactory for JwtFactory {
                     "uri_param_names": { "type": "array", "items": { "type": "string" } },
                     "cookie_names": { "type": "array", "items": { "type": "string" } },
                     "header_names": { "type": "array", "items": { "type": "string" } },
-                    "claims_to_verify": { "type": "array", "items": { "type": "string" } },
+                    "claims_to_verify": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["exp", "nbf"] }
+                    },
                     "key_claim_name": { "type": "string" },
                     "secret_is_base64": { "type": "boolean" },
                     "anonymous": { "type": ["string", "null"] },
-                    "run_on_preflight": { "type": "boolean" }
+                    "run_on_preflight": { "type": "boolean" },
+                    "maximum_expiration": { "type": "number", "minimum": 0, "maximum": 31536000 },
+                    "realm": { "type": ["string", "null"] }
                 }
             }),
         )
@@ -42,6 +48,7 @@ impl ApiGatewayPluginFactory for JwtFactory {
     fn create(&self, _id: &str, config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
         let config: Config = serde_json::from_value(config)
             .map_err(|error| PluginError::fail_closed(format!("invalid jwt config: {error}")))?;
+        validate(&config)?;
         Ok(Arc::new(JwtPlugin {
             manifest: self.manifest(),
             config,
@@ -68,6 +75,8 @@ struct Config {
     secret_is_base64: bool,
     anonymous: Option<String>,
     run_on_preflight: bool,
+    maximum_expiration: u64,
+    realm: Option<String>,
 }
 
 impl Default for Config {
@@ -76,13 +85,37 @@ impl Default for Config {
             uri_param_names: vec!["jwt".into()],
             cookie_names: Vec::new(),
             header_names: vec!["authorization".into()],
-            claims_to_verify: vec!["exp".into(), "nbf".into()],
+            claims_to_verify: vec!["exp".into()],
             key_claim_name: "iss".into(),
             secret_is_base64: false,
             anonymous: None,
             run_on_preflight: true,
+            maximum_expiration: 0,
+            realm: None,
         }
     }
+}
+
+fn validate(config: &Config) -> Result<(), PluginError> {
+    for claim in &config.claims_to_verify {
+        if !matches!(claim.as_str(), "exp" | "nbf") {
+            return Err(PluginError::fail_closed(format!(
+                "unsupported jwt claim '{claim}'"
+            )));
+        }
+    }
+    if config.maximum_expiration > 31_536_000 {
+        return Err(PluginError::fail_closed(
+            "jwt.maximum_expiration cannot exceed 31536000",
+        ));
+    }
+    if config.maximum_expiration > 0 && !config.claims_to_verify.iter().any(|claim| claim == "exp")
+    {
+        return Err(PluginError::fail_closed(
+            "jwt.maximum_expiration requires claims_to_verify to include exp",
+        ));
+    }
+    Ok(())
 }
 
 struct JwtPlugin {
@@ -131,10 +164,17 @@ impl ApiGatewayPlugin for JwtPlugin {
         }
 
         let mut response = plugin_response(StatusCode::UNAUTHORIZED, "Unauthorized");
-        response.headers_mut().insert(
-            header::WWW_AUTHENTICATE,
-            HeaderValue::from_static("Bearer realm=\"octra\""),
-        );
+        let challenge = self
+            .config
+            .realm
+            .as_deref()
+            .map(|realm| format!("Bearer realm=\"{realm}\""))
+            .unwrap_or_else(|| "Bearer".into());
+        if let Ok(value) = HeaderValue::from_str(&challenge) {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, value);
+        }
         Ok(PluginAction::ShortCircuit(response))
     }
 }
@@ -234,17 +274,30 @@ impl JwtPlugin {
         };
 
         let mut validation = Validation::new(algorithm);
-        validation.validate_exp = self
+        validation.required_spec_claims.clear();
+        let verify_exp = self
             .config
             .claims_to_verify
             .iter()
             .any(|claim| claim == "exp");
+        validation.validate_exp = verify_exp;
+        if verify_exp {
+            validation.required_spec_claims.insert("exp".to_string());
+        }
         validation.validate_nbf = self
             .config
             .claims_to_verify
             .iter()
             .any(|claim| claim == "nbf");
         jsonwebtoken::decode::<Value>(token, &decoding_key, &validation).ok()?;
+
+        if self.config.maximum_expiration > 0 {
+            let exp = claims.get("exp").and_then(Value::as_i64)?;
+            let remaining = exp - Utc::now().timestamp();
+            if remaining > self.config.maximum_expiration as i64 {
+                return None;
+            }
+        }
 
         Some(JwtCredentials {
             consumer_id: entry.consumer_id,

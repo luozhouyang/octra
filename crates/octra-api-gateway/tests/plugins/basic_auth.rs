@@ -21,7 +21,13 @@ async fn fixture() -> Gateway {
         true,
     )
     .await;
-    service_plugin(&gateway.storage, "svc-basic", "basic-auth", json!({})).await;
+    service_plugin(
+        &gateway.storage,
+        "svc-basic",
+        "basic-auth",
+        json!({"hide_credentials": true}),
+    )
+    .await;
 
     let consumer = gateway
         .storage
@@ -62,7 +68,7 @@ async fn rejects_missing_and_invalid_credentials() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(
         headers.get(header::WWW_AUTHENTICATE).unwrap(),
-        "Basic realm=\"octra\""
+        "Basic realm=\"service\""
     );
 
     let mut wrong = get("/basic/items");

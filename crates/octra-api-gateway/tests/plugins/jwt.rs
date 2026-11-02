@@ -32,6 +32,10 @@ fn token(issuer: &str, secret: &str, exp: i64) -> String {
 }
 
 async fn fixture() -> Gateway {
+    fixture_with(json!({})).await
+}
+
+async fn fixture_with(config: serde_json::Value) -> Gateway {
     let (addr, _calls) = spawn_mock("jwt").await;
     let gateway = gateway().await;
     seed_service(
@@ -43,7 +47,7 @@ async fn fixture() -> Gateway {
         true,
     )
     .await;
-    service_plugin(&gateway.storage, "svc-jwt", "jwt", json!({})).await;
+    service_plugin(&gateway.storage, "svc-jwt", "jwt", config).await;
 
     let consumer = gateway
         .storage
@@ -109,4 +113,31 @@ async fn accepts_a_valid_token_and_resolves_the_consumer() {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(json["path"], "/items");
     assert_eq!(json["x_consumer_username"], "jwt-user");
+}
+
+#[tokio::test]
+async fn rejects_tokens_whose_expiration_exceeds_the_configured_window() {
+    let gateway = fixture_with(json!({"maximum_expiration": 600})).await;
+
+    let mut request = get("/jwt/items");
+    let (name, value) = bearer(&token(ISSUER, SECRET, now() + 3600));
+    request.headers_mut().insert(name, value);
+    assert_eq!(gateway.send(request).await.0, StatusCode::UNAUTHORIZED);
+
+    let mut request = get("/jwt/items");
+    let (name, value) = bearer(&token(ISSUER, SECRET, now() + 300));
+    request.headers_mut().insert(name, value);
+    assert_eq!(gateway.send(request).await.0, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn includes_the_configured_realm() {
+    let gateway = fixture_with(json!({"realm": "octra"})).await;
+    let (status, headers, _) = gateway.send(get("/jwt/items")).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        headers.get(header::WWW_AUTHENTICATE).unwrap(),
+        "Bearer realm=\"octra\""
+    );
 }

@@ -191,6 +191,7 @@ pub struct GatewayState {
     pub credential: Option<CredentialInfo>,
     pub anonymous: bool,
     pub values: std::collections::BTreeMap<String, Value>,
+    pub request_body: Option<bytes::Bytes>,
     pub method_override: Option<http::Method>,
     pub consumers: std::collections::HashMap<String, ConsumerInfo>,
     pub consumer_by_username: std::collections::HashMap<String, String>,

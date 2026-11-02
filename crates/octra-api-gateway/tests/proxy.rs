@@ -160,10 +160,7 @@ async fn rejects_without_api_key_and_accepts_key_header() {
 
     let (status, headers, _) = gateway.send(get("/")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        headers.get(header::WWW_AUTHENTICATE).unwrap(),
-        "Key realm=\"octra\""
-    );
+    assert_eq!(headers.get(header::WWW_AUTHENTICATE).unwrap(), "Key");
 
     let mut api_key = get("/");
     api_key.headers_mut().insert("apikey", header_default(key));
