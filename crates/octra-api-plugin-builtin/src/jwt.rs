@@ -302,3 +302,452 @@ impl JwtPlugin {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{RequestFixture, response_parts, short_circuit};
+    use base64::Engine as _;
+    use http::Method;
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use octra_api_plugin_types::{AuthJwt, ConsumerInfo};
+
+    fn plugin(config: Value) -> Arc<dyn ApiGatewayPlugin> {
+        JwtFactory.create("jwt", config).expect("jwt config")
+    }
+
+    fn token(claims: Value, secret: &str, algorithm: Algorithm) -> String {
+        encode(
+            &Header::new(algorithm),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("jwt")
+    }
+
+    fn store_jwt(fixture: &mut RequestFixture, key: &str, secret: &str, algorithm: &str) {
+        fixture.state.jwt.insert(
+            key.into(),
+            AuthJwt {
+                credential_id: "cred-1".into(),
+                consumer_id: "consumer-1".into(),
+                key: key.into(),
+                secret: secret.into(),
+                algorithm: algorithm.into(),
+                rsa_public_key: None,
+            },
+        );
+        fixture.state.consumers.insert(
+            "consumer-1".into(),
+            ConsumerInfo {
+                id: "consumer-1".into(),
+                username: Some("alice".into()),
+                ..ConsumerInfo::default()
+            },
+        );
+    }
+
+    fn bearer(token: &str) -> HeaderValue {
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header")
+    }
+
+    async fn assert_unauthorized(action: PluginAction, challenge: &str) {
+        let (status, headers, body) = response_parts(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let body: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(body["message"], "Unauthorized");
+        assert_eq!(
+            headers
+                .get(header::WWW_AUTHENTICATE)
+                .expect("challenge")
+                .to_str()
+                .expect("ascii"),
+            challenge
+        );
+    }
+
+    #[test]
+    fn validates_config() {
+        assert!(JwtFactory.create("jwt", json!({})).is_ok());
+        assert!(
+            JwtFactory
+                .create("jwt", json!({"claims_to_verify": ["exp", "nbf"]}))
+                .is_ok()
+        );
+        assert!(
+            JwtFactory
+                .create("jwt", json!({"claims_to_verify": ["iat"]}))
+                .is_err()
+        );
+        assert!(
+            JwtFactory
+                .create("jwt", json!({"maximum_expiration": 31_536_001}))
+                .is_err()
+        );
+        assert!(
+            JwtFactory
+                .create(
+                    "jwt",
+                    json!({"claims_to_verify": ["nbf"], "maximum_expiration": 60})
+                )
+                .is_err()
+        );
+        assert!(
+            JwtFactory
+                .create(
+                    "jwt",
+                    json!({"claims_to_verify": ["exp"], "maximum_expiration": 60})
+                )
+                .is_ok()
+        );
+        assert!(
+            JwtFactory
+                .create("jwt", json!({"maximum_expiration": -1}))
+                .is_err()
+        );
+        assert!(
+            JwtFactory
+                .create("jwt", json!({"claims_to_verify": "exp"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn declares_request_and_log_phases() {
+        assert_eq!(
+            JwtFactory.phases(),
+            vec![PluginPhase::Request, PluginPhase::Log]
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticates_hs256_tokens() {
+        let plugin = plugin(json!({}));
+        let now = Utc::now().timestamp();
+        let token = token(
+            json!({"iss": "key-1", "exp": now + 3600}),
+            "secret",
+            Algorithm::HS256,
+        );
+
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&token));
+
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert_eq!(
+            fixture
+                .state
+                .consumer
+                .as_ref()
+                .map(|consumer| consumer.id.as_str()),
+            Some("consumer-1")
+        );
+        assert_eq!(
+            fixture
+                .state
+                .credential
+                .as_ref()
+                .map(|credential| (credential.kind.as_str(), credential.identifier.as_str())),
+            Some(("jwt", "key-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_expired_and_unknown_tokens() {
+        let plugin = plugin(json!({}));
+        let now = Utc::now().timestamp();
+
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        let bad = token(
+            json!({"iss": "key-1", "exp": now + 3600}),
+            "other-secret",
+            Algorithm::HS256,
+        );
+        fixture.headers.insert(header::AUTHORIZATION, bearer(&bad));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer").await;
+
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        let expired = token(
+            json!({"iss": "key-1", "exp": now - 120}),
+            "secret",
+            Algorithm::HS256,
+        );
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&expired));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer").await;
+
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        let no_exp = token(json!({"iss": "key-1"}), "secret", Algorithm::HS256);
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&no_exp));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer").await;
+
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "unknown", "secret", "HS256");
+        let unknown = token(
+            json!({"iss": "key-1", "exp": now + 3600}),
+            "secret",
+            Algorithm::HS256,
+        );
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&unknown));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer").await;
+
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS512");
+        let mismatch = token(
+            json!({"iss": "key-1", "exp": now + 3600}),
+            "secret",
+            Algorithm::HS256,
+        );
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&mismatch));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer").await;
+
+        let mut fixture = RequestFixture::default();
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer("not-a-token"));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer").await;
+    }
+
+    #[tokio::test]
+    async fn verifies_nbf_and_maximum_expiration_when_configured() {
+        let required_nbf = plugin(json!({"claims_to_verify": ["exp", "nbf"]}));
+        let now = Utc::now().timestamp();
+        let future = token(
+            json!({"iss": "key-1", "exp": now + 3600, "nbf": now + 120}),
+            "secret",
+            Algorithm::HS256,
+        );
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&future));
+        let action = required_nbf
+            .on_request(&mut fixture.context())
+            .await
+            .unwrap();
+        assert_unauthorized(action, "Bearer").await;
+
+        let past = token(
+            json!({"iss": "key-1", "exp": now + 3600, "nbf": now - 120}),
+            "secret",
+            Algorithm::HS256,
+        );
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        fixture.headers.insert(header::AUTHORIZATION, bearer(&past));
+        let action = required_nbf
+            .on_request(&mut fixture.context())
+            .await
+            .unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+
+        let short = plugin(json!({"claims_to_verify": ["exp"], "maximum_expiration": 60}));
+        let long_lived = token(
+            json!({"iss": "key-1", "exp": now + 3600}),
+            "secret",
+            Algorithm::HS256,
+        );
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&long_lived));
+        let action = short.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer").await;
+
+        let short_lived = token(
+            json!({"iss": "key-1", "exp": now + 30}),
+            "secret",
+            Algorithm::HS256,
+        );
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&short_lived));
+        let action = short.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+    }
+
+    #[tokio::test]
+    async fn reads_tokens_from_configured_sources() {
+        let now = Utc::now().timestamp();
+        let query_plugin = plugin(json!({}));
+        let query_token = token(
+            json!({"iss": "key-1", "exp": now + 3600}),
+            "secret",
+            Algorithm::HS256,
+        );
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        fixture.uri = format!("/p?jwt={query_token}").parse().expect("uri");
+        let action = query_plugin
+            .on_request(&mut fixture.context())
+            .await
+            .unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+
+        let cookie_token = token(
+            json!({"iss": "key-1", "exp": now + 3600}),
+            "secret",
+            Algorithm::HS256,
+        );
+        let cookies = plugin(json!({"cookie_names": ["session"]}));
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        fixture.headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("a=1; session={cookie_token}")).expect("cookie"),
+        );
+        let action = cookies.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+
+        let header_token = token(
+            json!({"iss": "key-1", "exp": now + 3600}),
+            "secret",
+            Algorithm::HS256,
+        );
+        let custom = plugin(json!({"header_names": ["x-jwt"]}));
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        fixture.headers.insert(
+            header::HeaderName::from_static("x-jwt"),
+            HeaderValue::from_str(&header_token).expect("token"),
+        );
+        let action = custom.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+    }
+
+    #[tokio::test]
+    async fn supports_base64_secrets_and_custom_key_claims() {
+        let now = Utc::now().timestamp();
+        let raw_secret = b"super-secret";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw_secret);
+        let base64_plugin = plugin(json!({"secret_is_base64": true}));
+        let signed = token(
+            json!({"iss": "key-1", "exp": now + 3600}),
+            "super-secret",
+            Algorithm::HS256,
+        );
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", &encoded, "HS256");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&signed));
+        let action = base64_plugin
+            .on_request(&mut fixture.context())
+            .await
+            .unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+
+        let invalid = plugin(json!({"secret_is_base64": true}));
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "not base64!", "HS256");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&signed));
+        let action = invalid.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer").await;
+
+        let custom = plugin(json!({"key_claim_name": "sub"}));
+        let custom_token = token(
+            json!({"sub": "key-1", "exp": now + 3600}),
+            "secret",
+            Algorithm::HS256,
+        );
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "secret", "HS256");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&custom_token));
+        let action = custom.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+    }
+
+    #[tokio::test]
+    async fn rsa_entries_without_a_public_key_are_rejected() {
+        let now = Utc::now().timestamp();
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(json!({"alg": "RS256", "typ": "JWT"}).to_string());
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(json!({"iss": "key-1", "exp": now + 3600}).to_string());
+        let token = format!("{header}.{payload}.signature");
+
+        let plugin = plugin(json!({}));
+        let mut fixture = RequestFixture::default();
+        store_jwt(&mut fixture, "key-1", "", "RS256");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, bearer(&token));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer").await;
+    }
+
+    #[tokio::test]
+    async fn skips_preflight_and_supports_anonymous_consumers() {
+        let required = plugin(json!({}));
+        let mut fixture = RequestFixture {
+            method: Method::OPTIONS,
+            ..RequestFixture::default()
+        };
+        let action = required.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer").await;
+
+        let skipped = plugin(json!({"run_on_preflight": false}));
+        let mut fixture = RequestFixture {
+            method: Method::OPTIONS,
+            ..RequestFixture::default()
+        };
+        let action = skipped.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert!(fixture.state.consumer.is_none());
+
+        let anonymous = plugin(json!({"anonymous": "anon"}));
+        let mut fixture = RequestFixture::default();
+        fixture.state.consumers.insert(
+            "anon".into(),
+            ConsumerInfo {
+                id: "anon".into(),
+                username: Some("anonymous".into()),
+                ..ConsumerInfo::default()
+            },
+        );
+        let action = anonymous.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert!(fixture.state.anonymous);
+
+        let unknown = plugin(json!({"anonymous": "ghost"}));
+        let mut fixture = RequestFixture::default();
+        let action = unknown.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer").await;
+    }
+
+    #[tokio::test]
+    async fn uses_the_configured_realm() {
+        let plugin = plugin(json!({"realm": "internal"}));
+        let mut fixture = RequestFixture::default();
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Bearer realm=\"internal\"").await;
+    }
+}

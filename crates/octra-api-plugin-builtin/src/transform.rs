@@ -381,3 +381,225 @@ pub(crate) fn json_append(existing: Option<&Value>, value: Value) -> Value {
         None => Value::Array(vec![value]),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const MULTIPART_TYPE: &str = "multipart/form-data; boundary=b";
+    const MULTIPART: &[u8] = b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--b\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\n2\r\n--b--\r\n";
+
+    #[test]
+    fn splits_pairs_on_the_first_colon() {
+        assert_eq!(split_pair("a:b"), ("a", Some("b")));
+        assert_eq!(split_pair("a"), ("a", None));
+        assert_eq!(split_pair("a::b"), ("a", Some("b")));
+        assert_eq!(split_pair("a:"), ("a", Some("")));
+        assert_eq!(split_pair(""), ("", None));
+    }
+
+    #[test]
+    fn applies_header_operations_in_order() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-remove", HeaderValue::from_static("1"));
+        headers.insert("x-rename", HeaderValue::from_static("rename"));
+        headers.insert("x-replace", HeaderValue::from_static("old"));
+        headers.insert("x-add", HeaderValue::from_static("keep"));
+        headers.insert("x-append", HeaderValue::from_static("first"));
+
+        apply_header_ops(
+            &mut headers,
+            &["x-remove".to_string()],
+            &["x-rename:x-new".to_string()],
+            &["x-replace:new".to_string(), "x-missing:new".to_string()],
+            &["x-add:new".to_string(), "x-missing-add:value".to_string()],
+            &["x-append:second".to_string()],
+            false,
+        );
+
+        assert!(!headers.contains_key("x-remove"));
+        assert!(!headers.contains_key("x-rename"));
+        assert_eq!(
+            headers.get("x-new").and_then(|value| value.to_str().ok()),
+            Some("rename")
+        );
+        assert_eq!(
+            headers
+                .get("x-replace")
+                .and_then(|value| value.to_str().ok()),
+            Some("new")
+        );
+        assert!(!headers.contains_key("x-missing"));
+        assert_eq!(
+            headers.get("x-add").and_then(|value| value.to_str().ok()),
+            Some("keep")
+        );
+        assert_eq!(
+            headers
+                .get("x-missing-add")
+                .and_then(|value| value.to_str().ok()),
+            Some("value")
+        );
+        let appended: Vec<_> = headers
+            .get_all("x-append")
+            .iter()
+            .map(|value| value.to_str().expect("ascii"))
+            .collect();
+        assert_eq!(appended, ["first", "second"]);
+    }
+
+    #[test]
+    fn skip_host_protects_the_host_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("original"));
+        headers.insert("x-rename", HeaderValue::from_static("rename"));
+
+        apply_header_ops(
+            &mut headers,
+            &["host".to_string()],
+            &["x-rename:host".to_string()],
+            &["host:new".to_string()],
+            &["host:new".to_string()],
+            &["host:new".to_string()],
+            true,
+        );
+
+        assert_eq!(
+            headers.get("host").and_then(|value| value.to_str().ok()),
+            Some("original")
+        );
+        assert_eq!(
+            headers
+                .get("x-rename")
+                .and_then(|value| value.to_str().ok()),
+            Some("rename")
+        );
+    }
+
+    #[test]
+    fn detects_content_types_with_parameters() {
+        let mut headers = HeaderMap::new();
+        assert!(!is_json_content_type(&headers));
+
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        assert!(is_json_content_type(&headers));
+
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/vnd.api+json"),
+        );
+        assert!(is_json_content_type(&headers));
+
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+        assert!(!is_json_content_type(&headers));
+
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded; charset=utf-8"),
+        );
+        assert!(is_form_content_type(&headers));
+        assert!(!is_multipart_content_type(&headers));
+
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("Multipart/Form-Data; boundary=b"),
+        );
+        assert!(is_multipart_content_type(&headers));
+    }
+
+    #[test]
+    fn parses_and_serializes_multipart_bodies() {
+        let mut multipart = MultipartBody::parse(MULTIPART_TYPE, MULTIPART).expect("multipart");
+        assert_eq!(multipart.value("a").as_deref(), Some("1"));
+        assert_eq!(multipart.value("b").as_deref(), Some("2"));
+        assert_eq!(multipart.value("missing"), None);
+
+        multipart.add("c", "3");
+        multipart.add("a", "ignored");
+        assert_eq!(multipart.value("a").as_deref(), Some("1"));
+        assert_eq!(multipart.value("c").as_deref(), Some("3"));
+
+        multipart.replace("a", "updated");
+        assert_eq!(multipart.value("a").as_deref(), Some("updated"));
+        multipart.replace("missing", "ignored");
+        assert_eq!(multipart.value("missing"), None);
+
+        multipart.rename("b", "renamed");
+        assert_eq!(multipart.value("b"), None);
+        assert_eq!(multipart.value("renamed").as_deref(), Some("2"));
+
+        multipart.remove("c");
+        assert_eq!(multipart.value("c"), None);
+
+        let reparsed =
+            MultipartBody::parse(MULTIPART_TYPE, &multipart.to_bytes()).expect("multipart");
+        assert_eq!(reparsed.value("a").as_deref(), Some("updated"));
+        assert_eq!(reparsed.value("renamed").as_deref(), Some("2"));
+
+        assert!(MultipartBody::parse("multipart/form-data", MULTIPART).is_none());
+    }
+
+    #[test]
+    fn parses_and_mutates_forms() {
+        let mut pairs = parse_form("a=1&b=2&b=3&c=x%20y");
+        assert_eq!(
+            pairs,
+            vec![
+                ("a".into(), "1".into()),
+                ("b".into(), "2".into()),
+                ("b".into(), "3".into()),
+                ("c".into(), "x y".into()),
+            ]
+        );
+        assert_eq!(parse_form(&encode_form(&pairs)), pairs);
+
+        form_remove(&mut pairs, "b");
+        assert!(pairs.iter().all(|(key, _)| key != "b"));
+
+        form_rename(&mut pairs, "a", "alpha");
+        assert_eq!(
+            pairs
+                .iter()
+                .find(|(key, _)| key == "alpha")
+                .map(|(_, value)| value.as_str()),
+            Some("1")
+        );
+
+        form_replace(&mut pairs, "alpha", "updated");
+        assert_eq!(
+            pairs
+                .iter()
+                .find(|(key, _)| key == "alpha")
+                .map(|(_, value)| value.as_str()),
+            Some("updated")
+        );
+        form_replace(&mut pairs, "missing", "ignored");
+
+        form_add(&mut pairs, "alpha", "ignored");
+        assert_eq!(pairs.iter().filter(|(key, _)| key == "alpha").count(), 1);
+        form_add(&mut pairs, "new", "value");
+        form_append(&mut pairs, "new", "second");
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(key, _)| key == "new")
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            ["value", "second"]
+        );
+    }
+
+    #[test]
+    fn appends_json_values() {
+        assert_eq!(json_append(None, json!(1)), json!([1]));
+        assert_eq!(json_append(Some(&json!(1)), json!(2)), json!([1, 2]));
+        assert_eq!(
+            json_append(Some(&json!([1, 2])), json!(3)),
+            json!([1, 2, 3])
+        );
+    }
+}

@@ -164,3 +164,126 @@ pub(crate) fn manifest(
         admin_routes: Vec::new(),
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use bytes::Bytes;
+    use http::{HeaderMap, Method, StatusCode, Uri};
+    use octra_api_core::{Route, Service};
+    use octra_api_plugin_types::{GatewayState, PluginAction, RequestBodyContext, RequestContext};
+
+    pub(crate) fn route() -> Route {
+        Route {
+            id: "route".into(),
+            name: None,
+            protocols: vec!["http".into()],
+            methods: Vec::new(),
+            hosts: Vec::new(),
+            paths: vec!["/".into()],
+            headers: Default::default(),
+            strip_path: false,
+            preserve_host: false,
+            request_buffering: true,
+            response_buffering: true,
+            regex_priority: 0,
+            service_id: Some("svc".into()),
+            enabled: true,
+            tags: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    pub(crate) fn service() -> Service {
+        Service {
+            id: "svc".into(),
+            name: "svc".into(),
+            protocol: "http".into(),
+            host: "up.test".into(),
+            port: 80,
+            path: None,
+            retries: 0,
+            connect_timeout: 1000,
+            write_timeout: 1000,
+            read_timeout: 1000,
+            enabled: true,
+            description: String::new(),
+            tags: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    pub(crate) struct RequestFixture {
+        pub(crate) state: GatewayState,
+        pub(crate) method: Method,
+        pub(crate) uri: Uri,
+        pub(crate) headers: HeaderMap,
+        pub(crate) route: Route,
+        pub(crate) service: Service,
+        pub(crate) client_ip: Option<std::net::IpAddr>,
+    }
+
+    impl Default for RequestFixture {
+        fn default() -> Self {
+            Self {
+                state: GatewayState::default(),
+                method: Method::GET,
+                uri: "/".parse().expect("uri"),
+                headers: HeaderMap::new(),
+                route: route(),
+                service: service(),
+                client_ip: None,
+            }
+        }
+    }
+
+    impl RequestFixture {
+        pub(crate) fn context(&mut self) -> RequestContext<'_> {
+            RequestContext {
+                request_id: "req",
+                state: &mut self.state,
+                matched_path: "/",
+                method: &self.method,
+                uri: &mut self.uri,
+                headers: &mut self.headers,
+                client_ip: self.client_ip,
+                consumer_id: None,
+                credential_id: None,
+                route: &self.route,
+                service: &self.service,
+            }
+        }
+
+        pub(crate) fn body_context(&mut self) -> RequestBodyContext<'_> {
+            RequestBodyContext {
+                request_id: "req",
+                state: &mut self.state,
+                method: &self.method,
+                uri: &mut self.uri,
+                headers: &mut self.headers,
+                consumer_id: None,
+                route: &self.route,
+                service: &self.service,
+            }
+        }
+    }
+
+    pub(crate) fn short_circuit(action: PluginAction) -> axum::response::Response {
+        match action {
+            PluginAction::ShortCircuit(response) => response,
+            PluginAction::Continue => panic!("expected a short-circuit response"),
+        }
+    }
+
+    pub(crate) async fn response_parts(
+        response: axum::response::Response,
+    ) -> (StatusCode, HeaderMap, Bytes) {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("response body");
+        (status, headers, body)
+    }
+}

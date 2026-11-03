@@ -106,3 +106,148 @@ impl ApiGatewayPlugin for RequestSizeLimitingPlugin {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{RequestFixture, response_parts, short_circuit};
+    use http::HeaderValue;
+
+    fn plugin(config: Value) -> Arc<dyn ApiGatewayPlugin> {
+        RequestSizeLimitingFactory
+            .create("request-size-limiting", config)
+            .expect("request-size-limiting config")
+    }
+
+    async fn request(
+        plugin: &Arc<dyn ApiGatewayPlugin>,
+        content_length: Option<&str>,
+    ) -> PluginAction {
+        let mut fixture = RequestFixture::default();
+        if let Some(content_length) = content_length {
+            fixture.headers.insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(content_length).expect("content length"),
+            );
+        }
+        plugin.on_request(&mut fixture.context()).await.unwrap()
+    }
+
+    async fn status(action: PluginAction) -> StatusCode {
+        if matches!(action, PluginAction::Continue) {
+            return StatusCode::OK;
+        }
+        let (status, _, _) = response_parts(short_circuit(action)).await;
+        status
+    }
+
+    #[test]
+    fn validates_config() {
+        assert!(
+            RequestSizeLimitingFactory
+                .create("size", json!({"allowed_payload_size": 0}))
+                .is_err()
+        );
+        assert!(
+            RequestSizeLimitingFactory
+                .create("size", json!({"allowed_payload_size": 1}))
+                .is_ok()
+        );
+        assert!(
+            RequestSizeLimitingFactory
+                .create(
+                    "size",
+                    json!({"allowed_payload_size": 1, "size_unit": "kilobytes"})
+                )
+                .is_ok()
+        );
+        assert!(
+            RequestSizeLimitingFactory
+                .create("size", json!({"allowed_payload_size": "1"}))
+                .is_err()
+        );
+        assert!(
+            RequestSizeLimitingFactory
+                .create("size", json!({"unexpected": true}))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn declares_request_and_log_phases() {
+        assert_eq!(
+            RequestSizeLimitingFactory.phases(),
+            vec![PluginPhase::Request, PluginPhase::Log]
+        );
+    }
+
+    #[tokio::test]
+    async fn enforces_byte_limits_at_the_boundary() {
+        let plugin = plugin(json!({"allowed_payload_size": 10, "size_unit": "bytes"}));
+        assert_eq!(
+            status(request(&plugin, Some("10")).await).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(request(&plugin, Some("11")).await).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[tokio::test]
+    async fn converts_kilobyte_and_megabyte_limits() {
+        let kilobytes = plugin(json!({"allowed_payload_size": 1, "size_unit": "kilobytes"}));
+        assert_eq!(
+            status(request(&kilobytes, Some("1024")).await).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(request(&kilobytes, Some("1025")).await).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        let megabytes = plugin(json!({"allowed_payload_size": 1, "size_unit": "megabytes"}));
+        assert_eq!(
+            status(request(&megabytes, Some("1048576")).await).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(request(&megabytes, Some("1048577")).await).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        let default = plugin(json!({"allowed_payload_size": 1}));
+        assert_eq!(
+            status(request(&default, Some("1048577")).await).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[tokio::test]
+    async fn requires_content_length_only_when_configured() {
+        let optional = plugin(json!({"allowed_payload_size": 10, "size_unit": "bytes"}));
+        assert_eq!(status(request(&optional, None).await).await, StatusCode::OK);
+        assert_eq!(
+            status(request(&optional, Some("not-a-number")).await).await,
+            StatusCode::OK
+        );
+
+        let required = plugin(json!({
+            "allowed_payload_size": 10,
+            "size_unit": "bytes",
+            "require_content_length": true
+        }));
+        assert_eq!(
+            status(request(&required, None).await).await,
+            StatusCode::LENGTH_REQUIRED
+        );
+        assert_eq!(
+            status(request(&required, Some("bad")).await).await,
+            StatusCode::LENGTH_REQUIRED
+        );
+        assert_eq!(
+            status(request(&required, Some("10")).await).await,
+            StatusCode::OK
+        );
+    }
+}

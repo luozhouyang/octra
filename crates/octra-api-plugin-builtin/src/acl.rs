@@ -113,3 +113,148 @@ impl ApiGatewayPlugin for AclPlugin {
         Ok(PluginAction::Continue)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{RequestFixture, response_parts, short_circuit};
+    use octra_api_plugin_types::ConsumerInfo;
+
+    fn plugin(config: Value) -> Arc<dyn ApiGatewayPlugin> {
+        AclFactory.create("acl", config).expect("acl config")
+    }
+
+    fn consumer(acl_groups: &[&str]) -> ConsumerInfo {
+        ConsumerInfo {
+            id: "consumer-1".into(),
+            acl_groups: acl_groups
+                .iter()
+                .map(|group| (*group).to_string())
+                .collect(),
+            ..ConsumerInfo::default()
+        }
+    }
+
+    async fn message(response: axum::response::Response) -> (StatusCode, Value) {
+        let (status, _, body) = response_parts(response).await;
+        (status, serde_json::from_slice(&body).expect("json body"))
+    }
+
+    #[test]
+    fn validates_allow_or_deny_exclusively() {
+        assert!(
+            AclFactory
+                .create("acl", json!({"allow": ["admins"]}))
+                .is_ok()
+        );
+        assert!(
+            AclFactory
+                .create("acl", json!({"deny": ["banned"]}))
+                .is_ok()
+        );
+        assert!(
+            AclFactory
+                .create("acl", json!({"allow": ["admins"], "deny": ["banned"]}))
+                .is_err()
+        );
+        assert!(
+            AclFactory
+                .create(
+                    "acl",
+                    json!({"allow": ["admins"], "hide_groups_header": true})
+                )
+                .is_ok()
+        );
+        assert!(
+            AclFactory
+                .create("acl", json!({"unexpected": true}))
+                .is_ok()
+        );
+        assert!(
+            AclFactory
+                .create("acl", json!({"allow": "admins"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn declares_request_and_log_phases() {
+        assert_eq!(
+            AclFactory.phases(),
+            vec![PluginPhase::Request, PluginPhase::Log]
+        );
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_requests_are_unauthorized() {
+        let plugin = plugin(json!({"allow": ["admins"]}));
+        let mut fixture = RequestFixture::default();
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let (status, body) = message(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["message"], "Unauthorized");
+    }
+
+    #[tokio::test]
+    async fn allow_lists_require_membership_and_emit_the_groups_header() {
+        let plugin = plugin(json!({"allow": ["admins"]}));
+
+        let mut fixture = RequestFixture::default();
+        fixture.state.consumer = Some(consumer(&["admins", "users", "admins"]));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert_eq!(
+            fixture.headers.get("x-consumer-groups").unwrap(),
+            "admins, users"
+        );
+
+        let mut fixture = RequestFixture::default();
+        fixture.state.consumer = Some(consumer(&["users"]));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let (status, body) = message(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["message"], "You cannot consume this service");
+    }
+
+    #[tokio::test]
+    async fn deny_lists_win_and_can_hide_the_groups_header() {
+        let plugin = plugin(json!({"deny": ["banned"], "hide_groups_header": true}));
+
+        let mut fixture = RequestFixture::default();
+        fixture.state.consumer = Some(consumer(&["banned"]));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let (status, _) = message(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let mut fixture = RequestFixture::default();
+        fixture.state.consumer = Some(consumer(&["users"]));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert!(!fixture.headers.contains_key("x-consumer-groups"));
+    }
+
+    #[tokio::test]
+    async fn consumer_groups_are_opt_in() {
+        let strict = plugin(json!({"allow": ["admins"]}));
+        let relaxed = plugin(json!({"allow": ["admins"], "include_consumer_groups": true}));
+
+        let mut fixture = RequestFixture::default();
+        fixture.state.consumer = Some(ConsumerInfo {
+            id: "consumer-1".into(),
+            groups: vec!["admins".into()],
+            ..ConsumerInfo::default()
+        });
+        let action = strict.on_request(&mut fixture.context()).await.unwrap();
+        let (status, _) = message(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let mut fixture = RequestFixture::default();
+        fixture.state.consumer = Some(ConsumerInfo {
+            id: "consumer-1".into(),
+            groups: vec!["admins".into()],
+            ..ConsumerInfo::default()
+        });
+        let action = relaxed.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+    }
+}

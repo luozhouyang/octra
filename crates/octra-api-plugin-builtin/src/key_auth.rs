@@ -287,3 +287,422 @@ fn strip_body_key(headers: &HeaderMap, body: Bytes, name: &str) -> Bytes {
     }
     body
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{RequestFixture, response_parts, short_circuit};
+    use crate::transform::MultipartBody;
+    use http::Method;
+    use octra_api_plugin_types::{AuthKey, ConsumerInfo};
+
+    const MULTIPART_TYPE: &str = "multipart/form-data; boundary=boundary";
+    const MULTIPART_BODY: &str = "--boundary\r\nContent-Disposition: form-data; name=\"apikey\"\r\n\r\nsecret\r\n--boundary\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\n1\r\n--boundary--\r\n";
+
+    fn plugin(config: Value) -> Arc<dyn ApiGatewayPlugin> {
+        KeyAuthFactory
+            .create("key-auth", config)
+            .expect("key-auth config")
+    }
+
+    fn headers(content_type: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(content_type) = content_type {
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(content_type).expect("content type"),
+            );
+        }
+        headers
+    }
+
+    fn store_key(fixture: &mut RequestFixture, key: &str) {
+        fixture.state.keyauth.insert(
+            key.into(),
+            AuthKey {
+                credential_id: "cred-1".into(),
+                consumer_id: "consumer-1".into(),
+            },
+        );
+        fixture.state.consumers.insert(
+            "consumer-1".into(),
+            ConsumerInfo {
+                id: "consumer-1".into(),
+                username: Some("alice".into()),
+                ..ConsumerInfo::default()
+            },
+        );
+    }
+
+    async fn assert_unauthorized(action: PluginAction, message: &str, challenge: &str) {
+        let (status, headers, body) = response_parts(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let body: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(body["message"], message);
+        assert_eq!(
+            headers
+                .get(header::WWW_AUTHENTICATE)
+                .expect("challenge")
+                .to_str()
+                .expect("ascii"),
+            challenge
+        );
+    }
+
+    #[test]
+    fn validates_config() {
+        assert!(KeyAuthFactory.create("key-auth", json!({})).is_ok());
+        assert!(
+            KeyAuthFactory
+                .create("key-auth", json!({"key_names": []}))
+                .is_ok()
+        );
+        assert!(
+            KeyAuthFactory
+                .create("key-auth", json!({"key_in_body": true}))
+                .is_ok()
+        );
+        assert!(
+            KeyAuthFactory
+                .create("key-auth", json!({"anonymous": 5}))
+                .is_err()
+        );
+        assert!(
+            KeyAuthFactory
+                .create("key-auth", json!({"key_names": "apikey"}))
+                .is_err()
+        );
+        assert!(
+            KeyAuthFactory
+                .create("key-auth", json!({"unexpected": true}))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn declares_request_and_log_phases() {
+        assert_eq!(
+            KeyAuthFactory.phases(),
+            vec![PluginPhase::Request, PluginPhase::Log]
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticates_header_keys() {
+        let plugin = plugin(json!({}));
+        let mut fixture = RequestFixture::default();
+        store_key(&mut fixture, "secret");
+        fixture.headers.insert(
+            header::HeaderName::from_static("apikey"),
+            HeaderValue::from_static("secret"),
+        );
+
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert!(!fixture.state.anonymous);
+        assert_eq!(
+            fixture
+                .state
+                .consumer
+                .as_ref()
+                .map(|consumer| consumer.id.as_str()),
+            Some("consumer-1")
+        );
+        assert_eq!(
+            fixture
+                .state
+                .credential
+                .as_ref()
+                .map(|credential| (credential.kind.as_str(), credential.identifier.as_str())),
+            Some(("key-auth", "secret"))
+        );
+    }
+
+    #[tokio::test]
+    async fn distinguishes_missing_and_invalid_keys() {
+        let required = plugin(json!({}));
+
+        let mut fixture = RequestFixture::default();
+        let action = required.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "No API key found in request", "Key").await;
+
+        let mut fixture = RequestFixture::default();
+        fixture.headers.insert(
+            header::HeaderName::from_static("apikey"),
+            HeaderValue::from_static("wrong"),
+        );
+        let action = required.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "Invalid authentication credentials", "Key").await;
+
+        let custom = plugin(json!({"realm": "internal"}));
+        let mut fixture = RequestFixture::default();
+        let action = custom.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(
+            action,
+            "No API key found in request",
+            "Key realm=\"internal\"",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn honours_custom_key_names_and_sources() {
+        let plugin = plugin(json!({"key_names": ["x-api-key"]}));
+        let mut fixture = RequestFixture::default();
+        store_key(&mut fixture, "secret");
+        fixture.headers.insert(
+            header::HeaderName::from_static("x-api-key"),
+            HeaderValue::from_static("secret"),
+        );
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+
+        let mut fixture = RequestFixture::default();
+        store_key(&mut fixture, "secret");
+        fixture.headers.insert(
+            header::HeaderName::from_static("apikey"),
+            HeaderValue::from_static("secret"),
+        );
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::ShortCircuit(_)));
+    }
+
+    #[tokio::test]
+    async fn reads_keys_from_the_query_string() {
+        let enabled = plugin(json!({}));
+        let mut fixture = RequestFixture::default();
+        store_key(&mut fixture, "secret");
+        fixture.uri = "/p?apikey=secret".parse().expect("uri");
+        let action = enabled.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+
+        let disabled = plugin(json!({"key_in_query": false}));
+        let mut fixture = RequestFixture::default();
+        store_key(&mut fixture, "secret");
+        fixture.uri = "/p?apikey=secret".parse().expect("uri");
+        let action = disabled.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "No API key found in request", "Key").await;
+    }
+
+    #[tokio::test]
+    async fn reads_and_strips_json_body_keys() {
+        let plugin = plugin(json!({"key_in_body": true, "hide_credentials": true}));
+        let mut fixture = RequestFixture::default();
+        store_key(&mut fixture, "secret");
+        fixture.headers = headers(Some("application/json"));
+        fixture.state.request_body = Some(Bytes::from_static(br#"{"apikey":"secret","x":1}"#));
+
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert_eq!(
+            fixture.state.values.get(BODY_KEY).and_then(Value::as_str),
+            Some("apikey")
+        );
+
+        let body = Bytes::from_static(br#"{"apikey":"secret","x":1}"#);
+        let stripped = plugin
+            .on_request_buffer(&mut fixture.body_context(), body)
+            .await
+            .unwrap();
+        let stripped: Value = serde_json::from_slice(&stripped).expect("json body");
+        assert!(stripped.get("apikey").is_none());
+        assert_eq!(stripped["x"], 1);
+    }
+
+    #[tokio::test]
+    async fn reads_and_strips_form_body_keys() {
+        let plugin = plugin(json!({"key_in_body": true, "hide_credentials": true}));
+        let mut fixture = RequestFixture::default();
+        store_key(&mut fixture, "secret");
+        fixture.headers = headers(Some("application/x-www-form-urlencoded"));
+        fixture.state.request_body = Some(Bytes::from_static(b"x=1&apikey=secret"));
+
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+
+        let stripped = plugin
+            .on_request_buffer(
+                &mut fixture.body_context(),
+                Bytes::from_static(b"x=1&apikey=secret"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stripped, Bytes::from_static(b"x=1"));
+    }
+
+    #[tokio::test]
+    async fn reads_and_strips_multipart_body_keys() {
+        let plugin = plugin(json!({"key_in_body": true, "hide_credentials": true}));
+        let mut fixture = RequestFixture::default();
+        store_key(&mut fixture, "secret");
+        fixture.headers = headers(Some(MULTIPART_TYPE));
+        fixture.state.request_body = Some(Bytes::from_static(MULTIPART_BODY.as_bytes()));
+
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+
+        let stripped = plugin
+            .on_request_buffer(
+                &mut fixture.body_context(),
+                Bytes::from_static(MULTIPART_BODY.as_bytes()),
+            )
+            .await
+            .unwrap();
+        let multipart = MultipartBody::parse(MULTIPART_TYPE, &stripped).expect("multipart");
+        assert_eq!(multipart.value("apikey"), None);
+        assert_eq!(multipart.value("x").as_deref(), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn body_keys_are_ignored_unless_enabled() {
+        let plugin = plugin(json!({}));
+        let mut fixture = RequestFixture::default();
+        store_key(&mut fixture, "secret");
+        fixture.headers = headers(Some("application/json"));
+        fixture.state.request_body = Some(Bytes::from_static(br#"{"apikey":"secret"}"#));
+
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "No API key found in request", "Key").await;
+    }
+
+    #[tokio::test]
+    async fn hides_headers_and_query_parameters() {
+        let plugin = plugin(json!({"hide_credentials": true}));
+
+        let mut fixture = RequestFixture::default();
+        store_key(&mut fixture, "secret");
+        fixture.headers.insert(
+            header::HeaderName::from_static("apikey"),
+            HeaderValue::from_static("secret"),
+        );
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert!(!fixture.headers.contains_key("apikey"));
+
+        let mut fixture = RequestFixture::default();
+        store_key(&mut fixture, "secret");
+        fixture.uri = "/p?apikey=secret&x=1".parse().expect("uri");
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert_eq!(fixture.uri.query(), Some("x=1"));
+    }
+
+    #[tokio::test]
+    async fn skips_preflight_only_when_configured() {
+        let default = plugin(json!({}));
+        let mut fixture = RequestFixture {
+            method: Method::OPTIONS,
+            ..RequestFixture::default()
+        };
+        let action = default.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "No API key found in request", "Key").await;
+
+        let skipped = plugin(json!({"run_on_preflight": false}));
+        let mut fixture = RequestFixture {
+            method: Method::OPTIONS,
+            ..RequestFixture::default()
+        };
+        let action = skipped.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert!(fixture.state.consumer.is_none());
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_a_known_anonymous_consumer() {
+        let known = plugin(json!({"anonymous": "anon"}));
+        let mut fixture = RequestFixture::default();
+        fixture.state.consumers.insert(
+            "anon".into(),
+            ConsumerInfo {
+                id: "anon".into(),
+                username: Some("anonymous".into()),
+                ..ConsumerInfo::default()
+            },
+        );
+        let action = known.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert!(fixture.state.anonymous);
+        assert_eq!(
+            fixture
+                .state
+                .consumer
+                .as_ref()
+                .map(|consumer| consumer.id.as_str()),
+            Some("anon")
+        );
+
+        let unknown = plugin(json!({"anonymous": "ghost"}));
+        let mut fixture = RequestFixture::default();
+        let action = unknown.on_request(&mut fixture.context()).await.unwrap();
+        assert_unauthorized(action, "No API key found in request", "Key").await;
+    }
+
+    #[test]
+    fn extracts_body_keys_from_supported_content_types() {
+        let names = vec!["apikey".to_string()];
+
+        let json = headers(Some("application/json"));
+        assert_eq!(
+            body_key(&json, br#"{"apikey":"secret","x":1}"#, &names),
+            Some(("apikey".into(), "secret".into()))
+        );
+        assert_eq!(body_key(&json, br#"{"other":1}"#, &names), None);
+        assert_eq!(body_key(&json, b"not json", &names), None);
+
+        let form = headers(Some("application/x-www-form-urlencoded"));
+        assert_eq!(
+            body_key(&form, b"x=1&apikey=secret", &names),
+            Some(("apikey".into(), "secret".into()))
+        );
+        assert_eq!(body_key(&form, b"x=1", &names), None);
+
+        let multipart = headers(Some(MULTIPART_TYPE));
+        assert_eq!(
+            body_key(&multipart, MULTIPART_BODY.as_bytes(), &names),
+            Some(("apikey".into(), "secret".into()))
+        );
+
+        assert_eq!(body_key(&HeaderMap::new(), b"apikey=secret", &names), None);
+        assert_eq!(
+            body_key(&headers(Some(MULTIPART_TYPE)), b"not multipart", &names),
+            None
+        );
+    }
+
+    #[test]
+    fn strips_body_keys_only_for_supported_content_types() {
+        let json = headers(Some("application/json"));
+        let stripped = strip_body_key(
+            &json,
+            Bytes::from_static(br#"{"apikey":"secret","x":1}"#),
+            "apikey",
+        );
+        let stripped: Value = serde_json::from_slice(&stripped).expect("json body");
+        assert!(stripped.get("apikey").is_none());
+        assert_eq!(stripped["x"], 1);
+
+        let original = Bytes::from_static(b"not json");
+        assert_eq!(strip_body_key(&json, original.clone(), "apikey"), original);
+
+        let form = headers(Some("application/x-www-form-urlencoded"));
+        assert_eq!(
+            strip_body_key(&form, Bytes::from_static(b"x=1&apikey=secret"), "apikey"),
+            Bytes::from_static(b"x=1")
+        );
+
+        let multipart = headers(Some(MULTIPART_TYPE));
+        let stripped = strip_body_key(
+            &multipart,
+            Bytes::from_static(MULTIPART_BODY.as_bytes()),
+            "apikey",
+        );
+        let parsed = MultipartBody::parse(MULTIPART_TYPE, &stripped).expect("multipart");
+        assert_eq!(parsed.value("apikey"), None);
+
+        let original = Bytes::from_static(b"apikey=secret");
+        assert_eq!(
+            strip_body_key(&HeaderMap::new(), original.clone(), "apikey"),
+            original
+        );
+    }
+}

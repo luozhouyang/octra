@@ -137,3 +137,229 @@ impl ApiGatewayPlugin for BasicAuthPlugin {
         Ok(PluginAction::ShortCircuit(response))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{RequestFixture, response_parts, short_circuit};
+    use octra_api_plugin_types::{AuthBasic, ConsumerInfo};
+
+    fn plugin(config: Value) -> Arc<dyn ApiGatewayPlugin> {
+        BasicAuthFactory
+            .create("basic-auth", config)
+            .expect("basic-auth config")
+    }
+
+    fn credentials(username: &str, password: &str) -> HeaderValue {
+        let mut raw = String::from(username);
+        raw.push(':');
+        raw.push_str(password);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+        HeaderValue::from_str(&format!("Basic {encoded}")).expect("header")
+    }
+
+    fn store_credential(fixture: &mut RequestFixture, password: &str) {
+        let hash = bcrypt::hash(password, 4).expect("bcrypt hash");
+        fixture.state.basicauth.insert(
+            "alice".into(),
+            AuthBasic {
+                credential_id: "cred-1".into(),
+                consumer_id: "consumer-1".into(),
+                username: "alice".into(),
+                password: hash,
+            },
+        );
+        fixture.state.consumers.insert(
+            "consumer-1".into(),
+            ConsumerInfo {
+                id: "consumer-1".into(),
+                username: Some("alice".into()),
+                ..ConsumerInfo::default()
+            },
+        );
+    }
+
+    async fn challenge(response: axum::response::Response) -> String {
+        let (status, headers, body) = response_parts(response).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let body: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(body["message"], "Unauthorized");
+        headers
+            .get(header::WWW_AUTHENTICATE)
+            .expect("challenge")
+            .to_str()
+            .expect("ascii")
+            .to_string()
+    }
+
+    #[test]
+    fn validates_config() {
+        assert!(BasicAuthFactory.create("basic-auth", json!({})).is_ok());
+        assert!(
+            BasicAuthFactory
+                .create("basic-auth", json!({"anonymous": "anon"}))
+                .is_ok()
+        );
+        assert!(
+            BasicAuthFactory
+                .create("basic-auth", json!({"anonymous": 5}))
+                .is_err()
+        );
+        assert!(
+            BasicAuthFactory
+                .create("basic-auth", json!({"realm": 5}))
+                .is_err()
+        );
+        assert!(
+            BasicAuthFactory
+                .create(
+                    "basic-auth",
+                    json!({"hide_credentials": true, "realm": "internal"})
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn declares_request_and_log_phases() {
+        assert_eq!(
+            BasicAuthFactory.phases(),
+            vec![PluginPhase::Request, PluginPhase::Log]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_malformed_and_unknown_credentials() {
+        let plugin = plugin(json!({}));
+
+        let mut fixture = RequestFixture::default();
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_eq!(
+            challenge(short_circuit(action)).await,
+            "Basic realm=\"service\""
+        );
+
+        let mut fixture = RequestFixture::default();
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, HeaderValue::from_static("Basic !!!"));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_eq!(
+            challenge(short_circuit(action)).await,
+            "Basic realm=\"service\""
+        );
+
+        let mut fixture = RequestFixture::default();
+        store_credential(&mut fixture, "secret");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, credentials("unknown", "secret"));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_eq!(
+            challenge(short_circuit(action)).await,
+            "Basic realm=\"service\""
+        );
+
+        let mut fixture = RequestFixture::default();
+        store_credential(&mut fixture, "secret");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, credentials("alice", "wrong"));
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_eq!(
+            challenge(short_circuit(action)).await,
+            "Basic realm=\"service\""
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_valid_credentials_and_optionally_hides_them() {
+        let visible = plugin(json!({"hide_credentials": false}));
+        let mut fixture = RequestFixture::default();
+        store_credential(&mut fixture, "secret");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, credentials("alice", "secret"));
+        let action = visible.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert_eq!(
+            fixture
+                .state
+                .consumer
+                .as_ref()
+                .map(|consumer| consumer.id.as_str()),
+            Some("consumer-1")
+        );
+        assert_eq!(
+            fixture
+                .state
+                .credential
+                .as_ref()
+                .map(|credential| credential.kind.as_str()),
+            Some("basic-auth")
+        );
+        assert!(fixture.headers.contains_key(header::AUTHORIZATION));
+
+        let hidden = plugin(json!({"hide_credentials": true}));
+        let mut fixture = RequestFixture::default();
+        store_credential(&mut fixture, "secret");
+        fixture
+            .headers
+            .insert(header::AUTHORIZATION, credentials("alice", "secret"));
+        let action = hidden.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert!(!fixture.headers.contains_key(header::AUTHORIZATION));
+    }
+
+    #[tokio::test]
+    async fn uses_the_configured_realm() {
+        let plugin = plugin(json!({"realm": "internal"}));
+        let mut fixture = RequestFixture::default();
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert_eq!(
+            challenge(short_circuit(action)).await,
+            "Basic realm=\"internal\""
+        );
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_a_known_anonymous_consumer() {
+        let known = plugin(json!({"anonymous": "anon"}));
+        let mut fixture = RequestFixture::default();
+        fixture.state.consumers.insert(
+            "anon".into(),
+            ConsumerInfo {
+                id: "anon".into(),
+                username: Some("anonymous".into()),
+                ..ConsumerInfo::default()
+            },
+        );
+        let action = known.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+        assert!(fixture.state.anonymous);
+        assert_eq!(
+            fixture
+                .state
+                .consumer
+                .as_ref()
+                .map(|consumer| consumer.id.as_str()),
+            Some("anon")
+        );
+
+        let unknown = plugin(json!({"anonymous": "ghost"}));
+        let mut fixture = RequestFixture::default();
+        let action = unknown.on_request(&mut fixture.context()).await.unwrap();
+        assert_eq!(
+            challenge(short_circuit(action)).await,
+            "Basic realm=\"service\""
+        );
+
+        let empty = plugin(json!({"anonymous": " "}));
+        let mut fixture = RequestFixture::default();
+        let action = empty.on_request(&mut fixture.context()).await.unwrap();
+        assert_eq!(
+            challenge(short_circuit(action)).await,
+            "Basic realm=\"service\""
+        );
+    }
+}

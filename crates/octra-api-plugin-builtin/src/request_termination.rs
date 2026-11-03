@@ -123,3 +123,132 @@ impl ApiGatewayPlugin for RequestTerminationPlugin {
         Ok(PluginAction::ShortCircuit(response))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{RequestFixture, response_parts, short_circuit};
+    use bytes::Bytes;
+
+    fn plugin(config: Value) -> Arc<dyn ApiGatewayPlugin> {
+        RequestTerminationFactory
+            .create("request-termination", config)
+            .expect("request-termination config")
+    }
+
+    #[test]
+    fn declares_request_and_log_phases() {
+        assert_eq!(
+            RequestTerminationFactory.phases(),
+            vec![PluginPhase::Request, PluginPhase::Log]
+        );
+    }
+
+    #[tokio::test]
+    async fn terminates_with_the_default_response() {
+        let plugin = plugin(json!({}));
+        let mut fixture = RequestFixture::default();
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let (status, headers, body) = response_parts(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_TYPE)
+                .expect("content type")
+                .to_str()
+                .expect("ascii"),
+            "application/json"
+        );
+        let body: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(body["message"], "Service unavailable");
+    }
+
+    #[tokio::test]
+    async fn supports_custom_status_and_message() {
+        let plugin = plugin(json!({"status_code": 418, "message": "teapot"}));
+        let mut fixture = RequestFixture::default();
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let (status, _, body) = response_parts(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::IM_A_TEAPOT);
+        let body: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(body["message"], "teapot");
+    }
+
+    #[tokio::test]
+    async fn supports_raw_bodies_and_content_types() {
+        let plugin = plugin(json!({
+            "status_code": 200,
+            "body": "hello",
+            "content_type": "text/plain"
+        }));
+        let mut fixture = RequestFixture::default();
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let (status, headers, body) = response_parts(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_TYPE)
+                .expect("content type")
+                .to_str()
+                .expect("ascii"),
+            "text/plain"
+        );
+        assert_eq!(body, Bytes::from_static(b"hello"));
+    }
+
+    #[tokio::test]
+    async fn echo_forces_a_json_content_type() {
+        let plugin = plugin(json!({
+            "status_code": 201,
+            "body": "created",
+            "content_type": "text/plain",
+            "echo": true
+        }));
+        let mut fixture = RequestFixture::default();
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let (status, headers, body) = response_parts(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_TYPE)
+                .expect("content type")
+                .to_str()
+                .expect("ascii"),
+            "application/json"
+        );
+        assert_eq!(body, Bytes::from_static(b"created"));
+    }
+
+    #[tokio::test]
+    async fn triggers_only_when_the_configured_header_is_present() {
+        let plugin = plugin(json!({"trigger": "x-kill"}));
+        let mut fixture = RequestFixture::default();
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+
+        let mut fixture = RequestFixture::default();
+        fixture.headers.insert(
+            header::HeaderName::from_static("x-kill"),
+            HeaderValue::from_static("1"),
+        );
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let (status, _, _) = response_parts(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        let mut fixture = RequestFixture {
+            uri: "/p?x-kill=1".parse().expect("uri"),
+            ..RequestFixture::default()
+        };
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        assert!(matches!(action, PluginAction::Continue));
+    }
+
+    #[tokio::test]
+    async fn invalid_statuses_fall_back_to_service_unavailable() {
+        let plugin = plugin(json!({"status_code": 0}));
+        let mut fixture = RequestFixture::default();
+        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let (status, _, _) = response_parts(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+}
