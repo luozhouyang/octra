@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use octra_api_plugin_types::{Capability, FailPolicy, PluginError, PluginManifest};
 use octra_llm_core::{AssistantContent, ChatRequest, ContentPart, Message, StreamEvent};
 use octra_llm_plugin_types::{
-    LlmAction, LlmLogContext, LlmPlugin, LlmPluginFactory, LlmPluginResult,
+    LlmAction, LlmErrorContext, LlmLogContext, LlmPlugin, LlmPluginFactory, LlmPluginResult,
     LlmProviderRequestContext, LlmRequestContext, LlmResponseContext, LlmStreamAction,
     LlmStreamContext, LlmStreamResult,
 };
@@ -780,6 +780,61 @@ impl Redaction {
         }
     }
 
+    /// Error bodies are never restored and may be the only place an entity
+    /// survived; mask what the rules find with a fixed marker.
+    fn redact_error_text(
+        &self,
+        text: &str,
+        kinds: &mut BTreeMap<String, usize>,
+    ) -> (String, usize) {
+        let mut detections = self.detector.detect(text);
+        resolve_overlaps(&mut detections);
+        if detections.is_empty() {
+            return (text.to_string(), 0);
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut cursor = 0;
+        let mut redacted = 0;
+        for detection in detections {
+            if detection.start < cursor
+                || detection.end > text.len()
+                || !text.is_char_boundary(detection.start)
+                || !text.is_char_boundary(detection.end)
+            {
+                continue;
+            }
+            out.push_str(&text[cursor..detection.start]);
+            let label = detection.kind.label().to_string();
+            out.push_str(&format!("[REDACTED:{label}]"));
+            *kinds.entry(label).or_default() += 1;
+            redacted += 1;
+            cursor = detection.end;
+        }
+        out.push_str(&text[cursor..]);
+        (out, redacted)
+    }
+
+    fn redact_error_value(&self, value: &mut Value, kinds: &mut BTreeMap<String, usize>) -> usize {
+        match value {
+            Value::String(text) => {
+                let (redacted, count) = self.redact_error_text(text, kinds);
+                if count > 0 {
+                    *text = redacted;
+                }
+                count
+            }
+            Value::Array(values) => values
+                .iter_mut()
+                .map(|value| self.redact_error_value(value, kinds))
+                .sum(),
+            Value::Object(object) => object
+                .values_mut()
+                .map(|value| self.redact_error_value(value, kinds))
+                .sum(),
+            _ => 0,
+        }
+    }
+
     fn restore_text(text: &str, mapping: &BTreeMap<String, String>) -> String {
         if mapping.is_empty() || !text.contains(PLACEHOLDER_PREFIX) {
             return text.to_string();
@@ -978,6 +1033,40 @@ impl LlmPlugin for Redaction {
         Ok(action)
     }
 
+    async fn on_error(&self, cx: &mut LlmErrorContext<'_>) -> LlmPluginResult {
+        let mut kinds = BTreeMap::new();
+        let mut redacted = 0;
+
+        let (message, count) = self.redact_error_text(&cx.error.message, &mut kinds);
+        if count > 0 {
+            cx.error.message = message;
+            redacted += count;
+        }
+        if let Some(body) = &mut cx.error.upstream_body {
+            redacted += self.redact_error_value(body, &mut kinds);
+        }
+        for value in cx.error.extra.values_mut() {
+            redacted += self.redact_error_value(value, &mut kinds);
+        }
+
+        if redacted > 0 {
+            tracing::warn!(
+                target: "octra.audit",
+                request_id = cx.meta.request_id,
+                redacted,
+                kinds = ?kinds,
+                "PII found in an upstream error body"
+            );
+            let mut state = State::load(cx.state);
+            state.redacted += redacted;
+            for (kind, count) in kinds {
+                *state.redacted_kinds.entry(kind).or_default() += count;
+            }
+            state.store(cx.state);
+        }
+        Ok(LlmAction::Continue)
+    }
+
     async fn on_log(&self, cx: &mut LlmLogContext<'_>) {
         let state = State::load(cx.state);
         if state.redacted == 0 {
@@ -1163,10 +1252,11 @@ fn valid_ipv4(value: &str) -> bool {
 mod tests {
     use super::*;
     use octra_llm_core::{
-        ChatRequest, ChatResponse, FinishReason, Message, Protocol, Role, StreamEvent, UserContent,
+        ChatRequest, ChatResponse, ErrorKind, FinishReason, GatewayError, Message, Protocol, Role,
+        StreamEvent, UserContent,
     };
     use octra_llm_plugin_types::{
-        LlmPlugin, LlmRequestContext, LlmRequestMeta, LlmResponseContext,
+        LlmErrorContext, LlmPlugin, LlmRequestContext, LlmRequestMeta, LlmResponseContext,
     };
     use serde_json::json;
 
@@ -1718,6 +1808,56 @@ mod tests {
                 .create(json!({"dictionary_file": "/nonexistent/octra-dictionary.txt"}))
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn error_bodies_are_rescanned_and_masked() {
+        let plugin = plugin(json!({}));
+        let mut error = GatewayError::new(
+            502,
+            ErrorKind::Upstream,
+            "upstream echoed a@b.com in its error",
+        );
+        error.upstream_body = Some(json!({
+            "detail": "phone 13800138000",
+            "nested": {"mail": "c@d.com"},
+        }));
+        error
+            .extra
+            .insert("hint".to_string(), json!("mail e@f.com"));
+
+        let meta = meta();
+        let mut state = Value::Null;
+        {
+            let mut cx = LlmErrorContext {
+                meta: &meta,
+                provider_id: None,
+                account_id: None,
+                error: &mut error,
+                state: &mut state,
+            };
+            plugin.on_error(&mut cx).await.unwrap();
+        }
+
+        assert!(!error.message.contains("a@b.com"), "{}", error.message);
+        assert!(error.message.contains("[REDACTED:email]"));
+        let body = error
+            .upstream_body
+            .as_ref()
+            .map(Value::to_string)
+            .unwrap_or_default();
+        assert!(!body.contains("13800138000"), "{body}");
+        assert!(!body.contains("c@d.com"), "{body}");
+        assert!(body.contains("[REDACTED:"));
+        assert!(
+            !error.extra["hint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("e@f.com"),
+            "{:?}",
+            error.extra
+        );
+        assert!(State::load(&state).redacted >= 4);
     }
 
     #[test]
