@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::catalog;
 use super::client::{build_client, build_uds_client, readiness_code, validate_endpoint};
-use super::local::LocalPiiClient;
+use super::local::{DEFAULT_SESSIONS, LocalPiiClient, MAX_SESSIONS};
 use super::models::{LocalModelManager, ModelStatus};
 
 type StatusMap = Arc<RwLock<HashMap<String, EngineStatus>>>;
@@ -318,7 +318,13 @@ impl PiiEngineRuntime {
                 return Err("local PII models require a model directory".to_string());
             }
         };
-        let local = LocalPiiClient::load(spec, &dir, threshold);
+        let sessions = config
+            .get("sessions")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(DEFAULT_SESSIONS)
+            .clamp(1, MAX_SESSIONS);
+        let local = LocalPiiClient::load(spec, &dir, threshold, sessions);
         set_status(
             &self.status,
             &record.name,

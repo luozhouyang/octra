@@ -4,8 +4,9 @@
 //! then fed to the model in 512-position windows; BIO token spans are merged
 //! into byte-offset detections before they leave the engine.
 
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use async_trait::async_trait;
 use octra_pii_types::{
@@ -25,6 +26,8 @@ const MAX_POSITIONS: usize = 512;
 const WINDOW: usize = MAX_POSITIONS - 2;
 const WINDOW_OVERLAP: usize = 64;
 const DETECTOR: &str = "astrlink-guard";
+pub(crate) const DEFAULT_SESSIONS: usize = 2;
+pub(crate) const MAX_SESSIONS: usize = 8;
 
 const LABELS: [&str; 21] = [
     "O",
@@ -52,7 +55,76 @@ const LABELS: [&str; 21] = [
 
 struct LoadedModel {
     tokenizer: Tokenizer,
-    session: Mutex<Session>,
+    pool: SessionPool,
+}
+
+/// Fixed-size pool of ONNX sessions. Each session is checked out for one
+/// window and returned when the guard drops.
+struct SessionPool {
+    sessions: Mutex<Vec<Session>>,
+    ready: Condvar,
+}
+
+impl SessionPool {
+    fn new(sessions: Vec<Session>) -> Self {
+        Self {
+            sessions: Mutex::new(sessions),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> Result<SessionGuard<'_>, PiiEngineError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| engine_error(PiiEngineErrorKind::Unavailable, "ONNX pool is poisoned"))?;
+        while sessions.is_empty() {
+            sessions = self.ready.wait(sessions).map_err(|_| {
+                engine_error(PiiEngineErrorKind::Unavailable, "ONNX pool is poisoned")
+            })?;
+        }
+        Ok(SessionGuard {
+            pool: self,
+            session: sessions.pop(),
+        })
+    }
+}
+
+struct SessionGuard<'a> {
+    pool: &'a SessionPool,
+    session: Option<Session>,
+}
+
+impl Deref for SessionGuard<'_> {
+    type Target = Session;
+
+    fn deref(&self) -> &Session {
+        self.session
+            .as_ref()
+            .expect("session is present until drop")
+    }
+}
+
+impl DerefMut for SessionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Session {
+        self.session
+            .as_mut()
+            .expect("session is present until drop")
+    }
+}
+
+impl Drop for SessionGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            let mut sessions = self
+                .pool
+                .sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            sessions.push(session);
+            self.pool.ready.notify_one();
+        }
+    }
 }
 
 pub struct LocalPiiClient {
@@ -62,8 +134,13 @@ pub struct LocalPiiClient {
 }
 
 impl LocalPiiClient {
-    pub fn load(spec: &'static ModelSpec, dir: &Path, threshold: f32) -> Arc<Self> {
-        let inner = load_model(spec, dir).map(Arc::new);
+    pub fn load(
+        spec: &'static ModelSpec,
+        dir: &Path,
+        threshold: f32,
+        sessions: usize,
+    ) -> Arc<Self> {
+        let inner = load_model(spec, dir, sessions).map(Arc::new);
         if let Err(error) = &inner {
             tracing::warn!(model = spec.id, %error, "local PII model is unavailable");
         }
@@ -87,7 +164,11 @@ impl LocalPiiClient {
     }
 }
 
-fn load_model(spec: &'static ModelSpec, dir: &Path) -> Result<LoadedModel, String> {
+fn load_model(
+    spec: &'static ModelSpec,
+    dir: &Path,
+    sessions: usize,
+) -> Result<LoadedModel, String> {
     for file in spec.files {
         let path = dir.join(file.file_name);
         let metadata = std::fs::metadata(&path)
@@ -117,27 +198,35 @@ fn load_model(spec: &'static ModelSpec, dir: &Path) -> Result<LoadedModel, Strin
     tokenizer.with_padding(None);
 
     let model_path = dir.join(MODEL_FILE);
-    let session = Session::builder()
-        .map_err(|error| format!("cannot create ONNX Runtime session: {error}"))?
-        .commit_from_file(&model_path)
-        .map_err(|error| format!("cannot load {}: {error}", model_path.display()))?;
-
-    let names: Vec<&str> = session
-        .inputs
-        .iter()
-        .map(|input| input.name.as_str())
-        .collect();
-    for required in ["input_ids", "attention_mask", "token_type_ids"] {
-        if !names.contains(&required) {
-            return Err(format!(
-                "model is missing the `{required}` input (inputs: {names:?})"
-            ));
+    let build_session = || -> Result<Session, String> {
+        let session = Session::builder()
+            .map_err(|error| format!("cannot create ONNX Runtime session: {error}"))?
+            .commit_from_file(&model_path)
+            .map_err(|error| format!("cannot load {}: {error}", model_path.display()))?;
+        let names: Vec<&str> = session
+            .inputs
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect();
+        for required in ["input_ids", "attention_mask", "token_type_ids"] {
+            if !names.contains(&required) {
+                return Err(format!(
+                    "model is missing the `{required}` input (inputs: {names:?})"
+                ));
+            }
         }
+        Ok(session)
+    };
+
+    let sessions = sessions.clamp(1, MAX_SESSIONS);
+    let mut pool = Vec::with_capacity(sessions);
+    for _ in 0..sessions {
+        pool.push(build_session()?);
     }
 
     Ok(LoadedModel {
         tokenizer,
-        session: Mutex::new(session),
+        pool: SessionPool::new(pool),
     })
 }
 
@@ -232,10 +321,7 @@ fn run_window(
         Tensor::from_array(([1usize, type_ids.len()], type_ids.into_boxed_slice()))
             .map_err(ort_error)?;
 
-    let mut session = model
-        .session
-        .lock()
-        .map_err(|_| engine_error(PiiEngineErrorKind::Unavailable, "ONNX session is poisoned"))?;
+    let mut session = model.pool.acquire()?;
     let outputs = session
         .run(ort::inputs![
             "input_ids" => input_ids,
@@ -408,6 +494,23 @@ fn engine_error(kind: PiiEngineErrorKind, message: impl Into<String>) -> PiiEngi
     PiiEngineError::new(kind, message)
 }
 
+fn detect_text(
+    model: &LoadedModel,
+    text: &str,
+    threshold: f32,
+    kinds: &[PiiKind],
+) -> Result<Vec<Detection>, PiiEngineError> {
+    let detections = model.detect(text, threshold)?;
+    Ok(if kinds.is_empty() {
+        detections
+    } else {
+        detections
+            .into_iter()
+            .filter(|detection| kinds.contains(&detection.kind))
+            .collect()
+    })
+}
+
 #[async_trait]
 impl PiiDetectorClient for LocalPiiClient {
     fn readiness(&self) -> EngineReadiness {
@@ -438,24 +541,61 @@ impl PiiDetectorClient for LocalPiiClient {
         let text = request.text.to_string();
         let threshold = self.threshold;
         let kinds: Vec<PiiKind> = request.kinds.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let detections = model.detect(&text, threshold)?;
-            if kinds.is_empty() {
-                Ok(detections)
-            } else {
-                Ok(detections
-                    .into_iter()
-                    .filter(|detection| kinds.contains(&detection.kind))
-                    .collect())
+        tokio::task::spawn_blocking(move || detect_text(&model, &text, threshold, &kinds))
+            .await
+            .map_err(|error| {
+                engine_error(
+                    PiiEngineErrorKind::Unavailable,
+                    format!("PII inference task failed: {error}"),
+                )
+            })?
+    }
+
+    async fn detect_batch(
+        &self,
+        requests: &[DetectRequest<'_>],
+    ) -> Result<Vec<Vec<Detection>>, PiiEngineError> {
+        let model = match &self.inner {
+            Ok(model) => model.clone(),
+            Err(error) => {
+                return Err(engine_error(PiiEngineErrorKind::Unavailable, error.clone()));
             }
-        })
-        .await
-        .map_err(|error| {
-            engine_error(
-                PiiEngineErrorKind::Unavailable,
-                format!("PII inference task failed: {error}"),
-            )
-        })?
+        };
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut jobs = Vec::with_capacity(requests.len());
+        for request in requests {
+            if request.text.len() > request.max_bytes {
+                return Err(engine_error(
+                    PiiEngineErrorKind::Rejected,
+                    format!(
+                        "PII input is {} bytes, over the limit of {}",
+                        request.text.len(),
+                        request.max_bytes
+                    ),
+                ));
+            }
+            jobs.push((request.text.to_string(), request.kinds.to_vec()));
+        }
+        let threshold = self.threshold;
+        let mut handles = Vec::with_capacity(jobs.len());
+        for (text, kinds) in jobs {
+            let model = model.clone();
+            handles.push(tokio::task::spawn_blocking(move || {
+                detect_text(&model, &text, threshold, &kinds)
+            }));
+        }
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            results.push(handle.await.map_err(|error| {
+                engine_error(
+                    PiiEngineErrorKind::Unavailable,
+                    format!("PII inference task failed: {error}"),
+                )
+            })??);
+        }
+        Ok(results)
     }
 }
 
@@ -528,11 +668,11 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("weights.bin"), [0x02u8]).unwrap();
-        let error = load_model(&SPEC, dir.path()).err().unwrap();
+        let error = load_model(&SPEC, dir.path(), 1).err().unwrap();
         assert!(error.contains("sha256"), "{error}");
 
         std::fs::write(dir.path().join("weights.bin"), [0x01u8]).unwrap();
-        let error = load_model(&SPEC, dir.path()).err().unwrap();
+        let error = load_model(&SPEC, dir.path(), 1).err().unwrap();
         assert!(!error.contains("sha256"), "{error}");
     }
 
@@ -546,6 +686,7 @@ mod tests {
             &super::super::catalog::ASTR_LINK_GUARD,
             Path::new(&dir),
             0.5,
+            1,
         );
         let detections = client
             .detect(DetectRequest {

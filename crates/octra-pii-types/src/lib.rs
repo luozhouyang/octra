@@ -103,6 +103,19 @@ pub trait PiiDetectorClient: Send + Sync {
     fn readiness(&self) -> EngineReadiness;
 
     async fn detect(&self, request: DetectRequest<'_>) -> Result<Vec<Detection>, PiiEngineError>;
+
+    /// Detects every input independently, in order. The default implementation
+    /// is sequential; in-process engines override it to use their worker pool.
+    async fn detect_batch(
+        &self,
+        requests: &[DetectRequest<'_>],
+    ) -> Result<Vec<Vec<Detection>>, PiiEngineError> {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            results.push(self.detect(*request).await?);
+        }
+        Ok(results)
+    }
 }
 
 /// Resolves engine names from plugin configuration to host-managed clients.

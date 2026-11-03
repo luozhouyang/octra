@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use aho_corasick::AhoCorasick;
 use async_trait::async_trait;
-use futures_util::future::BoxFuture;
 use octra_api_plugin_types::{Capability, FailPolicy, PluginError, PluginManifest};
 use octra_llm_core::{AssistantContent, ChatRequest, ContentPart, Message, StreamEvent};
 use octra_llm_plugin_types::{
@@ -40,7 +39,7 @@ const DEFAULT_MAX_DICTIONARY_TERMS: usize = 10_000;
 const HARD_MAX_DICTIONARY_TERMS: usize = 100_000;
 const MAX_DICTIONARY_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_ENGINE_MAX_BYTES: usize = 1024 * 1024;
-const DEFAULT_ENGINE_TIMEOUT_MS: u64 = 200;
+const DEFAULT_ENGINE_TIMEOUT_MS: u64 = 1_500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -471,8 +470,14 @@ impl RedactionFactory {
         }
         let flag =
             |key: &str, default: bool| config.get(key).and_then(Value::as_bool).unwrap_or(default);
+        let mut manifest = Self::manifest();
+        if engine.binding.is_some() {
+            // The host bounds this stage with the manifest timeout, so it must
+            // allow the engine call plus masking overhead.
+            manifest.timeout_ms = (engine.timeout.as_millis() as u64).saturating_add(200);
+        }
         Ok(Redaction {
-            manifest: Self::manifest(),
+            manifest,
             mode,
             detector: RuleDetector::compile(&flags, &custom, dictionary)?,
             engine: engine.binding,
@@ -621,26 +626,50 @@ impl Redaction {
         self.mode == Mode::Reversible
     }
 
-    async fn mask(&self, text: &str, state: &mut State) -> Result<String, PluginError> {
-        let mut detections = self.detector.detect(text);
-        if let Some(binding) = &self.engine {
-            detections.extend(self.engine_detections(binding, text).await?);
+    async fn mask_request(
+        &self,
+        request: &mut ChatRequest,
+        state: &mut State,
+    ) -> Result<(), PluginError> {
+        let mut slots = Vec::new();
+        collect_request_text_mut(request, self, &mut slots);
+        if slots.is_empty() {
+            return Ok(());
         }
-        resolve_overlaps(&mut detections);
+        let texts: Vec<&str> = slots.iter().map(|slot| slot.as_str()).collect();
+        let engine_results = self.engine_detections_batch(&texts).await?;
+        drop(texts);
+        debug_assert_eq!(engine_results.len(), slots.len());
+        for (slot, engine) in slots.into_iter().zip(engine_results) {
+            let mut detections = self.detector.detect(slot.as_str());
+            detections.extend(engine);
+            resolve_overlaps(&mut detections);
+            self.apply_detections(slot, detections, state)?;
+        }
+        Ok(())
+    }
+
+    fn apply_detections(
+        &self,
+        text: &mut String,
+        detections: Vec<Detection>,
+        state: &mut State,
+    ) -> Result<(), PluginError> {
         if detections.is_empty() {
-            return Ok(text.to_string());
+            return Ok(());
         }
-        let mut out = String::with_capacity(text.len());
+        let original = text.as_str();
+        let mut out = String::with_capacity(original.len());
         let mut cursor = 0;
         for detection in detections {
             if detection.start < cursor
-                || detection.end > text.len()
-                || !text.is_char_boundary(detection.start)
-                || !text.is_char_boundary(detection.end)
+                || detection.end > original.len()
+                || !original.is_char_boundary(detection.start)
+                || !original.is_char_boundary(detection.end)
             {
                 continue;
             }
-            out.push_str(&text[cursor..detection.start]);
+            out.push_str(&original[cursor..detection.start]);
             if state.next >= self.max_placeholders {
                 return Err(PluginError::fail_closed(format!(
                     "llm-pii-redaction exceeded {} placeholders",
@@ -659,150 +688,96 @@ impl Redaction {
             if self.reversible() {
                 state.mapping.insert(
                     key.clone(),
-                    text[detection.start..detection.end].to_string(),
+                    original[detection.start..detection.end].to_string(),
                 );
             }
             out.push_str(&key);
             cursor = detection.end;
         }
-        out.push_str(&text[cursor..]);
-        Ok(out)
+        out.push_str(&original[cursor..]);
+        *text = out;
+        Ok(())
     }
 
-    async fn engine_detections(
+    async fn engine_detections_batch(
         &self,
-        binding: &EngineBinding,
-        text: &str,
-    ) -> Result<Vec<Detection>, PluginError> {
+        texts: &[&str],
+    ) -> Result<Vec<Vec<Detection>>, PluginError> {
+        let Some(binding) = &self.engine else {
+            return Ok(vec![Vec::new(); texts.len()]);
+        };
         let client = match binding {
             EngineBinding::Client { client, .. } => client,
             EngineBinding::Missing { name } => {
-                return self.engine_unavailable(format!("PII engine '{name}' is not configured"));
+                return self.engine_unavailable_batch(
+                    texts.len(),
+                    format!("PII engine '{name}' is not configured"),
+                );
             }
         };
         if client.readiness() != EngineReadiness::Ready {
-            return self.engine_unavailable("PII engine is not ready".to_string());
+            return self
+                .engine_unavailable_batch(texts.len(), "PII engine is not ready".to_string());
         }
-        if text.len() > self.engine_max_bytes {
-            return self.engine_unavailable(format!(
-                "PII engine input exceeds {} bytes",
-                self.engine_max_bytes
-            ));
+        if let Some(text) = texts.iter().find(|text| text.len() > self.engine_max_bytes) {
+            return self.engine_unavailable_batch(
+                texts.len(),
+                format!(
+                    "PII engine input exceeds {} bytes ({} bytes)",
+                    self.engine_max_bytes,
+                    text.len()
+                ),
+            );
         }
-        let request = DetectRequest {
-            text,
-            locale: None,
-            kinds: &[],
-            max_bytes: self.engine_max_bytes,
-        };
-        match tokio::time::timeout(self.engine_timeout, client.detect(request)).await {
-            Ok(Ok(mut detections)) => {
+        let requests: Vec<DetectRequest<'_>> = texts
+            .iter()
+            .map(|text| DetectRequest {
+                text,
+                locale: None,
+                kinds: &[],
+                max_bytes: self.engine_max_bytes,
+            })
+            .collect();
+        match tokio::time::timeout(self.engine_timeout, client.detect_batch(&requests)).await {
+            Ok(Ok(mut results)) => {
                 if !self.engine_kinds.is_empty() {
-                    detections.retain(|detection| {
-                        self.engine_kinds
-                            .iter()
-                            .any(|kind| kind == detection.kind.label())
-                    });
+                    for detections in &mut results {
+                        detections.retain(|detection| {
+                            self.engine_kinds
+                                .iter()
+                                .any(|kind| kind == detection.kind.label())
+                        });
+                    }
                 }
-                Ok(detections)
+                Ok(results)
             }
-            Ok(Err(error)) => self.engine_unavailable(format!("PII engine failed: {error}")),
-            Err(_) => self.engine_unavailable(format!(
-                "PII engine timed out after {}ms",
-                self.engine_timeout.as_millis()
-            )),
+            Ok(Err(error)) => {
+                self.engine_unavailable_batch(texts.len(), format!("PII engine failed: {error}"))
+            }
+            Err(_) => self.engine_unavailable_batch(
+                texts.len(),
+                format!(
+                    "PII engine timed out after {}ms",
+                    self.engine_timeout.as_millis()
+                ),
+            ),
         }
     }
 
-    fn engine_unavailable(&self, message: String) -> Result<Vec<Detection>, PluginError> {
+    fn engine_unavailable_batch(
+        &self,
+        count: usize,
+        message: String,
+    ) -> Result<Vec<Vec<Detection>>, PluginError> {
         match self.engine_on_unavailable {
             OnUnavailable::Reject => Err(PluginError::fail_closed(format!(
                 "llm-pii-redaction: {message}"
             ))),
             OnUnavailable::RulesOnly => {
                 tracing::warn!("{message}; continuing with rule detection only");
-                Ok(Vec::new())
+                Ok(vec![Vec::new(); count])
             }
         }
-    }
-
-    async fn mask_parts(
-        &self,
-        parts: &mut [ContentPart],
-        state: &mut State,
-    ) -> Result<(), PluginError> {
-        for part in parts {
-            match part {
-                ContentPart::Text { text, .. } | ContentPart::Reasoning { text, .. } => {
-                    *text = self.mask(text, state).await?;
-                }
-                ContentPart::Image(_) | ContentPart::File(_) | ContentPart::Unsupported { .. } => {}
-            }
-        }
-        Ok(())
-    }
-
-    async fn mask_message(
-        &self,
-        message: &mut Message,
-        state: &mut State,
-    ) -> Result<(), PluginError> {
-        if let Some(content) = &mut message.content {
-            self.mask_parts(&mut content.parts, state).await?;
-        }
-        if self.redact_assistant {
-            for block in &mut message.assistant {
-                match block {
-                    AssistantContent::Text { text }
-                    | AssistantContent::Reasoning { text, .. }
-                    | AssistantContent::Refusal { text } => {
-                        *text = self.mask(text, state).await?;
-                    }
-                    AssistantContent::ToolCall { arguments, .. } => {
-                        mask_value(arguments, state, self).await?;
-                    }
-                    AssistantContent::ToolResult { content, .. } => {
-                        mask_value(content, state, self).await?;
-                    }
-                    AssistantContent::Raw { .. } => {}
-                }
-            }
-        }
-        if self.redact_tool_results {
-            for result in &mut message.tool_results {
-                self.mask_parts(&mut result.content.parts, state).await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn mask_request(
-        &self,
-        request: &mut ChatRequest,
-        state: &mut State,
-    ) -> Result<(), PluginError> {
-        if self.redact_system {
-            for block in &mut request.system.blocks {
-                *block = self.mask(block, state).await?;
-            }
-        }
-        for message in &mut request.messages {
-            self.mask_message(message, state).await?;
-        }
-        if self.redact_tools {
-            for tool in &mut request.tools {
-                let Some(function) = &mut tool.function else {
-                    continue;
-                };
-                if let Some(description) = &mut function.description {
-                    *description = self.mask(description, state).await?;
-                }
-                if let Some(parameters) = &mut function.parameters {
-                    mask_value(parameters, state, self).await?;
-                }
-            }
-        }
-        Ok(())
     }
 
     fn restore_text(text: &str, mapping: &BTreeMap<String, String>) -> String {
@@ -1038,28 +1013,81 @@ fn replace_reasoning(text: &str) -> LlmStreamAction {
     }
 }
 
-fn mask_value<'a>(
-    value: &'a mut Value,
-    state: &'a mut State,
-    plugin: &'a Redaction,
-) -> BoxFuture<'a, Result<(), PluginError>> {
-    Box::pin(async move {
-        match value {
-            Value::String(text) => *text = plugin.mask(text, state).await?,
-            Value::Array(values) => {
-                for value in values {
-                    mask_value(value, state, plugin).await?;
-                }
-            }
-            Value::Object(object) => {
-                for value in object.values_mut() {
-                    mask_value(value, state, plugin).await?;
-                }
-            }
-            _ => {}
+fn collect_request_text_mut<'a>(
+    request: &'a mut ChatRequest,
+    plugin: &Redaction,
+    out: &mut Vec<&'a mut String>,
+) {
+    if plugin.redact_system {
+        for block in &mut request.system.blocks {
+            out.push(block);
         }
-        Ok(())
-    })
+    }
+    for message in &mut request.messages {
+        if let Some(content) = &mut message.content {
+            collect_parts_text_mut(&mut content.parts, out);
+        }
+        if plugin.redact_assistant {
+            for block in &mut message.assistant {
+                match block {
+                    AssistantContent::Text { text }
+                    | AssistantContent::Reasoning { text, .. }
+                    | AssistantContent::Refusal { text } => out.push(text),
+                    AssistantContent::ToolCall { arguments, .. } => {
+                        collect_value_text_mut(arguments, out);
+                    }
+                    AssistantContent::ToolResult { content, .. } => {
+                        collect_value_text_mut(content, out);
+                    }
+                    AssistantContent::Raw { .. } => {}
+                }
+            }
+        }
+        if plugin.redact_tool_results {
+            for result in &mut message.tool_results {
+                collect_parts_text_mut(&mut result.content.parts, out);
+            }
+        }
+    }
+    if plugin.redact_tools {
+        for tool in &mut request.tools {
+            let Some(function) = &mut tool.function else {
+                continue;
+            };
+            if let Some(description) = &mut function.description {
+                out.push(description);
+            }
+            if let Some(parameters) = &mut function.parameters {
+                collect_value_text_mut(parameters, out);
+            }
+        }
+    }
+}
+
+fn collect_parts_text_mut<'a>(parts: &'a mut [ContentPart], out: &mut Vec<&'a mut String>) {
+    for part in parts {
+        match part {
+            ContentPart::Text { text, .. } | ContentPart::Reasoning { text, .. } => out.push(text),
+            ContentPart::Image(_) | ContentPart::File(_) | ContentPart::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn collect_value_text_mut<'a>(value: &'a mut Value, out: &mut Vec<&'a mut String>) {
+    match value {
+        Value::String(text) => out.push(text),
+        Value::Array(values) => {
+            for value in values {
+                collect_value_text_mut(value, out);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                collect_value_text_mut(value, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn resolve_overlaps(detections: &mut Vec<Detection>) {
@@ -1457,6 +1485,99 @@ mod tests {
         );
     }
 
+    struct AnyResolver {
+        name: &'static str,
+        engine: Arc<dyn PiiDetectorClient>,
+    }
+
+    impl PiiEngineResolver for AnyResolver {
+        fn resolve(&self, name: &str) -> Option<Arc<dyn PiiDetectorClient>> {
+            (name == self.name).then(|| self.engine.clone())
+        }
+    }
+
+    struct BatchEngine {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl PiiDetectorClient for BatchEngine {
+        fn readiness(&self) -> EngineReadiness {
+            EngineReadiness::Ready
+        }
+
+        async fn detect(
+            &self,
+            _request: DetectRequest<'_>,
+        ) -> Result<Vec<Detection>, octra_pii_types::PiiEngineError> {
+            Err(octra_pii_types::PiiEngineError::new(
+                octra_pii_types::PiiEngineErrorKind::Unavailable,
+                "per-field detection must not be used",
+            ))
+        }
+
+        async fn detect_batch(
+            &self,
+            requests: &[DetectRequest<'_>],
+        ) -> Result<Vec<Vec<Detection>>, octra_pii_types::PiiEngineError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(requests
+                .iter()
+                .map(|request| {
+                    request
+                        .text
+                        .match_indices("Alice")
+                        .map(|(start, needle)| Detection {
+                            kind: PiiKind::Custom("private_person".into()),
+                            start,
+                            end: start + needle.len(),
+                            confidence: 0.99,
+                            detector: "engine",
+                        })
+                        .collect()
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn one_engine_call_masks_every_text_field() {
+        let engine = Arc::new(BatchEngine {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let resolver = Arc::new(AnyResolver {
+            name: "batch",
+            engine: engine.clone(),
+        });
+        let plugin = plugin_with(Some(resolver), json!({"detector": {"engine": "batch"}}));
+        let mut request = text_request("Alice one");
+        request.messages.push(Message {
+            role: Role::User,
+            content: Some(UserContent::text("Alice two")),
+            assistant: Vec::new(),
+            tool_results: Vec::new(),
+            name: None,
+            extra: Default::default(),
+        });
+        let mut state = Value::Null;
+        mask_request(&plugin, &mut request, &mut state).await;
+
+        assert_eq!(engine.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!request_text(&request).contains("Alice"));
+        let second = request.messages[1]
+            .content
+            .as_ref()
+            .unwrap()
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(!second.contains("Alice"), "{second}");
+    }
+
     #[tokio::test]
     async fn missing_engine_fails_closed_by_default() {
         let plugin = plugin_with(None, json!({"detector": {"engine": "missing"}}));
@@ -1608,6 +1729,16 @@ mod tests {
         assert!(!valid_id_card("110105194912310021"));
         assert!(valid_ipv4("192.168.1.1"));
         assert!(!valid_ipv4("999.1.1.1"));
+    }
+
+    #[test]
+    fn manifest_timeout_covers_the_engine_deadline() {
+        let plugin = RedactionFactory::new(None)
+            .create(json!({"detector": {"engine": "x", "timeout_ms": 900}}))
+            .unwrap();
+        assert_eq!(plugin.manifest().timeout_ms, 1_100);
+        let plain = RedactionFactory::new(None).create(json!({})).unwrap();
+        assert_eq!(plain.manifest().timeout_ms, 200);
     }
 
     #[test]
