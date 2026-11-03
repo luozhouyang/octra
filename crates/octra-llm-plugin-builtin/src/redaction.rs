@@ -18,8 +18,9 @@ use futures_util::future::BoxFuture;
 use octra_api_plugin_types::{Capability, FailPolicy, PluginError, PluginManifest};
 use octra_llm_core::{AssistantContent, ChatRequest, ContentPart, Message, StreamEvent};
 use octra_llm_plugin_types::{
-    LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmProviderRequestContext,
-    LlmRequestContext, LlmResponseContext, LlmStreamAction, LlmStreamContext, LlmStreamResult,
+    LlmAction, LlmLogContext, LlmPlugin, LlmPluginFactory, LlmPluginResult,
+    LlmProviderRequestContext, LlmRequestContext, LlmResponseContext, LlmStreamAction,
+    LlmStreamContext, LlmStreamResult,
 };
 use octra_pii_types::{
     DetectRequest, Detection, EngineReadiness, PiiDetector, PiiDetectorClient, PiiEngineResolver,
@@ -55,6 +56,10 @@ struct State {
     max_len: usize,
     next: usize,
     pending: BTreeMap<String, String>,
+    #[serde(default)]
+    redacted: usize,
+    #[serde(default)]
+    redacted_kinds: BTreeMap<String, usize>,
 }
 
 impl State {
@@ -350,6 +355,7 @@ struct EngineConfig {
     on_unavailable: OnUnavailable,
     timeout: Duration,
     max_bytes: usize,
+    kinds: Vec<String>,
 }
 
 impl EngineConfig {
@@ -359,6 +365,7 @@ impl EngineConfig {
             on_unavailable: OnUnavailable::Reject,
             timeout: Duration::from_millis(200),
             max_bytes: DEFAULT_ENGINE_MAX_BYTES,
+            kinds: Vec::new(),
         }
     }
 }
@@ -372,6 +379,7 @@ pub struct Redaction {
     engine_on_unavailable: OnUnavailable,
     engine_timeout: Duration,
     engine_max_bytes: usize,
+    engine_kinds: Vec<String>,
     max_placeholders: usize,
     redact_system: bool,
     redact_assistant: bool,
@@ -471,6 +479,7 @@ impl RedactionFactory {
             engine_on_unavailable: engine.on_unavailable,
             engine_timeout: engine.timeout,
             engine_max_bytes: engine.max_bytes,
+            engine_kinds: engine.kinds,
             max_placeholders,
             redact_system: flag("redact_system", true),
             redact_assistant: flag("redact_assistant", true),
@@ -489,7 +498,7 @@ impl RedactionFactory {
         for key in object.keys() {
             if !matches!(
                 key.as_str(),
-                "engine" | "timeout_ms" | "fail_closed" | "on_unavailable" | "max_bytes"
+                "engine" | "timeout_ms" | "fail_closed" | "on_unavailable" | "max_bytes" | "kinds"
             ) {
                 return Err(PluginError::fail_closed(format!(
                     "unknown PII detector option '{key}'"
@@ -552,11 +561,36 @@ impl RedactionFactory {
                 name: name.to_string(),
             },
         };
+        let kinds = match object.get("kinds") {
+            None => Vec::new(),
+            Some(Value::Array(values)) => {
+                let mut kinds = Vec::with_capacity(values.len());
+                for value in values {
+                    let kind = value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|kind| !kind.is_empty())
+                        .ok_or_else(|| {
+                            PluginError::fail_closed(
+                                "llm-pii-redaction `detector.kinds` entries must be non-empty strings",
+                            )
+                        })?;
+                    kinds.push(kind.to_string());
+                }
+                kinds
+            }
+            Some(_) => {
+                return Err(PluginError::fail_closed(
+                    "llm-pii-redaction `detector.kinds` must be an array of strings",
+                ));
+            }
+        };
         Ok(EngineConfig {
             binding: Some(binding),
             on_unavailable,
             timeout: Duration::from_millis(timeout_ms),
             max_bytes,
+            kinds,
         })
     }
 
@@ -613,13 +647,14 @@ impl Redaction {
                     self.max_placeholders
                 )));
             }
+            let label = detection.kind.label().to_string();
             let key = format!(
                 "{PLACEHOLDER_PREFIX}{}:{}:{}{PLACEHOLDER_SUFFIX}",
-                state.nonce,
-                detection.kind.label(),
-                state.next
+                state.nonce, label, state.next
             );
             state.next += 1;
+            state.redacted += 1;
+            *state.redacted_kinds.entry(label).or_default() += 1;
             state.max_len = state.max_len.max(key.len());
             if self.reversible() {
                 state.mapping.insert(
@@ -661,7 +696,16 @@ impl Redaction {
             max_bytes: self.engine_max_bytes,
         };
         match tokio::time::timeout(self.engine_timeout, client.detect(request)).await {
-            Ok(Ok(detections)) => Ok(detections),
+            Ok(Ok(mut detections)) => {
+                if !self.engine_kinds.is_empty() {
+                    detections.retain(|detection| {
+                        self.engine_kinds
+                            .iter()
+                            .any(|kind| kind == detection.kind.label())
+                    });
+                }
+                Ok(detections)
+            }
             Ok(Err(error)) => self.engine_unavailable(format!("PII engine failed: {error}")),
             Err(_) => self.engine_unavailable(format!(
                 "PII engine timed out after {}ms",
@@ -957,6 +1001,20 @@ impl LlmPlugin for Redaction {
         };
         state.store(cx.state);
         Ok(action)
+    }
+
+    async fn on_log(&self, cx: &mut LlmLogContext<'_>) {
+        let state = State::load(cx.state);
+        if state.redacted == 0 {
+            return;
+        }
+        tracing::info!(
+            target: "octra.audit",
+            request_id = cx.meta.request_id,
+            redacted = state.redacted,
+            kinds = ?state.redacted_kinds,
+            "PII redaction applied"
+        );
     }
 }
 
@@ -1344,6 +1402,59 @@ mod tests {
         let masked = request_text(&request);
         assert!(!masked.contains("Alice"), "{masked}");
         assert!(masked.contains(PLACEHOLDER_PREFIX), "{masked}");
+    }
+
+    #[tokio::test]
+    async fn engine_kind_filter_skips_unselected_entities() {
+        let text = "Alice wrote to a@b.com";
+        let engine = Arc::new(FakeEngine {
+            readiness: EngineReadiness::Ready,
+            detections: vec![
+                engine_span(PiiKind::Custom("private_person".into()), text, "Alice"),
+                engine_span(PiiKind::Email, text, "a@b.com"),
+            ],
+        });
+        let resolver = Arc::new(FakeResolver {
+            name: "fake",
+            engine,
+        });
+        let plugin = plugin_with(
+            Some(resolver),
+            json!({"detector": {"engine": "fake", "kinds": ["email"]}}),
+        );
+        let mut request = text_request(text);
+        let mut state = Value::Null;
+        mask_request(&plugin, &mut request, &mut state).await;
+        let masked = request_text(&request);
+        assert!(masked.contains("Alice"), "{masked}");
+        assert!(!masked.contains("a@b.com"), "{masked}");
+    }
+
+    #[tokio::test]
+    async fn state_records_content_free_counts() {
+        let plugin = plugin(json!({"rules": {"phone": true}}));
+        let mut request = text_request("a@b.com and 13800138000");
+        let mut state = Value::Null;
+        mask_request(&plugin, &mut request, &mut state).await;
+        let counts = State::load(&state);
+        assert_eq!(counts.redacted, 2);
+        assert_eq!(counts.redacted_kinds["email"], 1);
+        assert_eq!(counts.redacted_kinds["phone"], 1);
+    }
+
+    #[test]
+    fn rejects_bad_detector_kinds() {
+        let resolver_less = RedactionFactory::new(None);
+        assert!(
+            resolver_less
+                .create(json!({"detector": {"engine": "fake", "kinds": "email"}}))
+                .is_err()
+        );
+        assert!(
+            resolver_less
+                .create(json!({"detector": {"engine": "fake", "kinds": [""]}}))
+                .is_err()
+        );
     }
 
     #[tokio::test]
