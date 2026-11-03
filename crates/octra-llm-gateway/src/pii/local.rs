@@ -686,22 +686,29 @@ mod tests {
             &super::super::catalog::ASTR_LINK_GUARD,
             Path::new(&dir),
             0.5,
-            1,
+            2,
         );
-        let detections = client
-            .detect(DetectRequest {
+        let requests = [
+            DetectRequest {
                 text: "Contact alice@example.com for details.",
                 locale: Some("en"),
                 kinds: &[],
                 max_bytes: 4096,
-            })
-            .await
-            .unwrap();
-        assert!(
-            detections
-                .iter()
-                .any(|detection| detection.kind == PiiKind::Email),
-            "detections: {detections:?}"
-        );
+            },
+            DetectRequest {
+                text: "Write to bob@example.com instead.",
+                locale: Some("en"),
+                kinds: &[],
+                max_bytes: 4096,
+            },
+        ];
+        let results = client.detect_batch(&requests).await.unwrap();
+        assert_eq!(results.len(), 2);
+        for result in &results {
+            assert!(
+                result.iter().any(|detection| detection.kind == PiiKind::Email),
+                "detections: {result:?}"
+            );
+        }
     }
 }
