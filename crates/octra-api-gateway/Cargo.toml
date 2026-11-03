@@ -41,6 +41,7 @@ ed25519-dalek = "2"
 [dev-dependencies]
 jsonwebtoken = "9"
 octra-api-plugin-builtin.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true

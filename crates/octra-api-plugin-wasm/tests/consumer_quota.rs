@@ -6,7 +6,7 @@
 //!     --manifest-path examples/plugins/consumer-quota/Cargo.toml
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -157,32 +157,11 @@ fn service() -> Service {
     }
 }
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("workspace root")
-}
-
 fn staged_artifact() -> Option<PathBuf> {
-    let example = workspace_root().join("examples/plugins/consumer-quota");
-    let wasm = std::env::var_os("OCTRA_TEST_PLUGIN_WASM")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| example.join("target/wasm32-wasip1/release/consumer_quota.wasm"));
-    if !wasm.is_file() {
-        return None;
-    }
-
+    octra_api_plugin_wasm::testing::example_wasm()?;
     let staging = tempfile::tempdir().ok()?;
     let artifact = staging.keep();
-    std::fs::create_dir_all(artifact.join("migrations")).ok()?;
-    std::fs::copy(example.join("plugin.json"), artifact.join("plugin.json")).ok()?;
-    std::fs::copy(
-        example.join("migrations/000_base.sql"),
-        artifact.join("migrations/000_base.sql"),
-    )
-    .ok()?;
-    std::fs::copy(wasm, artifact.join("plugin.wasm")).ok()?;
+    octra_api_plugin_wasm::testing::stage_example_artifact(&artifact).ok()?;
     Some(artifact)
 }
 

@@ -20,6 +20,9 @@ pub use factory::WasmPluginFactory;
 pub use host_provider::{InstalledWasmPlugin, WasmHostProvider};
 pub use metrics::{PluginMetrics, PluginStatsSnapshot};
 
+#[doc(hidden)]
+pub mod testing;
+
 wasmtime::component::bindgen!({
     path: "wit",
     world: "plugin",
