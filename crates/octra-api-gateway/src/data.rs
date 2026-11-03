@@ -54,6 +54,7 @@ pub async fn proxy(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(new_request_id);
+    let client_ip = state.client_ip.resolve(peer, &parts.headers);
 
     let snapshot = state.runtime.snapshot().await;
 
@@ -174,7 +175,7 @@ pub async fn proxy(
         method: &parts.method,
         uri: &mut parts.uri,
         headers: &mut parts.headers,
-        client_ip: Some(peer.ip()),
+        client_ip: Some(client_ip),
         consumer_id: None,
         credential_id: None,
         route,
@@ -252,7 +253,7 @@ pub async fn proxy(
         method: &parts.method,
         uri: &mut parts.uri,
         headers: &mut parts.headers,
-        client_ip: Some(peer.ip()),
+        client_ip: Some(client_ip),
         consumer_id: consumer_id.as_deref(),
         credential_id: credential_id.as_deref(),
         route,
@@ -362,7 +363,7 @@ pub async fn proxy(
     let hash_input = octra_runtime::HashInput {
         headers: &parts.headers,
         path: &hash_path,
-        client_ip: Some(peer.ip()),
+        client_ip: Some(client_ip),
         consumer_id: consumer_id.as_deref(),
         uri_captures: &dispatch.uri_captures,
     };

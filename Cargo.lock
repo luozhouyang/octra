@@ -3460,6 +3460,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "ipnet",
  "jsonwebtoken",
  "octra-api-core",
  "octra-api-plugin-builtin",
@@ -3583,6 +3584,7 @@ name = "octra-config"
 version = "0.1.0"
 dependencies = [
  "dirs 6.0.0",
+ "ipnet",
  "octra-core",
  "serde",
  "tempfile",

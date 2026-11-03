@@ -16,6 +16,7 @@ hex.workspace = true
 http.workspace = true
 http-body.workspace = true
 http-body-util.workspace = true
+ipnet = "2"
 octra-api-core.workspace = true
 octra-config.workspace = true
 octra-core.workspace = true

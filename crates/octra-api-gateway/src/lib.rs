@@ -9,6 +9,7 @@
 
 pub mod admin;
 pub mod audit;
+pub mod client_ip;
 pub mod data;
 pub mod http_client;
 pub mod key;
@@ -26,6 +27,7 @@ use octra_runtime::GatewayRuntime;
 use octra_storage::Storage;
 
 pub use audit::{AuditState, record_control_audit};
+pub use client_ip::ClientIpResolver;
 pub use key::{GeneratedApiKey, generate_api_key};
 pub use metrics::{ApiMetrics, MetricsSnapshot};
 
@@ -36,6 +38,7 @@ pub struct ApiDataState {
     pub storage: Option<Arc<Storage>>,
     pub config: Arc<OctraConfig>,
     pub client: reqwest::Client,
+    pub client_ip: Arc<ClientIpResolver>,
     pub metrics: Arc<ApiMetrics>,
 }
 
@@ -59,12 +62,14 @@ impl ApiDataState {
         plugins: Arc<PluginRuntime>,
     ) -> Self {
         let client = http_client::build(&config);
+        let client_ip = Arc::new(ClientIpResolver::from_config(&config.gateway));
         Self {
             runtime,
             plugins,
             storage: None,
             config,
             client,
+            client_ip,
             metrics,
         }
     }

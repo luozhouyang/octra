@@ -1,9 +1,10 @@
 //! Configuration loading and local workspace path resolution.
 
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
+use ipnet::IpNet;
 use octra_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,14 @@ pub struct GatewayConfig {
     pub request_timeout_secs: u64,
     pub connect_timeout_secs: u64,
     pub max_body_bytes: usize,
+    /// Proxy addresses trusted to supply the client address in `real_ip_header`.
+    /// Empty ignores forwarded headers and uses the transport peer address.
+    pub trusted_ips: Vec<String>,
+    /// Header carrying the original client address, honored only from trusted
+    /// proxies.
+    pub real_ip_header: String,
+    /// Walk `real_ip_header` right-to-left past trusted proxies.
+    pub real_ip_recursive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +142,9 @@ impl Default for GatewayConfig {
             request_timeout_secs: 60,
             connect_timeout_secs: 10,
             max_body_bytes: 32 * 1024 * 1024,
+            trusted_ips: Vec::new(),
+            real_ip_header: "x-forwarded-for".to_string(),
+            real_ip_recursive: false,
         }
     }
 }
@@ -329,6 +341,14 @@ fn apply_env_overrides(config: &mut OctraConfig) {
     }
 }
 
+/// HTTP token characters permitted in a header name (RFC 9110 `tchar`).
+fn is_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
 fn validate(config: &OctraConfig) -> Result<()> {
     let control: SocketAddr = config.daemon.control_bind.parse().map_err(|err| {
         Error::Config(format!(
@@ -373,6 +393,21 @@ fn validate(config: &OctraConfig) -> Result<()> {
         return Err(Error::Config(
             "gateway.max_body_bytes must be greater than zero".into(),
         ));
+    }
+
+    for rule in &config.gateway.trusted_ips {
+        if rule.parse::<IpAddr>().is_err() && rule.parse::<IpNet>().is_err() {
+            return Err(Error::Config(format!(
+                "invalid gateway.trusted_ips entry '{rule}': expected an IP address or CIDR"
+            )));
+        }
+    }
+
+    if !is_header_name(&config.gateway.real_ip_header) {
+        return Err(Error::Config(format!(
+            "invalid gateway.real_ip_header '{}': expected an HTTP header name",
+            config.gateway.real_ip_header
+        )));
     }
 
     if config.storage.path.trim().is_empty() {
@@ -461,6 +496,31 @@ mod tests {
         config.storage.retention.llm_usage_days = 90;
         config.storage.retention.usage_rollup_days = 30;
         assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn validates_trusted_proxy_settings() {
+        let mut config = OctraConfig::default();
+        assert!(config.gateway.trusted_ips.is_empty());
+        assert_eq!(config.gateway.real_ip_header, "x-forwarded-for");
+        assert!(!config.gateway.real_ip_recursive);
+        assert!(validate(&config).is_ok());
+
+        config.gateway.trusted_ips = vec!["10.0.0.0/8".into(), "2001:db8::1".into()];
+        assert!(validate(&config).is_ok());
+
+        config.gateway.trusted_ips = vec!["not-an-address".into()];
+        assert!(validate(&config).is_err());
+
+        let mut config = OctraConfig::default();
+        config.gateway.real_ip_header = String::new();
+        assert!(validate(&config).is_err());
+
+        config.gateway.real_ip_header = "not a header".into();
+        assert!(validate(&config).is_err());
+
+        config.gateway.real_ip_header = "x-real-ip".into();
+        assert!(validate(&config).is_ok());
     }
 
     #[test]
