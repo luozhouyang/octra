@@ -22,6 +22,32 @@ jobs:
       - name: Test
         run: cargo test --workspace --exclude octra-desktop
 
+  wasm:
+    name: WASM plugins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target, examples/plugins/consumer-quota -> target"
+      - name: Cache cargo-component
+        id: cargo-component-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-component
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-component-0.21.1-${{ runner.os }}
+      - name: Install cargo-component
+        if: steps.cargo-component-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-component --locked --version 0.21.1
+      - name: Add wasm32-wasip1 target
+        run: rustup target add wasm32-wasip1
+      - name: Build and run WASM plugin tests
+        run: bash scripts/test-wasm.sh
+
   web:
     name: Web
     runs-on: ubuntu-latest

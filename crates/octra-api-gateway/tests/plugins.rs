@@ -20,4 +20,5 @@ mod plugins {
     mod request_termination;
     mod request_transformer;
     mod response_transformer;
+    mod wasm_admin;
 }

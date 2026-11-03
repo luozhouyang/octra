@@ -1573,4 +1573,173 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn applies_upstream_mutations_with_capability() {
+        let mut uri: Uri = "/old?x=1".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-old", HeaderValue::from_static("1"));
+        let mut state = GatewayState::default();
+        let route = route();
+        let service = service();
+        let method = Method::GET;
+        let mut cx = UpstreamRequestContext {
+            request_id: "req",
+            state: &mut state,
+            method: &method,
+            uri: &mut uri,
+            headers: &mut headers,
+            consumer_id: None,
+            route: &route,
+            service: &service,
+            target_url: "http://up",
+        };
+        let mutation = wit::RequestMutation {
+            path: Some("/new".to_string()),
+            query: Some("y=2".to_string()),
+            set_headers: vec![("x-new".to_string(), "yes".to_string())],
+            remove_headers: vec!["x-old".to_string()],
+        };
+        apply_upstream_mutation(&mut cx, mutation, &[Capability::RequestHeaders]).unwrap();
+
+        assert_eq!(cx.uri.path(), "/new");
+        assert_eq!(cx.uri.query(), Some("y=2"));
+        assert_eq!(cx.headers.get("x-new").unwrap().to_str().unwrap(), "yes");
+        assert!(cx.headers.get("x-old").is_none());
+    }
+
+    #[test]
+    fn rejects_upstream_mutations_without_capability() {
+        let mut uri: Uri = "/old".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        let mut state = GatewayState::default();
+        let route = route();
+        let service = service();
+        let method = Method::GET;
+        let mut cx = UpstreamRequestContext {
+            request_id: "req",
+            state: &mut state,
+            method: &method,
+            uri: &mut uri,
+            headers: &mut headers,
+            consumer_id: None,
+            route: &route,
+            service: &service,
+            target_url: "http://up",
+        };
+        let mutation = wit::RequestMutation {
+            path: None,
+            query: None,
+            set_headers: vec![("x-new".to_string(), "yes".to_string())],
+            remove_headers: Vec::new(),
+        };
+        assert!(apply_upstream_mutation(&mut cx, mutation, &[]).is_err());
+    }
+
+    #[test]
+    fn applies_response_mutations_with_capability() {
+        let mut status = StatusCode::OK;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-old", HeaderValue::from_static("1"));
+        let request_headers = HeaderMap::new();
+        let mut state = GatewayState::default();
+        let route = route();
+        let service = service();
+        let mut cx = ResponseContext {
+            request_id: "req",
+            state: &mut state,
+            request_headers: &request_headers,
+            status: &mut status,
+            headers: &mut headers,
+            consumer_id: None,
+            route: &route,
+            service: &service,
+            target_url: "http://up",
+        };
+        let mutation = wit::ResponseMutation {
+            status: Some(201),
+            set_headers: vec![("x-new".to_string(), "yes".to_string())],
+            remove_headers: vec!["x-old".to_string()],
+        };
+        apply_response_mutation(&mut cx, mutation, &[Capability::ResponseHeaders]).unwrap();
+
+        assert_eq!(*cx.status, StatusCode::CREATED);
+        assert_eq!(cx.headers.get("x-new").unwrap().to_str().unwrap(), "yes");
+        assert!(cx.headers.get("x-old").is_none());
+    }
+
+    #[test]
+    fn rejects_response_mutations_without_capability() {
+        let mut status = StatusCode::OK;
+        let mut headers = HeaderMap::new();
+        let request_headers = HeaderMap::new();
+        let mut state = GatewayState::default();
+        let route = route();
+        let service = service();
+        let mut cx = ResponseContext {
+            request_id: "req",
+            state: &mut state,
+            request_headers: &request_headers,
+            status: &mut status,
+            headers: &mut headers,
+            consumer_id: None,
+            route: &route,
+            service: &service,
+            target_url: "http://up",
+        };
+        let mutation = wit::ResponseMutation {
+            status: Some(201),
+            set_headers: Vec::new(),
+            remove_headers: Vec::new(),
+        };
+        assert!(apply_response_mutation(&mut cx, mutation, &[]).is_err());
+    }
+
+    #[test]
+    fn requires_body_and_header_capabilities_for_body_actions() {
+        let mut uri: Uri = "/".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        let mut state = GatewayState::default();
+        let route = route();
+        let service = service();
+        let method = Method::POST;
+        let mut cx = RequestBodyContext {
+            request_id: "req",
+            state: &mut state,
+            method: &method,
+            uri: &mut uri,
+            headers: &mut headers,
+            consumer_id: None,
+            route: &route,
+            service: &service,
+        };
+
+        let action = wit::RequestBodyAction::Continue(wit::RequestBodyResult {
+            body: b"body".to_vec(),
+            set_headers: Vec::new(),
+            remove_headers: Vec::new(),
+        });
+        assert!(apply_request_body_action(&mut cx, action, &[]).is_err());
+
+        let action = wit::RequestBodyAction::Continue(wit::RequestBodyResult {
+            body: b"body".to_vec(),
+            set_headers: vec![("x-new".to_string(), "yes".to_string())],
+            remove_headers: Vec::new(),
+        });
+        assert!(apply_request_body_action(&mut cx, action, &[Capability::RequestBody]).is_err());
+
+        let action = wit::RequestBodyAction::Continue(wit::RequestBodyResult {
+            body: b"body".to_vec(),
+            set_headers: vec![("x-new".to_string(), "yes".to_string())],
+            remove_headers: Vec::new(),
+        });
+        let body = apply_request_body_action(
+            &mut cx,
+            action,
+            &[Capability::RequestBody, Capability::RequestHeaders],
+        )
+        .unwrap();
+        assert_eq!(body, Bytes::from_static(b"body"));
+        assert_eq!(cx.headers.get("x-new").unwrap().to_str().unwrap(), "yes");
+    }
 }

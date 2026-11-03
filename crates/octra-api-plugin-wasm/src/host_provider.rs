@@ -234,3 +234,147 @@ impl PluginStorage for UnavailableStorage {
         Err(StorageError::Unavailable)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    use octra_api_plugin_types::{EntityFieldSpec, FailPolicy, PluginKind, PluginRuntimeKind};
+
+    fn manifest(name: &str) -> PluginManifest {
+        PluginManifest {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            kind: PluginKind::Api,
+            runtime: PluginRuntimeKind::Wasm,
+            priority: 0,
+            description: String::new(),
+            timeout_ms: 250,
+            fail_policy: FailPolicy::Open,
+            phases: Vec::new(),
+            capabilities: vec![Capability::StorageEntities],
+            config_schema: None,
+            api_version: "1".to_string(),
+            entities: vec![EntitySpec {
+                name: "demo".to_string(),
+                primary_key: vec!["id".to_string()],
+                fields: vec![EntityFieldSpec {
+                    name: "id".to_string(),
+                    field_type: "string".to_string(),
+                    nullable: false,
+                }],
+                unique: Vec::new(),
+            }],
+            migrations: Vec::new(),
+            admin_routes: Vec::new(),
+        }
+    }
+
+    fn provider(dir: &Path) -> WasmHostProvider {
+        WasmHostProvider::new(
+            Arc::new(PluginStorageRoot::new(dir.join("plugin-data"))),
+            vec![InstalledWasmPlugin::new(
+                manifest("demo"),
+                vec![Capability::StorageEntities, Capability::Log],
+            )],
+        )
+    }
+
+    fn instance(name: &str) -> PluginInstance {
+        PluginInstance {
+            id: format!("{name}-1"),
+            name: name.to_string(),
+            instance_name: None,
+            config: serde_json::json!({}),
+            enabled: true,
+            protocols: Vec::new(),
+            ordering: None,
+            service_id: None,
+            route_id: None,
+            consumer_id: None,
+            consumer_group_id: None,
+            tags: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn exposes_approved_capabilities_and_declared_entities() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = provider(dir.path());
+        assert!(provider.contains("demo"));
+
+        let host = provider.host_for(&instance("demo"));
+        assert_eq!(
+            host.capabilities(),
+            &[Capability::StorageEntities, Capability::Log]
+        );
+        assert_eq!(host.plugin_name(), "demo");
+        assert_eq!(host.plugin_instance_id(), "demo-1");
+
+        assert!(host.storage().kv_get("missing").unwrap().is_none());
+        host.storage().kv_put("key", b"value", None).unwrap();
+        assert_eq!(
+            host.storage().kv_get("key").unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert!(matches!(
+            host.storage()
+                .upsert("not-declared", &serde_json::json!({"id": "a"})),
+            Err(StorageError::NotDeclared(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_plugins_get_no_capabilities_and_unavailable_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = provider(dir.path());
+        assert!(!provider.contains("missing"));
+
+        let host = provider.host_for(&instance("missing"));
+        assert!(host.capabilities().is_empty());
+        assert!(matches!(
+            host.storage().kv_get("key"),
+            Err(StorageError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn uninstall_can_preserve_or_purge_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = provider(dir.path());
+        {
+            let host = provider.host_for(&instance("demo"));
+            host.storage().kv_put("key", b"value", None).unwrap();
+        }
+
+        provider.uninstall("demo", false).unwrap();
+        assert!(!provider.contains("demo"));
+        provider.install(manifest("demo"), vec![Capability::StorageEntities]);
+        let host = provider.host_for(&instance("demo"));
+        assert_eq!(
+            host.storage().kv_get("key").unwrap(),
+            Some(b"value".to_vec())
+        );
+        drop(host);
+
+        provider.uninstall("demo", true).unwrap();
+        provider.install(manifest("demo"), vec![Capability::StorageEntities]);
+        let host = provider.host_for(&instance("demo"));
+        assert_eq!(host.storage().kv_get("key").unwrap(), None);
+    }
+
+    #[test]
+    fn storage_bytes_track_the_plugin_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = provider(dir.path());
+        {
+            let host = provider.host_for(&instance("demo"));
+            host.storage().kv_put("key", b"value", None).unwrap();
+        }
+        assert!(provider.storage_bytes("demo").unwrap() > 0);
+        assert!(provider.storage_bytes("missing").is_none());
+    }
+}

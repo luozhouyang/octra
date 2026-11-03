@@ -1432,3 +1432,87 @@ macro_rules! export_plugin {
         );
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_describe_their_kind_and_message() {
+        let error = Error::config("bad config");
+        assert_eq!(error.kind(), ErrorKind::Config);
+        assert_eq!(error.message(), "bad config");
+        assert_eq!(error.to_string(), "bad config");
+        assert_eq!(Error::storage("disk").kind(), ErrorKind::Storage);
+        assert_eq!(Error::internal("boom").kind(), ErrorKind::Internal);
+    }
+
+    #[test]
+    fn admin_requests_read_params_and_headers() {
+        let request = AdminRequest {
+            request_id: "req".to_string(),
+            method: "GET".to_string(),
+            path: "/usage/c1".to_string(),
+            query: "window=60".to_string(),
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            params: vec![("consumer".to_string(), "c1".to_string())],
+            body: Vec::new(),
+        };
+
+        assert_eq!(request.param("consumer"), Some("c1"));
+        assert_eq!(request.param("missing"), None);
+        assert_eq!(request.header("content-type"), Some("application/json"));
+        assert_eq!(request.header("missing"), None);
+    }
+
+    #[test]
+    fn decision_helpers_build_values() {
+        let response = Response {
+            status: 429,
+            headers: vec![("retry-after".to_string(), "5".to_string())],
+            body: b"slow down".to_vec(),
+        };
+
+        assert_eq!(Decision::continue_request(), Decision::Continue);
+        assert_eq!(
+            Decision::reject(response.clone()),
+            Decision::Reject(response.clone())
+        );
+        assert_eq!(
+            ResponseDecision::continue_request(),
+            ResponseDecision::Continue
+        );
+        assert_eq!(
+            ResponseDecision::reject(response.clone()),
+            ResponseDecision::Reject(response.clone())
+        );
+        assert_eq!(
+            BodyDecision::continue_with(b"body".to_vec()),
+            BodyDecision::Continue(b"body".to_vec())
+        );
+        assert_eq!(
+            BodyDecision::reject(response.clone()),
+            BodyDecision::Reject(response.clone())
+        );
+        assert_eq!(ErrorDecision::continue_request(), ErrorDecision::Continue);
+        assert_eq!(
+            ErrorDecision::respond(response.clone()),
+            ErrorDecision::Respond(response)
+        );
+    }
+
+    #[test]
+    fn auth_identity_builders_set_consumer_and_credential_fields() {
+        let identity = AuthIdentity::consumer("c1")
+            .with_username("alice")
+            .with_custom_id("a-1")
+            .with_credential("cred-1", "key-auth");
+
+        assert_eq!(identity.consumer_id.as_deref(), Some("c1"));
+        assert_eq!(identity.consumer_username.as_deref(), Some("alice"));
+        assert_eq!(identity.consumer_custom_id.as_deref(), Some("a-1"));
+        assert_eq!(identity.credential_id.as_deref(), Some("cred-1"));
+        assert_eq!(identity.credential_type.as_deref(), Some("key-auth"));
+        assert_eq!(AuthIdentity::default(), AuthIdentity::default());
+    }
+}

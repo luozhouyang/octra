@@ -121,3 +121,52 @@ impl Drop for WasmEngine {
         self.inner.stop.store(true, Ordering::Relaxed);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_limits_match_the_documented_values() {
+        let limits = WasmLimits::default();
+        assert_eq!(limits.max_fuel, 10_000_000);
+        assert_eq!(limits.max_memory_bytes, 64 * 1024 * 1024);
+        assert_eq!(limits.timeout, Duration::from_millis(250));
+        assert_eq!(limits.max_body_bytes, 1024 * 1024);
+        assert_eq!(limits.max_inflight, 64);
+    }
+
+    #[test]
+    fn new_engines_expose_their_limits_and_empty_metrics() {
+        let limits = WasmLimits {
+            timeout: Duration::from_millis(5),
+            ..WasmLimits::default()
+        };
+        let engine = WasmEngine::new(limits).unwrap();
+        assert_eq!(engine.limits().timeout, Duration::from_millis(5));
+        assert!(engine.metrics().snapshots().is_empty());
+        assert!(engine.metrics().snapshot("missing").is_none());
+    }
+
+    #[test]
+    fn caches_compiled_components_by_hash() {
+        let engine = WasmEngine::new(WasmLimits::default()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin.wasm");
+        std::fs::write(&path, [0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00]).unwrap();
+
+        let first = engine.component("hash", &path).unwrap();
+        let second = engine.component("hash", &path).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        engine.remove_component("hash");
+        let third = engine.component("hash", &path).unwrap();
+        assert!(!Arc::ptr_eq(&first, &third));
+
+        assert!(
+            engine
+                .component("missing", &dir.path().join("absent.wasm"))
+                .is_err()
+        );
+    }
+}

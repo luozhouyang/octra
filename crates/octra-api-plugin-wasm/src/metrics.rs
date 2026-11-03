@@ -101,3 +101,53 @@ impl PluginMetrics {
         snapshots
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn records_outcomes_and_latency() {
+        let stats = PluginStats::default();
+        stats.record(Outcome::Continue, Duration::from_micros(10));
+        stats.record(Outcome::Reject, Duration::from_micros(20));
+        stats.record(
+            Outcome::Failure { timeout: true },
+            Duration::from_micros(30),
+        );
+        stats.record(
+            Outcome::Failure { timeout: false },
+            Duration::from_micros(40),
+        );
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.calls, 4);
+        assert_eq!(snapshot.rejections, 1);
+        assert_eq!(snapshot.failures, 2);
+        assert_eq!(snapshot.timeouts, 1);
+        assert_eq!(snapshot.total_latency_micros, 100);
+        assert_eq!(snapshot.max_latency_micros, 40);
+    }
+
+    #[test]
+    fn metrics_are_scoped_per_plugin() {
+        let metrics = PluginMetrics::default();
+        let alpha = metrics.stats("alpha");
+        let same = metrics.stats("alpha");
+        assert!(Arc::ptr_eq(&alpha, &same));
+        alpha.record(Outcome::Continue, Duration::ZERO);
+        metrics
+            .stats("beta")
+            .record(Outcome::Reject, Duration::ZERO);
+
+        let names: Vec<String> = metrics
+            .snapshots()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, ["alpha", "beta"]);
+        assert_eq!(metrics.snapshot("alpha").unwrap().calls, 1);
+        assert_eq!(metrics.snapshot("beta").unwrap().rejections, 1);
+        assert!(metrics.snapshot("missing").is_none());
+    }
+}
