@@ -867,9 +867,14 @@ fn group_name<'a>(entry: &PluginEntry, groups: &[ConsumerGroupRef<'a>]) -> &'a s
 /// Applies `ordering.before` / `ordering.after` constraints while keeping the
 /// priority order for unconstrained plugins.
 fn apply_ordering(entries: &mut Vec<PluginEntry>) {
+    // Contradictory constraints (a before b, b before a) never settle, so bound
+    // the passes; each pass applies at most one move.
+    let max_passes = entries.len().saturating_mul(entries.len()).max(1) + 1;
+    let mut passes = 0;
     let mut changed = true;
-    while changed {
+    while changed && passes < max_passes {
         changed = false;
+        passes += 1;
         for index in 0..entries.len() {
             let ordering = entries[index].ordering.clone();
             let Some(ordering) = ordering else {
