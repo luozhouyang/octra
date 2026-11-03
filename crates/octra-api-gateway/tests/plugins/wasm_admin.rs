@@ -14,16 +14,9 @@ use axum::http::StatusCode;
 use octra_api_plugin_types::Scope;
 use serde_json::{Value, json};
 
-use crate::common::{
-    WasmTestEnv, get, plugin_instance, seed_simple_service, spawn_mock,
-};
+use crate::common::{WasmTestEnv, get, plugin_instance, seed_simple_service, spawn_mock};
 
-const CAPABILITIES: &[&str] = &[
-    "request_headers",
-    "log",
-    "storage_entities",
-    "admin_api",
-];
+const CAPABILITIES: &[&str] = &["request_headers", "log", "storage_entities", "admin_api"];
 
 async fn install(env: &WasmTestEnv) -> String {
     let (status, _, artifact) = env.upload_example().await;
