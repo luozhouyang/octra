@@ -22,12 +22,14 @@ octra-llm-plugin-runtime.workspace = true
 octra-llm-protocol.workspace = true
 octra-pii-types.workspace = true
 octra-storage.workspace = true
+ort.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tokenizers.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 tokio-util.workspace = true
@@ -40,6 +42,7 @@ futures-util.workspace = true
 octra-llm-plugin-builtin.workspace = true
 octra-api-core.workspace = true
 http-body-util.workspace = true
+tempfile = "3"
 tower.workspace = true
 
 [lints]

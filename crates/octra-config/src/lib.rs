@@ -266,6 +266,12 @@ impl Workspace {
         self.resolve_path(&config.plugins.artifact_dir)
     }
 
+    /// Local model cache. Downloaded model files are deliberately kept out of
+    /// the settings directory so configuration sync never carries gigabytes.
+    pub fn model_dir(&self) -> PathBuf {
+        self.home.join("cache").join("models")
+    }
+
     fn resolve_path(&self, configured: &str) -> PathBuf {
         let path = Path::new(configured);
         if path.is_absolute() {

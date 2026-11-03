@@ -923,6 +923,114 @@ async fn pii_engine_crud_and_status() {
 }
 
 #[tokio::test]
+async fn local_pii_engine_records_are_accepted() {
+    let harness = Harness::new().await;
+
+    let (status, body) = create(
+        &harness,
+        PII_ENGINES,
+        json!({
+            "name": "custom-local",
+            "mode": "local",
+            "enabled": false,
+            "config": {"model": "astrlink-guard", "threshold": 0.7}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_eq!(body["mode"], "local");
+    assert_eq!(body["transport"], "in_process");
+    let id = body["id"].as_str().unwrap().to_string();
+
+    let (status, updated) = call(
+        &harness,
+        Method::PUT,
+        &format!("{PII_ENGINES}/{id}"),
+        Some(json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {updated}");
+    assert_eq!(updated["mode"], "local");
+
+    let (status, body) = create(
+        &harness,
+        PII_ENGINES,
+        json!({
+            "name": "local-wrong-transport",
+            "mode": "local",
+            "transport": "uds_jsonl"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}
+
+const PII_MODELS: &str = "/admin/llm/pii-models";
+
+#[tokio::test]
+async fn pii_models_list_status_and_score() {
+    let harness = Harness::new().await;
+
+    let (status, listed) = call(&harness, Method::GET, PII_MODELS, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let models = listed.as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["id"], "astrlink-guard");
+    assert_eq!(models[0]["installed"], false);
+    assert_eq!(models[0]["enabled"], false);
+    assert_eq!(models[0]["threshold"], 0.8);
+    assert_eq!(models[0]["state"]["state"], "idle");
+
+    let (status, _) = call(
+        &harness,
+        Method::GET,
+        &format!("{PII_MODELS}/not-a-model"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body) = create(
+        &harness,
+        &format!("{PII_MODELS}/astrlink-guard"),
+        json!({"do": "score", "score": 0.9}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["threshold"], 0.9);
+    assert_eq!(body["enabled"], false);
+    assert!(body["record_id"].is_string());
+
+    for score in [0.2, 1.0] {
+        let (status, body) = create(
+            &harness,
+            &format!("{PII_MODELS}/astrlink-guard"),
+            json!({"do": "score", "score": score}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "score {score}: {body}");
+    }
+
+    let (status, body) = create(
+        &harness,
+        &format!("{PII_MODELS}/astrlink-guard"),
+        json!({"do": "score", "score": 0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["threshold"], 0.8);
+
+    let (status, body) = create(
+        &harness,
+        &format!("{PII_MODELS}/astrlink-guard"),
+        json!({"do": "off"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["enabled"], false);
+}
+
+#[tokio::test]
 async fn pii_engine_rejects_invalid_configuration() {
     let harness = Harness::new().await;
 

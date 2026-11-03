@@ -159,7 +159,9 @@ async fn main() -> anyhow::Result<()> {
         )
     };
 
-    let pii_engines = Arc::new(octra_llm_gateway::pii::PiiEngineRuntime::new());
+    let pii_engines = Arc::new(octra_llm_gateway::pii::PiiEngineRuntime::with_models_dir(
+        workspace.model_dir(),
+    ));
     let pii_records = storage
         .llm
         .list_pii_engines()

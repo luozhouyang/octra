@@ -152,6 +152,11 @@ pub fn router(state: LlmControlState) -> Router {
         .route(
             "/admin/llm/pii-engines/{id}/restart",
             post(restart_pii_engine),
+        )
+        .route("/admin/llm/pii-models", get(list_pii_models))
+        .route(
+            "/admin/llm/pii-models/{id}",
+            get(get_pii_model).post(pii_model_action),
         );
     Router::new()
         .merge(providers)
@@ -169,6 +174,7 @@ pub fn router(state: LlmControlState) -> Router {
 // ---------------------------------------------------------------------------
 // Errors
 
+#[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
     message: String,
@@ -2253,19 +2259,48 @@ impl PiiEngineBody {
             .clone()
             .or_else(|| existing.map(|record| record.mode.clone()))
             .unwrap_or_else(|| "external".to_string());
-        if !matches!(mode.as_str(), "external" | "managed") {
-            return Err(ApiError::bad_request("`mode` must be external or managed").field("mode"));
+        if !matches!(mode.as_str(), "external" | "managed" | "local") {
+            return Err(
+                ApiError::bad_request("`mode` must be external, managed or local").field("mode"),
+            );
         }
         let transport = self
             .transport
             .clone()
             .or_else(|| existing.map(|record| record.transport.clone()))
-            .unwrap_or_else(|| "http_loopback".to_string());
-        if !matches!(transport.as_str(), "http_loopback" | "uds_jsonl") {
-            return Err(
-                ApiError::bad_request("`transport` must be http_loopback or uds_jsonl")
-                    .field("transport"),
-            );
+            .unwrap_or_else(|| {
+                if mode == "local" {
+                    "in_process".to_string()
+                } else {
+                    "http_loopback".to_string()
+                }
+            });
+        if !matches!(
+            transport.as_str(),
+            "http_loopback" | "uds_jsonl" | "in_process"
+        ) {
+            return Err(ApiError::bad_request(
+                "`transport` must be http_loopback, uds_jsonl or in_process",
+            )
+            .field("transport"));
+        }
+        if mode == "local" && transport != "in_process" {
+            return Err(ApiError::bad_request(
+                "local PII engines require the in_process transport",
+            )
+            .field("transport"));
+        }
+        if mode == "managed" && transport != "uds_jsonl" {
+            return Err(ApiError::bad_request(
+                "managed PII engines require the uds_jsonl transport",
+            )
+            .field("transport"));
+        }
+        if mode == "external" && transport == "in_process" {
+            return Err(ApiError::bad_request(
+                "external PII engines require http_loopback or uds_jsonl",
+            )
+            .field("transport"));
         }
         let endpoint = non_empty(
             self.endpoint
@@ -2273,12 +2308,6 @@ impl PiiEngineBody {
             "endpoint",
         )?;
         if mode == "managed" {
-            if transport != "uds_jsonl" {
-                return Err(ApiError::bad_request(
-                    "managed PII engines require the uds_jsonl transport",
-                )
-                .field("transport"));
-            }
             let endpoint_value = endpoint.as_deref().ok_or_else(|| {
                 ApiError::bad_request("managed PII engines require `endpoint`").field("endpoint")
             })?;
@@ -2557,8 +2586,7 @@ async fn start_pii_engine(
             "PII engine runtime is not enabled",
         )
     })?;
-    pii.start(&record)
-        .map_err(|message| ApiError::bad_request(message))?;
+    pii.start(&record).map_err(ApiError::bad_request)?;
     if let Some(plugins) = &state.plugins {
         plugins.reload().await.map_err(ApiError::internal)?;
     }
@@ -2626,6 +2654,248 @@ async fn restart_pii_engine(
         "status": "restarted",
         "engine": pii.get_status(&record.name),
     })))
+}
+
+// ---------------------------------------------------------------------------
+// Local PII models
+
+#[derive(Debug, Serialize)]
+pub struct PiiModelView {
+    #[serde(flatten)]
+    model: crate::pii::ModelStatus,
+    enabled: bool,
+    threshold: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    record_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_readiness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PiiModelAction {
+    #[serde(rename = "do")]
+    action: String,
+    #[serde(default)]
+    score: Option<f32>,
+}
+
+fn pii_runtime(state: &LlmControlState) -> ApiResult<&crate::pii::PiiEngineRuntime> {
+    state.pii.as_deref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PII model runtime is not enabled",
+        )
+    })
+}
+
+fn local_threshold(record: Option<&LlmPiiEngineRecord>, spec: &crate::pii::ModelSpec) -> f32 {
+    record
+        .and_then(|record| serde_json::from_str::<Value>(&record.config_json).ok())
+        .and_then(|config| config.get("threshold").and_then(Value::as_f64))
+        .map(|value| (value as f32).clamp(spec.floor, 0.999))
+        .unwrap_or(spec.default_threshold)
+}
+
+async fn pii_model_view(
+    state: &LlmControlState,
+    spec: &'static crate::pii::ModelSpec,
+) -> ApiResult<PiiModelView> {
+    let pii = pii_runtime(state)?;
+    let model = pii
+        .model_status(spec.id)
+        .ok_or_else(|| ApiError::not_found("PII model", spec.id))?;
+    let record = state
+        .storage
+        .llm
+        .get_pii_engine_by_name(spec.id)
+        .await
+        .map_err(ApiError::from_storage)?;
+    let engine = pii.get_status(spec.id);
+    Ok(PiiModelView {
+        threshold: local_threshold(record.as_ref(), spec),
+        enabled: record.as_ref().is_some_and(|record| record.enabled),
+        record_id: record.map(|record| record.id),
+        engine_readiness: engine.as_ref().map(|engine| engine.readiness.to_string()),
+        engine_error: engine.and_then(|engine| engine.last_error),
+        model,
+    })
+}
+
+async fn list_pii_models(
+    State(state): State<LlmControlState>,
+) -> ApiResult<extract::Json<Vec<PiiModelView>>> {
+    let pii = pii_runtime(&state)?;
+    let records = state
+        .storage
+        .llm
+        .list_pii_engines()
+        .await
+        .map_err(ApiError::from_storage)?;
+    let mut views = Vec::new();
+    for spec in crate::pii::catalog::MODELS {
+        let model = pii
+            .model_status(spec.id)
+            .ok_or_else(|| ApiError::not_found("PII model", spec.id))?;
+        let record = records.iter().find(|record| record.name == spec.id);
+        let engine = pii.get_status(spec.id);
+        views.push(PiiModelView {
+            threshold: local_threshold(record, spec),
+            enabled: record.is_some_and(|record| record.enabled),
+            record_id: record.map(|record| record.id.clone()),
+            engine_readiness: engine.as_ref().map(|engine| engine.readiness.to_string()),
+            engine_error: engine.and_then(|engine| engine.last_error),
+            model,
+        });
+    }
+    Ok(extract::Json(views))
+}
+
+async fn get_pii_model(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<extract::Json<PiiModelView>> {
+    let spec =
+        crate::pii::catalog::get(&id).ok_or_else(|| ApiError::not_found("PII model", &id))?;
+    Ok(extract::Json(pii_model_view(&state, spec).await?))
+}
+
+async fn ensure_local_record(
+    state: &LlmControlState,
+    spec: &'static crate::pii::ModelSpec,
+    enabled: bool,
+    threshold: f32,
+) -> ApiResult<LlmPiiEngineRecord> {
+    let models = pii_runtime(state)?.models().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PII model directory is not configured",
+        )
+    })?;
+    let input = LlmPiiEngineInput {
+        name: spec.id.to_string(),
+        mode: "local".to_string(),
+        transport: "in_process".to_string(),
+        endpoint: None,
+        command: None,
+        args: Vec::new(),
+        env_allow: Vec::new(),
+        model_dir: Some(models.model_dir(spec).to_string_lossy().into_owned()),
+        config_json: json!({ "model": spec.id, "threshold": threshold }).to_string(),
+        enabled,
+    };
+    match state
+        .storage
+        .llm
+        .get_pii_engine_by_name(spec.id)
+        .await
+        .map_err(ApiError::from_storage)?
+    {
+        Some(existing) => state
+            .storage
+            .llm
+            .update_pii_engine(&existing.id, &input)
+            .await
+            .map_err(ApiError::from_storage),
+        None => state
+            .storage
+            .llm
+            .create_pii_engine(&input)
+            .await
+            .map_err(ApiError::from_storage),
+    }
+}
+
+async fn pii_model_action(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+    extract::Json(body): extract::Json<PiiModelAction>,
+) -> ApiResult<extract::Json<PiiModelView>> {
+    let spec =
+        crate::pii::catalog::get(&id).ok_or_else(|| ApiError::not_found("PII model", &id))?;
+    let pii = pii_runtime(&state)?;
+    let models = pii.models().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PII model directory is not configured",
+        )
+    })?;
+    let existing = state
+        .storage
+        .llm
+        .get_pii_engine_by_name(spec.id)
+        .await
+        .map_err(ApiError::from_storage)?;
+    let enabled = existing.as_ref().is_some_and(|record| record.enabled);
+    let threshold = local_threshold(existing.as_ref(), spec);
+
+    match body.action.as_str() {
+        "on" | "pick" => {
+            ensure_local_record(&state, spec, true, threshold).await?;
+            let status = models.start(spec).map_err(ApiError::bad_request)?;
+            if status.installed {
+                reload_pii_engines(&state).await?;
+            } else {
+                let control = state.clone();
+                tokio::spawn(async move {
+                    let Some(models) = control.pii.as_ref().and_then(|pii| pii.models()) else {
+                        return;
+                    };
+                    let status = models.wait(spec).await;
+                    tracing::info!(
+                        model = spec.id,
+                        state = ?status.state,
+                        "local PII model download finished"
+                    );
+                    if let Err(error) = reload_pii_engines(&control).await {
+                        tracing::warn!(?error, "cannot reload PII engines after download");
+                    }
+                });
+            }
+        }
+        "off" => {
+            models.cancel(spec);
+            ensure_local_record(&state, spec, false, threshold).await?;
+            pii.stop(spec.id);
+            reload_pii_engines(&state).await?;
+        }
+        "download" => {
+            models.start(spec).map_err(ApiError::bad_request)?;
+        }
+        "cancel" => {
+            models.cancel(spec);
+        }
+        "remove" => {
+            models.remove(spec).map_err(ApiError::bad_request)?;
+            ensure_local_record(&state, spec, false, threshold).await?;
+            pii.stop(spec.id);
+            reload_pii_engines(&state).await?;
+        }
+        "score" => {
+            let score = body.score.unwrap_or(0.0);
+            let threshold = if score == 0.0 {
+                spec.default_threshold
+            } else if (spec.floor..1.0).contains(&score) {
+                score
+            } else {
+                return Err(ApiError::bad_request(format!(
+                    "score must be 0 or between {} and 1",
+                    spec.floor
+                ))
+                .field("score"));
+            };
+            ensure_local_record(&state, spec, enabled, threshold).await?;
+            reload_pii_engines(&state).await?;
+        }
+        other => {
+            return Err(
+                ApiError::bad_request(format!("unknown PII model action '{other}'")).field("do"),
+            );
+        }
+    }
+
+    Ok(extract::Json(pii_model_view(&state, spec).await?))
 }
 
 // ---------------------------------------------------------------------------

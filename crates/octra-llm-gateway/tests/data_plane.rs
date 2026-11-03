@@ -483,6 +483,7 @@ async fn missing_secret_is_a_502_and_falls_through() {
         config,
         plugins: Arc::new(octra_llm_gateway::LlmPluginRuntime::empty()),
         pii: Arc::new(octra_llm_gateway::pii::PiiEngineRuntime::new()),
+        models: None,
     };
     let broken_id = harness
         .provider(

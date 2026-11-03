@@ -20,7 +20,10 @@ use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::catalog;
 use super::client::{build_client, build_uds_client, readiness_code, validate_endpoint};
+use super::local::LocalPiiClient;
+use super::models::{LocalModelManager, ModelStatus};
 
 type StatusMap = Arc<RwLock<HashMap<String, EngineStatus>>>;
 
@@ -41,6 +44,8 @@ struct ManagedHandle {
     task: JoinHandle<()>,
 }
 
+type ManagedBuild = (Arc<dyn PiiDetectorClient>, ManagedHandle, Arc<AtomicU8>);
+
 impl Drop for ManagedHandle {
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -52,6 +57,7 @@ pub struct PiiEngineRuntime {
     engines: RwLock<HashMap<String, Arc<dyn PiiDetectorClient>>>,
     status: StatusMap,
     managers: RwLock<HashMap<String, ManagedHandle>>,
+    models: Option<Arc<LocalModelManager>>,
 }
 
 impl Default for PiiEngineRuntime {
@@ -66,7 +72,39 @@ impl PiiEngineRuntime {
             engines: RwLock::new(HashMap::new()),
             status: Arc::new(RwLock::new(HashMap::new())),
             managers: RwLock::new(HashMap::new()),
+            models: None,
         }
+    }
+
+    /// Enables local models stored under `root`. Without a root only external
+    /// and managed engines are available.
+    pub fn with_models_dir(root: PathBuf) -> Self {
+        Self {
+            models: Some(Arc::new(LocalModelManager::new(root))),
+            ..Self::new()
+        }
+    }
+
+    pub fn models(&self) -> Option<&Arc<LocalModelManager>> {
+        self.models.as_ref()
+    }
+
+    pub fn model_statuses(&self) -> Vec<ModelStatus> {
+        self.models
+            .as_ref()
+            .map(|models| {
+                catalog::MODELS
+                    .iter()
+                    .map(|spec| models.status(spec))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn model_status(&self, id: &str) -> Option<ModelStatus> {
+        let models = self.models.as_ref()?;
+        let spec = catalog::get(id)?;
+        Some(models.status(spec))
     }
 
     /// Rebuilds the registry from stored definitions. Returns warnings for
@@ -123,6 +161,18 @@ impl PiiEngineRuntime {
                         ));
                     }
                 },
+                "local" => match self.build_local(record) {
+                    Ok(client) => {
+                        engines.insert(record.name.clone(), client);
+                    }
+                    Err(error) => {
+                        set_status(&self.status, &record.name, "failed", Some(error.clone()));
+                        warnings.push(format!(
+                            "local PII model '{}' is unavailable: {error}",
+                            record.name
+                        ));
+                    }
+                },
                 other => {
                     set_status(
                         &self.status,
@@ -170,6 +220,10 @@ impl PiiEngineRuntime {
                 let (client, handle, _readiness) = self.build_managed(record)?;
                 self.write_engines().insert(record.name.clone(), client);
                 self.write_managers().insert(record.name.clone(), handle);
+            }
+            "local" => {
+                let client = self.build_local(record)?;
+                self.write_engines().insert(record.name.clone(), client);
             }
             other => {
                 let message = format!("unknown engine mode '{other}'");
@@ -225,10 +279,7 @@ impl PiiEngineRuntime {
             .cloned()
     }
 
-    fn build_managed(
-        &self,
-        record: &LlmPiiEngineRecord,
-    ) -> Result<(Arc<dyn PiiDetectorClient>, ManagedHandle, Arc<AtomicU8>), String> {
+    fn build_managed(&self, record: &LlmPiiEngineRecord) -> Result<ManagedBuild, String> {
         let spec = ManagedSpec::from_record(record)?;
         let (client, readiness) = build_uds_client(spec.socket_string(), spec.env_timeout());
         let cancel = CancellationToken::new();
@@ -241,6 +292,41 @@ impl PiiEngineRuntime {
             }),
         };
         Ok((client, handle, readiness))
+    }
+
+    fn build_local(
+        &self,
+        record: &LlmPiiEngineRecord,
+    ) -> Result<Arc<dyn PiiDetectorClient>, String> {
+        let config: Value = serde_json::from_str(&record.config_json).unwrap_or(Value::Null);
+        let model_id = config
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(&record.name);
+        let spec = catalog::get(model_id)
+            .ok_or_else(|| format!("unknown local PII model '{model_id}'"))?;
+        let threshold = config
+            .get("threshold")
+            .and_then(Value::as_f64)
+            .map(|value| value as f32)
+            .unwrap_or(spec.default_threshold)
+            .clamp(spec.floor, 0.999);
+        let dir = match (&self.models, &record.model_dir) {
+            (Some(models), _) => models.model_dir(spec),
+            (None, Some(dir)) => PathBuf::from(dir),
+            (None, None) => {
+                return Err("local PII models require a model directory".to_string());
+            }
+        };
+        let local = LocalPiiClient::load(spec, &dir, threshold);
+        set_status(
+            &self.status,
+            &record.name,
+            readiness_label(local.readiness()),
+            local.error().map(str::to_string),
+        );
+        let client: Arc<dyn PiiDetectorClient> = local;
+        Ok(client)
     }
 
     fn write_engines(
@@ -277,7 +363,7 @@ impl PiiEngineResolver for PiiEngineRuntime {
 fn base_status(record: &LlmPiiEngineRecord) -> EngineStatus {
     let readiness = if !record.enabled {
         "disabled"
-    } else if record.mode == "managed" {
+    } else if matches!(record.mode.as_str(), "managed" | "local") {
         "starting"
     } else {
         "ready"

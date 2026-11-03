@@ -409,6 +409,7 @@ pub struct Harness {
     pub config: Arc<OctraConfig>,
     pub plugins: Arc<LlmPluginRuntime>,
     pub pii: Arc<octra_llm_gateway::pii::PiiEngineRuntime>,
+    pub models: Option<tempfile::TempDir>,
 }
 
 impl Harness {
@@ -420,7 +421,10 @@ impl Harness {
                 .await
                 .unwrap(),
         );
-        let pii = Arc::new(octra_llm_gateway::pii::PiiEngineRuntime::new());
+        let models = tempfile::tempdir().unwrap();
+        let pii = Arc::new(octra_llm_gateway::pii::PiiEngineRuntime::with_models_dir(
+            models.path().to_path_buf(),
+        ));
         let plugins = Arc::new(
             LlmPluginRuntime::bootstrap(
                 storage.clone(),
@@ -435,6 +439,7 @@ impl Harness {
             config,
             plugins,
             pii,
+            models: Some(models),
         }
     }
 
