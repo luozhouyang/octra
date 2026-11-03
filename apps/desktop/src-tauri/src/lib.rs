@@ -63,9 +63,57 @@ async fn daemon_health() -> Result<serde_json::Value, String> {
         .map_err(|err| format!("invalid daemon response: {err}"))
 }
 
+#[tauri::command]
+async fn daemon_pii_models() -> Result<serde_json::Value, String> {
+    let token = control_token()?;
+    let response = reqwest::Client::new()
+        .get(format!("{}/admin/llm/pii-models", control_base_url()))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|err| format!("cannot reach the Octra daemon: {err}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|err| format!("invalid daemon response: {err}"))
+}
+
+#[tauri::command]
+async fn daemon_pii_action(
+    id: String,
+    action: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let token = control_token()?;
+    let response = reqwest::Client::new()
+        .post(format!("{}/admin/llm/pii-models/{id}", control_base_url()))
+        .bearer_auth(token)
+        .json(&action)
+        .send()
+        .await
+        .map_err(|err| format!("cannot reach the Octra daemon: {err}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|err| format!("invalid daemon response: {err}"))
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![daemon_health])
+        .invoke_handler(tauri::generate_handler![
+            daemon_health,
+            daemon_pii_models,
+            daemon_pii_action
+        ])
         .run(tauri::generate_context!())
         .expect("error while running the Octra desktop app");
 }

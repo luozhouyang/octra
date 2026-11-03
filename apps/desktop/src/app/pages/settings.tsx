@@ -1,12 +1,130 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@octra/ui";
+import type { PiiModelAction, PiiModelStatus } from "@octra/types";
 import { useState, type FormEvent } from "react";
 
-import { isTauri } from "../../lib/control-api";
+import { actOnPiiModel, fetchPiiModels, isTauri } from "../../lib/control-api";
 import { useControlSettings } from "../../lib/store";
 
 const inputClass =
   "mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-primary";
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${Math.round(bytes / 1024)} KB`;
+}
+
+function PiiModelCard({
+  model,
+  busy,
+  onAction,
+}: {
+  model: PiiModelStatus;
+  busy: boolean;
+  onAction: (action: PiiModelAction) => void;
+}) {
+  const [score, setScore] = useState(model.threshold);
+  const download = model.state.state === "downloading" ? model.state : null;
+  const downloading = download !== null;
+  const percent =
+    download && download.total > 0
+      ? Math.min(100, (download.downloaded / download.total) * 100)
+      : 0;
+
+  return (
+    <div className="mt-4 rounded-lg border border-border bg-background p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="font-medium">{model.display_name}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {model.license} · {formatBytes(model.size)} · revision {model.revision.slice(0, 12)}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            disabled={busy}
+            onClick={() => onAction({ do: model.enabled ? "off" : "on" })}
+          >
+            {model.enabled ? "Turn off" : "Turn on"}
+          </Button>
+          {!model.installed && !downloading && !model.enabled && (
+            <span className="self-center text-xs text-muted-foreground">
+              Turn on to download
+            </span>
+          )}
+          {!model.installed && !downloading && model.enabled && (
+            <Button type="button" disabled={busy} onClick={() => onAction({ do: "on" })}>
+              Retry download
+            </Button>
+          )}
+          {downloading && (
+            <Button type="button" disabled={busy} onClick={() => onAction({ do: "cancel" })}>
+              Cancel
+            </Button>
+          )}
+          {model.installed && (
+            <Button type="button" disabled={busy} onClick={() => onAction({ do: "remove" })}>
+              Remove
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 space-y-2 text-sm">
+        <p className="text-muted-foreground">
+          Status:{" "}
+          <span className="text-foreground">
+            {model.enabled ? "enabled" : "off"} · {model.installed ? "installed" : model.state.state}
+          </span>
+        </p>
+        {downloading && download && (
+          <div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div className="h-full bg-primary transition-all" style={{ width: `${percent}%` }} />
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {formatBytes(download.downloaded)} / {formatBytes(download.total)}
+            </p>
+          </div>
+        )}
+        {model.last_error && <p className="text-xs text-danger">{model.last_error}</p>}
+        {model.engine_readiness === "failed" && (
+          <p className="text-xs text-danger">
+            Engine failed to load{model.engine_error ? `: ${model.engine_error}` : ""}
+          </p>
+        )}
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-end gap-3">
+        <label className="text-sm">
+          <span className="text-muted-foreground">Threshold ({model.floor}–0.99)</span>
+          <input
+            className={inputClass}
+            type="number"
+            min={model.floor}
+            max={0.99}
+            step={0.01}
+            value={score}
+            onChange={(event) => setScore(Number(event.target.value))}
+          />
+        </label>
+        <Button
+          type="button"
+          disabled={busy}
+          onClick={() => onAction({ do: "score", score })}
+        >
+          Apply threshold
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 export function SettingsPage() {
   const queryClient = useQueryClient();
@@ -18,6 +136,19 @@ export function SettingsPage() {
   const [draftBaseUrl, setDraftBaseUrl] = useState(baseUrl);
   const [draftToken, setDraftToken] = useState(token);
   const desktop = isTauri();
+
+  const piiModels = useQuery({
+    queryKey: ["pii-models"],
+    queryFn: fetchPiiModels,
+    refetchInterval: (query) =>
+      query.state.data?.some((model) => model.state.state === "downloading") ? 1_000 : 5_000,
+    retry: 1,
+  });
+  const piiAction = useMutation({
+    mutationFn: ({ id, action }: { id: string; action: PiiModelAction }) =>
+      actOnPiiModel(id, action),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["pii-models"] }),
+  });
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -72,6 +203,40 @@ export function SettingsPage() {
 
             <Button type="submit">Save connection</Button>
           </form>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-border bg-card p-6">
+        <h2 className="text-sm font-medium">Local PII model</h2>
+        <p className="mt-3 text-sm text-muted-foreground">
+          Optional on-device detection for names, addresses and secrets that rules miss. Models are
+          downloaded only when you turn them on and are kept under{" "}
+          <code className="rounded bg-background px-1.5 py-0.5">$OCTRA_HOME/cache/models</code>.
+          Point the <code className="rounded bg-background px-1.5 py-0.5">llm-pii-redaction</code>{" "}
+          plugin at the engine name{" "}
+          <code className="rounded bg-background px-1.5 py-0.5">astrlink-guard</code> to use it.
+        </p>
+
+        {piiModels.isPending && (
+          <p className="mt-4 text-sm text-muted-foreground">Loading models…</p>
+        )}
+        {piiModels.isError && (
+          <p className="mt-4 text-sm text-danger">
+            {piiModels.error instanceof Error ? piiModels.error.message : "cannot load models"}
+          </p>
+        )}
+        {piiModels.data?.map((model) => (
+          <PiiModelCard
+            key={`${model.id}:${model.threshold}`}
+            model={model}
+            busy={piiAction.isPending && piiAction.variables?.id === model.id}
+            onAction={(action) => piiAction.mutate({ id: model.id, action })}
+          />
+        ))}
+        {piiAction.isError && (
+          <p className="mt-4 text-sm text-danger">
+            {piiAction.error instanceof Error ? piiAction.error.message : "model action failed"}
+          </p>
         )}
       </section>
 

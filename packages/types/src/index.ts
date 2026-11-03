@@ -45,3 +45,33 @@ export interface ControlConfig {
     format: "pretty" | "json";
   };
 }
+
+export type PiiDownloadState =
+  | { state: "idle" }
+  | { state: "downloading"; downloaded: number; total: number }
+  | { state: "verifying" }
+  | { state: "ready" }
+  | { state: "failed"; message: string }
+  | { state: "cancelled" };
+
+export interface PiiModelStatus {
+  id: string;
+  display_name: string;
+  license: string;
+  revision: string;
+  size: number;
+  installed: boolean;
+  state: PiiDownloadState;
+  last_error?: string;
+  default_threshold: number;
+  floor: number;
+  enabled: boolean;
+  threshold: number;
+  record_id?: string;
+  engine_readiness?: string;
+  engine_error?: string;
+}
+
+export type PiiModelAction =
+  | { do: "on" | "off" | "download" | "cancel" | "remove" | "pick" }
+  | { do: "score"; score: number };

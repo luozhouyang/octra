@@ -1,6 +1,8 @@
 import type {
   ControlConfig,
   HealthResponse,
+  PiiModelAction,
+  PiiModelStatus,
   RouteSummary,
   ServiceSummary,
   SnapshotInfo,
@@ -53,6 +55,26 @@ export class ControlApiClient {
 
   reload(): Promise<SnapshotInfo> {
     return this.request<SnapshotInfo>("/api/v1/system/reload", { method: "POST" });
+  }
+
+  piiModels(signal?: AbortSignal): Promise<PiiModelStatus[]> {
+    return this.request<PiiModelStatus[]>("/admin/llm/pii-models", { signal });
+  }
+
+  piiModelAction(
+    id: string,
+    action: PiiModelAction,
+    signal?: AbortSignal,
+  ): Promise<PiiModelStatus> {
+    return this.request<PiiModelStatus>(
+      `/admin/llm/pii-models/${encodeURIComponent(id)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(action),
+        signal,
+      },
+    );
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
