@@ -1039,94 +1039,390 @@ impl PluginRuntime {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use http::Method;
-    use octra_api_core::{Route, Service};
+    use bytes::Bytes;
+    use http::{HeaderMap, Method, StatusCode, Uri};
+    use octra_api_core::{PluginInstance, Route, Service};
     use octra_api_plugin_types::{
-        ApiGatewayPlugin, Capability, ConsumerInfo, FailPolicy, GatewayState, PluginAction,
-        PluginError, PluginKind, PluginManifest, PluginPhase, PluginResult, PluginRuntimeKind,
+        ApiGatewayPlugin, ApiGatewayPluginFactory, BodyContext, Capability, ErrorContext,
+        FailPolicy, GatewayState, LogContext, PluginAction, PluginError, PluginKind,
+        PluginManifest, PluginPhase, PluginResult, PluginRuntimeKind, RequestBodyContext,
+        RequestContext, ResponseBodyContext, ResponseContext, UpstreamRequestContext,
+    };
+    use serde_json::{Value, json};
+
+    use super::{
+        CompositePluginFactoryResolver, NoopPluginHostProvider, PluginChain, PluginRegistry,
+        PluginRuntime,
     };
 
-    use super::{PluginChain, PluginEntry};
+    // ---------------------------------------------------------------------
+    // Stub factory: one configurable plugin per manifest name. Every hook
+    // records `stage:<label>` so tests can assert exact ordering.
+    // ---------------------------------------------------------------------
 
-    enum Behaviour {
-        Authenticate,
+    #[derive(Clone, Copy)]
+    enum Outcome {
+        Continue,
+        ShortCircuit(u16),
         FailOpen,
+        FailClosed,
+        Hang,
     }
 
-    struct StubAuth {
-        manifest: PluginManifest,
-        behaviour: Behaviour,
+    #[derive(Clone)]
+    struct StubSpec {
+        name: &'static str,
+        priority: i32,
+        timeout_ms: u64,
+        phases: Vec<PluginPhase>,
+        capabilities: Vec<Capability>,
+        rejects_config: bool,
+        outcome: Outcome,
     }
 
-    #[async_trait]
-    impl ApiGatewayPlugin for StubAuth {
-        fn manifest(&self) -> &PluginManifest {
-            &self.manifest
+    fn spec(name: &'static str) -> StubSpec {
+        StubSpec {
+            name,
+            priority: 0,
+            timeout_ms: 100,
+            phases: vec![PluginPhase::Request],
+            capabilities: Vec::new(),
+            rejects_config: false,
+            outcome: Outcome::Continue,
+        }
+    }
+
+    impl StubSpec {
+        fn with_priority(mut self, priority: i32) -> Self {
+            self.priority = priority;
+            self
         }
 
-        async fn on_request(
-            &self,
-            cx: &mut octra_api_plugin_types::RequestContext<'_>,
-        ) -> PluginResult {
-            match self.behaviour {
-                Behaviour::Authenticate => {
-                    cx.state.consumer = Some(ConsumerInfo {
-                        id: "consumer-1".to_string(),
-                        ..ConsumerInfo::default()
-                    });
-                    Ok(PluginAction::Continue)
-                }
-                Behaviour::FailOpen => Err(PluginError::fail_open("boom")),
+        fn with_phases(mut self, phases: &[PluginPhase]) -> Self {
+            self.phases = phases.to_vec();
+            self
+        }
+
+        fn with_capability(mut self, capability: Capability) -> Self {
+            self.capabilities.push(capability);
+            self
+        }
+
+        fn with_timeout(mut self, timeout_ms: u64) -> Self {
+            self.timeout_ms = timeout_ms;
+            self
+        }
+
+        fn with_outcome(mut self, outcome: Outcome) -> Self {
+            self.outcome = outcome;
+            self
+        }
+
+        fn rejecting_config(mut self) -> Self {
+            self.rejects_config = true;
+            self
+        }
+
+        fn manifest(&self) -> PluginManifest {
+            PluginManifest {
+                name: self.name.to_string(),
+                version: "1.0.0".to_string(),
+                kind: PluginKind::Api,
+                runtime: PluginRuntimeKind::Builtin,
+                priority: self.priority,
+                description: String::new(),
+                timeout_ms: self.timeout_ms,
+                fail_policy: FailPolicy::Open,
+                phases: self.phases.clone(),
+                capabilities: self.capabilities.clone(),
+                config_schema: None,
+                api_version: "1".to_string(),
+                entities: Vec::new(),
+                migrations: Vec::new(),
+                admin_routes: Vec::new(),
             }
         }
     }
 
-    fn manifest() -> PluginManifest {
-        PluginManifest {
-            name: "stub-auth".to_string(),
-            version: "1.0.0".to_string(),
-            kind: PluginKind::Api,
-            runtime: PluginRuntimeKind::Builtin,
-            priority: 0,
-            description: String::new(),
-            timeout_ms: 100,
-            fail_policy: FailPolicy::Open,
-            phases: vec![PluginPhase::Request],
-            capabilities: vec![Capability::Auth],
-            config_schema: None,
-            api_version: "1".to_string(),
-            entities: Vec::new(),
-            migrations: Vec::new(),
-            admin_routes: Vec::new(),
+    fn short_circuit(status: u16) -> axum::response::Response {
+        axum::response::Response::builder()
+            .status(StatusCode::from_u16(status).expect("valid status"))
+            .body(axum::body::Body::empty())
+            .expect("response")
+    }
+
+    struct StubPlugin {
+        manifest: PluginManifest,
+        label: String,
+        outcome: Outcome,
+        trace: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl StubPlugin {
+        fn record(&self, stage: &str) {
+            self.trace
+                .lock()
+                .expect("trace lock")
+                .push(format!("{stage}:{}", self.label));
+        }
+
+        async fn decide(&self) -> PluginResult {
+            match self.outcome {
+                Outcome::Continue => Ok(PluginAction::Continue),
+                Outcome::ShortCircuit(status) => {
+                    Ok(PluginAction::ShortCircuit(short_circuit(status)))
+                }
+                Outcome::FailOpen => Err(PluginError::fail_open("stub failure")),
+                Outcome::FailClosed => Err(PluginError::fail_closed("stub failure")),
+                Outcome::Hang => {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    Ok(PluginAction::Continue)
+                }
+            }
+        }
+
+        async fn act(&self, stage: &str) -> PluginResult {
+            self.record(stage);
+            self.decide().await
+        }
+
+        async fn transform(&self, stage: &str, body: Bytes) -> Result<Bytes, PluginError> {
+            self.record(stage);
+            match self.outcome {
+                Outcome::FailOpen => Err(PluginError::fail_open("stub failure")),
+                Outcome::FailClosed => Err(PluginError::fail_closed("stub failure")),
+                Outcome::Hang => {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    Ok(body)
+                }
+                Outcome::Continue | Outcome::ShortCircuit(_) => {
+                    let mut next = body.to_vec();
+                    next.extend_from_slice(self.label.as_bytes());
+                    Ok(Bytes::from(next))
+                }
+            }
         }
     }
 
-    fn chain(behaviour: Behaviour) -> PluginChain {
-        PluginChain {
-            entries: vec![PluginEntry {
-                id: "stub-auth".to_string(),
-                name: "stub-auth".to_string(),
-                instance_name: None,
-                priority: 0,
-                timeout: Duration::from_millis(100),
-                phases: vec![PluginPhase::Request],
-                capabilities: vec![Capability::Auth],
-                protocols: Vec::new(),
-                auth: true,
-                ordering: None,
-                service_id: None,
-                route_id: None,
-                consumer_id: None,
-                consumer_group_id: None,
-                plugin: Arc::new(StubAuth {
-                    manifest: manifest(),
-                    behaviour,
-                }),
-            }],
+    #[async_trait]
+    impl ApiGatewayPlugin for StubPlugin {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn on_rewrite(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
+            self.act("rewrite").await
+        }
+
+        async fn on_request(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
+            self.act("request").await
+        }
+
+        async fn on_upstream_request(&self, _cx: &mut UpstreamRequestContext<'_>) -> PluginResult {
+            self.act("upstream_request").await
+        }
+
+        async fn on_response(&self, _cx: &mut ResponseContext<'_>) -> PluginResult {
+            self.act("response").await
+        }
+
+        async fn on_error(&self, cx: &mut ErrorContext<'_>) -> PluginResult {
+            self.trace
+                .lock()
+                .expect("trace lock")
+                .push(format!("error:{}:{}", self.label, cx.error));
+            self.decide().await
+        }
+
+        async fn on_request_buffer(
+            &self,
+            _cx: &mut RequestBodyContext<'_>,
+            body: Bytes,
+        ) -> Result<Bytes, PluginError> {
+            self.transform("request_buffer", body).await
+        }
+
+        async fn on_response_buffer(
+            &self,
+            _cx: &mut ResponseBodyContext<'_>,
+            body: Bytes,
+        ) -> Result<Bytes, PluginError> {
+            self.transform("response_buffer", body).await
+        }
+
+        async fn on_response_body(
+            &self,
+            _cx: &BodyContext<'_>,
+            chunk: Bytes,
+        ) -> Result<Bytes, PluginError> {
+            self.transform("response_body", chunk).await
+        }
+
+        async fn on_log(&self, _cx: &LogContext<'_>) {
+            if matches!(self.outcome, Outcome::Hang) {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            self.record("log");
+        }
+    }
+
+    struct StubFactory {
+        spec: StubSpec,
+        trace: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ApiGatewayPluginFactory for StubFactory {
+        fn manifest(&self) -> PluginManifest {
+            self.spec.manifest()
+        }
+
+        fn create(
+            &self,
+            _id: &str,
+            config: Value,
+        ) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
+            if self.spec.rejects_config {
+                return Err(PluginError::fail_closed("invalid config"));
+            }
+            let label = config
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or(self.spec.name)
+                .to_string();
+            Ok(Arc::new(StubPlugin {
+                manifest: self.spec.manifest(),
+                label,
+                outcome: self.spec.outcome,
+                trace: self.trace.clone(),
+            }))
+        }
+
+        fn phases(&self) -> Vec<PluginPhase> {
+            self.spec.phases.clone()
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Harness
+    // ---------------------------------------------------------------------
+
+    struct Harness {
+        runtime: PluginRuntime,
+        trace: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Harness {
+        fn new(specs: &[StubSpec], instances: Vec<PluginInstance>) -> Self {
+            let trace = Arc::new(Mutex::new(Vec::new()));
+            let mut registry = PluginRegistry::new();
+            for spec in specs {
+                registry.register(StubFactory {
+                    spec: spec.clone(),
+                    trace: trace.clone(),
+                });
+            }
+            let runtime = PluginRuntime::new(Arc::new(registry));
+            runtime.reload(instances).expect("reload");
+            Self { runtime, trace }
+        }
+
+        fn trace(&self) -> Vec<String> {
+            self.trace.lock().expect("trace lock").clone()
+        }
+
+        fn clear_trace(&self) {
+            self.trace.lock().expect("trace lock").clear();
+        }
+    }
+
+    trait InstanceExt: Sized {
+        fn labeled(self, label: &str) -> Self;
+        fn with_id(self, id: &str) -> Self;
+        fn named(self, instance_name: &str) -> Self;
+        fn on_route(self, route: &str) -> Self;
+        fn on_service(self, service: &str) -> Self;
+        fn for_consumer(self, consumer: &str) -> Self;
+        fn for_group(self, group: &str) -> Self;
+        fn with_protocols(self, protocols: &[&str]) -> Self;
+        fn with_ordering(self, ordering: Value) -> Self;
+        fn disabled(self) -> Self;
+    }
+
+    impl InstanceExt for PluginInstance {
+        fn labeled(mut self, label: &str) -> Self {
+            self.config = json!({ "label": label });
+            self
+        }
+
+        fn with_id(mut self, id: &str) -> Self {
+            self.id = id.to_string();
+            self
+        }
+
+        fn named(mut self, instance_name: &str) -> Self {
+            self.instance_name = Some(instance_name.to_string());
+            self
+        }
+
+        fn on_route(mut self, route: &str) -> Self {
+            self.route_id = Some(route.to_string());
+            self
+        }
+
+        fn on_service(mut self, service: &str) -> Self {
+            self.service_id = Some(service.to_string());
+            self
+        }
+
+        fn for_consumer(mut self, consumer: &str) -> Self {
+            self.consumer_id = Some(consumer.to_string());
+            self
+        }
+
+        fn for_group(mut self, group: &str) -> Self {
+            self.consumer_group_id = Some(group.to_string());
+            self
+        }
+
+        fn with_protocols(mut self, protocols: &[&str]) -> Self {
+            self.protocols = protocols
+                .iter()
+                .map(|protocol| (*protocol).to_string())
+                .collect();
+            self
+        }
+
+        fn with_ordering(mut self, ordering: Value) -> Self {
+            self.ordering = Some(ordering);
+            self
+        }
+
+        fn disabled(mut self) -> Self {
+            self.enabled = false;
+            self
+        }
+    }
+
+    fn instance(name: &str) -> PluginInstance {
+        PluginInstance {
+            id: name.to_string(),
+            name: name.to_string(),
+            instance_name: None,
+            config: json!({ "label": name }),
+            enabled: true,
+            protocols: Vec::new(),
+            ordering: None,
+            service_id: None,
+            route_id: None,
+            consumer_id: None,
+            consumer_group_id: None,
+            tags: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
         }
     }
 
@@ -1172,47 +1468,837 @@ mod tests {
         }
     }
 
-    type AuthRun = (
-        Result<Option<axum::response::Response>, PluginError>,
-        Option<String>,
-    );
-
-    async fn run(behaviour: Behaviour) -> AuthRun {
-        let mut uri = "/".parse().unwrap();
-        let mut headers = http::HeaderMap::new();
-        let mut state = GatewayState::default();
-        let route = route();
-        let service = service();
-        let method = Method::GET;
-        let mut cx = octra_api_plugin_types::RequestContext {
+    fn request_context<'a>(
+        state: &'a mut GatewayState,
+        uri: &'a mut Uri,
+        headers: &'a mut HeaderMap,
+        method: &'a Method,
+        route: &'a Route,
+        service: &'a Service,
+    ) -> RequestContext<'a> {
+        RequestContext {
             request_id: "req",
-            state: &mut state,
+            state,
             matched_path: "/",
-            method: &method,
-            uri: &mut uri,
-            headers: &mut headers,
+            method,
+            uri,
+            headers,
             client_ip: None,
             consumer_id: None,
             credential_id: None,
+            route,
+            service,
+        }
+    }
+
+    async fn run_rewrite(
+        chain: &PluginChain,
+    ) -> Result<Option<axum::response::Response>, PluginError> {
+        let route = route();
+        let service = service();
+        let method = Method::GET;
+        let mut uri: Uri = "/".parse().expect("uri");
+        let mut headers = HeaderMap::new();
+        let mut state = GatewayState::default();
+        let mut cx = request_context(
+            &mut state,
+            &mut uri,
+            &mut headers,
+            &method,
+            &route,
+            &service,
+        );
+        chain.on_rewrite(&mut cx).await
+    }
+
+    async fn run_request(
+        chain: &PluginChain,
+    ) -> Result<Option<axum::response::Response>, PluginError> {
+        let route = route();
+        let service = service();
+        let method = Method::GET;
+        let mut uri: Uri = "/".parse().expect("uri");
+        let mut headers = HeaderMap::new();
+        let mut state = GatewayState::default();
+        let mut cx = request_context(
+            &mut state,
+            &mut uri,
+            &mut headers,
+            &method,
+            &route,
+            &service,
+        );
+        chain.on_request(&mut cx).await
+    }
+
+    async fn run_upstream(
+        chain: &PluginChain,
+    ) -> Result<Option<axum::response::Response>, PluginError> {
+        let route = route();
+        let service = service();
+        let method = Method::GET;
+        let mut uri: Uri = "/".parse().expect("uri");
+        let mut headers = HeaderMap::new();
+        let mut state = GatewayState::default();
+        let mut cx = UpstreamRequestContext {
+            request_id: "req",
+            state: &mut state,
+            method: &method,
+            uri: &mut uri,
+            headers: &mut headers,
+            consumer_id: None,
+            route: &route,
+            service: &service,
+            target_url: "http://localhost/",
+        };
+        chain.on_upstream_request(&mut cx).await
+    }
+
+    async fn run_response(
+        chain: &PluginChain,
+    ) -> Result<Option<axum::response::Response>, PluginError> {
+        let route = route();
+        let service = service();
+        let request_headers = HeaderMap::new();
+        let mut status = StatusCode::OK;
+        let mut headers = HeaderMap::new();
+        let mut state = GatewayState::default();
+        let mut cx = ResponseContext {
+            request_id: "req",
+            state: &mut state,
+            request_headers: &request_headers,
+            status: &mut status,
+            headers: &mut headers,
+            consumer_id: None,
+            route: &route,
+            service: &service,
+            target_url: "http://localhost/",
+        };
+        chain.on_response(&mut cx).await
+    }
+
+    async fn run_error(
+        chain: &PluginChain,
+    ) -> Result<Option<axum::response::Response>, PluginError> {
+        let route = route();
+        let service = service();
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("uri");
+        let headers = HeaderMap::new();
+        let mut state = GatewayState::default();
+        let mut cx = ErrorContext {
+            request_id: "req",
+            state: &mut state,
+            method: &method,
+            uri: &uri,
+            headers: &headers,
+            consumer_id: None,
+            route: &route,
+            service: &service,
+            target_url: "http://localhost/",
+            error: "upstream exploded",
+        };
+        chain.on_error(&mut cx).await
+    }
+
+    async fn run_request_buffer(chain: &PluginChain, body: Bytes) -> Result<Bytes, PluginError> {
+        let route = route();
+        let service = service();
+        let method = Method::GET;
+        let mut uri: Uri = "/".parse().expect("uri");
+        let mut headers = HeaderMap::new();
+        let mut state = GatewayState::default();
+        let mut cx = RequestBodyContext {
+            request_id: "req",
+            state: &mut state,
+            method: &method,
+            uri: &mut uri,
+            headers: &mut headers,
+            consumer_id: None,
             route: &route,
             service: &service,
         };
-        let result = chain(behaviour).on_request(&mut cx).await;
-        (result, state.consumer.map(|consumer| consumer.id))
+        chain.on_request_buffer(&mut cx, body).await
+    }
+
+    async fn run_response_buffer(chain: &PluginChain, body: Bytes) -> Result<Bytes, PluginError> {
+        let route = route();
+        let service = service();
+        let headers = HeaderMap::new();
+        let mut state = GatewayState::default();
+        let mut cx = ResponseBodyContext {
+            request_id: "req",
+            state: &mut state,
+            status: StatusCode::OK,
+            headers: &headers,
+            consumer_id: None,
+            route: &route,
+            service: &service,
+            target_url: "http://localhost/",
+        };
+        chain.on_response_buffer(&mut cx, body).await
+    }
+
+    async fn run_response_body(chain: &PluginChain, chunk: Bytes) -> Result<Bytes, PluginError> {
+        let route = route();
+        let service = service();
+        let mut state = GatewayState::default();
+        let mut cx = BodyContext {
+            request_id: "req",
+            state: &mut state,
+            route: &route,
+            service: &service,
+            target_url: "http://localhost/",
+        };
+        chain.on_response_body(&mut cx, chunk).await
+    }
+
+    async fn run_log(chain: &PluginChain) {
+        let route = route();
+        let service = service();
+        let method = Method::GET;
+        let mut state = GatewayState::default();
+        let mut cx = LogContext {
+            request_id: "req",
+            state: &mut state,
+            method: &method,
+            path: "/",
+            status: 200,
+            latency: Duration::from_millis(1),
+            consumer_id: None,
+            route: &route,
+            service: &service,
+            target_url: Some("http://localhost/"),
+            error: None,
+        };
+        chain.on_log(&mut cx).await;
+    }
+
+    // ---------------------------------------------------------------------
+    // Ordering
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn orders_by_priority_then_name() {
+        let harness = Harness::new(
+            &[
+                spec("alpha").with_priority(10),
+                spec("beta").with_priority(20),
+                spec("gamma").with_priority(20),
+            ],
+            vec![instance("alpha"), instance("beta"), instance("gamma")],
+        );
+
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_eq!(
+            chain.names().collect::<Vec<_>>(),
+            ["beta", "gamma", "alpha"]
+        );
+        run_request(&chain).await.expect("request phase");
+        assert_eq!(
+            harness.trace(),
+            ["request:beta", "request:gamma", "request:alpha"]
+        );
     }
 
     #[tokio::test]
-    async fn auth_entries_run_in_the_request_phase() {
-        let (result, consumer) = run(Behaviour::Authenticate).await;
-        assert!(result.unwrap().is_none());
-        assert_eq!(consumer.as_deref(), Some("consumer-1"));
+    async fn ordering_before_and_after_override_priority() {
+        let harness = Harness::new(
+            &[
+                spec("a").with_priority(30),
+                spec("b").with_priority(20),
+                spec("c").with_priority(10),
+            ],
+            vec![
+                instance("a"),
+                instance("b"),
+                instance("c").with_ordering(json!({ "before": ["a"] })),
+            ],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_eq!(chain.names().collect::<Vec<_>>(), ["c", "a", "b"]);
+
+        let harness = Harness::new(
+            &[
+                spec("a").with_priority(30),
+                spec("b").with_priority(20),
+                spec("c").with_priority(10),
+            ],
+            vec![
+                instance("a").with_ordering(json!({ "after": ["c"] })),
+                instance("b"),
+                instance("c"),
+            ],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_eq!(chain.names().collect::<Vec<_>>(), ["b", "c", "a"]);
     }
 
     #[tokio::test]
-    async fn auth_errors_fail_closed_even_when_the_policy_is_open() {
-        let (result, consumer) = run(Behaviour::FailOpen).await;
-        let error = result.unwrap_err();
+    async fn ordering_chains_apply_and_cycles_terminate() {
+        let harness = Harness::new(
+            &[
+                spec("a").with_priority(30),
+                spec("b").with_priority(20),
+                spec("c").with_priority(10),
+            ],
+            vec![
+                instance("a"),
+                instance("b").with_ordering(json!({ "before": ["a"] })),
+                instance("c").with_ordering(json!({ "before": ["b"] })),
+            ],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_eq!(chain.names().collect::<Vec<_>>(), ["c", "b", "a"]);
+
+        let harness = Harness::new(
+            &[spec("a"), spec("b")],
+            vec![
+                instance("a").with_ordering(json!({ "before": ["b"] })),
+                instance("b").with_ordering(json!({ "before": ["a"] })),
+            ],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        let mut names = chain.names().collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["a", "b"]);
+    }
+
+    // ---------------------------------------------------------------------
+    // Scope resolution
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn route_scope_beats_service_scope_beats_global() {
+        let harness = Harness::new(
+            &[spec("stub")],
+            vec![
+                instance("stub").labeled("global"),
+                instance("stub").labeled("service").on_service("svc"),
+                instance("stub")
+                    .labeled("route")
+                    .on_route("rt")
+                    .on_service("svc"),
+            ],
+        );
+
+        let chain = harness
+            .runtime
+            .pre_auth_chain(Some("rt"), Some("svc"), "http");
+        assert_eq!(chain.names().collect::<Vec<_>>(), ["stub"]);
+        run_request(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["request:route"]);
+
+        harness.clear_trace();
+        let chain = harness
+            .runtime
+            .pre_auth_chain(Some("other"), Some("svc"), "http");
+        run_request(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["request:service"]);
+
+        harness.clear_trace();
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        run_request(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["request:global"]);
+    }
+
+    #[tokio::test]
+    async fn distinct_instance_names_all_run_but_duplicates_dedupe_by_id() {
+        let harness = Harness::new(
+            &[spec("stub")],
+            vec![
+                instance("stub").named("a").labeled("a"),
+                instance("stub").named("b").labeled("b"),
+            ],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        run_request(&chain).await.expect("request phase");
+        let mut trace = harness.trace();
+        trace.sort();
+        assert_eq!(trace, ["request:a", "request:b"]);
+
+        let harness = Harness::new(
+            &[spec("stub")],
+            vec![
+                instance("stub").with_id("z").labeled("z"),
+                instance("stub").with_id("a").labeled("a"),
+            ],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_eq!(chain.names().count(), 1);
+        run_request(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["request:a"]);
+    }
+
+    #[tokio::test]
+    async fn consumer_and_group_scopes_resolve_after_authentication() {
+        let harness = Harness::new(
+            &[spec("quota")],
+            vec![
+                instance("quota").labeled("global"),
+                instance("quota").labeled("consumer").for_consumer("c1"),
+                instance("quota").labeled("group").for_group("g1"),
+            ],
+        );
+
+        let pre = harness.runtime.pre_auth_chain(None, None, "http");
+        assert!(pre.is_empty());
+
+        let chain = harness
+            .runtime
+            .post_auth_chain(None, None, Some("c1"), &[], &[], "http");
+        run_request(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["request:consumer"]);
+
+        harness.clear_trace();
+        let chain = harness
+            .runtime
+            .post_auth_chain(None, None, Some("c2"), &[], &[], "http");
+        run_request(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["request:global"]);
+
+        harness.clear_trace();
+        let chain = harness.runtime.post_auth_chain(
+            None,
+            None,
+            Some("c2"),
+            &["g1".to_string()],
+            &["gold".to_string()],
+            "http",
+        );
+        run_request(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["request:group"]);
+    }
+
+    #[tokio::test]
+    async fn auth_entries_are_excluded_after_authentication() {
+        let harness = Harness::new(
+            &[
+                spec("auth")
+                    .with_priority(100)
+                    .with_capability(Capability::Auth),
+                spec("quota"),
+            ],
+            vec![
+                instance("auth"),
+                instance("quota").labeled("global"),
+                instance("quota").labeled("consumer").for_consumer("c1"),
+            ],
+        );
+
+        let pre = harness.runtime.pre_auth_chain(None, None, "http");
+        assert!(pre.has_auth());
+        assert_eq!(pre.names().collect::<Vec<_>>(), ["auth"]);
+
+        let post = harness
+            .runtime
+            .post_auth_chain(None, None, Some("c1"), &[], &[], "http");
+        assert!(!post.has_auth());
+        assert_eq!(post.names().collect::<Vec<_>>(), ["quota"]);
+        run_request(&post).await.expect("request phase");
+        assert_eq!(harness.trace(), ["request:consumer"]);
+    }
+
+    #[tokio::test]
+    async fn protocols_filter_instances_case_insensitively() {
+        let harness = Harness::new(
+            &[spec("stub")],
+            vec![instance("stub").with_protocols(&["https"])],
+        );
+
+        assert!(
+            harness
+                .runtime
+                .pre_auth_chain(None, None, "http")
+                .is_empty()
+        );
+        assert!(
+            !harness
+                .runtime
+                .pre_auth_chain(None, None, "HTTPS")
+                .is_empty()
+        );
+
+        let harness = Harness::new(&[spec("stub")], vec![instance("stub")]);
+        assert!(
+            !harness
+                .runtime
+                .pre_auth_chain(None, None, "http")
+                .is_empty()
+        );
+        assert!(
+            !harness
+                .runtime
+                .pre_auth_chain(None, None, "https")
+                .is_empty()
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Failure policy
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn general_fail_open_continues_and_fail_closed_errors() {
+        let open = Harness::new(
+            &[spec("stub").with_outcome(Outcome::FailOpen)],
+            vec![instance("stub")],
+        );
+        let chain = open.runtime.pre_auth_chain(None, None, "http");
+        assert!(run_request(&chain).await.expect("fail-open").is_none());
+
+        let closed = Harness::new(
+            &[spec("stub").with_outcome(Outcome::FailClosed)],
+            vec![instance("stub")],
+        );
+        let chain = closed.runtime.pre_auth_chain(None, None, "http");
+        let error = run_request(&chain).await.expect_err("fail-closed");
         assert_eq!(error.fail_policy, FailPolicy::Closed);
-        assert!(consumer.is_none());
+    }
+
+    #[tokio::test]
+    async fn timeouts_fail_closed() {
+        let harness = Harness::new(
+            &[spec("stub").with_timeout(10).with_outcome(Outcome::Hang)],
+            vec![instance("stub")],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        let error = run_request(&chain).await.expect_err("timeout");
+        assert_eq!(error.fail_policy, FailPolicy::Closed);
+        assert!(error.message.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn auth_failures_and_timeouts_fail_closed_even_when_the_policy_is_open() {
+        let harness = Harness::new(
+            &[spec("auth")
+                .with_capability(Capability::Auth)
+                .with_outcome(Outcome::FailOpen)],
+            vec![instance("auth")],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        let error = run_request(&chain).await.expect_err("auth failure");
+        assert_eq!(error.fail_policy, FailPolicy::Closed);
+
+        let harness = Harness::new(
+            &[spec("auth")
+                .with_capability(Capability::Auth)
+                .with_timeout(10)
+                .with_outcome(Outcome::Hang)],
+            vec![instance("auth")],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        let error = run_request(&chain).await.expect_err("auth timeout");
+        assert_eq!(error.fail_policy, FailPolicy::Closed);
+    }
+
+    // ---------------------------------------------------------------------
+    // Short-circuiting
+    // ---------------------------------------------------------------------
+
+    fn short_circuit_harness(phase: PluginPhase) -> Harness {
+        Harness::new(
+            &[
+                spec("a")
+                    .with_phases(&[phase])
+                    .with_outcome(Outcome::ShortCircuit(418)),
+                spec("b").with_phases(&[phase]),
+            ],
+            vec![instance("a"), instance("b")],
+        )
+    }
+
+    async fn assert_short_circuit(result: Result<Option<axum::response::Response>, PluginError>) {
+        let response = result.expect("stage result").expect("short circuit");
+        assert_eq!(
+            response.status(),
+            StatusCode::from_u16(418).expect("status")
+        );
+    }
+
+    #[tokio::test]
+    async fn short_circuits_stop_the_rest_of_each_stage() {
+        let harness = short_circuit_harness(PluginPhase::Rewrite);
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_short_circuit(run_rewrite(&chain).await).await;
+        assert_eq!(harness.trace(), ["rewrite:a"]);
+
+        let harness = short_circuit_harness(PluginPhase::Request);
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_short_circuit(run_request(&chain).await).await;
+        assert_eq!(harness.trace(), ["request:a"]);
+
+        let harness = short_circuit_harness(PluginPhase::UpstreamRequest);
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_short_circuit(run_upstream(&chain).await).await;
+        assert_eq!(harness.trace(), ["upstream_request:a"]);
+
+        let harness = short_circuit_harness(PluginPhase::Response);
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_short_circuit(run_response(&chain).await).await;
+        assert_eq!(harness.trace(), ["response:a"]);
+
+        let harness = short_circuit_harness(PluginPhase::Error);
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_short_circuit(run_error(&chain).await).await;
+        assert_eq!(harness.trace(), ["error:a:upstream exploded"]);
+    }
+
+    // ---------------------------------------------------------------------
+    // Bytes stages
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn bytes_stages_pin_fail_open_asymmetry() {
+        let harness = Harness::new(
+            &[spec("stub").with_outcome(Outcome::FailOpen)],
+            vec![instance("stub")],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        let request = run_request_buffer(&chain, Bytes::from_static(b"body"))
+            .await
+            .expect("request buffer fail-open");
+        assert!(request.is_empty());
+
+        let harness = Harness::new(
+            &[spec("stub")
+                .with_phases(&[PluginPhase::ResponseBody])
+                .with_outcome(Outcome::FailOpen)],
+            vec![instance("stub")],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        let buffered = run_response_buffer(&chain, Bytes::from_static(b"body"))
+            .await
+            .expect("response buffer fail-open");
+        assert!(buffered.is_empty());
+        let chunked = run_response_body(&chain, Bytes::from_static(b"chunk"))
+            .await
+            .expect("response body fail-open");
+        assert_eq!(chunked, Bytes::from_static(b"chunk"));
+
+        let harness = Harness::new(
+            &[spec("stub")
+                .with_phases(&[PluginPhase::ResponseBody])
+                .with_outcome(Outcome::FailClosed)],
+            vec![instance("stub")],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert!(
+            run_response_buffer(&chain, Bytes::from_static(b"body"))
+                .await
+                .is_err()
+        );
+        assert!(
+            run_response_body(&chain, Bytes::from_static(b"chunk"))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn bytes_stages_chain_in_priority_order() {
+        let harness = Harness::new(
+            &[spec("a").with_priority(10), spec("b")],
+            vec![instance("a"), instance("b")],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_eq!(
+            run_request_buffer(&chain, Bytes::from_static(b"x"))
+                .await
+                .expect("request buffer"),
+            Bytes::from_static(b"xab")
+        );
+
+        let harness = Harness::new(
+            &[
+                spec("a")
+                    .with_priority(10)
+                    .with_phases(&[PluginPhase::ResponseBody]),
+                spec("b").with_phases(&[PluginPhase::ResponseBody]),
+            ],
+            vec![instance("a"), instance("b")],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert_eq!(
+            run_response_buffer(&chain, Bytes::from_static(b"x"))
+                .await
+                .expect("response buffer"),
+            Bytes::from_static(b"xab")
+        );
+        assert_eq!(
+            run_response_body(&chain, Bytes::from_static(b"x"))
+                .await
+                .expect("response body"),
+            Bytes::from_static(b"xab")
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Log hook
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn log_hook_runs_for_all_entries_and_swallows_timeouts() {
+        let harness = Harness::new(
+            &[
+                spec("a").with_phases(&[PluginPhase::Log]),
+                spec("b").with_phases(&[PluginPhase::Log]),
+            ],
+            vec![instance("a"), instance("b")],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        run_log(&chain).await;
+        assert_eq!(harness.trace(), ["log:a", "log:b"]);
+
+        let harness = Harness::new(
+            &[
+                spec("slow")
+                    .with_phases(&[PluginPhase::Log])
+                    .with_timeout(10)
+                    .with_outcome(Outcome::Hang),
+                spec("fast").with_phases(&[PluginPhase::Log]),
+            ],
+            vec![instance("slow"), instance("fast")],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        run_log(&chain).await;
+        assert_eq!(harness.trace(), ["log:fast"]);
+    }
+
+    // ---------------------------------------------------------------------
+    // Compilation and resolver behaviour
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn disabled_unknown_and_invalid_instances_are_skipped() {
+        let harness = Harness::new(
+            &[spec("known")],
+            vec![instance("known").disabled(), instance("unknown")],
+        );
+        assert!(
+            harness
+                .runtime
+                .pre_auth_chain(None, None, "http")
+                .is_empty()
+        );
+        assert!(!harness.runtime.has_plugins());
+
+        let harness = Harness::new(
+            &[spec("broken").rejecting_config()],
+            vec![instance("broken")],
+        );
+        assert!(
+            harness
+                .runtime
+                .pre_auth_chain(None, None, "http")
+                .is_empty()
+        );
+        assert!(!harness.runtime.has_plugins());
+    }
+
+    #[tokio::test]
+    async fn composite_resolver_prefers_builtins_and_dedupes_manifests() {
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let mut builtins = PluginRegistry::new();
+        builtins.register(StubFactory {
+            spec: spec("shared").with_priority(1),
+            trace: trace.clone(),
+        });
+        builtins.register(StubFactory {
+            spec: spec("only-builtin"),
+            trace: trace.clone(),
+        });
+        let mut dynamic = PluginRegistry::new();
+        dynamic.register(StubFactory {
+            spec: spec("shared").with_priority(2),
+            trace: trace.clone(),
+        });
+        dynamic.register(StubFactory {
+            spec: spec("only-dynamic"),
+            trace,
+        });
+
+        let resolver = CompositePluginFactoryResolver::new(Arc::new(builtins), Arc::new(dynamic));
+        let runtime = PluginRuntime::with_resolver(
+            Arc::new(PluginRegistry::new()),
+            Arc::new(resolver),
+            Arc::new(NoopPluginHostProvider),
+        );
+
+        assert_eq!(
+            runtime
+                .manifests()
+                .into_iter()
+                .map(|manifest| manifest.name)
+                .collect::<Vec<_>>(),
+            ["only-builtin", "only-dynamic", "shared"]
+        );
+        assert_eq!(
+            runtime
+                .factory("shared")
+                .expect("builtin factory")
+                .manifest()
+                .priority,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn chains_are_cached_and_replaced_on_reload() {
+        let harness = Harness::new(&[spec("stub")], vec![instance("stub")]);
+        let first = harness.runtime.pre_auth_chain(Some("r"), Some("s"), "http");
+        let same = harness.runtime.pre_auth_chain(Some("r"), Some("s"), "http");
+        assert!(Arc::ptr_eq(&first, &same));
+
+        let other = harness
+            .runtime
+            .pre_auth_chain(Some("r2"), Some("s"), "http");
+        assert!(!Arc::ptr_eq(&first, &other));
+
+        let post =
+            harness
+                .runtime
+                .post_auth_chain(Some("r"), Some("s"), Some("c"), &[], &[], "http");
+        let post_same =
+            harness
+                .runtime
+                .post_auth_chain(Some("r"), Some("s"), Some("c"), &[], &[], "http");
+        assert!(Arc::ptr_eq(&post, &post_same));
+
+        harness
+            .runtime
+            .reload(vec![instance("stub").labeled("new")])
+            .expect("reload");
+        let after = harness.runtime.pre_auth_chain(Some("r"), Some("s"), "http");
+        assert!(!Arc::ptr_eq(&first, &after));
+    }
+
+    #[tokio::test]
+    async fn empty_runtime_shares_an_empty_chain_and_validates_names() {
+        let runtime = PluginRuntime::empty();
+        let first = runtime.pre_auth_chain(None, None, "http");
+        let second = runtime.pre_auth_chain(Some("r"), Some("s"), "https");
+        assert!(first.is_empty());
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(
+            runtime
+                .post_auth_chain(None, None, None, &[], &[], "http")
+                .is_empty()
+        );
+        assert!(!runtime.has_plugins());
+
+        let error = runtime
+            .validate("missing", &json!({}))
+            .expect_err("unknown plugin");
+        assert!(error.message.contains("unknown plugin"));
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_registered_plugins() {
+        let harness = Harness::new(&[spec("stub")], Vec::new());
+        harness
+            .runtime
+            .validate("stub", &json!({}))
+            .expect("known plugin");
     }
 }
