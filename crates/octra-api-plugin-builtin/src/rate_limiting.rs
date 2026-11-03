@@ -277,13 +277,33 @@ struct Limiter {
 static LIMITERS: OnceLock<Mutex<HashMap<String, Limiter>>> = OnceLock::new();
 
 impl RateLimitingPlugin {
+    /// Auth plugins run earlier in the chain (priorities 1005–1250 versus 910),
+    /// but the request context is built before they do, so fall back to the
+    /// authenticated state they populated.
+    fn consumer_identifier(cx: &RequestContext<'_>) -> Option<String> {
+        cx.consumer_id.map(str::to_string).or_else(|| {
+            cx.state
+                .consumer
+                .as_ref()
+                .map(|consumer| consumer.id.clone())
+        })
+    }
+
+    fn credential_identifier(cx: &RequestContext<'_>) -> Option<String> {
+        cx.credential_id.map(str::to_string).or_else(|| {
+            cx.state
+                .credential
+                .as_ref()
+                .map(|credential| credential.id.clone())
+        })
+    }
+
     fn identifier(&self, cx: &RequestContext<'_>) -> String {
         let primary = match self.config.limit_by {
-            LimitBy::Consumer => cx
-                .consumer_id
-                .map(str::to_string)
-                .or_else(|| cx.credential_id.map(str::to_string)),
-            LimitBy::Credential => cx.credential_id.map(str::to_string),
+            LimitBy::Consumer => {
+                Self::consumer_identifier(cx).or_else(|| Self::credential_identifier(cx))
+            }
+            LimitBy::Credential => Self::credential_identifier(cx),
             LimitBy::Ip => None,
             LimitBy::Service => Some(cx.service.id.clone()),
             LimitBy::Header => self.config.header_name.as_deref().and_then(|name| {

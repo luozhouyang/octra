@@ -126,9 +126,7 @@ async fn reports_all_configured_windows() {
 }
 
 #[tokio::test]
-async fn consumer_limits_share_the_client_ip_in_the_pre_auth_chain() {
-    // Non-deferred rate-limiting instances run before the consumer context is
-    // attached, so `limit_by: consumer` currently keys on the client IP.
+async fn consumer_limits_are_keyed_by_the_authenticated_consumer() {
     let (addr, _calls) = spawn_mock("rate-consumer").await;
     let gateway = gateway().await;
     seed_service(
@@ -181,6 +179,12 @@ async fn consumer_limits_share_the_client_ip_in_the_pre_auth_chain() {
     let first = with_header(get("/rate-consumer/items"), "apikey", "first-key");
     assert_eq!(gateway.send(first).await.0, StatusCode::CREATED);
 
+    let exhausted = with_header(get("/rate-consumer/items"), "apikey", "first-key");
+    assert_eq!(
+        gateway.send(exhausted).await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+
     let second = with_header(get("/rate-consumer/items"), "apikey", "second-key");
-    assert_eq!(gateway.send(second).await.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(gateway.send(second).await.0, StatusCode::CREATED);
 }
