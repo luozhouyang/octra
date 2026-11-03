@@ -105,12 +105,13 @@ async fn a_trigger_header_gates_termination() {
 }
 
 #[tokio::test]
-async fn only_the_trigger_header_is_matched() {
+async fn a_trigger_query_parameter_also_terminates() {
     let (gateway, upstream) = fixture(json!({"trigger": "x-kill"})).await;
 
-    // Kong also accepts a query parameter trigger; this implementation only
-    // inspects request headers, so the request continues upstream.
     let request = with_query(get("/terminate/items"), "x-kill=1");
-    assert_eq!(gateway.send(request).await.0, StatusCode::CREATED);
-    assert_eq!(hit_count(&upstream), 1);
+    assert_eq!(
+        gateway.send(request).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(hit_count(&upstream), 0);
 }

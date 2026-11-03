@@ -87,10 +87,15 @@ impl ApiGatewayPlugin for RequestTerminationPlugin {
     }
 
     async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
-        if let Some(trigger) = &self.config.trigger
-            && !cx.headers.contains_key(trigger.as_str())
-        {
-            return Ok(PluginAction::Continue);
+        if let Some(trigger) = &self.config.trigger {
+            let in_header = cx.headers.contains_key(trigger.as_str());
+            let in_query = cx.uri.query().is_some_and(|query| {
+                url::form_urlencoded::parse(query.as_bytes())
+                    .any(|(name, _)| name.as_ref() == trigger.as_str())
+            });
+            if !in_header && !in_query {
+                return Ok(PluginAction::Continue);
+            }
         }
 
         let status = StatusCode::from_u16(self.config.status_code)
@@ -220,7 +225,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn triggers_only_when_the_configured_header_is_present() {
+    async fn triggers_on_the_configured_header_or_query_parameter() {
         let plugin = plugin(json!({"trigger": "x-kill"}));
         let mut fixture = RequestFixture::default();
         let action = plugin.on_request(&mut fixture.context()).await.unwrap();
@@ -240,7 +245,8 @@ mod tests {
             ..RequestFixture::default()
         };
         let action = plugin.on_request(&mut fixture.context()).await.unwrap();
-        assert!(matches!(action, PluginAction::Continue));
+        let (status, _, _) = response_parts(short_circuit(action)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
