@@ -467,7 +467,9 @@ impl PluginChain {
             if !entry.phases.contains(&PluginPhase::Request) {
                 continue;
             }
-            body = run_bytes_stage(entry, entry.plugin.on_request_buffer(cx, body)).await?;
+            let fallback = body.clone();
+            body =
+                run_bytes_stage(entry, entry.plugin.on_request_buffer(cx, body), fallback).await?;
         }
         Ok(body)
     }
@@ -481,7 +483,9 @@ impl PluginChain {
             if !entry.phases.contains(&PluginPhase::ResponseBody) {
                 continue;
             }
-            body = run_bytes_stage(entry, entry.plugin.on_response_buffer(cx, body)).await?;
+            let fallback = body.clone();
+            body =
+                run_bytes_stage(entry, entry.plugin.on_response_buffer(cx, body), fallback).await?;
         }
         Ok(body)
     }
@@ -572,6 +576,7 @@ where
 async fn run_bytes_stage<F>(
     entry: &PluginEntry,
     future: F,
+    fallback: Bytes,
 ) -> std::result::Result<Bytes, PluginError>
 where
     F: std::future::Future<Output = std::result::Result<Bytes, PluginError>>,
@@ -582,7 +587,7 @@ where
         Ok(Err(error)) => match error.fail_policy {
             FailPolicy::Open => {
                 tracing::warn!(plugin = %entry.name, error = %error, "plugin body stage failed");
-                Ok(Bytes::new())
+                Ok(fallback)
             }
             FailPolicy::Closed => Err(error),
         },
@@ -2049,16 +2054,18 @@ mod tests {
     // ---------------------------------------------------------------------
 
     #[tokio::test]
-    async fn bytes_stages_pin_fail_open_asymmetry() {
+    async fn bytes_stages_fail_open_preserve_the_body() {
         let harness = Harness::new(
             &[spec("stub").with_outcome(Outcome::FailOpen)],
             vec![instance("stub")],
         );
         let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        let request = run_request_buffer(&chain, Bytes::from_static(b"body"))
-            .await
-            .expect("request buffer fail-open");
-        assert!(request.is_empty());
+        assert_eq!(
+            run_request_buffer(&chain, Bytes::from_static(b"body"))
+                .await
+                .expect("request buffer fail-open"),
+            Bytes::from_static(b"body")
+        );
 
         let harness = Harness::new(
             &[spec("stub")
@@ -2067,14 +2074,18 @@ mod tests {
             vec![instance("stub")],
         );
         let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        let buffered = run_response_buffer(&chain, Bytes::from_static(b"body"))
-            .await
-            .expect("response buffer fail-open");
-        assert!(buffered.is_empty());
-        let chunked = run_response_body(&chain, Bytes::from_static(b"chunk"))
-            .await
-            .expect("response body fail-open");
-        assert_eq!(chunked, Bytes::from_static(b"chunk"));
+        assert_eq!(
+            run_response_buffer(&chain, Bytes::from_static(b"body"))
+                .await
+                .expect("response buffer fail-open"),
+            Bytes::from_static(b"body")
+        );
+        assert_eq!(
+            run_response_body(&chain, Bytes::from_static(b"chunk"))
+                .await
+                .expect("response body fail-open"),
+            Bytes::from_static(b"chunk")
+        );
 
         let harness = Harness::new(
             &[spec("stub")
