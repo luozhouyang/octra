@@ -187,3 +187,33 @@ async fn denies_consumer_groups_when_enabled() {
         StatusCode::FORBIDDEN
     );
 }
+
+#[tokio::test]
+async fn deny_lists_block_listed_groups_only() {
+    let gateway = fixture_with(json!({"deny": ["blocked"]})).await;
+    add_consumer(&gateway, "blocked", "blocked-key", "blocked").await;
+    add_consumer(&gateway, "allowed", "allowed-key", "admins").await;
+
+    assert_eq!(
+        gateway.send(with_key("blocked-key")).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        gateway.send(with_key("allowed-key")).await.0,
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn can_hide_the_groups_header() {
+    let gateway = fixture_with(json!({
+        "allow": ["admins"],
+        "hide_groups_header": true
+    }))
+    .await;
+    add_consumer(&gateway, "admin", "admin-key", "admins").await;
+
+    let (status, _, json) = gateway.send(with_key("admin-key")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["x_consumer_groups"], "");
+}

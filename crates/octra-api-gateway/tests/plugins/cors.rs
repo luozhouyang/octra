@@ -146,3 +146,103 @@ async fn matches_regex_origins() {
         "https://app.example.com"
     );
 }
+
+#[tokio::test]
+async fn denies_unlisted_origins_without_cors_headers() {
+    let gateway = fixture(json!({"origins": [ORIGIN]})).await;
+
+    let mut actual = get("/cors/items");
+    actual
+        .headers_mut()
+        .insert(header::ORIGIN, header_default("https://evil.test"));
+    let (status, headers, _) = gateway.send(actual).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(headers.get("access-control-allow-origin").is_none());
+
+    let (status, headers, _) = gateway.send(preflight("https://evil.test")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("access-control-allow-origin").is_none());
+}
+
+#[tokio::test]
+async fn defaults_to_wildcard_origins() {
+    let gateway = fixture(json!({})).await;
+    let (status, headers, _) = gateway.send(get("/cors/items")).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(headers.get("access-control-allow-origin").unwrap(), "*");
+}
+
+#[tokio::test]
+async fn exposes_headers_and_allows_credentials() {
+    let gateway = fixture(json!({
+        "origins": [ORIGIN],
+        "exposed_headers": ["x-upstream"],
+        "credentials": true
+    }))
+    .await;
+
+    let mut request = get("/cors/items");
+    request
+        .headers_mut()
+        .insert(header::ORIGIN, header_default(ORIGIN));
+    let (status, headers, _) = gateway.send(request).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(headers.get("access-control-allow-origin").unwrap(), ORIGIN);
+    assert_eq!(
+        headers.get("access-control-allow-credentials").unwrap(),
+        "true"
+    );
+    assert_eq!(
+        headers.get("access-control-expose-headers").unwrap(),
+        "x-upstream"
+    );
+    assert!(
+        headers
+            .get(header::VARY)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("Origin")
+    );
+}
+
+#[tokio::test]
+async fn adds_cors_headers_to_authentication_failures() {
+    let (addr, _calls) = spawn_mock("cors-auth").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-cors-auth",
+        &format!("http://{addr}"),
+        false,
+        "/cors-auth",
+        true,
+    )
+    .await;
+    service_plugin(
+        &gateway.storage,
+        "svc-cors-auth",
+        "cors",
+        json!({"origins": [ORIGIN]}),
+    )
+    .await;
+    service_plugin(
+        &gateway.storage,
+        "svc-cors-auth",
+        "key-auth",
+        json!({"key_names": ["apikey"]}),
+    )
+    .await;
+    gateway.reload().await;
+
+    let mut request = get("/cors-auth/items");
+    request
+        .headers_mut()
+        .insert(header::ORIGIN, header_default(ORIGIN));
+    let (status, headers, _) = gateway.send(request).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(headers.get("access-control-allow-origin").unwrap(), ORIGIN);
+}

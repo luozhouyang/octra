@@ -156,3 +156,131 @@ async fn includes_the_configured_realm() {
         "Key realm=\"octra\""
     );
 }
+
+#[tokio::test]
+async fn can_disable_header_or_query_lookup() {
+    let header_off = fixture_with(json!({
+        "key_names": ["apikey"],
+        "key_in_header": false
+    }))
+    .await;
+    add_key(&header_off, "team", "secret-key").await;
+
+    let mut request = get("/key/items");
+    request
+        .headers_mut()
+        .insert("apikey", header_default("secret-key"));
+    assert_eq!(header_off.send(request).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        header_off.send(get("/key/items?apikey=secret-key")).await.0,
+        StatusCode::CREATED
+    );
+
+    let query_off = fixture_with(json!({
+        "key_names": ["apikey"],
+        "key_in_query": false
+    }))
+    .await;
+    add_key(&query_off, "team", "secret-key").await;
+    assert_eq!(
+        query_off.send(get("/key/items?apikey=secret-key")).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn forwards_credentials_when_hiding_is_disabled() {
+    let gateway = fixture_with(json!({
+        "key_names": ["apikey"],
+        "hide_credentials": false
+    }))
+    .await;
+    add_key(&gateway, "team", "secret-key").await;
+
+    let mut request = get("/key/items");
+    request
+        .headers_mut()
+        .insert("apikey", header_default("secret-key"));
+    let (status, _, json) = gateway.send(request).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["apikey"], "secret-key");
+    assert_eq!(json["x_consumer_username"], "team");
+}
+
+#[tokio::test]
+async fn header_keys_take_precedence_over_query_keys() {
+    let gateway = fixture_with(json!({
+        "key_names": ["apikey"],
+        "hide_credentials": false
+    }))
+    .await;
+    add_key(&gateway, "team", "header-key").await;
+
+    let mut request = get("/key/items?apikey=wrong-key");
+    request
+        .headers_mut()
+        .insert("apikey", header_default("header-key"));
+    let (status, _, json) = gateway.send(request).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["x_consumer_username"], "team");
+
+    // A wrong header key does not fall back to a valid query key.
+    let mut request = get("/key/items?apikey=header-key");
+    request
+        .headers_mut()
+        .insert("apikey", header_default("wrong-key"));
+    assert_eq!(gateway.send(request).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn preflight_requests_can_bypass_authentication() {
+    let skipped = fixture_with(json!({
+        "key_names": ["apikey"],
+        "run_on_preflight": false
+    }))
+    .await;
+    assert_eq!(
+        skipped.send(request("OPTIONS", "/key/items")).await.0,
+        StatusCode::CREATED
+    );
+
+    let required = fixture().await;
+    assert_eq!(
+        required.send(request("OPTIONS", "/key/items")).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn falls_back_to_an_anonymous_consumer() {
+    let gateway = fixture_with(json!({
+        "key_names": ["apikey"],
+        "anonymous": "anon"
+    }))
+    .await;
+    gateway
+        .storage
+        .api
+        .create_consumer(&CreateConsumer {
+            username: Some("anon".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    let (status, _, json) = gateway.send(get("/key/items")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["x_consumer_username"], "anon");
+
+    let unknown = fixture_with(json!({
+        "key_names": ["apikey"],
+        "anonymous": "ghost"
+    }))
+    .await;
+    assert_eq!(
+        unknown.send(get("/key/items")).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}

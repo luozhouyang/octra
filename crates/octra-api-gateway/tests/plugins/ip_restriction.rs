@@ -5,7 +5,9 @@
 use axum::http::StatusCode;
 use serde_json::json;
 
-use crate::common::{Gateway, gateway, get, seed_service, service_plugin, spawn_mock};
+use crate::common::{
+    Gateway, gateway, get, seed_service, service_plugin, spawn_mock, with_peer, with_xff,
+};
 
 async fn fixture(config: serde_json::Value) -> Gateway {
     let (addr, _calls) = spawn_mock("ip").await;
@@ -45,4 +47,37 @@ async fn rejects_an_ip_outside_an_allowlist_with_a_custom_status() {
         gateway.send(get("/ip/items")).await.0,
         StatusCode::IM_A_TEAPOT
     );
+}
+
+#[tokio::test]
+async fn deny_rules_win_over_allow_rules() {
+    let gateway = fixture(json!({
+        "allow": ["127.0.0.0/8"],
+        "deny": ["127.0.0.1"]
+    }))
+    .await;
+    assert_eq!(
+        gateway.send(get("/ip/items")).await.0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn applies_ipv6_rules_to_the_peer_address() {
+    let gateway = fixture(json!({"allow": ["2001:db8::/32"]})).await;
+
+    let allowed = with_peer(get("/ip/items"), "[2001:db8::1]:4242");
+    assert_eq!(gateway.send(allowed).await.0, StatusCode::CREATED);
+    assert_eq!(
+        gateway.send(get("/ip/items")).await.0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn ignores_x_forwarded_for() {
+    // The client address comes from the transport peer, not from headers.
+    let gateway = fixture(json!({"allow": ["127.0.0.0/8"]})).await;
+    let request = with_xff(get("/ip/items"), "10.1.2.3");
+    assert_eq!(gateway.send(request).await.0, StatusCode::CREATED);
 }
