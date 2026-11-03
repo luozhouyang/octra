@@ -2833,7 +2833,7 @@ async fn pii_model_action(
     match body.action.as_str() {
         "on" | "pick" => {
             ensure_local_record(&state, spec, true, threshold).await?;
-            let status = models.start(spec).map_err(ApiError::bad_request)?;
+            let status = models.ensure(spec).await.map_err(ApiError::bad_request)?;
             if status.installed {
                 reload_pii_engines(&state).await?;
             } else {
@@ -2861,7 +2861,7 @@ async fn pii_model_action(
             reload_pii_engines(&state).await?;
         }
         "download" => {
-            models.start(spec).map_err(ApiError::bad_request)?;
+            models.ensure(spec).await.map_err(ApiError::bad_request)?;
         }
         "cancel" => {
             models.cancel(spec);

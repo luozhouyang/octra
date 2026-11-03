@@ -73,6 +73,11 @@ function PiiModelCard({
               Remove
             </Button>
           )}
+          {model.engine_readiness === "failed" && (
+            <Button type="button" disabled={busy} onClick={() => onAction({ do: "on" })}>
+              Retry
+            </Button>
+          )}
         </div>
       </div>
 

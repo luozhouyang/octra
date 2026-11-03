@@ -135,6 +135,42 @@ impl LocalModelManager {
         if spec.installed(&self.root) {
             return Ok(self.status(spec));
         }
+        self.spawn_download(spec)
+    }
+
+    /// Verifies an installed model and repairs corrupt files by downloading
+    /// them again. Unlike [`Self::start`] this also runs when the file sizes
+    /// match, so a same-size corrupted file is never considered usable.
+    pub async fn ensure(&self, spec: &'static ModelSpec) -> Result<ModelStatus, String> {
+        if !spec.installed(&self.root) {
+            return self.spawn_download(spec);
+        }
+        let root = self.root.clone();
+        let bad = tokio::task::spawn_blocking(move || {
+            spec.files
+                .iter()
+                .filter(|file| !file_matches(&root, spec, file))
+                .map(|file| file.file_name)
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_else(|_| spec.files.iter().map(|file| file.file_name).collect());
+        if bad.is_empty() {
+            return Ok(self.status(spec));
+        }
+        for file in spec.files {
+            if !bad.contains(&file.file_name) {
+                continue;
+            }
+            let target = spec.file_path(&self.root, file);
+            let part = target.with_file_name(format!("{}.part", file.file_name));
+            let _ = std::fs::remove_file(&target);
+            let _ = std::fs::remove_file(&part);
+        }
+        self.spawn_download(spec)
+    }
+
+    fn spawn_download(&self, spec: &'static ModelSpec) -> Result<ModelStatus, String> {
         {
             let mut downloads = self
                 .downloads
@@ -180,7 +216,8 @@ impl LocalModelManager {
 
     pub fn remove(&self, spec: &ModelSpec) -> Result<(), String> {
         self.cancel(spec);
-        let dir = self.model_dir(spec);
+        // Remove every revision, not just the pinned one.
+        let dir = self.root.join(spec.id);
         if dir.exists() {
             std::fs::remove_dir_all(&dir)
                 .map_err(|error| format!("cannot remove {}: {error}", dir.display()))?;
@@ -199,10 +236,74 @@ impl LocalModelManager {
     pub async fn wait(&self, spec: &'static ModelSpec) -> ModelStatus {
         loop {
             let status = self.status(spec);
-            if status.installed || status.state.is_terminal() {
+            if !download_active(&self.downloads, spec.id)
+                && (status.installed || status.state.is_terminal())
+            {
                 return status;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+}
+
+fn download_active(downloads: &Mutex<HashMap<&'static str, Arc<DownloadEntry>>>, id: &str) -> bool {
+    downloads
+        .lock()
+        .ok()
+        .and_then(|downloads| {
+            downloads.get(id).map(|entry| {
+                entry
+                    .state
+                    .read()
+                    .map(|state| {
+                        matches!(
+                            *state,
+                            DownloadState::Downloading { .. } | DownloadState::Verifying
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn file_matches(root: &Path, spec: &ModelSpec, file: &ModelFile) -> bool {
+    let path = spec.file_path(root, file);
+    std::fs::metadata(&path)
+        .map(|metadata| metadata.len() == file.size)
+        .unwrap_or(false)
+        && file_sha256(&path).as_deref() == Some(file.sha256)
+}
+
+/// Removes revision directories other than the pinned one.
+fn gc_revisions(spec: &ModelSpec, root: &Path) {
+    let base = root.join(spec.id);
+    let current = spec.dir(root);
+    let keep = current.file_name();
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let file_name = entry.file_name();
+        if keep == Some(file_name.as_os_str()) {
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => tracing::info!(
+                model = spec.id,
+                revision = %file_name.to_string_lossy(),
+                "removed a stale PII model revision"
+            ),
+            Err(error) => tracing::warn!(
+                model = spec.id,
+                path = %path.display(),
+                %error,
+                "cannot remove a stale PII model revision"
+            ),
         }
     }
 }
@@ -250,6 +351,7 @@ async fn run_download(
     set_state(&entry, DownloadState::Verifying);
     if spec.installed(&root) {
         set_state(&entry, DownloadState::Ready);
+        gc_revisions(spec, &root);
     } else {
         fail(
             &entry,
@@ -435,6 +537,77 @@ mod tests {
         let manager = LocalModelManager::new(dir.path().to_path_buf());
         manager.cancel(&ASTR_LINK_GUARD);
         manager.cancel(&ASTR_LINK_GUARD);
+    }
+
+    const FAKE_FILES: &[ModelFile] = &[ModelFile {
+        repo_path: "one.bin",
+        file_name: "one.bin",
+        size: 1,
+        sha256: "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+    }];
+    const FAKE: ModelSpec = ModelSpec {
+        id: "fake",
+        display_name: "Fake",
+        license: "test",
+        revision: "0123456789abcdef",
+        base_url: "https://example.invalid/",
+        files: FAKE_FILES,
+        default_threshold: 0.8,
+        floor: 0.5,
+    };
+
+    #[test]
+    fn file_matches_checks_hash_not_only_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = FAKE.file_path(dir.path(), &FAKE_FILES[0]);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        std::fs::write(&path, [0x02u8]).unwrap();
+        assert!(FAKE.installed(dir.path()));
+        assert!(!file_matches(dir.path(), &FAKE, &FAKE_FILES[0]));
+
+        std::fs::write(&path, [0x01u8]).unwrap();
+        assert!(file_matches(dir.path(), &FAKE, &FAKE_FILES[0]));
+    }
+
+    #[tokio::test]
+    async fn ensure_removes_a_same_size_corrupt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = LocalModelManager::new(dir.path().to_path_buf());
+        let path = FAKE.file_path(dir.path(), &FAKE_FILES[0]);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, [0x02u8]).unwrap();
+
+        let status = manager.ensure(&FAKE).await.unwrap();
+        assert!(!status.installed);
+        assert!(!path.exists());
+        manager.cancel(&FAKE);
+    }
+
+    #[test]
+    fn remove_deletes_every_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = LocalModelManager::new(dir.path().to_path_buf());
+        let current = FAKE.dir(dir.path());
+        std::fs::create_dir_all(&current).unwrap();
+        let stale = dir.path().join(FAKE.id).join("deadbeef0000");
+        std::fs::create_dir_all(&stale).unwrap();
+
+        manager.remove(&FAKE).unwrap();
+        assert!(!dir.path().join(FAKE.id).exists());
+    }
+
+    #[test]
+    fn gc_keeps_only_the_pinned_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = FAKE.dir(dir.path());
+        std::fs::create_dir_all(&current).unwrap();
+        let stale = dir.path().join(FAKE.id).join("deadbeef0000");
+        std::fs::create_dir_all(&stale).unwrap();
+
+        gc_revisions(&FAKE, dir.path());
+        assert!(current.exists());
+        assert!(!stale.exists());
     }
 
     /// Manual smoke test: downloads the pinned model from Hugging Face and
