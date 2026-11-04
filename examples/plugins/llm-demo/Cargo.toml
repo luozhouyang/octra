@@ -1,0 +1,31 @@
+# Reference third-party LLM Gateway plugin.
+#
+# Build a component artifact with:
+#
+#   cargo component build --release --manifest-path examples/plugins/llm-demo/Cargo.toml
+#
+# The result is target/wasm32-wasip1/release/llm_demo.wasm; pair it with
+# plugin.json as described in the README.
+[package]
+name = "llm-demo"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wit-bindgen-rt = { version = "0.41", features = ["bitflags"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+[package.metadata.component]
+package = "octra:llm-plugin"
+
+# Standalone workspace: keeps the example out of the root workspace.
+[workspace]

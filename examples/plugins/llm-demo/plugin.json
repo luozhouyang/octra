@@ -1,0 +1,25 @@
+{
+  "api_version": "1",
+  "name": "llm-demo",
+  "version": "1.0.0",
+  "kind": "llm",
+  "runtime": "wasm",
+  "priority": 500,
+  "description": "Reference LLM plugin: rejects configured models and tags responses with a header",
+  "timeout_ms": 50,
+  "fail_policy": "closed",
+  "capabilities": ["request_body"],
+  "phases": ["request", "response", "log"],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "reject_models": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": []
+      },
+      "header_name": { "type": "string", "default": "x-llm-demo" },
+      "header_value": { "type": "string", "default": "active" }
+    }
+  }
+}
