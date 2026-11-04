@@ -347,12 +347,13 @@ impl octra_api_gateway::LlmWasmLifecycle for RecordingLifecycle {
         &self,
         manifest: octra_api_plugin_types::PluginManifest,
         _artifact_dir: std::path::PathBuf,
+        _replaces_hash: Option<&str>,
     ) -> Result<(), String> {
         self.installed.lock().unwrap().push(manifest.name);
         Ok(())
     }
 
-    async fn uninstall(&self, name: &str) -> Result<(), String> {
+    async fn uninstall(&self, name: &str, _artifact_hash: Option<&str>) -> Result<(), String> {
         self.removed.lock().unwrap().push(name.to_string());
         Ok(())
     }
@@ -414,4 +415,61 @@ async fn installs_and_uninstalls_an_llm_artifact_through_the_lifecycle_hook() {
         .await;
     assert_eq!(status, StatusCode::OK, "uninstall failed: {uninstalled}");
     assert_eq!(lifecycle.removed.lock().unwrap().as_slice(), ["llm-demo"]);
+}
+
+struct FailingLifecycle;
+
+#[async_trait::async_trait]
+impl octra_api_gateway::LlmWasmLifecycle for FailingLifecycle {
+    async fn install(
+        &self,
+        _manifest: octra_api_plugin_types::PluginManifest,
+        _artifact_dir: std::path::PathBuf,
+        _replaces_hash: Option<&str>,
+    ) -> Result<(), String> {
+        Err("cannot activate".to_string())
+    }
+
+    async fn uninstall(&self, _name: &str, _artifact_hash: Option<&str>) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn failed_llm_activation_removes_the_catalog_row() {
+    let env = WasmTestEnv::with_llm_lifecycle(std::sync::Arc::new(FailingLifecycle)).await;
+    let artifact = llm_artifact(&env.dir.path().join("llm-demo-artifact"));
+    let (status, _, uploaded) = env
+        .send_control_json(
+            "POST",
+            "/admin/plugin-artifacts",
+            json!({"path": artifact.to_string_lossy()}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let artifact_id = uploaded["id"].as_str().expect("artifact id");
+
+    let (status, _, body) = env
+        .send_control_json(
+            "POST",
+            "/admin/plugins/llm-demo/install",
+            json!({"artifact_id": artifact_id}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "install: {body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot activate")
+    );
+
+    let (status, _, _) = env
+        .send_control_json("GET", "/admin/plugins/llm-demo/health", json!({}))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "catalog row was not rolled back"
+    );
 }

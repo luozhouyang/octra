@@ -121,8 +121,18 @@ pub struct ApiControlState {
 /// LLM plugin chains; the API installer writes the catalog row.
 #[async_trait::async_trait]
 pub trait LlmWasmLifecycle: Send + Sync {
-    async fn install(&self, manifest: PluginManifest, artifact_dir: PathBuf) -> Result<(), String>;
-    async fn uninstall(&self, name: &str) -> Result<(), String>;
+    /// Registers or replaces a plugin. `replaces_hash` is the artifact hash of
+    /// the version being upgraded, so the implementation can evict the old
+    /// compiled component after a successful reload.
+    async fn install(
+        &self,
+        manifest: PluginManifest,
+        artifact_dir: PathBuf,
+        replaces_hash: Option<&str>,
+    ) -> Result<(), String>;
+    /// Removes a plugin. `artifact_hash` identifies the compiled component to
+    /// evict once the new chains are live.
+    async fn uninstall(&self, name: &str, artifact_hash: Option<&str>) -> Result<(), String>;
 }
 
 /// A synchronous notification hook. Implementations should schedule async work

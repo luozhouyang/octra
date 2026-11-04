@@ -10,6 +10,7 @@ use octra_plugin_storage::{PluginStorageError, PluginStorageRoot, PluginStore};
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
 
+#[derive(Clone)]
 pub struct InstalledWasmPlugin {
     pub manifest: PluginManifest,
     pub entities: Vec<EntitySpec>,
@@ -59,6 +60,12 @@ impl WasmHostProvider {
 
     pub fn contains(&self, name: &str) -> bool {
         self.installed.read().contains_key(name)
+    }
+
+    /// Snapshot of the installed plugin, used to restore the runtime when an
+    /// upgrade or uninstall fails partway through.
+    pub fn plugin(&self, name: &str) -> Option<InstalledWasmPlugin> {
+        self.installed.read().get(name).cloned()
     }
 
     /// Current on-disk database size, if the plugin is installed and openable.

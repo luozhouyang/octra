@@ -23,6 +23,6 @@ impl LlmWasmPluginFactory {
         let mut limits: WasmLimits = engine.limits().clone();
         limits.timeout = layout.manifest.timeout();
         crate::adapter::probe_component(&component, &limits, &layout.manifest.name)?;
-        Ok(Self::new(layout.manifest, component, limits))
+        Ok(Self::new(layout.manifest, component, limits, layout.hash))
     }
 }

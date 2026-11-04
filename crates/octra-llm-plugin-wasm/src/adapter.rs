@@ -38,6 +38,7 @@ pub struct LlmWasmPluginFactory {
     component: Arc<Component>,
     limits: WasmLimits,
     scopes: &'static [LlmScope],
+    hash: String,
 }
 
 impl LlmWasmPluginFactory {
@@ -45,6 +46,7 @@ impl LlmWasmPluginFactory {
         manifest: PluginManifest,
         component: Arc<Component>,
         limits: WasmLimits,
+        hash: String,
     ) -> Self {
         let scopes: &'static [LlmScope] =
             if manifest.phases.contains(&PluginPhase::Request) || manifest.phases.is_empty() {
@@ -57,7 +59,13 @@ impl LlmWasmPluginFactory {
             component,
             limits,
             scopes,
+            hash,
         }
+    }
+
+    /// Content hash of the artifact this factory was loaded from.
+    pub fn component_hash(&self) -> &str {
+        &self.hash
     }
 }
 

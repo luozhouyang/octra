@@ -43,13 +43,22 @@ impl LlmWasmLifecycle for LlmWasmRuntime {
         &self,
         manifest: PluginManifest,
         artifact_dir: std::path::PathBuf,
+        replaces_hash: Option<&str>,
     ) -> Result<(), String> {
         let factory = LlmWasmPluginFactory::from_artifact(&self.engine, &artifact_dir)
             .map_err(|error| error.message)?;
+        let installed_hash = factory.component_hash().to_string();
         let previous = self.registry.factory(&manifest.name);
         self.registry.register_arc(Arc::new(factory));
         match self.runtime.reload().await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Some(old_hash) = replaces_hash
+                    && old_hash != installed_hash
+                {
+                    self.engine.remove_component(old_hash);
+                }
+                Ok(())
+            }
             Err(error) => {
                 match previous {
                     Some(previous) => self.registry.register_arc(previous),
@@ -64,15 +73,26 @@ impl LlmWasmLifecycle for LlmWasmRuntime {
                         "cannot restore LLM plugin chains after a failed install"
                     );
                 }
+                // The new component is not referenced by any registered
+                // factory at this point, unless it is the version we just
+                // tried to replace.
+                if replaces_hash != Some(installed_hash.as_str()) {
+                    self.engine.remove_component(&installed_hash);
+                }
                 Err(error.to_string())
             }
         }
     }
 
-    async fn uninstall(&self, name: &str) -> Result<(), String> {
+    async fn uninstall(&self, name: &str, artifact_hash: Option<&str>) -> Result<(), String> {
         let previous = self.registry.remove(name);
         match self.runtime.reload().await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Some(hash) = artifact_hash {
+                    self.engine.remove_component(hash);
+                }
+                Ok(())
+            }
             Err(error) => {
                 if let Some(previous) = previous {
                     self.registry.register_arc(previous);

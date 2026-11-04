@@ -13,13 +13,13 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use octra_api_plugin_types::{
     Capability, EntityQuery, PluginError, PluginKind, PluginManifest, PluginRuntimeKind,
 };
-use octra_api_plugin_wasm::{PluginStatsSnapshot, WasmPluginFactory};
+use octra_api_plugin_wasm::{InstalledWasmPlugin, PluginStatsSnapshot, WasmPluginFactory};
 use octra_plugin_storage::{copy_artifact_for_kind, validate_artifact_dir_any};
 use octra_storage::{PluginArtifactInput, PluginArtifactRecord};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{ApiControlState, LlmWasmLifecycle};
+use crate::{ApiControlState, LlmWasmLifecycle, WasmControlState};
 
 use super::error::{AdminError, AdminResult};
 use super::list::{ListQuery, ListResponse, deserialize, list_response, read_json_body, to_value};
@@ -177,7 +177,7 @@ pub async fn install(
             .llm
             .upsert_installed_plugin(&manifest, &artifact, "", &input.approve_capabilities)
             .await?;
-        if let Err(error) = lifecycle.install(manifest, artifact_dir).await {
+        if let Err(error) = lifecycle.install(manifest, artifact_dir, None).await {
             // The lifecycle hook has already restored the runtime factory.
             let _ = state.storage.llm.delete_installed_plugin(&name).await;
             return Err(AdminError::schema(format!(
@@ -192,6 +192,7 @@ pub async fn install(
 
     let factory =
         WasmPluginFactory::from_artifact(&wasm.engine, &artifact_dir).map_err(plugin_error)?;
+    let component_hash = artifact.hash.clone();
     let store = wasm
         .storage_root
         .open(&name, manifest.entities.clone())
@@ -206,7 +207,28 @@ pub async fn install(
         .map_err(storage_error)?
         .to_string_lossy()
         .to_string();
-    let record = state
+
+    // Activate the runtime before writing the catalog row. The row is what
+    // marks the plugin as installed, so a failed reload must not leave one
+    // behind for a plugin the runtime never accepted.
+    let previous = ApiPluginRuntime::capture(wasm, &name);
+    wasm.catalog.insert(Arc::new(factory));
+    wasm.host_provider
+        .install(manifest.clone(), input.approve_capabilities.clone());
+    if let Err(error) = reload_all(&state).await {
+        previous.restore(wasm, &name);
+        if let Err(rollback) = reload_all(&state).await {
+            tracing::warn!(
+                ?rollback,
+                plugin = %name,
+                "cannot restore API plugin chains after a failed install"
+            );
+        }
+        wasm.engine.remove_component(&component_hash);
+        return Err(error);
+    }
+
+    let record = match state
         .storage
         .llm
         .upsert_installed_plugin(
@@ -215,12 +237,22 @@ pub async fn install(
             &storage_path,
             &input.approve_capabilities,
         )
-        .await?;
-
-    wasm.catalog.insert(Arc::new(factory));
-    wasm.host_provider
-        .install(manifest, input.approve_capabilities);
-    reload_all(&state).await?;
+        .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            previous.restore(wasm, &name);
+            if let Err(rollback) = reload_all(&state).await {
+                tracing::warn!(
+                    ?rollback,
+                    plugin = %name,
+                    "cannot restore API plugin chains after a failed install"
+                );
+            }
+            wasm.engine.remove_component(&component_hash);
+            return Err(error.into());
+        }
+    };
 
     Ok((
         StatusCode::CREATED,
@@ -265,20 +297,33 @@ pub async fn upgrade(
             .llm
             .upsert_installed_plugin(&manifest, &artifact, "", &input.approve_capabilities)
             .await?;
-        if let Err(error) = lifecycle.install(manifest, artifact_dir).await {
+        if let Err(error) = lifecycle
+            .install(
+                manifest.clone(),
+                artifact_dir,
+                existing.artifact_hash.as_deref(),
+            )
+            .await
+        {
             // Restore the old catalog row; the lifecycle hook has already
-            // restored the old runtime factory.
-            if let Some(old_artifact) = old_artifact {
-                let _ = state
-                    .storage
-                    .llm
-                    .upsert_installed_plugin(
-                        &old_manifest,
-                        &old_artifact,
-                        &old_storage_path,
-                        &old_capabilities,
-                    )
-                    .await;
+            // restored the old runtime factory. Without an artifact record
+            // the old row cannot be rebuilt, so remove the new one instead.
+            match old_artifact {
+                Some(old_artifact) => {
+                    let _ = state
+                        .storage
+                        .llm
+                        .upsert_installed_plugin(
+                            &old_manifest,
+                            &old_artifact,
+                            &old_storage_path,
+                            &old_capabilities,
+                        )
+                        .await;
+                }
+                None => {
+                    let _ = state.storage.llm.delete_installed_plugin(&name).await;
+                }
             }
             return Err(AdminError::schema(format!(
                 "cannot activate LLM plugin: {error}"
@@ -289,8 +334,11 @@ pub async fn upgrade(
         ));
     }
 
+    let previous = ApiPluginRuntime::capture(wasm, &name);
+    let previous_hash = existing.artifact_hash.clone();
     let factory =
         WasmPluginFactory::from_artifact(&wasm.engine, &artifact_dir).map_err(plugin_error)?;
+    let component_hash = artifact.hash.clone();
     let store = wasm
         .storage_root
         .open(&name, manifest.entities.clone())
@@ -305,7 +353,24 @@ pub async fn upgrade(
         .map_err(storage_error)?
         .to_string_lossy()
         .to_string();
-    let record = state
+
+    wasm.catalog.insert(Arc::new(factory));
+    wasm.host_provider
+        .install(manifest.clone(), input.approve_capabilities.clone());
+    if let Err(error) = reload_all(&state).await {
+        previous.restore(wasm, &name);
+        if let Err(rollback) = reload_all(&state).await {
+            tracing::warn!(
+                ?rollback,
+                plugin = %name,
+                "cannot restore API plugin chains after a failed upgrade"
+            );
+        }
+        wasm.engine.remove_component(&component_hash);
+        return Err(error);
+    }
+
+    let record = match state
         .storage
         .llm
         .upsert_installed_plugin(
@@ -314,12 +379,31 @@ pub async fn upgrade(
             &storage_path,
             &input.approve_capabilities,
         )
-        .await?;
+        .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            previous.restore(wasm, &name);
+            if let Err(rollback) = reload_all(&state).await {
+                tracing::warn!(
+                    ?rollback,
+                    plugin = %name,
+                    "cannot restore API plugin chains after a failed upgrade"
+                );
+            }
+            wasm.engine.remove_component(&component_hash);
+            return Err(error.into());
+        }
+    };
 
-    wasm.catalog.insert(Arc::new(factory));
-    wasm.host_provider
-        .install(manifest, input.approve_capabilities);
-    reload_all(&state).await?;
+    // The old component is no longer referenced by any live factory.
+    if previous_hash
+        .as_deref()
+        .is_some_and(|hash| hash != component_hash)
+    {
+        wasm.engine
+            .remove_component(previous_hash.as_deref().unwrap_or_default());
+    }
 
     Ok(Json(
         json!({ "plugin": to_value(&record)?, "migrations": report }),
@@ -346,7 +430,7 @@ pub async fn uninstall(
     if record.kind == PluginKind::Llm.as_str() {
         let lifecycle = llm_lifecycle(&state)?;
         lifecycle
-            .uninstall(&name)
+            .uninstall(&name, record.artifact_hash.as_deref())
             .await
             .map_err(AdminError::schema)?;
         if let Err(error) = state.storage.llm.delete_installed_plugin(&name).await {
@@ -355,7 +439,7 @@ pub async fn uninstall(
             if let Some(path) = record.artifact_path.as_deref()
                 && let Ok(manifest) = serde_json::from_str::<PluginManifest>(&record.manifest_json)
             {
-                let _ = lifecycle.install(manifest, PathBuf::from(path)).await;
+                let _ = lifecycle.install(manifest, PathBuf::from(path), None).await;
             }
             return Err(AdminError::internal(error.to_string()));
         }
@@ -366,17 +450,35 @@ pub async fn uninstall(
         })));
     }
 
+    // Delete the catalog row first: plugin instances cascade with it, so the
+    // next reload compiles without this plugin. Nothing has changed if this
+    // step fails.
+    state.storage.llm.delete_installed_plugin(&name).await?;
     wasm.catalog.remove(&name);
     wasm.host_provider
-        .uninstall(&name, input.purge_data)
+        .uninstall(&name, false)
         .map_err(storage_error)?;
-    state.storage.llm.delete_installed_plugin(&name).await?;
     reload_all(&state).await?;
+
+    let purged = if input.purge_data {
+        match wasm.host_provider.uninstall(&name, true) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(plugin = %name, %error, "cannot purge plugin data");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    if let Some(hash) = record.artifact_hash.as_deref() {
+        wasm.engine.remove_component(hash);
+    }
 
     Ok(Json(json!({
         "name": name,
         "uninstalled": true,
-        "purged": input.purge_data,
+        "purged": purged,
     })))
 }
 
@@ -607,6 +709,44 @@ fn ensure_capabilities(manifest: &PluginManifest, approved: &[Capability]) -> Ad
     Ok(())
 }
 
+/// Runtime half of an installed API plugin. Captured before activation so a
+/// failed reload, or a failed catalog write, can put the previous factory and
+/// host registration back.
+struct ApiPluginRuntime {
+    factory: Option<Arc<WasmPluginFactory>>,
+    host: Option<InstalledWasmPlugin>,
+}
+
+impl ApiPluginRuntime {
+    fn capture(wasm: &WasmControlState, name: &str) -> Self {
+        Self {
+            factory: wasm.catalog.get(name),
+            host: wasm.host_provider.plugin(name),
+        }
+    }
+
+    fn restore(self, wasm: &WasmControlState, name: &str) {
+        match self.factory {
+            Some(factory) => wasm.catalog.insert(factory),
+            None => wasm.catalog.remove(name),
+        }
+        match self.host {
+            Some(host) => wasm
+                .host_provider
+                .install(host.manifest, host.approved_capabilities),
+            None => {
+                if let Err(error) = wasm.host_provider.uninstall(name, false) {
+                    tracing::warn!(
+                        plugin = name,
+                        %error,
+                        "cannot detach the API plugin from the host"
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn llm_lifecycle(state: &ApiControlState) -> AdminResult<&Arc<dyn LlmWasmLifecycle>> {
     state
         .llm_wasm
@@ -626,6 +766,9 @@ fn plugin_error(error: PluginError) -> AdminError {
 mod tests {
     use super::*;
     use ed25519_dalek::Signer;
+    use octra_api_plugin_types::ApiGatewayPluginFactory;
+    use octra_api_plugin_wasm::{WasmEngine, WasmHostProvider, WasmLimits, WasmPluginCatalog};
+    use octra_plugin_storage::PluginStorageRoot;
 
     fn manifest(capabilities: &[&str]) -> PluginManifest {
         serde_json::from_value(json!({
@@ -713,5 +856,84 @@ mod tests {
         );
         let short = BASE64.encode([0u8; 63]);
         assert!(verify_signature(&[key], false, "hash", Some(&short)).is_err());
+    }
+
+    fn artifact(dir: &std::path::Path, name: &str, version: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.json"),
+            json!({
+                "api_version": "1",
+                "name": name,
+                "version": version,
+                "kind": "api",
+                "runtime": "wasm",
+                "priority": 0,
+                "description": "",
+                "capabilities": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("plugin.wasm"),
+            [0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00],
+        )
+        .unwrap();
+        dir.to_path_buf()
+    }
+
+    fn control_state(root: &std::path::Path) -> WasmControlState {
+        let engine = Arc::new(WasmEngine::new(WasmLimits::default()).unwrap());
+        let storage_root = Arc::new(PluginStorageRoot::new(root.join("storage")));
+        WasmControlState {
+            engine,
+            catalog: Arc::new(WasmPluginCatalog::new()),
+            host_provider: Arc::new(WasmHostProvider::new(storage_root.clone(), Vec::new())),
+            storage_root,
+            artifact_dir: root.join("artifacts"),
+            max_artifact_bytes: 1 << 20,
+            trusted_keys: Vec::new(),
+            allow_unsigned: true,
+        }
+    }
+
+    #[test]
+    fn runtime_snapshot_tracks_and_restores_the_previous_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let wasm = control_state(temp.path());
+        let v1 = artifact(&temp.path().join("v1"), "demo", "1.0.0");
+        let v2 = artifact(&temp.path().join("v2"), "demo", "2.0.0");
+
+        // Restoring an empty snapshot removes a registration added after it.
+        let empty = ApiPluginRuntime::capture(&wasm, "demo");
+        let factory = Arc::new(WasmPluginFactory::from_artifact(&wasm.engine, &v2).unwrap());
+        let manifest = factory.manifest();
+        wasm.catalog.insert(factory);
+        wasm.host_provider.install(manifest, Vec::new());
+        assert!(wasm.catalog.contains("demo"));
+        assert!(wasm.host_provider.contains("demo"));
+        empty.restore(&wasm, "demo");
+        assert!(!wasm.catalog.contains("demo"));
+        assert!(!wasm.host_provider.contains("demo"));
+
+        // Restoring a captured registration puts the previous factory and
+        // host manifest back.
+        let factory = Arc::new(WasmPluginFactory::from_artifact(&wasm.engine, &v1).unwrap());
+        wasm.catalog.insert(factory.clone());
+        wasm.host_provider.install(factory.manifest(), Vec::new());
+        let previous = ApiPluginRuntime::capture(&wasm, "demo");
+        let factory = Arc::new(WasmPluginFactory::from_artifact(&wasm.engine, &v2).unwrap());
+        wasm.catalog.insert(factory.clone());
+        wasm.host_provider.install(factory.manifest(), Vec::new());
+        previous.restore(&wasm, "demo");
+        assert_eq!(
+            wasm.catalog.get("demo").unwrap().manifest().version,
+            "1.0.0"
+        );
+        assert_eq!(
+            wasm.host_provider.plugin("demo").unwrap().manifest.version,
+            "1.0.0"
+        );
     }
 }
