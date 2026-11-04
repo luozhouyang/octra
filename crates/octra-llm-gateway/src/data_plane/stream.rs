@@ -302,7 +302,19 @@ impl BridgeState {
         }
         let mut out = match self.flush_pending().await {
             Ok(out) => out,
-            Err(error) => {
+            Err(mut error) => {
+                let account_id = self
+                    .account
+                    .as_ref()
+                    .map(|account| account.record.id.clone());
+                apply_error_chain(
+                    self.plugins.clone(),
+                    &self.meta,
+                    account_id.as_deref(),
+                    &mut error,
+                    &mut self.plugin_state,
+                )
+                .await;
                 let mut out = Vec::new();
                 for frame in octra_llm_protocol::encode_stream_error(self.ingress, &error) {
                     out.extend(frame.to_bytes());

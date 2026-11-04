@@ -1732,7 +1732,16 @@ async fn rotate_virtual_key(
         Some(_) => parse_expiry(body.expires_at)?,
         None => existing.expires_at.filter(|expires| *expires > now),
     };
-    let name = body.name.unwrap_or_else(|| existing.name.clone());
+    let name = match body.name {
+        Some(name) => {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(ApiError::bad_request("name must not be empty"));
+            }
+            name.to_string()
+        }
+        None => existing.name.clone(),
+    };
     let grace_seconds = body.grace_seconds.unwrap_or(86_400).min(2_592_000);
     let plaintext = keys::generate_key();
     let rotation = LlmVirtualKeyRotation {
