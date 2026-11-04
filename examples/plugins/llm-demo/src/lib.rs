@@ -1,7 +1,7 @@
-//! Reference LLM Gateway plugin.
+//! Reference LLM Gateway plugin built with the authoring SDK.
 //!
-//! The host calls `configure` once per component instance and then `on-stage`
-//! for every lifecycle stage. This plugin:
+//! The host calls `configure` once per component instance and then one stage
+//! method per lifecycle event. This plugin:
 //!
 //!   * rejects requests for models listed in `reject_models` with a 429,
 //!   * tags successful requests with `header_name: header_value`,
@@ -10,10 +10,9 @@
 #[allow(warnings)]
 mod bindings;
 
-use bindings::exports::octra::llm_plugin::plugin_api::{Guest, Invocation, Outcome};
-use bindings::octra::llm_plugin::types::Stage;
+use octra_llm_plugin_sdk::{Decision, Error, GatewayError, LlmPlugin, RequestContext, Result};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -33,75 +32,44 @@ fn default_header_value() -> String {
     "active".to_string()
 }
 
-impl Config {
-    fn parse(raw: &str) -> Result<Self, String> {
-        let value: Value =
-            serde_json::from_str(raw).map_err(|error| format!("invalid config JSON: {error}"))?;
-        serde_json::from_value(value).map_err(|error| format!("invalid config: {error}"))
-    }
+struct LlmDemo {
+    config: Config,
 }
 
-struct LlmDemo;
-
-impl Guest for LlmDemo {
-    fn configure(config_json: String) -> Result<(), String> {
-        Config::parse(&config_json).map(|_| ())
+impl LlmPlugin for LlmDemo {
+    fn configure(config: Value) -> Result<Self> {
+        let config: Config = serde_json::from_value(config)
+            .map_err(|error| Error::new(format!("invalid config: {error}")))?;
+        Ok(Self { config })
     }
 
-    fn on_stage(call: Invocation) -> Result<Outcome, String> {
-        let config = Config::parse(&call.config_json)?;
-        match call.stage {
-            Stage::Request => on_request(&config, &call),
-            _ => Ok(passthrough(&call)),
+    fn on_request(&mut self, cx: &mut RequestContext<'_>) -> Result<Decision> {
+        let model = cx.request_model().unwrap_or_default().to_string();
+        if self
+            .config
+            .reject_models
+            .iter()
+            .any(|blocked| blocked == &model)
+        {
+            return Ok(Decision::Reject(
+                GatewayError::new(
+                    429,
+                    "rate_limited",
+                    format!("model '{model}' is blocked by llm-demo"),
+                )
+                .with_code("model_blocked"),
+            ));
         }
+
+        cx.headers.push((
+            self.config.header_name.clone(),
+            self.config.header_value.clone(),
+        ));
+        *cx.state = serde_json::json!({ "model": model });
+        Ok(Decision::Continue)
     }
 }
 
-fn on_request(config: &Config, call: &Invocation) -> Result<Outcome, String> {
-    let payload: Value = serde_json::from_str(&call.payload_json)
-        .map_err(|error| format!("invalid request payload: {error}"))?;
-    let model = payload
-        .get("request")
-        .and_then(|request| request.get("model"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-
-    if config.reject_models.iter().any(|blocked| blocked == model) {
-        let error = json!({
-            "status": 429,
-            "kind": "rate_limited",
-            "code": "model_blocked",
-            "message": format!("model '{model}' is blocked by llm-demo"),
-        });
-        return Ok(Outcome {
-            action: "reject".to_string(),
-            payload_json: None,
-            state_json: call.state_json.clone(),
-            error_json: Some(error.to_string()),
-            headers: Vec::new(),
-        });
-    }
-
-    Ok(Outcome {
-        action: "continue".to_string(),
-        payload_json: None,
-        state_json: json!({ "model": model }).to_string(),
-        error_json: None,
-        headers: vec![(
-            config.header_name.clone(),
-            config.header_value.clone(),
-        )],
-    })
-}
-
-fn passthrough(call: &Invocation) -> Outcome {
-    Outcome {
-        action: "continue".to_string(),
-        payload_json: None,
-        state_json: call.state_json.clone(),
-        error_json: None,
-        headers: Vec::new(),
-    }
-}
-
-bindings::export!(LlmDemo with_types_in bindings);
+// The generated bindings module carries the WIT world; the SDK supplies the
+// configure/on-stage adapter and the JSON envelope handling.
+octra_llm_plugin_sdk::export_plugin!(LlmDemo, bindings);

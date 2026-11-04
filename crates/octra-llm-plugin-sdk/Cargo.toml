@@ -1,0 +1,12 @@
+[package]
+name = "octra-llm-plugin-sdk"
+description = "Authoring SDK for third-party Octra LLM Gateway plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

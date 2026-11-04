@@ -6,6 +6,12 @@ with every component.
 
 ## Build
 
+The example is written with `octra-llm-plugin-sdk`: implement `LlmPlugin`, then
+declare the component with `octra_llm_plugin_sdk::export_plugin!(LlmDemo,
+bindings)`. The SDK parses the JSON envelope, dispatches stages and serialises
+the outcome, so plugin code works with `serde_json::Value` and the friendly
+context types.
+
 ```bash
 cargo component build --release --manifest-path examples/plugins/llm-demo/Cargo.toml
 ```
