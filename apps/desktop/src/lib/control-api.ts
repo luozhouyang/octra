@@ -18,6 +18,10 @@ export async function fetchHealth(): Promise<HealthResponse> {
 }
 
 export async function reloadSnapshot(): Promise<SnapshotInfo> {
+  if (isTauri()) {
+    return invoke<SnapshotInfo>("daemon_reload");
+  }
+
   const { baseUrl, token } = useControlSettings.getState();
   return new ControlApiClient({ baseUrl, token: token || undefined }).reload();
 }

@@ -30,8 +30,8 @@ import { TrafficFabric } from "../../components/traffic-fabric";
 import { fetchHealth, reloadSnapshot } from "../../lib/control-api";
 import { formatRelativeTime, formatUptime, hostFromBaseUrl } from "../../lib/format";
 import {
+  chartViewFor,
   gatewayHealth,
-  requestSeries,
   trafficFabric,
   trafficSeriesSummary,
 } from "../../lib/sample-data";
@@ -49,6 +49,7 @@ export function Dashboard() {
   const queryClient = useQueryClient();
   const baseUrl = useControlSettings((state) => state.baseUrl);
   const [range, setRange] = useState<"1h" | "24h" | "7d">("24h");
+  const chart = chartViewFor(range);
 
   const health = useQuery({
     queryKey: ["health"],
@@ -159,16 +160,6 @@ export function Dashboard() {
             <FabricStat label="Requests" value={trafficSeriesSummary.requests} big />
             <FabricStat label="Success" value={trafficSeriesSummary.success} />
             <FabricStat label="p95" value={trafficSeriesSummary.p95} />
-            <Segmented
-              className="ml-auto"
-              value={range}
-              onChange={setRange}
-              options={[
-                { value: "1h", label: "1H" },
-                { value: "24h", label: "24H" },
-                { value: "7d", label: "7D" },
-              ]}
-            />
           </div>
         </CardHeader>
         <div className="overflow-x-auto border-y border-border bg-surface px-4 py-4 sm:px-5">
@@ -195,9 +186,7 @@ export function Dashboard() {
                 <Activity className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} />
                 <CardTitle>Request volume</CardTitle>
               </div>
-              <CardDescription>
-                All gateways · last 24 hours · 5-second buckets aggregated
-              </CardDescription>
+              <CardDescription>{chart.description}</CardDescription>
             </div>
             <Segmented
               value={range}
@@ -214,12 +203,12 @@ export function Dashboard() {
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div className="flex flex-wrap items-baseline gap-2.5">
                 <span className="font-mono text-2xl font-medium">
-                  {trafficSeriesSummary.requests}
+                  {chart.requests}
                 </span>
                 <span className="text-[11px] text-muted-foreground">requests</span>
                 <Badge variant="accent">
                   <span aria-hidden>↗</span>
-                  {trafficSeriesSummary.delta}
+                  {chart.delta}
                 </Badge>
               </div>
               <div className="flex items-center gap-3.5">
@@ -227,13 +216,11 @@ export function Dashboard() {
                 <Legend color="bg-coral" label="Errors" />
               </div>
             </div>
-            <RequestChart values={requestSeries.values} errors={requestSeries.errors} />
+            <RequestChart values={chart.series.values} errors={chart.series.errors} />
             <div className="flex justify-between font-mono text-[10.5px] text-muted-foreground">
-              <span>00:00</span>
-              <span>06:00</span>
-              <span>12:00</span>
-              <span>18:00</span>
-              <span>now</span>
+              {chart.labels.map((label) => (
+                <span key={label}>{label}</span>
+              ))}
             </div>
           </div>
           <CardFooter>
@@ -245,7 +232,7 @@ export function Dashboard() {
               <span className="font-mono text-secondary">0.7%</span>
             </div>
             <span className="font-mono text-[11px] text-muted-foreground">
-              sampled from {trafficSeriesSummary.requests} requests
+              sampled from {chart.requests} requests
             </span>
           </CardFooter>
         </Card>

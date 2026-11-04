@@ -7,7 +7,6 @@ import {
   CardHeader,
   CardSeparator,
   CardTitle,
-  Segmented,
   Table,
   TableBody,
   TableCell,
@@ -17,14 +16,11 @@ import {
   cn,
 } from "@octra/ui";
 import { Plus, Receipt } from "lucide-react";
-import { useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
 import { StatStrip, type StatItem } from "../../components/stat-strip";
 import { modelRoutes, providerMix } from "../../lib/sample-data";
 import { toneBar, toneDot } from "../../lib/tone";
-
-type Range = "1h" | "24h" | "7d";
 
 const stats: StatItem[] = [
   { label: "Requests", value: "8,412", meta: "44.4% of traffic", tone: "primary" },
@@ -34,8 +30,6 @@ const stats: StatItem[] = [
 ];
 
 export function LlmPage() {
-  const [range, setRange] = useState<Range>("24h");
-
   return (
     <div className="flex flex-col gap-5">
       <PageHeader
@@ -65,15 +59,6 @@ export function LlmPage() {
               <CardTitle>Model routes</CardTitle>
               <CardDescription>Fallback order is evaluated top to bottom</CardDescription>
             </div>
-            <Segmented
-              value={range}
-              onChange={setRange}
-              options={[
-                { value: "1h", label: "1H" },
-                { value: "24h", label: "24H" },
-                { value: "7d", label: "7D" },
-              ]}
-            />
           </CardHeader>
           <CardSeparator />
           <div className="flex-1">

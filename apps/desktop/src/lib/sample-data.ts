@@ -540,6 +540,50 @@ export const pluginDecisions: PluginDecision[] = [
   { time: "12:03:22", plugin: "param_override", detail: "temperature → 0.2", outcome: "allow" },
 ];
 
+export type ChartRange = "1h" | "24h" | "7d";
+
+export interface ChartView {
+  series: RequestChartProps;
+  requests: string;
+  delta: string;
+  description: string;
+  labels: string[];
+}
+
+export function chartViewFor(range: ChartRange): ChartView {
+  if (range === "1h") {
+    return {
+      series: {
+        values: requestSeries.values.slice(-12),
+        errors: (requestSeries.errors ?? []).slice(-12),
+      },
+      requests: "1,245",
+      delta: "3.1% vs prev hour",
+      description: "All gateways · last hour · 5-minute buckets",
+      labels: ["-60m", "-45m", "-30m", "-15m", "now"],
+    };
+  }
+  if (range === "7d") {
+    return {
+      series: {
+        values: requestSeries.values.map((value) => Number((value * 7).toFixed(2))),
+        errors: (requestSeries.errors ?? []).map((value) => Number((value * 7).toFixed(2))),
+      },
+      requests: "132,601",
+      delta: "8.4% vs prev 7d",
+      description: "All gateways · last 7 days · hourly buckets",
+      labels: ["7d", "5d", "3d", "1d", "now"],
+    };
+  }
+  return {
+    series: requestSeries,
+    requests: trafficSeriesSummary.requests,
+    delta: trafficSeriesSummary.delta,
+    description: "All gateways · last 24 hours · 5-second buckets aggregated",
+    labels: ["00:00", "06:00", "12:00", "18:00", "now"],
+  };
+}
+
 export const trafficSeriesSummary = {
   requests: "18,943",
   success: "99.3%",
