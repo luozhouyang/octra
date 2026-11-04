@@ -2,22 +2,22 @@
 //!
 //! The guard is a policy at the edge: it rejects early with a stable error
 //! code, while authoritative account quota stays in the core account pool.
-//! Counters live in host state keyed by the configured instance, so they
-//! survive chain reloads and are flushed to storage for restarts. A rolling
-//! window starts at the first admitted request.
+//! Counters go through the configured counter backend keyed by the stable
+//! instance id, so a chain reload keeps them and a shared backend can serve
+//! several daemon processes. A rolling window starts at the first admitted
+//! request.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use octra_api_plugin_types::{Capability, PluginError, PluginManifest};
 use octra_llm_core::{GatewayError, estimate_tokens};
 use octra_llm_plugin_types::{
-    LlmAction, LlmErrorContext, LlmLogContext, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory,
-    LlmPluginResult, LlmPluginStateStore, LlmRequestContext, LlmScope, REQUEST_LLM_SCOPES,
+    LlmAction, LlmCounterStore, LlmErrorContext, LlmLogContext, LlmPlugin, LlmPluginCreateContext,
+    LlmPluginFactory, LlmPluginResult, LlmRequestContext, LlmScope, REQUEST_LLM_SCOPES,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::manifest;
@@ -35,53 +35,12 @@ pub struct BudgetGuard {
     period_ms: i64,
     code: String,
     status: u16,
-    window: Arc<Mutex<Window>>,
-    state: Arc<dyn LlmPluginStateStore>,
+    counters: Arc<dyn LlmCounterStore>,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-struct Window {
-    ends_at_ms: i64,
-    requests: u64,
-    tokens: u64,
-}
-
-/// Windows are shared by stable instance key so a reload reuses the live
-/// counter instead of starting from zero.
-fn windows() -> &'static Mutex<HashMap<String, Arc<Mutex<Window>>>> {
-    static WINDOWS: OnceLock<Mutex<HashMap<String, Arc<Mutex<Window>>>>> = OnceLock::new();
-    WINDOWS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn state_key(instance_key: &str) -> String {
-    format!("budget:{instance_key}")
-}
-
-fn shared_window(instance_key: &str, state: &Arc<dyn LlmPluginStateStore>) -> Arc<Mutex<Window>> {
-    let mut windows = windows()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(window) = windows.get(instance_key) {
-        return window.clone();
-    }
-    let window = state
-        .get(&state_key(instance_key))
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default();
-    let window = Arc::new(Mutex::new(window));
-    windows.insert(instance_key.to_string(), window.clone());
-    window
-}
-
-impl Window {
-    fn roll(&mut self, now_ms: i64, period_ms: i64) {
-        if self.ends_at_ms == 0 {
-            self.ends_at_ms = now_ms.saturating_add(period_ms);
-        } else if now_ms >= self.ends_at_ms {
-            self.ends_at_ms = now_ms.saturating_add(period_ms);
-            self.requests = 0;
-            self.tokens = 0;
-        }
+impl BudgetGuard {
+    fn counter_key(&self) -> String {
+        format!("budget:{}", self.key)
     }
 }
 
@@ -102,7 +61,7 @@ impl BudgetGuardFactory {
         &self,
         config: Value,
         instance_key: &str,
-        state: Arc<dyn LlmPluginStateStore>,
+        counters: Arc<dyn LlmCounterStore>,
     ) -> Result<BudgetGuard, PluginError> {
         let config: Config = serde_json::from_value(config).map_err(|error| {
             PluginError::fail_closed(format!("invalid budget guard config: {error}"))
@@ -149,8 +108,7 @@ impl BudgetGuardFactory {
             period_ms,
             code,
             status,
-            window: shared_window(instance_key, &state),
-            state,
+            counters,
         })
     }
 }
@@ -219,7 +177,7 @@ impl LlmPluginFactory for BudgetGuardFactory {
         Ok(Arc::new(self.build(
             config,
             &key,
-            Arc::new(MemoryStateStore::default()),
+            Arc::new(octra_llm_plugin_types::MemoryCounterStore::default()),
         )?))
     }
 
@@ -231,31 +189,8 @@ impl LlmPluginFactory for BudgetGuardFactory {
         Ok(Arc::new(self.build(
             config,
             context.instance_key,
-            context.state.clone(),
+            context.counters.clone(),
         )?))
-    }
-}
-
-/// Minimal store used when no host store is supplied.
-#[derive(Debug, Default)]
-struct MemoryStateStore {
-    values: Mutex<HashMap<String, Value>>,
-}
-
-impl LlmPluginStateStore for MemoryStateStore {
-    fn get(&self, key: &str) -> Option<Value> {
-        self.values
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(key)
-            .cloned()
-    }
-
-    fn put(&self, key: &str, value: Value) {
-        self.values
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(key.to_string(), value);
     }
 }
 
@@ -267,33 +202,30 @@ impl LlmPlugin for BudgetGuard {
 
     async fn on_request(&self, cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
         let estimate = estimate_tokens(cx.request);
-        let now = now_ms();
-        let (rejected, code, snapshot) = {
-            let mut window = self
-                .window
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            window.roll(now, self.period_ms);
-            let requests_exceeded = self.requests.is_some_and(|limit| window.requests >= limit);
-            let tokens_exceeded = self
-                .tokens
-                .is_some_and(|limit| window.tokens.saturating_add(estimate) > limit);
-            let rejected = requests_exceeded || tokens_exceeded;
-            if !rejected {
-                window.requests = window.requests.saturating_add(1);
-                window.tokens = window.tokens.saturating_add(estimate);
-            }
-            (rejected, self.code.clone(), window.clone())
-        };
-        self.persist(&snapshot);
-        if rejected {
+        let window = self
+            .counters
+            .admit_budget(
+                &self.counter_key(),
+                now_ms(),
+                self.period_ms,
+                self.requests,
+                self.tokens,
+                estimate,
+            )
+            .await
+            .map_err(|error| PluginError {
+                message: format!("llm-budget-guard counter backend failed: {error}"),
+                fail_policy: self.manifest.fail_policy,
+            })?;
+        if !window.accepted {
             tracing::debug!(
                 request_id = %cx.meta.request_id,
-                code = %code,
+                code = %self.code,
                 "llm budget rejected request"
             );
             return Ok(LlmAction::Reject(
-                GatewayError::upstream(self.status, "request budget exhausted").with_code(code),
+                GatewayError::upstream(self.status, "request budget exhausted")
+                    .with_code(self.code.clone()),
             ));
         }
         *cx.state = json!({ TOKEN_RESERVATION: estimate });
@@ -310,19 +242,19 @@ impl LlmPlugin for BudgetGuard {
             .usage
             .input_tokens
             .saturating_add(cx.event.usage.output_tokens);
-        let snapshot = {
-            let mut window = self
-                .window
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            window.roll(now_ms(), self.period_ms);
-            window.tokens = window
-                .tokens
-                .saturating_sub(reserved)
-                .saturating_add(actual);
-            window.clone()
-        };
-        self.persist(&snapshot);
+        if let Err(error) = self
+            .counters
+            .settle_budget(
+                &self.counter_key(),
+                now_ms(),
+                self.period_ms,
+                reserved,
+                actual,
+            )
+            .await
+        {
+            tracing::warn!(%error, "cannot settle the LLM token budget");
+        }
         *cx.state = Value::Null;
     }
 
@@ -332,26 +264,15 @@ impl LlmPlugin for BudgetGuard {
         let Some(reserved) = cx.state.get(TOKEN_RESERVATION).and_then(Value::as_u64) else {
             return Ok(LlmAction::Continue);
         };
-        let snapshot = {
-            let mut window = self
-                .window
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            window.roll(now_ms(), self.period_ms);
-            window.tokens = window.tokens.saturating_sub(reserved);
-            window.clone()
-        };
-        self.persist(&snapshot);
+        if let Err(error) = self
+            .counters
+            .settle_budget(&self.counter_key(), now_ms(), self.period_ms, reserved, 0)
+            .await
+        {
+            tracing::warn!(%error, "cannot refund the LLM token budget");
+        }
         *cx.state = Value::Null;
         Ok(LlmAction::Continue)
-    }
-}
-
-impl BudgetGuard {
-    fn persist(&self, window: &Window) {
-        if let Ok(value) = serde_json::to_value(window) {
-            self.state.put(&state_key(&self.key), value);
-        }
     }
 }
 
@@ -366,8 +287,8 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use octra_llm_core::{ChatRequest, Message, Protocol, Usage};
-    use octra_llm_plugin_types::LlmResponseHeaders;
     use octra_llm_plugin_types::{LlmLogEvent, LlmRequestMeta};
+    use octra_llm_plugin_types::{LlmResponseHeaders, MemoryCounterStore};
 
     fn meta() -> LlmRequestMeta<'static> {
         LlmRequestMeta {
@@ -384,33 +305,52 @@ mod tests {
         }
     }
 
-    fn guard(config: Value) -> BudgetGuard {
+    struct Harness {
+        plugin: BudgetGuard,
+        counters: Arc<MemoryCounterStore>,
+        key: String,
+    }
+
+    fn guard(config: Value) -> Harness {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let key = format!("test-instance-{}", NEXT.fetch_add(1, Ordering::Relaxed));
-        BudgetGuardFactory
-            .build(config, &key, Arc::new(MemoryStateStore::default()))
-            .unwrap()
+        harness_with(config, &key, Arc::new(MemoryCounterStore::default()))
+    }
+
+    fn harness_with(config: Value, key: &str, counters: Arc<MemoryCounterStore>) -> Harness {
+        let plugin = BudgetGuardFactory
+            .build(config, key, counters.clone())
+            .unwrap();
+        Harness {
+            plugin,
+            counters,
+            key: format!("budget:{key}"),
+        }
+    }
+
+    fn window_tokens(harness: &Harness) -> u64 {
+        harness
+            .counters
+            .budget_window(&harness.key)
+            .map(|window| window.tokens)
+            .unwrap_or(0)
     }
 
     #[tokio::test]
     async fn counters_survive_instance_recreation() {
-        let state: Arc<dyn LlmPluginStateStore> = Arc::new(MemoryStateStore::default());
-        let first = BudgetGuardFactory
-            .build(json!({"requests": 1}), "reload-instance", state.clone())
-            .unwrap();
+        let counters = Arc::new(MemoryCounterStore::default());
+        let first = harness_with(json!({"requests": 1}), "reload-instance", counters.clone());
         assert!(matches!(
-            request(&first, "hello").await.unwrap(),
+            request(&first.plugin, "hello").await.unwrap(),
             LlmAction::Continue
         ));
 
-        // Simulates a chain reload: a new instance with the same key reuses
-        // the live window.
-        let second = BudgetGuardFactory
-            .build(json!({"requests": 1}), "reload-instance", state)
-            .unwrap();
+        // Simulates a chain reload: a new instance with the same key and the
+        // same shared counter store sees the live window.
+        let second = harness_with(json!({"requests": 1}), "reload-instance", counters);
         assert!(matches!(
-            request(&second, "hello").await.unwrap(),
+            request(&second.plugin, "hello").await.unwrap(),
             LlmAction::Reject(_)
         ));
     }
@@ -430,12 +370,12 @@ mod tests {
 
     #[tokio::test]
     async fn request_limit_rejects_with_stable_code() {
-        let plugin = guard(json!({"requests": 1, "period": "day"}));
+        let harness = guard(json!({"requests": 1, "period": "day"}));
         assert!(matches!(
-            request(&plugin, "hello").await.unwrap(),
+            request(&harness.plugin, "hello").await.unwrap(),
             LlmAction::Continue
         ));
-        let rejected = request(&plugin, "hello").await.unwrap();
+        let rejected = request(&harness.plugin, "hello").await.unwrap();
         let LlmAction::Reject(error) = rejected else {
             panic!("second request should be rejected");
         };
@@ -445,7 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_refunds_the_token_reservation_once() {
-        let plugin = guard(json!({"tokens": 100, "period": "hour"}));
+        let harness = guard(json!({"tokens": 100, "period": "hour"}));
         let meta = meta();
         let mut request = ChatRequest::new("m", vec![Message::user("hi")]);
         let mut state = Value::Null;
@@ -455,8 +395,8 @@ mod tests {
             request: &mut request,
             state: &mut state,
         };
-        plugin.on_request(&mut cx).await.unwrap();
-        assert!(plugin.window.lock().unwrap().tokens > 0);
+        harness.plugin.on_request(&mut cx).await.unwrap();
+        assert!(window_tokens(&harness) > 0);
 
         let mut error = GatewayError::upstream(500, "boom");
         let mut cx = octra_llm_plugin_types::LlmErrorContext {
@@ -466,18 +406,18 @@ mod tests {
             error: &mut error,
             state: &mut state,
         };
-        plugin.on_error(&mut cx).await.unwrap();
-        assert_eq!(plugin.window.lock().unwrap().tokens, 0);
+        harness.plugin.on_error(&mut cx).await.unwrap();
+        assert_eq!(window_tokens(&harness), 0);
         assert!(cx.state.is_null());
 
         // A later on_log/on_error for the same request must not refund twice.
-        plugin.on_error(&mut cx).await.unwrap();
-        assert_eq!(plugin.window.lock().unwrap().tokens, 0);
+        harness.plugin.on_error(&mut cx).await.unwrap();
+        assert_eq!(window_tokens(&harness), 0);
     }
 
     #[tokio::test]
     async fn token_budget_reconciles_actual_usage() {
-        let plugin = guard(json!({"tokens": 100, "period": "hour"}));
+        let harness = guard(json!({"tokens": 100, "period": "hour"}));
         let meta = meta();
         let mut request = ChatRequest::new("m", vec![Message::user("hi")]);
         let mut state = Value::Null;
@@ -487,8 +427,8 @@ mod tests {
             request: &mut request,
             state: &mut state,
         };
-        plugin.on_request(&mut cx).await.unwrap();
-        let reserved = plugin.window.lock().unwrap().tokens;
+        harness.plugin.on_request(&mut cx).await.unwrap();
+        let reserved = window_tokens(&harness);
         assert!(reserved > 0);
 
         let usage = Usage {
@@ -516,27 +456,9 @@ mod tests {
             event: &event,
             state: &mut state,
         };
-        plugin.on_log(&mut cx).await;
-        let window = plugin.window.lock().unwrap();
-        assert_eq!(window.tokens, 5);
+        harness.plugin.on_log(&mut cx).await;
+        assert_eq!(window_tokens(&harness), 5);
         assert_eq!(state, Value::Null);
-    }
-
-    #[tokio::test]
-    async fn window_rolls_over() {
-        let plugin = guard(json!({"requests": 1, "period": "minute"}));
-        assert!(matches!(
-            request(&plugin, "hi").await.unwrap(),
-            LlmAction::Continue
-        ));
-        {
-            let mut window = plugin.window.lock().unwrap();
-            window.ends_at_ms = now_ms() - 1;
-        }
-        assert!(matches!(
-            request(&plugin, "hi").await.unwrap(),
-            LlmAction::Continue
-        ));
     }
 
     #[test]

@@ -16,6 +16,12 @@ use octra_llm_core::{ChatRequest, ChatResponse, GatewayError, Protocol, StreamEv
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod counters;
+
+pub use counters::{
+    BudgetWindowView, CounterOutcome, CounterWindow, LlmCounterStore, MemoryCounterStore,
+};
+
 /// Where an LLM plugin configuration applies. Precedence runs from the most
 /// specific scope to the least; the first config for a plugin name wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -87,7 +93,7 @@ pub type LlmStreamResult = Result<LlmStreamAction, PluginError>;
 
 /// Contract version a factory must implement to be registered. Bumped when a
 /// context or trait signature changes incompatibly.
-pub const LLM_PLUGIN_API_VERSION: u32 = 4;
+pub const LLM_PLUGIN_API_VERSION: u32 = 5;
 
 const MAX_RESPONSE_HEADERS: usize = 128;
 const MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
@@ -334,6 +340,8 @@ pub struct LlmPluginCreateContext<'a> {
     pub scope: &'a str,
     pub scope_id: &'a str,
     pub state: std::sync::Arc<dyn LlmPluginStateStore>,
+    /// Shared counters for rate limits and budget guards.
+    pub counters: std::sync::Arc<dyn LlmCounterStore>,
 }
 
 /// Scopes every plugin supports unless it narrows the set. Request-stage

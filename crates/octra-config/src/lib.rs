@@ -117,6 +117,17 @@ pub struct PluginsConfig {
     pub max_body_bytes: usize,
     pub max_inflight: usize,
     pub default_timeout_ms: u64,
+    /// Counter backend for LLM rate limits and budget guards. `database`
+    /// shares counters across processes that use the same SQLite file.
+    pub counter_backend: CounterBackend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CounterBackend {
+    Local,
+    #[default]
+    Database,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -219,6 +230,7 @@ impl Default for PluginsConfig {
             max_body_bytes: 1024 * 1024,
             max_inflight: 64,
             default_timeout_ms: 100,
+            counter_backend: CounterBackend::default(),
         }
     }
 }

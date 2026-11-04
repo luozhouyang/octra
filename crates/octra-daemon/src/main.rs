@@ -18,97 +18,17 @@ use octra_api_plugin_wasm::{
     InstalledWasmPlugin, WasmEngine, WasmHostProvider, WasmLimits, WasmPluginCatalog,
     WasmPluginFactory,
 };
-use octra_config::Workspace;
+use octra_config::{CounterBackend, Workspace};
+use octra_daemon::wasm_lifecycle::LlmWasmRuntime;
 use octra_llm_gateway::{LlmControlState, LlmDataState, LlmPluginRuntime, LlmRuntime};
-use octra_llm_plugin_runtime::LlmPluginRegistry;
+use octra_llm_plugin_runtime::StorageCounterStore;
+use octra_llm_plugin_types::{LlmCounterStore, MemoryCounterStore};
 use octra_llm_plugin_wasm::LlmWasmPluginFactory;
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
 use octra_plugin_storage::PluginStorageRoot;
 use octra_runtime::GatewayRuntime;
 use octra_types::{AppState, AuthState};
 use tokio_util::sync::CancellationToken;
-
-/// Bridges the API installer to the LLM plugin registry. The runtime is
-/// reloaded after every change; a failed reload restores the previous factory
-/// so the catalog and the compiled chains stay consistent.
-struct LlmWasmRuntime {
-    registry: Arc<LlmPluginRegistry>,
-    runtime: Arc<LlmPluginRuntime>,
-    engine: Arc<WasmEngine>,
-}
-
-#[async_trait::async_trait]
-impl LlmWasmLifecycle for LlmWasmRuntime {
-    async fn install(
-        &self,
-        manifest: PluginManifest,
-        artifact_dir: std::path::PathBuf,
-        replaces_hash: Option<&str>,
-    ) -> Result<(), String> {
-        let factory = LlmWasmPluginFactory::from_artifact(&self.engine, &artifact_dir)
-            .map_err(|error| error.message)?;
-        let installed_hash = factory.component_hash().to_string();
-        let previous = self.registry.factory(&manifest.name);
-        self.registry.register_arc(Arc::new(factory));
-        match self.runtime.reload().await {
-            Ok(()) => {
-                if let Some(old_hash) = replaces_hash
-                    && old_hash != installed_hash
-                {
-                    self.engine.remove_component(old_hash);
-                }
-                Ok(())
-            }
-            Err(error) => {
-                match previous {
-                    Some(previous) => self.registry.register_arc(previous),
-                    None => {
-                        self.registry.remove(&manifest.name);
-                    }
-                }
-                if let Err(rollback) = self.runtime.reload().await {
-                    tracing::warn!(
-                        %rollback,
-                        plugin = %manifest.name,
-                        "cannot restore LLM plugin chains after a failed install"
-                    );
-                }
-                // The new component is not referenced by any registered
-                // factory at this point, unless it is the version we just
-                // tried to replace.
-                if replaces_hash != Some(installed_hash.as_str()) {
-                    self.engine.remove_component(&installed_hash);
-                }
-                Err(error.to_string())
-            }
-        }
-    }
-
-    async fn uninstall(&self, name: &str, artifact_hash: Option<&str>) -> Result<(), String> {
-        let previous = self.registry.remove(name);
-        match self.runtime.reload().await {
-            Ok(()) => {
-                if let Some(hash) = artifact_hash {
-                    self.engine.remove_component(hash);
-                }
-                Ok(())
-            }
-            Err(error) => {
-                if let Some(previous) = previous {
-                    self.registry.register_arc(previous);
-                    if let Err(rollback) = self.runtime.reload().await {
-                        tracing::warn!(
-                            %rollback,
-                            plugin = %name,
-                            "cannot restore LLM plugin chains after a failed uninstall"
-                        );
-                    }
-                }
-                Err(error.to_string())
-            }
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -287,18 +207,26 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let llm_registry = Arc::new(llm_registry);
+    let counter_store: Arc<dyn LlmCounterStore> = match config.plugins.counter_backend {
+        CounterBackend::Database => Arc::new(StorageCounterStore::new(storage.clone())),
+        CounterBackend::Local => Arc::new(MemoryCounterStore::default()),
+    };
     let llm_plugin_runtime = Arc::new(
-        LlmPluginRuntime::bootstrap(storage.clone(), llm_registry.clone())
-            .await
-            .context("cannot build the LLM plugin runtime")?,
+        LlmPluginRuntime::bootstrap_with_counters(
+            storage.clone(),
+            llm_registry.clone(),
+            counter_store,
+        )
+        .await
+        .context("cannot build the LLM plugin runtime")?,
     );
     let llm_wasm_lifecycle: Option<Arc<dyn LlmWasmLifecycle>> =
         wasm_control.as_ref().map(|control| {
-            Arc::new(LlmWasmRuntime {
-                registry: llm_registry.clone(),
-                runtime: llm_plugin_runtime.clone(),
-                engine: control.engine.clone(),
-            }) as Arc<dyn LlmWasmLifecycle>
+            Arc::new(LlmWasmRuntime::new(
+                llm_registry.clone(),
+                llm_plugin_runtime.clone(),
+                control.engine.clone(),
+            )) as Arc<dyn LlmWasmLifecycle>
         });
 
     let token =

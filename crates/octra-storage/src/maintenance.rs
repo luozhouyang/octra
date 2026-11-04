@@ -65,6 +65,9 @@ impl Storage {
             )
             .await?;
         let usage_rollup = self.prune_rollup(policy.usage_rollup_days).await?;
+        if let Err(error) = self.llm.prune_llm_counters(Utc::now().timestamp()).await {
+            tracing::debug!(%error, "LLM counter prune failed");
+        }
         let report = PruneReport {
             llm_usage,
             request_logs,

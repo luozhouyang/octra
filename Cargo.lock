@@ -3616,9 +3616,11 @@ dependencies = [
  "octra-api-plugin-wasm",
  "octra-config",
  "octra-core",
+ "octra-llm-core",
  "octra-llm-gateway",
  "octra-llm-plugin-builtin",
  "octra-llm-plugin-runtime",
+ "octra-llm-plugin-types",
  "octra-llm-plugin-wasm",
  "octra-mcp-gateway",
  "octra-observability",
@@ -3748,6 +3750,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "octra-llm-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "octra-llm-plugin-types"
 version = "0.1.0"
 dependencies = [
@@ -3757,6 +3766,7 @@ dependencies = [
  "octra-llm-core",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 
@@ -3900,6 +3910,7 @@ dependencies = [
  "octra-api-plugin-types",
  "octra-core",
  "octra-llm-core",
+ "octra-llm-plugin-types",
  "octra-mcp-core",
  "serde",
  "serde_json",

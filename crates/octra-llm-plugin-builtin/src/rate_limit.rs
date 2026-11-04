@@ -2,30 +2,27 @@
 //!
 //! The plugin counts admitted requests in fixed UTC calendar windows. It can
 //! count per virtual-key family, consumer, consumer group, requested model,
-//! client IP or globally. Counters live in process memory and are keyed by the
-//! stable plugin-config instance id, so a chain reload keeps them.
+//! client IP or globally. Counters go through the configured backend and are
+//! keyed by the stable plugin-config instance id, so a chain reload keeps them
+//! and a shared database backend can serve several daemon processes.
 
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{Datelike, TimeZone, Utc};
 use octra_api_plugin_types::{Capability, PluginError, PluginManifest};
 use octra_llm_core::{ErrorKind, GatewayError};
 use octra_llm_plugin_types::{
-    LlmAction, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory, LlmPluginResult,
-    LlmRequestContext, LlmScope, REQUEST_LLM_SCOPES,
+    CounterWindow, LlmAction, LlmCounterStore, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory,
+    LlmPluginResult, LlmRequestContext, LlmScope, REQUEST_LLM_SCOPES,
 };
-use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::manifest;
 
 const MAX_RULES: usize = 32;
-const MAX_BUCKETS: usize = 100_000;
-const PRUNE_INTERVAL_MS: i64 = 60_000;
 
 pub struct RateLimitFactory;
 
@@ -152,7 +149,8 @@ impl LlmPluginFactory for RateLimitFactory {
         Ok(Arc::new(RateLimitPlugin {
             manifest: self.manifest(),
             config,
-            limiter: limiter_for(&key),
+            instance_key: key,
+            counters: Arc::new(octra_llm_plugin_types::MemoryCounterStore::default()),
         }))
     }
 
@@ -164,7 +162,8 @@ impl LlmPluginFactory for RateLimitFactory {
         Ok(Arc::new(RateLimitPlugin {
             manifest: self.manifest(),
             config: CompiledConfig::parse(config)?,
-            limiter: limiter_for(context.instance_key),
+            instance_key: context.instance_key.to_string(),
+            counters: context.counters.clone(),
         }))
     }
 }
@@ -473,59 +472,11 @@ fn limit_by_name(limit_by: LimitBy) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct BucketKey {
-    rule: String,
-    subject: String,
-    window: Window,
-    window_start: i64,
-}
-
-#[derive(Debug, Default)]
-struct Limiter {
-    buckets: HashMap<BucketKey, u64>,
-    last_prune_ms: i64,
-}
-
-impl Limiter {
-    fn prune(&mut self, now_ms: i64) {
-        if now_ms - self.last_prune_ms < PRUNE_INTERVAL_MS && self.buckets.len() < MAX_BUCKETS {
-            return;
-        }
-        self.last_prune_ms = now_ms;
-        let now = now_ms / 1000;
-        self.buckets
-            .retain(|key, _| window_end(key.window, key.window_start) > now);
-        if self.buckets.len() > MAX_BUCKETS {
-            let mut starts: Vec<i64> = self.buckets.keys().map(|key| key.window_start).collect();
-            starts.sort_unstable();
-            let cutoff = starts[starts.len() - MAX_BUCKETS];
-            self.buckets.retain(|key, _| key.window_start >= cutoff);
-        }
-    }
-}
-
-fn window_end(window: Window, start: i64) -> i64 {
-    start.saturating_add(window_reset(window, start))
-}
-
-fn limiters() -> &'static Mutex<HashMap<String, Arc<Mutex<Limiter>>>> {
-    static LIMITERS: OnceLock<Mutex<HashMap<String, Arc<Mutex<Limiter>>>>> = OnceLock::new();
-    LIMITERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn limiter_for(instance_key: &str) -> Arc<Mutex<Limiter>> {
-    let mut limiters = limiters().lock();
-    limiters
-        .entry(instance_key.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(Limiter::default())))
-        .clone()
-}
-
 struct RateLimitPlugin {
     manifest: PluginManifest,
     config: CompiledConfig,
-    limiter: Arc<Mutex<Limiter>>,
+    instance_key: String,
+    counters: Arc<dyn LlmCounterStore>,
 }
 
 #[derive(Debug)]
@@ -535,6 +486,14 @@ struct RuleEval {
     remaining: u64,
     reset: i64,
     exceeded: bool,
+}
+
+struct PendingRule {
+    label: String,
+    limit: u64,
+    reset: i64,
+    /// Indices into the counter-window list for this rule's subjects.
+    windows: Vec<usize>,
 }
 
 impl RateLimitPlugin {
@@ -580,18 +539,24 @@ impl RateLimitPlugin {
         }
     }
 
-    fn evaluate(
+    async fn evaluate(
         &self,
         cx: &LlmRequestContext<'_>,
         now: i64,
-        limiter: &mut Limiter,
-    ) -> (Vec<RuleEval>, bool) {
+    ) -> Result<(Vec<RuleEval>, bool), PluginError> {
         let total_rules = self.config.rules.len();
-        let mut evals = Vec::new();
-        let mut increment = Vec::new();
-        let mut rejected = false;
+        let mut pending = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+        let mut specs: Vec<(i64, i64, u64)> = Vec::new();
+        let mut reject_without_counter = false;
 
         for rule in &self.config.rules {
+            let label = if total_rules == 1 {
+                rule.window.title().to_string()
+            } else {
+                pascal_case(&rule.name)
+            };
+            let reset = window_reset(rule.window, now);
             let subjects = self.subjects(rule, cx);
             if subjects.is_empty() {
                 if self.config.fault_tolerant {
@@ -599,73 +564,103 @@ impl RateLimitPlugin {
                 }
                 // The caller turns a missing subject into a fail-closed plugin
                 // error; the empty label is the marker.
-                evals.push(RuleEval {
+                pending.push(PendingRule {
                     label: String::new(),
                     limit: rule.limit,
-                    remaining: 0,
-                    reset: window_reset(rule.window, now),
-                    exceeded: true,
+                    reset,
+                    windows: Vec::new(),
                 });
-                rejected = true;
+                reject_without_counter = true;
                 continue;
             }
 
-            let mut best_remaining = u64::MAX;
-            let mut best_reset = window_reset(rule.window, now);
-            let mut rule_exceeded = false;
-            let mut exceeded_reset = 0;
+            let start = window_start(rule.window, now);
+            let end = start.saturating_add(reset);
+            let mut window_indices = Vec::with_capacity(subjects.len());
             for subject in subjects {
-                let start = window_start(rule.window, now);
-                let key = BucketKey {
-                    rule: rule.name.clone(),
+                window_indices.push(keys.len());
+                keys.push(format!(
+                    "rate:{}:{}:{}:{}:{}",
+                    self.instance_key,
+                    rule.name,
                     subject,
-                    window: rule.window,
-                    window_start: start,
-                };
-                let used = *limiter.buckets.get(&key).unwrap_or(&0);
-                let remaining = rule.limit.saturating_sub(used);
-                let reset = window_reset(rule.window, now);
-                if used >= rule.limit {
+                    rule.window.as_str(),
+                    start
+                ));
+                specs.push((start, end, rule.limit));
+            }
+            pending.push(PendingRule {
+                label,
+                limit: rule.limit,
+                reset,
+                windows: window_indices,
+            });
+        }
+
+        let (counts, accepted) = if reject_without_counter || keys.is_empty() {
+            (vec![0; keys.len()], false)
+        } else {
+            let windows: Vec<CounterWindow<'_>> = keys
+                .iter()
+                .zip(&specs)
+                .map(|(key, (start, end, limit))| CounterWindow {
+                    key,
+                    window_start: *start,
+                    window_end: *end,
+                    limit: *limit,
+                })
+                .collect();
+            let outcome = self
+                .counters
+                .admit_windows(&windows)
+                .await
+                .map_err(|error| PluginError {
+                    message: format!("llm-rate-limit counter backend failed: {error}"),
+                    fail_policy: self.manifest.fail_policy,
+                })?;
+            (outcome.counts, outcome.accepted)
+        };
+
+        let mut evals = Vec::with_capacity(pending.len());
+        let mut rejected = reject_without_counter;
+        for rule in pending {
+            if rule.label.is_empty() {
+                evals.push(RuleEval {
+                    label: rule.label,
+                    limit: rule.limit,
+                    remaining: 0,
+                    reset: rule.reset.max(1),
+                    exceeded: true,
+                });
+                continue;
+            }
+            let mut best_remaining = u64::MAX;
+            let mut rule_exceeded = false;
+            for index in &rule.windows {
+                let used = counts.get(*index).copied().unwrap_or(0);
+                best_remaining = best_remaining.min(rule.limit.saturating_sub(used));
+                // Counts are post-increment on an accepted admission and
+                // pre-increment on a rejected one.
+                if !accepted && used >= rule.limit {
                     rule_exceeded = true;
-                    exceeded_reset = exceeded_reset.max(reset);
                 }
-                if remaining < best_remaining {
-                    best_remaining = remaining;
-                    best_reset = reset;
-                }
-                increment.push(key);
             }
             if rule_exceeded {
                 rejected = true;
-                best_reset = exceeded_reset.max(best_reset);
             }
-            let label = if total_rules == 1 {
-                rule.window.title().to_string()
-            } else {
-                pascal_case(&rule.name)
-            };
             evals.push(RuleEval {
-                label,
+                label: rule.label,
                 limit: rule.limit,
                 remaining: if best_remaining == u64::MAX {
                     0
                 } else {
                     best_remaining
                 },
-                reset: best_reset,
+                reset: rule.reset.max(1),
                 exceeded: rule_exceeded,
             });
         }
-
-        if !rejected {
-            for key in increment {
-                *limiter.buckets.entry(key).or_insert(0) += 1;
-            }
-            for eval in &mut evals {
-                eval.remaining = eval.remaining.saturating_sub(1);
-            }
-        }
-        (evals, rejected)
+        Ok((evals, rejected))
     }
 
     fn write_headers(&self, cx: &mut LlmRequestContext<'_>, evals: &[RuleEval], rejected: bool) {
@@ -721,13 +716,8 @@ impl LlmPlugin for RateLimitPlugin {
     }
 
     async fn on_request(&self, cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
-        let now_dt = Utc::now();
-        let now = now_dt.timestamp();
-        let (evals, rejected) = {
-            let mut limiter = self.limiter.lock();
-            limiter.prune(now_dt.timestamp_millis());
-            self.evaluate(cx, now, &mut limiter)
-        };
+        let now = Utc::now().timestamp();
+        let (evals, rejected) = self.evaluate(cx, now).await?;
 
         // Missing subject with fault_tolerant=false: fail closed.
         if !self.config.fault_tolerant && evals.iter().any(|eval| eval.label.is_empty()) {

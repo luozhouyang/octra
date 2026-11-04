@@ -78,6 +78,7 @@ async fn runs_the_reference_component_through_the_host() {
         scope: "global",
         scope_id: "",
         state: Arc::new(MemoryState),
+        counters: Arc::new(octra_llm_plugin_types::MemoryCounterStore::default()),
     };
     let plugin = factory
         .create_with(json!({ "reject_models": ["blocked-model"] }), &context)

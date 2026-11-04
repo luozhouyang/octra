@@ -17,6 +17,7 @@ octra-runtime.workspace = true
 octra-llm-gateway.workspace = true
 octra-llm-plugin-builtin.workspace = true
 octra-llm-plugin-runtime.workspace = true
+octra-llm-plugin-types.workspace = true
 octra-llm-plugin-wasm.workspace = true
 octra-mcp-gateway.workspace = true
 octra-observability.workspace = true
@@ -33,6 +34,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+octra-llm-core.workspace = true
 tempfile = "3"
 
 [lints]

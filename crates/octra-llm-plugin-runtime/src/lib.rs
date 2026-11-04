@@ -8,6 +8,10 @@
 // would only obscure the data-plane flow.
 #![allow(clippy::result_large_err)]
 
+mod counter_store;
+
+pub use counter_store::StorageCounterStore;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,11 +21,11 @@ use octra_api_plugin_types::{Capability, FailPolicy, PluginError, PluginManifest
 use octra_core::{Error, Result};
 use octra_llm_core::{GatewayError, StreamEvent};
 use octra_llm_plugin_types::{
-    LLM_PLUGIN_API_VERSION, LlmAction, LlmErrorContext, LlmLogContext, LlmLogEvent, LlmPlugin,
-    LlmPluginCreateContext, LlmPluginFactory, LlmPluginResult, LlmPluginStateStore,
-    LlmProviderInfo, LlmProviderRequestContext, LlmRequestContext, LlmRequestMeta, LlmRequestState,
-    LlmResponseContext, LlmResponseHeaders, LlmScope, LlmStreamAction, LlmStreamContext,
-    LlmStreamResult,
+    LLM_PLUGIN_API_VERSION, LlmAction, LlmCounterStore, LlmErrorContext, LlmLogContext,
+    LlmLogEvent, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory, LlmPluginResult,
+    LlmPluginStateStore, LlmProviderInfo, LlmProviderRequestContext, LlmRequestContext,
+    LlmRequestMeta, LlmRequestState, LlmResponseContext, LlmResponseHeaders, LlmScope,
+    LlmStreamAction, LlmStreamContext, LlmStreamResult, MemoryCounterStore,
 };
 use octra_storage::Storage;
 use octra_storage::plugins::{PluginConfigRecord, PluginData, PluginRecord};
@@ -883,7 +887,14 @@ impl LlmPluginChains {
     #[cfg(test)]
     fn compile(data: PluginData, registry: &LlmPluginRegistry) -> Result<Self> {
         let state: Arc<dyn LlmPluginStateStore> = Arc::new(MemoryPluginStateStore::default());
-        Self::compile_with(data, registry, &LlmPluginMetrics::default(), &state)
+        let counters: Arc<dyn LlmCounterStore> = Arc::new(MemoryCounterStore::default());
+        Self::compile_with(
+            data,
+            registry,
+            &LlmPluginMetrics::default(),
+            &state,
+            &counters,
+        )
     }
 
     fn compile_with(
@@ -891,6 +902,7 @@ impl LlmPluginChains {
         registry: &LlmPluginRegistry,
         metrics: &LlmPluginMetrics,
         state: &Arc<dyn LlmPluginStateStore>,
+        counters: &Arc<dyn LlmCounterStore>,
     ) -> Result<Self> {
         let plugins: HashMap<&str, &PluginRecord> = data
             .plugins
@@ -901,7 +913,8 @@ impl LlmPluginChains {
         let mut by_scope: HashMap<ScopeKey, Vec<LlmEntry>> = HashMap::new();
         let mut configured = HashSet::new();
         for config in &data.configs {
-            if let Some((key, entry)) = compile_config(config, &plugins, registry, metrics, state)?
+            if let Some((key, entry)) =
+                compile_config(config, &plugins, registry, metrics, state, counters)?
             {
                 configured.insert(config.id.clone());
                 by_scope.entry(key).or_default().push(entry);
@@ -1055,6 +1068,7 @@ fn compile_config(
     registry: &LlmPluginRegistry,
     metrics: &LlmPluginMetrics,
     state: &Arc<dyn LlmPluginStateStore>,
+    counters: &Arc<dyn LlmCounterStore>,
 ) -> Result<Option<(ScopeKey, LlmEntry)>> {
     if !config.enabled {
         return Ok(None);
@@ -1081,10 +1095,14 @@ fn compile_config(
         )));
     }
     if !factory.supported_scopes().contains(&scope) {
-        return Err(Error::Runtime(format!(
-            "LLM plugin '{}' does not support {} scope",
-            plugin.name, scope
-        )));
+        // Legacy or hand-written rows may predate a scope restriction. Skip
+        // them like an unregistered plugin instead of refusing to boot.
+        tracing::warn!(
+            plugin = %plugin.name,
+            scope = %scope,
+            "LLM plugin config uses an unsupported scope; skipping config"
+        );
+        return Ok(None);
     }
     let context = LlmPluginCreateContext {
         instance_key: &config.id,
@@ -1092,6 +1110,7 @@ fn compile_config(
         scope: scope.as_str(),
         scope_id: &config.scope_id,
         state: state.clone(),
+        counters: counters.clone(),
     };
     let instance = factory
         .create_with(value, &context)
@@ -1120,6 +1139,7 @@ pub struct LlmPluginRuntime {
     metrics: LlmPluginMetrics,
     state: Arc<dyn LlmPluginStateStore>,
     persistent: Option<Arc<PersistentPluginStateStore>>,
+    counters: Arc<dyn LlmCounterStore>,
 }
 
 impl Default for LlmPluginRuntime {
@@ -1137,12 +1157,24 @@ impl LlmPluginRuntime {
             metrics: LlmPluginMetrics::default(),
             state: Arc::new(MemoryPluginStateStore::default()),
             persistent: None,
+            counters: Arc::new(MemoryCounterStore::default()),
         }
     }
 
     pub async fn bootstrap(
         storage: Arc<Storage>,
         registry: Arc<LlmPluginRegistry>,
+    ) -> Result<Self> {
+        Self::bootstrap_with_counters(storage, registry, Arc::new(MemoryCounterStore::default()))
+            .await
+    }
+
+    /// Boots the runtime with a specific counter backend, for example the
+    /// SQLite store shared by several daemon processes.
+    pub async fn bootstrap_with_counters(
+        storage: Arc<Storage>,
+        registry: Arc<LlmPluginRegistry>,
+        counters: Arc<dyn LlmCounterStore>,
     ) -> Result<Self> {
         let persistent = Arc::new(PersistentPluginStateStore::new(storage.clone()));
         persistent.seed(storage.llm.load_plugin_state().await?);
@@ -1164,6 +1196,7 @@ impl LlmPluginRuntime {
             metrics: LlmPluginMetrics::default(),
             state: persistent.clone(),
             persistent: Some(persistent),
+            counters,
         };
         runtime.reload().await?;
         Ok(runtime)
@@ -1181,8 +1214,13 @@ impl LlmPluginRuntime {
             storage.llm.upsert_plugin(&manifest).await?;
         }
         let data = storage.llm.load_plugin_data().await?;
-        let chains =
-            LlmPluginChains::compile_with(data, &self.registry, &self.metrics, &self.state)?;
+        let chains = LlmPluginChains::compile_with(
+            data,
+            &self.registry,
+            &self.metrics,
+            &self.state,
+            &self.counters,
+        )?;
         for manifest in self.registry.manifests() {
             self.metrics.seed_if_missing(&manifest.name);
         }
@@ -1914,7 +1952,9 @@ mod tests {
         };
         let metrics = LlmPluginMetrics::default();
         let state: Arc<dyn LlmPluginStateStore> = Arc::new(MemoryPluginStateStore::default());
-        let chains = LlmPluginChains::compile_with(data, &registry, &metrics, &state).unwrap();
+        let counters: Arc<dyn LlmCounterStore> = Arc::new(MemoryCounterStore::default());
+        let chains =
+            LlmPluginChains::compile_with(data, &registry, &metrics, &state, &counters).unwrap();
         let chain = chains.chain_for(None, None, "m", None);
         let mut request = ChatRequest::new("m", Vec::new());
         let mut state = LlmRequestState::new();
@@ -2019,7 +2059,9 @@ mod tests {
         };
         let metrics = LlmPluginMetrics::default();
         let state: Arc<dyn LlmPluginStateStore> = Arc::new(MemoryPluginStateStore::default());
-        let _chains = LlmPluginChains::compile_with(data, &registry(), &metrics, &state).unwrap();
+        let counters: Arc<dyn LlmCounterStore> = Arc::new(MemoryCounterStore::default());
+        let _chains =
+            LlmPluginChains::compile_with(data, &registry(), &metrics, &state, &counters).unwrap();
 
         let snapshot = metrics.snapshot();
         let views: Vec<_> = snapshot.iter().filter(|view| view.name == "mark").collect();
@@ -2051,7 +2093,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_scope_is_rejected() {
+    async fn unsupported_scope_is_skipped_not_fatal() {
         let registry = LlmPluginRegistry::new();
         registry.register(RequestScopedFactory(MarkPlugin {
             manifest: manifest("request-only"),
@@ -2061,14 +2103,9 @@ mod tests {
             plugins: vec![plugin("request-only", "p1", "llm", true)],
             configs: vec![config("c1", "p1", "provider", "provider-1")],
         };
-        let error = LlmPluginChains::compile(data, &registry)
-            .err()
-            .expect("provider scope is outside the supported set");
-        let message = error.to_string();
-        assert!(
-            message.contains("does not support provider scope"),
-            "unexpected error: {message}"
-        );
+        let chains = LlmPluginChains::compile(data, &registry)
+            .expect("a legacy unsupported scope must not abort compilation");
+        assert!(!chains.has_any);
     }
 
     #[tokio::test]

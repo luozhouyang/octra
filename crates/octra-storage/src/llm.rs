@@ -3,6 +3,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use octra_api_core::Policy;
 use octra_core::{Error, Result};
+use octra_llm_plugin_types::{BudgetWindowView, CounterOutcome, CounterWindow};
 use sqlx::{Row, SqlitePool};
 
 #[derive(Clone)]
@@ -2013,6 +2014,255 @@ impl LlmStore {
     }
 }
 
+/// Runs `body` inside a `BEGIN IMMEDIATE` transaction. Taking the write lock
+/// before reading serialises counter updates across processes.
+macro_rules! immediate_transaction {
+    ($pool:expr, |$connection:ident| $body:expr) => {{
+        let mut $connection = $pool.acquire().await.map_err(|error| {
+            Error::Storage(format!("cannot open a counter transaction: {error}"))
+        })?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *$connection)
+            .await
+            .map_err(|error| {
+                Error::Storage(format!("cannot begin a counter transaction: {error}"))
+            })?;
+        let result: std::result::Result<_, sqlx::Error> = async { $body }.await;
+        match result {
+            Ok(value) => {
+                sqlx::query("COMMIT")
+                    .execute(&mut *$connection)
+                    .await
+                    .map_err(|error| {
+                        Error::Storage(format!("cannot commit a counter transaction: {error}"))
+                    })?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *$connection).await;
+                Err(Error::Storage(format!(
+                    "counter transaction failed: {error}"
+                )))
+            }
+        }
+    }};
+}
+
+/// Shared LLM counters used by rate limiting and budget guards.
+impl LlmStore {
+    /// Atomically checks every window and increments all of them when none is
+    /// exhausted. A rejected admission leaves every counter unchanged.
+    pub async fn admit_counter_windows(
+        &self,
+        windows: &[CounterWindow<'_>],
+    ) -> Result<CounterOutcome> {
+        if windows.is_empty() {
+            return Ok(CounterOutcome {
+                counts: Vec::new(),
+                accepted: true,
+            });
+        }
+        immediate_transaction!(self.pool(), |connection| {
+            admit_windows_in(&mut connection, windows).await
+        })
+    }
+
+    pub async fn admit_budget_window(
+        &self,
+        key: &str,
+        now_ms: i64,
+        period_ms: i64,
+        max_requests: Option<u64>,
+        max_tokens: Option<u64>,
+        estimate: u64,
+    ) -> Result<BudgetWindowView> {
+        immediate_transaction!(self.pool(), |connection| {
+            admit_budget_in(
+                &mut connection,
+                key,
+                now_ms,
+                period_ms,
+                max_requests,
+                max_tokens,
+                estimate,
+            )
+            .await
+        })
+    }
+
+    pub async fn settle_budget_window(
+        &self,
+        key: &str,
+        now_ms: i64,
+        period_ms: i64,
+        reserved: u64,
+        actual: u64,
+    ) -> Result<BudgetWindowView> {
+        immediate_transaction!(self.pool(), |connection| {
+            settle_budget_in(&mut connection, key, now_ms, period_ms, reserved, actual).await
+        })
+    }
+
+    /// Removes expired calendar-window counters. Rolling budget windows are
+    /// reused in place and need no pruning.
+    pub async fn prune_llm_counters(&self, now_unix: i64) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM llm_counters WHERE window_end < ?1")
+            .bind(now_unix)
+            .execute(self.pool())
+            .await
+            .map_err(|error| Error::Storage(format!("cannot prune LLM counters: {error}")))?;
+        Ok(result.rows_affected())
+    }
+}
+
+async fn admit_windows_in(
+    connection: &mut sqlx::SqliteConnection,
+    windows: &[CounterWindow<'_>],
+) -> std::result::Result<CounterOutcome, sqlx::Error> {
+    let mut counts = Vec::with_capacity(windows.len());
+    let mut accepted = true;
+    for window in windows {
+        let current: Option<i64> = sqlx::query_scalar(
+            "SELECT value FROM llm_counters WHERE key = ?1 AND window_start = ?2",
+        )
+        .bind(window.key)
+        .bind(window.window_start)
+        .fetch_optional(&mut *connection)
+        .await?;
+        let current = u64::try_from(current.unwrap_or(0)).unwrap_or(0);
+        if current >= window.limit {
+            accepted = false;
+        }
+        counts.push(current);
+    }
+    if accepted {
+        for (window, count) in windows.iter().zip(counts.iter_mut()) {
+            *count = count.saturating_add(1);
+            let value = i64::try_from(*count).unwrap_or(i64::MAX);
+            sqlx::query(
+                "INSERT INTO llm_counters (key, window_start, value, window_end)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(key, window_start) DO UPDATE SET
+                    value = excluded.value,
+                    window_end = excluded.window_end",
+            )
+            .bind(window.key)
+            .bind(window.window_start)
+            .bind(value)
+            .bind(window.window_end)
+            .execute(&mut *connection)
+            .await?;
+        }
+    }
+    Ok(CounterOutcome { counts, accepted })
+}
+
+async fn admit_budget_in(
+    connection: &mut sqlx::SqliteConnection,
+    key: &str,
+    now_ms: i64,
+    period_ms: i64,
+    max_requests: Option<u64>,
+    max_tokens: Option<u64>,
+    estimate: u64,
+) -> std::result::Result<BudgetWindowView, sqlx::Error> {
+    let (ends_at_ms, requests, tokens) = load_budget(connection, key, now_ms, period_ms).await?;
+    let requests_exceeded = max_requests.is_some_and(|limit| requests >= limit);
+    let tokens_exceeded = max_tokens.is_some_and(|limit| tokens.saturating_add(estimate) > limit);
+    let accepted = !(requests_exceeded || tokens_exceeded);
+    let requests = if accepted {
+        requests.saturating_add(1)
+    } else {
+        requests
+    };
+    let tokens = if accepted {
+        tokens.saturating_add(estimate)
+    } else {
+        tokens
+    };
+    store_budget(connection, key, ends_at_ms, requests, tokens).await?;
+    Ok(BudgetWindowView {
+        accepted,
+        ends_at_ms,
+        requests,
+        tokens,
+    })
+}
+
+async fn settle_budget_in(
+    connection: &mut sqlx::SqliteConnection,
+    key: &str,
+    now_ms: i64,
+    period_ms: i64,
+    reserved: u64,
+    actual: u64,
+) -> std::result::Result<BudgetWindowView, sqlx::Error> {
+    let (ends_at_ms, requests, tokens) = load_budget(connection, key, now_ms, period_ms).await?;
+    let tokens = tokens.saturating_sub(reserved).saturating_add(actual);
+    store_budget(connection, key, ends_at_ms, requests, tokens).await?;
+    Ok(BudgetWindowView {
+        accepted: true,
+        ends_at_ms,
+        requests,
+        tokens,
+    })
+}
+
+async fn load_budget(
+    connection: &mut sqlx::SqliteConnection,
+    key: &str,
+    now_ms: i64,
+    period_ms: i64,
+) -> std::result::Result<(i64, u64, u64), sqlx::Error> {
+    let row: Option<(i64, i64, i64)> = sqlx::query_as(
+        "SELECT ends_at_ms, requests, tokens FROM llm_budget_windows WHERE key = ?1",
+    )
+    .bind(key)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let (mut ends_at_ms, mut requests, mut tokens) = row
+        .map(|(ends, requests, tokens)| {
+            (
+                ends,
+                u64::try_from(requests).unwrap_or(0),
+                u64::try_from(tokens).unwrap_or(0),
+            )
+        })
+        .unwrap_or((0, 0, 0));
+    if ends_at_ms == 0 {
+        ends_at_ms = now_ms.saturating_add(period_ms);
+    } else if now_ms >= ends_at_ms {
+        ends_at_ms = now_ms.saturating_add(period_ms);
+        requests = 0;
+        tokens = 0;
+    }
+    Ok((ends_at_ms, requests, tokens))
+}
+
+async fn store_budget(
+    connection: &mut sqlx::SqliteConnection,
+    key: &str,
+    ends_at_ms: i64,
+    requests: u64,
+    tokens: u64,
+) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO llm_budget_windows (key, ends_at_ms, requests, tokens)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(key) DO UPDATE SET
+            ends_at_ms = excluded.ends_at_ms,
+            requests = excluded.requests,
+            tokens = excluded.tokens",
+    )
+    .bind(key)
+    .bind(ends_at_ms)
+    .bind(i64::try_from(requests).unwrap_or(i64::MAX))
+    .bind(i64::try_from(tokens).unwrap_or(i64::MAX))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2613,5 +2863,112 @@ mod tests {
         .await
         .unwrap();
         assert!(orphaned.is_none());
+    }
+
+    #[tokio::test]
+    async fn counter_windows_are_shared_and_all_or_nothing() {
+        let storage = storage().await;
+        let windows = [
+            CounterWindow {
+                key: "rate:a",
+                window_start: 10,
+                window_end: 20,
+                limit: 2,
+            },
+            CounterWindow {
+                key: "rate:b",
+                window_start: 10,
+                window_end: 20,
+                limit: 1,
+            },
+        ];
+        let first = storage.llm.admit_counter_windows(&windows).await.unwrap();
+        assert!(first.accepted);
+        assert_eq!(first.counts, vec![1, 1]);
+
+        let second = storage.llm.admit_counter_windows(&windows).await.unwrap();
+        assert!(!second.accepted, "b is exhausted");
+        assert_eq!(
+            second.counts,
+            vec![1, 1],
+            "rejected admits do not increment"
+        );
+
+        // A second store handle on the same database sees the same counters.
+        let other = storage.llm.clone();
+        let third = other
+            .admit_counter_windows(&[CounterWindow {
+                key: "rate:a",
+                window_start: 10,
+                window_end: 20,
+                limit: 2,
+            }])
+            .await
+            .unwrap();
+        assert!(third.accepted);
+        assert_eq!(third.counts, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn budget_windows_roll_and_settle() {
+        let storage = storage().await;
+        let admitted = storage
+            .llm
+            .admit_budget_window("cfg-1", 1_000, 1_000, Some(1), None, 10)
+            .await
+            .unwrap();
+        assert!(admitted.accepted);
+        assert_eq!(admitted.requests, 1);
+        assert_eq!(admitted.tokens, 10);
+
+        let rejected = storage
+            .llm
+            .admit_budget_window("cfg-1", 1_000, 1_000, Some(1), None, 10)
+            .await
+            .unwrap();
+        assert!(!rejected.accepted);
+        assert_eq!(rejected.requests, 1);
+
+        let settled = storage
+            .llm
+            .settle_budget_window("cfg-1", 1_000, 1_000, 10, 30)
+            .await
+            .unwrap();
+        assert_eq!(settled.tokens, 30);
+
+        let rolled = storage
+            .llm
+            .admit_budget_window("cfg-1", 2_000, 1_000, Some(1), None, 5)
+            .await
+            .unwrap();
+        assert!(rolled.accepted);
+        assert_eq!(rolled.ends_at_ms, 3_000);
+        assert_eq!(rolled.requests, 1);
+        assert_eq!(rolled.tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn prune_removes_only_expired_counters() {
+        let storage = storage().await;
+        storage
+            .llm
+            .admit_counter_windows(&[
+                CounterWindow {
+                    key: "expired",
+                    window_start: 0,
+                    window_end: 10,
+                    limit: 1,
+                },
+                CounterWindow {
+                    key: "live",
+                    window_start: 0,
+                    window_end: 1_000,
+                    limit: 1,
+                },
+            ])
+            .await
+            .unwrap();
+        assert_eq!(storage.llm.prune_llm_counters(100).await.unwrap(), 1);
+        assert_eq!(storage.llm.prune_llm_counters(100).await.unwrap(), 0);
     }
 }
