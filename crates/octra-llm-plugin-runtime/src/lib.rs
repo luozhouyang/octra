@@ -136,6 +136,66 @@ enum StageFailure {
     Timeout,
 }
 
+/// Number of buckets in the per-stage latency histogram.
+const LATENCY_BUCKETS: usize = 24;
+
+/// Bucket upper bounds in microseconds, ascending. A sample is counted in the
+/// first bucket whose bound is greater than or equal to its duration. The final
+/// entry is the `+Inf` bucket, which also catches samples above 120 seconds.
+const LATENCY_BOUNDS_MICROS: [u64; LATENCY_BUCKETS] = [
+    0,
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    25_000,
+    50_000,
+    100_000,
+    250_000,
+    500_000,
+    1_000_000,
+    2_500_000,
+    5_000_000,
+    10_000_000,
+    30_000_000,
+    60_000_000,
+    120_000_000,
+    u64::MAX,
+];
+
+/// Index of the first bucket whose upper bound is at least `micros`.
+fn latency_bucket_index(micros: u64) -> usize {
+    LATENCY_BOUNDS_MICROS
+        .iter()
+        .position(|&bound| micros <= bound)
+        .unwrap_or(LATENCY_BUCKETS - 1)
+}
+
+/// Nearest-rank percentile over cumulative bucket counts. Returns the upper
+/// bound of the bucket holding the requested rank, or 0 when there are no
+/// samples.
+fn latency_percentile_micros(calls: u64, buckets: &[u64; LATENCY_BUCKETS], percentile: u64) -> u64 {
+    if calls == 0 {
+        return 0;
+    }
+    // ceil(percentile / 100 * calls), clamped to the sample range.
+    let rank = ((u128::from(percentile) * u128::from(calls)).div_ceil(100) as u64).clamp(1, calls);
+    let mut cumulative = 0u64;
+    for (index, count) in buckets.iter().enumerate() {
+        cumulative = cumulative.saturating_add(*count);
+        if cumulative >= rank {
+            return LATENCY_BOUNDS_MICROS[index];
+        }
+    }
+    LATENCY_BOUNDS_MICROS[LATENCY_BUCKETS - 1]
+}
+
 #[derive(Default)]
 struct StageStats {
     calls: AtomicU64,
@@ -145,6 +205,7 @@ struct StageStats {
     fail_open: AtomicU64,
     total_micros: AtomicU64,
     max_micros: AtomicU64,
+    latency_buckets: [AtomicU64; LATENCY_BUCKETS],
 }
 
 #[derive(Default)]
@@ -166,6 +227,8 @@ impl PluginStats {
         let micros = elapsed.as_micros().min(u64::MAX as u128) as u64;
         stats.total_micros.fetch_add(micros, Ordering::Relaxed);
         stats.max_micros.fetch_max(micros, Ordering::Relaxed);
+        let bucket = latency_bucket_index(micros);
+        stats.latency_buckets[bucket].fetch_add(1, Ordering::Relaxed);
         match failure {
             Some(StageFailure::Error) => {
                 stats.failures.fetch_add(1, Ordering::Relaxed);
@@ -299,6 +362,9 @@ pub struct StageMetricsView {
     pub fail_open: u64,
     pub total_micros: u64,
     pub max_micros: u64,
+    pub latency_p50_micros: u64,
+    pub latency_p95_micros: u64,
+    pub latency_p99_micros: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -325,16 +391,27 @@ impl PluginMetricsView {
         .enumerate()
         {
             let counters = &stats.stages[index];
+            let calls = counters.calls.load(Ordering::Relaxed);
+            // Buckets are read after `calls`: `record` bumps the call counter
+            // before its bucket, so the cumulative counts observed here never
+            // understate the samples covered by `calls` beyond a single
+            // in-flight record.
+            let latency_buckets: [u64; LATENCY_BUCKETS] = std::array::from_fn(|bucket| {
+                counters.latency_buckets[bucket].load(Ordering::Relaxed)
+            });
             stages.insert(
                 stage.as_str(),
                 StageMetricsView {
-                    calls: counters.calls.load(Ordering::Relaxed),
+                    calls,
                     failures: counters.failures.load(Ordering::Relaxed),
                     timeouts: counters.timeouts.load(Ordering::Relaxed),
                     rejections: counters.rejections.load(Ordering::Relaxed),
                     fail_open: counters.fail_open.load(Ordering::Relaxed),
                     total_micros: counters.total_micros.load(Ordering::Relaxed),
                     max_micros: counters.max_micros.load(Ordering::Relaxed),
+                    latency_p50_micros: latency_percentile_micros(calls, &latency_buckets, 50),
+                    latency_p95_micros: latency_percentile_micros(calls, &latency_buckets, 95),
+                    latency_p99_micros: latency_percentile_micros(calls, &latency_buckets, 99),
                 },
             );
         }
@@ -1694,6 +1771,71 @@ mod tests {
         assert_eq!(view.stages["request"].fail_open, 1);
         assert_eq!(view.stages["request"].rejections, 0);
         assert_eq!(view.stages["response"].calls, 0);
+
+        // The percentile fields must remain part of the serialized payload so
+        // existing API consumers can pick them up without a schema change.
+        let request_json = serde_json::to_value(&view.stages["request"]).unwrap();
+        for field in [
+            "latency_p50_micros",
+            "latency_p95_micros",
+            "latency_p99_micros",
+        ] {
+            assert!(
+                request_json.get(field).is_some(),
+                "missing serialized field {field}"
+            );
+        }
+    }
+
+    fn test_identity() -> PluginIdentity {
+        PluginIdentity {
+            name: "test".to_string(),
+            config_id: "c1".to_string(),
+            scope: LlmScope::Global,
+            scope_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn latency_percentiles_use_nearest_rank() {
+        let stats = PluginStats::default();
+        stats.record(
+            Stage::Request,
+            Duration::from_micros(100),
+            None,
+            false,
+            false,
+        );
+        stats.record(
+            Stage::Request,
+            Duration::from_millis(10),
+            None,
+            false,
+            false,
+        );
+        stats.record(Stage::Request, Duration::from_secs(1), None, false, false);
+
+        let view = PluginMetricsView::from_stats(&test_identity(), &stats);
+        let request = &view.stages["request"];
+        assert_eq!(request.calls, 3);
+        // Nearest-rank ranks for 3 samples are 2, 3 and 3, so p50 lands in
+        // the 10 ms bucket while p95 and p99 land in the 1 s bucket.
+        assert_eq!(request.latency_p50_micros, 10_000);
+        assert_eq!(request.latency_p95_micros, 1_000_000);
+        assert_eq!(request.latency_p99_micros, 1_000_000);
+        assert_eq!(request.max_micros, 1_000_000);
+    }
+
+    #[test]
+    fn latency_percentiles_are_zero_without_samples() {
+        let stats = PluginStats::default();
+        let view = PluginMetricsView::from_stats(&test_identity(), &stats);
+        for stage in view.stages.values() {
+            assert_eq!(stage.calls, 0);
+            assert_eq!(stage.latency_p50_micros, 0);
+            assert_eq!(stage.latency_p95_micros, 0);
+            assert_eq!(stage.latency_p99_micros, 0);
+        }
     }
 
     #[tokio::test]

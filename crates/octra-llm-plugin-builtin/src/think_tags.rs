@@ -34,10 +34,35 @@ pub struct ThinkTagsFactory;
 
 impl LlmPluginFactory for ThinkTagsFactory {
     fn manifest(&self) -> PluginManifest {
-        manifest(
+        let mut manifest = manifest(
             "llm-think-tags",
             "Remove inline <think> reasoning blocks from streamed text",
-        )
+        );
+        manifest.config_schema = Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "llm-think-tags config",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "strip": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "open": {
+                    "type": "string",
+                    "minLength": 1,
+                    "default": "<think>",
+                    "description": "Opening tag; must differ from `close`."
+                },
+                "close": {
+                    "type": "string",
+                    "minLength": 1,
+                    "default": "</think>",
+                    "description": "Closing tag; must differ from `open`."
+                }
+            }
+        }));
+        manifest
     }
 
     fn create(&self, config: Value) -> Result<Arc<dyn LlmPlugin>, PluginError> {

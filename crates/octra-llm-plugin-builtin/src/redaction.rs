@@ -27,7 +27,7 @@ use octra_pii_types::{
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::manifest;
 
@@ -618,6 +618,102 @@ impl RedactionFactory {
         manifest.timeout_ms = 200;
         manifest.priority = 700;
         manifest.capabilities = vec![Capability::RequestBody, Capability::ResponseBody];
+        manifest.config_schema = Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "llm-pii-redaction config",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["reversible", "irreversible"],
+                    "default": "reversible"
+                },
+                "rules": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "email": {"type": "boolean", "default": true},
+                        "phone": {"type": "boolean", "default": true},
+                        "id_card": {"type": "boolean", "default": true},
+                        "bank_card": {"type": "boolean", "default": true},
+                        "api_key": {"type": "boolean", "default": true},
+                        "ip": {"type": "boolean", "default": false}
+                    }
+                },
+                "custom_patterns": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "regex"],
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1},
+                            "regex": {"type": "string"}
+                        }
+                    }
+                },
+                "dictionary": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1}
+                },
+                "dictionary_file": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Path to a newline-separated term file; `#` starts a comment."
+                },
+                "max_dictionary_terms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100000,
+                    "default": 10000
+                },
+                "dictionary_case_insensitive": {
+                    "type": "boolean",
+                    "default": false
+                },
+                "detector": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["engine"],
+                    "properties": {
+                        "engine": {"type": "string", "minLength": 1},
+                        "timeout_ms": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1500
+                        },
+                        "fail_closed": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Sets the default for `on_unavailable`."
+                        },
+                        "on_unavailable": {
+                            "type": "string",
+                            "enum": ["reject", "rules_only"]
+                        },
+                        "max_bytes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1048576
+                        },
+                        "kinds": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1}
+                        }
+                    }
+                },
+                "max_placeholders": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "default": 1024
+                },
+                "redact_system": {"type": "boolean", "default": true},
+                "redact_assistant": {"type": "boolean", "default": true},
+                "redact_tool_results": {"type": "boolean", "default": true},
+                "redact_tools": {"type": "boolean", "default": false}
+            }
+        }));
         manifest
     }
 }

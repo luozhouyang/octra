@@ -163,6 +163,45 @@ impl LlmPluginFactory for BudgetGuardFactory {
         );
         manifest.priority = 650;
         manifest.capabilities = vec![Capability::RequestBody];
+        manifest.config_schema = Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "llm-budget-guard config",
+            "description": "At least one of `requests` or `tokens` is required.",
+            "type": "object",
+            "additionalProperties": false,
+            "anyOf": [
+                {"required": ["requests"]},
+                {"required": ["tokens"]}
+            ],
+            "properties": {
+                "requests": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum requests per rolling window."
+                },
+                "tokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum estimated plus actual tokens per rolling window."
+                },
+                "period": {
+                    "type": "string",
+                    "enum": ["minute", "hour", "day", "month"],
+                    "default": "day"
+                },
+                "code": {
+                    "type": "string",
+                    "default": "budget_exceeded",
+                    "description": "Stable error code returned in the rejection."
+                },
+                "status": {
+                    "type": "integer",
+                    "minimum": 400,
+                    "maximum": 599,
+                    "default": 429
+                }
+            }
+        }));
         manifest
     }
 

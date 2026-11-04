@@ -98,6 +98,28 @@ mod tests {
     }
 
     #[test]
+    fn builtin_plugins_declare_a_config_schema() {
+        let registry = super::registry();
+        let manifests = registry.manifests();
+        assert!(!manifests.is_empty());
+        for manifest in manifests {
+            let schema = manifest
+                .config_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} has no config schema", manifest.name));
+            let schema = schema
+                .as_object()
+                .unwrap_or_else(|| panic!("{} config schema is not a JSON object", manifest.name));
+            assert_eq!(
+                schema.get("type").and_then(|value| value.as_str()),
+                Some("object"),
+                "{} config schema must declare type object",
+                manifest.name
+            );
+        }
+    }
+
+    #[test]
     fn builtin_plugins_declare_their_phases() {
         use octra_api_plugin_types::PluginKind;
         use octra_llm_plugin_types::LlmScope;

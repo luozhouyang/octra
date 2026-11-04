@@ -1951,6 +1951,20 @@ impl From<PluginConfigRecord> for PluginConfigView {
 pub struct PluginDetailView {
     pub plugin: PluginView,
     pub configs: Vec<PluginConfigView>,
+    /// Parsed JSON Schema for the plugin configuration. Invalid or absent
+    /// schemas are exposed as `null` instead of failing the request.
+    pub config_schema: Value,
+}
+
+impl PluginDetailView {
+    fn new(record: PluginRecord, configs: Vec<PluginConfigRecord>) -> Self {
+        let config_schema = serde_json::from_str(&record.config_schema_json).unwrap_or(Value::Null);
+        Self {
+            plugin: record.into(),
+            configs: configs.into_iter().map(PluginConfigView::from).collect(),
+            config_schema,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1996,10 +2010,7 @@ async fn get_plugin(
         .list_plugin_configs(&id)
         .await
         .map_err(ApiError::internal)?;
-    Ok(extract::Json(PluginDetailView {
-        plugin: record.into(),
-        configs: configs.into_iter().map(PluginConfigView::from).collect(),
-    }))
+    Ok(extract::Json(PluginDetailView::new(record, configs)))
 }
 
 async fn update_plugin(
@@ -2022,10 +2033,7 @@ async fn update_plugin(
         .list_plugin_configs(&id)
         .await
         .map_err(ApiError::internal)?;
-    Ok(extract::Json(PluginDetailView {
-        plugin: record.into(),
-        configs: configs.into_iter().map(PluginConfigView::from).collect(),
-    }))
+    Ok(extract::Json(PluginDetailView::new(record, configs)))
 }
 
 async fn list_plugin_configs(

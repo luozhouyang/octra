@@ -38,6 +38,101 @@ impl LlmPluginFactory for RateLimitFactory {
         manifest.priority = 1000;
         manifest.timeout_ms = 50;
         manifest.capabilities = vec![Capability::RequestBody, Capability::ResponseHeaders];
+        manifest.config_schema = Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "llm-rate-limit config",
+            "description": "Use either flat window fields or `rules`, not both. Flat window limits must be monotonically non-decreasing from shorter to longer windows.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "second": {"type": "integer", "minimum": 1},
+                "minute": {"type": "integer", "minimum": 1},
+                "hour": {"type": "integer", "minimum": 1},
+                "day": {"type": "integer", "minimum": 1},
+                "month": {"type": "integer", "minimum": 1},
+                "year": {"type": "integer", "minimum": 1},
+                "limit_by": {
+                    "type": "string",
+                    "enum": ["virtual_key", "consumer", "consumer_group", "model", "client_ip", "global"],
+                    "default": "virtual_key"
+                },
+                "policy": {
+                    "type": "string",
+                    "enum": ["local"],
+                    "default": "local",
+                    "description": "Only local counting is implemented."
+                },
+                "fault_tolerant": {"type": "boolean", "default": true},
+                "hide_client_headers": {"type": "boolean", "default": false},
+                "error_code": {
+                    "type": "integer",
+                    "minimum": 400,
+                    "maximum": 599,
+                    "default": 429
+                },
+                "error_message": {
+                    "type": "string",
+                    "minLength": 1,
+                    "default": "LLM rate limit exceeded"
+                },
+                "code": {
+                    "type": "string",
+                    "minLength": 1,
+                    "default": "rate_limited"
+                },
+                "rules": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["name", "window", "limit"],
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                            },
+                            "window": {
+                                "type": "string",
+                                "enum": ["second", "minute", "hour", "day", "month", "year"]
+                            },
+                            "limit": {"type": "integer", "minimum": 1},
+                            "limit_by": {
+                                "type": "string",
+                                "enum": ["virtual_key", "consumer", "consumer_group", "model", "client_ip", "global"]
+                            }
+                        }
+                    }
+                }
+            },
+            "oneOf": [
+                {
+                    "required": ["rules"],
+                    "properties": {"rules": {"minItems": 1}},
+                    "not": {
+                        "anyOf": [
+                            {"required": ["second"]},
+                            {"required": ["minute"]},
+                            {"required": ["hour"]},
+                            {"required": ["day"]},
+                            {"required": ["month"]},
+                            {"required": ["year"]}
+                        ]
+                    }
+                },
+                {
+                    "anyOf": [
+                        {"required": ["second"]},
+                        {"required": ["minute"]},
+                        {"required": ["hour"]},
+                        {"required": ["day"]},
+                        {"required": ["month"]},
+                        {"required": ["year"]}
+                    ],
+                    "properties": {"rules": {"maxItems": 0}}
+                }
+            ]
+        }));
         manifest
     }
 

@@ -104,6 +104,93 @@ impl LlmPluginFactory for IntentHintFactory {
             "Tag requests with a routing intent hint for core model selection",
         );
         manifest.priority = 600;
+        manifest.config_schema = Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "llm-intent-hint config",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "default": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Applied when no rule matches; whitespace-only values are rejected."
+                },
+                "ignore_header": {
+                    "type": "boolean",
+                    "default": false
+                },
+                "rules": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["intent"],
+                        "properties": {
+                            "intent": {
+                                "type": "string",
+                                "minLength": 1
+                            },
+                            "has_tools": {"type": "boolean"},
+                            "has_images": {"type": "boolean"},
+                            "reasoning_effort": {"type": "boolean"},
+                            "min_tokens": {
+                                "type": "integer",
+                                "minimum": 1
+                            }
+                        }
+                    }
+                },
+                "classifier": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["base_url", "model", "labels"],
+                    "properties": {
+                        "base_url": {
+                            "type": "string",
+                            "description": "HTTP(S) base URL; `/chat/completions` is appended."
+                        },
+                        "model": {
+                            "type": "string",
+                            "minLength": 1
+                        },
+                        "labels": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"type": "string", "minLength": 1}
+                        },
+                        "secret_ref": {
+                            "type": "string",
+                            "description": "Resolved by the host before the plugin is created."
+                        },
+                        "secret": {
+                            "type": "string",
+                            "description": "Bearer token sent to the classifier endpoint."
+                        },
+                        "timeout_ms": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "maximum": 10000,
+                            "default": 1500
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 32000,
+                            "default": 4000
+                        },
+                        "cache_entries": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 65536,
+                            "default": 512
+                        },
+                        "system_prompt": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        }));
         manifest
     }
 

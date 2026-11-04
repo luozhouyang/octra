@@ -33,6 +33,35 @@ impl LlmPluginFactory for ModelMapFactory {
             "Map client model aliases onto provider models",
         );
         manifest.priority = 900;
+        manifest.config_schema = Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "llm-model-map config",
+            "description": "Either `map` or `mappings` is required; `map` wins when both are present. Unknown top-level keys are ignored.",
+            "type": "object",
+            "additionalProperties": true,
+            "anyOf": [
+                {"required": ["map"]},
+                {"required": ["mappings"]}
+            ],
+            "properties": {
+                "map": {
+                    "type": "object",
+                    "description": "Client model alias to provider model.",
+                    "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                },
+                "mappings": {
+                    "type": "object",
+                    "description": "Accepted as an alias for `map`.",
+                    "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                }
+            }
+        }));
         manifest
     }
 

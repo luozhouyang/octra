@@ -8,7 +8,7 @@ use octra_llm_plugin_types::{
     LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext, LlmScope,
     REQUEST_LLM_SCOPES,
 };
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::manifest;
 
@@ -129,6 +129,58 @@ impl LlmPluginFactory for ParamOverrideFactory {
             "Set or delete sampling parameters and extra request fields",
         );
         manifest.priority = 850;
+        manifest.config_schema = Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "llm-param-override config",
+            "description": "Unknown keys under `set` are copied to the request extra fields.",
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["set"],
+            "properties": {
+                "set": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                        "temperature": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 2.0
+                        },
+                        "top_p": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 1.0
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 4294967295u64
+                        },
+                        "max_tokens": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 4294967295u64
+                        },
+                        "stop": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        }
+                    }
+                },
+                "delete": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "extra": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "extra_delete": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            }
+        }));
         manifest
     }
 

@@ -8,7 +8,7 @@ use octra_llm_plugin_types::{
     LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext, LlmScope,
     REQUEST_LLM_SCOPES,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::manifest;
 
@@ -35,6 +35,25 @@ impl LlmPluginFactory for SystemPromptFactory {
             "Prepend, append or replace the system prompt",
         );
         manifest.priority = 800;
+        manifest.config_schema = Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "llm-system-prompt config",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["prompt"],
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Whitespace-only values are rejected."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["prepend", "append", "replace"],
+                    "default": "prepend"
+                }
+            }
+        }));
         manifest
     }
 

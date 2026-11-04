@@ -54,6 +54,26 @@ impl LlmPluginFactory for RequestAuditFactory {
         );
         manifest.timeout_ms = 50;
         manifest.capabilities = vec![octra_api_plugin_types::Capability::Log];
+        manifest.config_schema = Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "llm-request-audit config",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "include_usage": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "include_error": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "include_client": {
+                    "type": "boolean",
+                    "default": false
+                }
+            }
+        }));
         manifest
     }
 

@@ -760,6 +760,16 @@ async fn llm_plugin_catalog_and_config_crud() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["plugin"]["name"], "llm-model-map");
     assert!(detail["configs"].as_array().unwrap().is_empty());
+    assert!(
+        detail["config_schema"].is_object(),
+        "config_schema: {}",
+        detail["config_schema"]
+    );
+    assert_eq!(detail["config_schema"]["type"], "object");
+    assert_eq!(
+        detail["config_schema"]["properties"]["map"]["type"],
+        "object"
+    );
 
     let (status, config) = create(
         &harness,
