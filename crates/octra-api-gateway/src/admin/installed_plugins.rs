@@ -84,6 +84,51 @@ pub async fn get_artifact(
     Ok(Json(to_value(&artifact)?))
 }
 
+/// Deletes an unused artifact version and its copied files. Installed plugins
+/// keep their artifact until they are uninstalled or upgraded away from it.
+pub async fn delete_artifact(
+    State(state): State<ApiControlState>,
+    Path(id): Path<String>,
+) -> AdminResult<Json<Value>> {
+    let wasm = wasm(&state)?;
+    let artifact = state
+        .storage
+        .llm
+        .get_plugin_artifact(&id)
+        .await?
+        .ok_or_else(|| AdminError::not_found(format!("plugin artifact '{id}' not found")))?;
+
+    if let Some(plugin) = state.storage.llm.get_plugin_by_name(&artifact.name).await?
+        && (plugin.artifact_id.as_deref() == Some(artifact.id.as_str())
+            || plugin.artifact_hash.as_deref() == Some(artifact.hash.as_str()))
+    {
+        return Err(AdminError::conflict(format!(
+            "artifact is used by the installed plugin '{}'",
+            plugin.name
+        )));
+    }
+
+    if !state.storage.llm.delete_plugin_artifact(&id).await? {
+        return Err(AdminError::not_found(format!(
+            "plugin artifact '{id}' not found"
+        )));
+    }
+    wasm.engine.remove_component(&artifact.hash);
+    remove_artifact_dir(&artifact.path);
+
+    Ok(Json(json!({ "id": id, "deleted": true })))
+}
+
+fn remove_artifact_dir(path: &str) {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(path, %error, "cannot remove the plugin artifact directory");
+        }
+    }
+}
+
 pub async fn upload_artifact(
     State(state): State<ApiControlState>,
     payload: Result<Json<Value>, JsonRejection>,
@@ -281,6 +326,13 @@ pub async fn upgrade(
     let (manifest, artifact, artifact_dir) =
         resolve_artifact(&state, &name, input.artifact_id.as_deref()).await?;
     ensure_capabilities(&manifest, &input.approve_capabilities)?;
+    if existing.kind != manifest.kind.as_str() {
+        return Err(AdminError::schema(format!(
+            "cannot upgrade a {} plugin with a {} artifact",
+            existing.kind,
+            manifest.kind.as_str()
+        )));
+    }
 
     if manifest.kind == PluginKind::Llm {
         let lifecycle = llm_lifecycle(&state)?;
@@ -494,11 +546,23 @@ pub async fn health(
         .await?
         .ok_or_else(|| AdminError::not_found(format!("plugin '{name}' is not installed")))?;
     let installed = record.source == "wasm";
-    let in_catalog = wasm.catalog.contains(&name);
-    let in_host = wasm.host_provider.contains(&name);
+    let is_llm = record.kind == PluginKind::Llm.as_str();
+    let (in_catalog, in_host) = if is_llm {
+        let registered = state
+            .llm_wasm
+            .as_ref()
+            .is_some_and(|lifecycle| lifecycle.registered(&name));
+        (registered, registered)
+    } else {
+        (
+            wasm.catalog.contains(&name),
+            wasm.host_provider.contains(&name),
+        )
+    };
     let healthy = installed && record.enabled && in_catalog && in_host;
     Ok(Json(json!({
         "name": name,
+        "kind": record.kind,
         "installed": installed,
         "enabled": record.enabled,
         "catalog": in_catalog,

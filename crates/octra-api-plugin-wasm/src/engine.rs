@@ -114,6 +114,11 @@ impl WasmEngine {
     pub fn remove_component(&self, hash: &str) {
         self.components.write().remove(hash);
     }
+
+    /// Number of components currently held by the content-addressed cache.
+    pub fn cached_components(&self) -> usize {
+        self.components.read().len()
+    }
 }
 
 impl Drop for WasmEngine {
@@ -158,8 +163,10 @@ mod tests {
         let first = engine.component("hash", &path).unwrap();
         let second = engine.component("hash", &path).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(engine.cached_components(), 1);
 
         engine.remove_component("hash");
+        assert_eq!(engine.cached_components(), 0);
         let third = engine.component("hash", &path).unwrap();
         assert!(!Arc::ptr_eq(&first, &third));
 

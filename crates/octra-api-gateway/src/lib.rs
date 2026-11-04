@@ -133,6 +133,9 @@ pub trait LlmWasmLifecycle: Send + Sync {
     /// Removes a plugin. `artifact_hash` identifies the compiled component to
     /// evict once the new chains are live.
     async fn uninstall(&self, name: &str, artifact_hash: Option<&str>) -> Result<(), String>;
+    /// Whether the plugin factory is currently registered with the LLM
+    /// runtime. Used by the shared health endpoint.
+    fn registered(&self, name: &str) -> bool;
 }
 
 /// A synchronous notification hook. Implementations should schedule async work

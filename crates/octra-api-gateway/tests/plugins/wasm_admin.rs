@@ -357,17 +357,25 @@ impl octra_api_gateway::LlmWasmLifecycle for RecordingLifecycle {
         self.removed.lock().unwrap().push(name.to_string());
         Ok(())
     }
+
+    fn registered(&self, name: &str) -> bool {
+        self.installed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|installed| installed == name)
+    }
 }
 
-fn llm_artifact(dir: &std::path::Path) -> std::path::PathBuf {
+fn artifact(dir: &std::path::Path, kind: &str, version: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
         dir.join("plugin.json"),
         json!({
             "api_version": "1",
             "name": "llm-demo",
-            "version": "1.0.0",
-            "kind": "llm",
+            "version": version,
+            "kind": kind,
             "runtime": "wasm",
             "priority": 0,
             "description": "demo",
@@ -377,8 +385,16 @@ fn llm_artifact(dir: &std::path::Path) -> std::path::PathBuf {
         .to_string(),
     )
     .unwrap();
-    std::fs::write(dir.join("plugin.wasm"), b"\0asm\x01\0\0\0").unwrap();
+    std::fs::write(
+        dir.join("plugin.wasm"),
+        [0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00],
+    )
+    .unwrap();
     dir.to_path_buf()
+}
+
+fn llm_artifact(dir: &std::path::Path) -> std::path::PathBuf {
+    artifact(dir, "llm", "1.0.0")
 }
 
 #[tokio::test]
@@ -410,6 +426,13 @@ async fn installs_and_uninstalls_an_llm_artifact_through_the_lifecycle_hook() {
     assert_eq!(status, StatusCode::CREATED, "install failed: {installed}");
     assert_eq!(lifecycle.installed.lock().unwrap().as_slice(), ["llm-demo"]);
 
+    let (status, _, health) = env
+        .send_control_json("GET", "/admin/plugins/llm-demo/health", json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(health["healthy"], true, "health: {health}");
+    assert_eq!(health["kind"], "llm");
+
     let (status, _, uninstalled) = env
         .send_control_json("POST", "/admin/plugins/llm-demo/uninstall", json!({}))
         .await;
@@ -432,6 +455,10 @@ impl octra_api_gateway::LlmWasmLifecycle for FailingLifecycle {
 
     async fn uninstall(&self, _name: &str, _artifact_hash: Option<&str>) -> Result<(), String> {
         Ok(())
+    }
+
+    fn registered(&self, _name: &str) -> bool {
+        false
     }
 }
 
@@ -471,5 +498,154 @@ async fn failed_llm_activation_removes_the_catalog_row() {
         status,
         StatusCode::NOT_FOUND,
         "catalog row was not rolled back"
+    );
+}
+
+#[tokio::test]
+async fn deletes_unused_artifacts_and_cascades_llm_configs_on_uninstall() {
+    let lifecycle = std::sync::Arc::new(RecordingLifecycle {
+        installed: std::sync::Mutex::new(Vec::new()),
+        removed: std::sync::Mutex::new(Vec::new()),
+    });
+    let env = WasmTestEnv::with_llm_lifecycle(lifecycle).await;
+    let source = llm_artifact(&env.dir.path().join("llm-demo-artifact"));
+
+    // Upload and delete an artifact that no plugin uses.
+    let (status, _, uploaded) = env
+        .send_control_json(
+            "POST",
+            "/admin/plugin-artifacts",
+            json!({"path": source.to_string_lossy()}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let artifact_id = uploaded["id"].as_str().unwrap().to_string();
+
+    let (status, _, body) = env
+        .send_control_json(
+            "DELETE",
+            &format!("/admin/plugin-artifacts/{artifact_id}"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "delete failed: {body}");
+    assert_eq!(body["deleted"], true);
+    let (status, _, _) = env
+        .send_control_json(
+            "GET",
+            &format!("/admin/plugin-artifacts/{artifact_id}"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Install a second copy, then refuse to delete the artifact in use.
+    let (status, _, uploaded) = env
+        .send_control_json(
+            "POST",
+            "/admin/plugin-artifacts",
+            json!({"path": source.to_string_lossy()}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let artifact_id = uploaded["id"].as_str().unwrap().to_string();
+    let (status, _, body) = env
+        .send_control_json(
+            "POST",
+            "/admin/plugins/llm-demo/install",
+            json!({"artifact_id": artifact_id}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "install failed: {body}");
+    let (status, _, _) = env
+        .send_control_json(
+            "DELETE",
+            &format!("/admin/plugin-artifacts/{artifact_id}"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Uninstall cascades the plugin configuration rows.
+    env.gateway
+        .storage
+        .llm
+        .create_plugin_config("plg_llm-demo", Scope::Global, None, true, "{}")
+        .await
+        .unwrap();
+    assert_eq!(
+        env.gateway
+            .storage
+            .llm
+            .list_plugin_configs("plg_llm-demo")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let (status, _, body) = env
+        .send_control_json("POST", "/admin/plugins/llm-demo/uninstall", json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "uninstall failed: {body}");
+    assert!(
+        env.gateway
+            .storage
+            .llm
+            .list_plugin_configs("plg_llm-demo")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn rejects_cross_kind_upgrades() {
+    let lifecycle = std::sync::Arc::new(RecordingLifecycle {
+        installed: std::sync::Mutex::new(Vec::new()),
+        removed: std::sync::Mutex::new(Vec::new()),
+    });
+    let env = WasmTestEnv::with_llm_lifecycle(lifecycle).await;
+    let api = artifact(&env.dir.path().join("api-artifact"), "api", "1.0.0");
+    let (status, _, uploaded) = env
+        .send_control_json(
+            "POST",
+            "/admin/plugin-artifacts",
+            json!({"path": api.to_string_lossy()}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "upload: {uploaded}");
+    let artifact_id = uploaded["id"].as_str().unwrap();
+    let (status, _, body) = env
+        .send_control_json(
+            "POST",
+            "/admin/plugins/llm-demo/install",
+            json!({"artifact_id": artifact_id}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "install: {body}");
+
+    let llm = artifact(&env.dir.path().join("llm-artifact"), "llm", "2.0.0");
+    let (status, _, uploaded) = env
+        .send_control_json(
+            "POST",
+            "/admin/plugin-artifacts",
+            json!({"path": llm.to_string_lossy()}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "upload: {uploaded}");
+    let artifact_id = uploaded["id"].as_str().unwrap();
+    let (status, _, body) = env
+        .send_control_json(
+            "POST",
+            "/admin/plugins/llm-demo/upgrade",
+            json!({"artifact_id": artifact_id}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "upgrade: {body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot upgrade a api plugin with a llm artifact")
     );
 }

@@ -86,7 +86,7 @@ impl AdminError {
         }
     }
 
-    fn conflict(message: impl Into<String>) -> Self {
+    pub fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             name: "unique constraint violation",

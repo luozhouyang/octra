@@ -101,7 +101,7 @@ impl LlmPluginFactory for LlmWasmPluginFactory {
         let config_json = serde_json::to_string(&config).map_err(|error| {
             PluginError::fail_closed(format!("cannot serialize wasm plugin config: {error}"))
         })?;
-        Ok(Arc::new(LlmWasmPlugin {
+        let plugin = LlmWasmPlugin {
             manifest: self.manifest.clone(),
             component: self.component.clone(),
             config_json,
@@ -115,7 +115,11 @@ impl LlmPluginFactory for LlmWasmPluginFactory {
             } else {
                 self.limits.max_inflight
             },
-        }))
+        };
+        // Instantiate once during chain compilation so a configuration the
+        // guest rejects fails the control write instead of every request.
+        plugin.instantiate()?;
+        Ok(Arc::new(plugin))
     }
 }
 
@@ -160,10 +164,21 @@ impl LlmWasmPlugin {
             return Ok(entry.instance.clone());
         }
         if instances.len() >= self.max_instances {
-            return Err(PluginError::fail_closed(format!(
-                "LLM wasm plugin '{}' has too many in-flight requests",
-                self.manifest.name
-            )));
+            // Requests that never reach the log stage (early errors, client
+            // disconnects) rely on this eviction instead of stamping out every
+            // new request once the cap is reached.
+            if let Some(oldest) = instances
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(request_id, _)| request_id.clone())
+            {
+                instances.remove(&oldest);
+                tracing::warn!(
+                    plugin = %self.manifest.name,
+                    request_id = %oldest,
+                    "evicting the oldest LLM wasm instance at the capacity limit"
+                );
+            }
         }
         let instance = Arc::new(Mutex::new(self.instantiate()?));
         instances.insert(
