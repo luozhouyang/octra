@@ -20,7 +20,8 @@ use octra_llm_plugin_types::{
     LLM_PLUGIN_API_VERSION, LlmAction, LlmErrorContext, LlmLogContext, LlmLogEvent, LlmPlugin,
     LlmPluginCreateContext, LlmPluginFactory, LlmPluginResult, LlmPluginStateStore,
     LlmProviderInfo, LlmProviderRequestContext, LlmRequestContext, LlmRequestMeta, LlmRequestState,
-    LlmResponseContext, LlmScope, LlmStreamAction, LlmStreamContext, LlmStreamResult,
+    LlmResponseContext, LlmResponseHeaders, LlmScope, LlmStreamAction, LlmStreamContext,
+    LlmStreamResult,
 };
 use octra_storage::Storage;
 use octra_storage::plugins::{PluginConfigRecord, PluginData, PluginRecord};
@@ -77,6 +78,18 @@ impl LlmPluginRegistry {
         self.factory(name)
             .ok_or_else(|| PluginError::fail_closed(format!("unknown LLM plugin '{name}'")))?
             .validate(config)
+    }
+
+    /// Scopes the named plugin can honour. Unknown plugins report no scopes.
+    pub fn supported_scopes(&self, name: &str) -> Vec<LlmScope> {
+        self.factory(name)
+            .map(|factory| factory.supported_scopes().to_vec())
+            .unwrap_or_default()
+    }
+
+    pub fn supports_scope(&self, name: &str, scope: LlmScope) -> bool {
+        self.factory(name)
+            .is_some_and(|factory| factory.supported_scopes().contains(&scope))
     }
 }
 
@@ -172,34 +185,107 @@ impl PluginStats {
     }
 }
 
-/// Shared per-plugin counters. Configured entries clone the `Arc`, so counters
+/// Identity of one metrics entry. Configured instances are keyed by config id,
+/// while catalog entries only describe a registered plugin.
+#[derive(Debug, Clone)]
+struct PluginIdentity {
+    name: String,
+    config_id: String,
+    scope: LlmScope,
+    scope_id: String,
+}
+
+struct MetricsEntry {
+    identity: PluginIdentity,
+    stats: Arc<PluginStats>,
+}
+
+/// Shared per-instance counters. Configured entries clone the `Arc`, so counters
 /// survive a chain reload and in-flight requests keep updating them.
 #[derive(Clone, Default)]
 pub struct LlmPluginMetrics {
-    plugins: Arc<Mutex<HashMap<String, Arc<PluginStats>>>>,
+    plugins: Arc<Mutex<HashMap<String, Arc<MetricsEntry>>>>,
 }
 
 impl LlmPluginMetrics {
-    fn stats(&self, name: &str) -> Arc<PluginStats> {
-        self.plugins
-            .lock()
-            .entry(name.to_string())
-            .or_default()
+    /// Stats for a configured instance, keyed by its unique config id. Two
+    /// configs of the same plugin at different scopes stay distinguishable.
+    fn stats(
+        &self,
+        config_id: &str,
+        name: &str,
+        scope: LlmScope,
+        scope_id: &str,
+    ) -> Arc<PluginStats> {
+        let mut plugins = self.plugins.lock();
+        plugins
+            .entry(config_id.to_string())
+            .or_insert_with(|| {
+                Arc::new(MetricsEntry {
+                    identity: PluginIdentity {
+                        name: name.to_string(),
+                        config_id: config_id.to_string(),
+                        scope,
+                        scope_id: scope_id.to_string(),
+                    },
+                    stats: Arc::new(PluginStats::default()),
+                })
+            })
+            .stats
             .clone()
     }
 
+    /// Removes counters for configured instances that are no longer present.
+    /// Catalog entries (empty config id) are kept and handled by
+    /// [`Self::seed_if_missing`].
+    fn retain_configs(&self, keep: &HashSet<String>) {
+        self.plugins.lock().retain(|_, entry| {
+            entry.identity.config_id.is_empty() || keep.contains(&entry.identity.config_id)
+        });
+    }
+
+    /// Adds a zero-state entry for a registered plugin that has no
+    /// configuration, so the snapshot still advertises it. A configured
+    /// instance replaces any catalog placeholder for the same name.
+    fn seed_if_missing(&self, name: &str) {
+        let mut plugins = self.plugins.lock();
+        let configured = plugins
+            .values()
+            .any(|entry| entry.identity.name == name && !entry.identity.config_id.is_empty());
+        if configured {
+            plugins.retain(|_, entry| {
+                !(entry.identity.name == name && entry.identity.config_id.is_empty())
+            });
+            return;
+        }
+        if plugins.values().any(|entry| entry.identity.name == name) {
+            return;
+        }
+        plugins.insert(
+            format!("catalog:{name}"),
+            Arc::new(MetricsEntry {
+                identity: PluginIdentity {
+                    name: name.to_string(),
+                    config_id: String::new(),
+                    scope: LlmScope::Global,
+                    scope_id: String::new(),
+                },
+                stats: Arc::new(PluginStats::default()),
+            }),
+        );
+    }
+
     pub fn snapshot(&self) -> Vec<PluginMetricsView> {
-        let stats: Vec<(String, Arc<PluginStats>)> = self
-            .plugins
-            .lock()
+        let entries: Vec<Arc<MetricsEntry>> = self.plugins.lock().values().cloned().collect();
+        let mut views: Vec<_> = entries
             .iter()
-            .map(|(name, stats)| (name.clone(), stats.clone()))
+            .map(|entry| PluginMetricsView::from_stats(&entry.identity, &entry.stats))
             .collect();
-        let mut views: Vec<_> = stats
-            .into_iter()
-            .map(|(name, stats)| PluginMetricsView::from_stats(name, &stats))
-            .collect();
-        views.sort_by(|left, right| left.name.cmp(&right.name));
+        views.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.config_id.cmp(&right.config_id))
+        });
         views
     }
 }
@@ -218,11 +304,14 @@ pub struct StageMetricsView {
 #[derive(Debug, Serialize)]
 pub struct PluginMetricsView {
     pub name: String,
+    pub config_id: String,
+    pub scope: LlmScope,
+    pub scope_id: String,
     pub stages: BTreeMap<&'static str, StageMetricsView>,
 }
 
 impl PluginMetricsView {
-    fn from_stats(name: String, stats: &PluginStats) -> Self {
+    fn from_stats(identity: &PluginIdentity, stats: &PluginStats) -> Self {
         let mut stages = BTreeMap::new();
         for (index, stage) in [
             Stage::Request,
@@ -249,7 +338,13 @@ impl PluginMetricsView {
                 },
             );
         }
-        Self { name, stages }
+        Self {
+            name: identity.name.clone(),
+            config_id: identity.config_id.clone(),
+            scope: identity.scope,
+            scope_id: identity.scope_id.clone(),
+            stages,
+        }
     }
 }
 
@@ -329,12 +424,14 @@ impl LlmPluginChain {
     pub async fn on_request(
         &self,
         meta: &LlmRequestMeta<'_>,
+        headers: &mut LlmResponseHeaders,
         request: &mut octra_llm_core::ChatRequest,
         state: &mut LlmRequestState,
     ) -> std::result::Result<Option<GatewayError>, LlmChainError> {
         for entry in &self.entries {
             let mut cx = LlmRequestContext {
                 meta,
+                headers,
                 request,
                 state: state.slot(&entry.name),
             };
@@ -648,6 +745,9 @@ impl LlmPluginStateStore for PersistentPluginStateStore {
     }
 }
 
+/// Upper bound on cached resolved chains; clearing only costs recomputation.
+const MAX_CACHED_CHAINS: usize = 4096;
+
 #[derive(Default)]
 struct LlmPluginChains {
     by_scope: HashMap<ScopeKey, Vec<LlmEntry>>,
@@ -676,12 +776,18 @@ impl LlmPluginChains {
             .map(|plugin| (plugin.id.as_str(), plugin))
             .collect();
         let mut by_scope: HashMap<ScopeKey, Vec<LlmEntry>> = HashMap::new();
+        let mut configured = HashSet::new();
         for config in &data.configs {
             if let Some((key, entry)) = compile_config(config, &plugins, registry, metrics, state)?
             {
+                configured.insert(config.id.clone());
                 by_scope.entry(key).or_default().push(entry);
             }
         }
+        // Drop counters for configs that no longer exist. In-flight requests
+        // keep their `Arc<PluginStats>` alive, but the snapshot stops
+        // advertising a deleted instance.
+        metrics.retain_configs(&configured);
         for entries in by_scope.values_mut() {
             sort_entries(entries);
         }
@@ -740,7 +846,11 @@ impl LlmPluginChains {
 
         sort_entries(&mut entries);
         let chain = Arc::new(LlmPluginChain { entries });
-        self.cache.lock().insert(key, chain.clone());
+        let mut cache = self.cache.lock();
+        if cache.len() >= MAX_CACHED_CHAINS {
+            cache.clear();
+        }
+        cache.insert(key, chain.clone());
         chain
     }
 }
@@ -847,6 +957,12 @@ fn compile_config(
             plugin.name
         )));
     }
+    if !factory.supported_scopes().contains(&scope) {
+        return Err(Error::Runtime(format!(
+            "LLM plugin '{}' does not support {} scope",
+            plugin.name, scope
+        )));
+    }
     let context = LlmPluginCreateContext {
         instance_key: &config.id,
         plugin_name: &plugin.name,
@@ -864,10 +980,10 @@ fn compile_config(
             name: plugin.name.clone(),
             scope,
             scope_id: config.scope_id.clone(),
-            priority: plugin.priority,
+            priority: i64::from(manifest.priority),
             timeout: manifest.timeout(),
             fail_policy: manifest.fail_policy,
-            stats: metrics.stats(&plugin.name),
+            stats: metrics.stats(&config.id, &plugin.name, scope, &config.scope_id),
             plugin: instance,
         },
     )))
@@ -904,9 +1020,6 @@ impl LlmPluginRuntime {
         storage: Arc<Storage>,
         registry: Arc<LlmPluginRegistry>,
     ) -> Result<Self> {
-        for manifest in registry.manifests() {
-            storage.llm.upsert_plugin(&manifest).await?;
-        }
         let persistent = Arc::new(PersistentPluginStateStore::new(storage.clone()));
         persistent.seed(storage.llm.load_plugin_state().await?);
         let flusher = persistent.clone();
@@ -940,11 +1053,14 @@ impl LlmPluginRuntime {
         let Some(storage) = &self.storage else {
             return Ok(());
         };
+        for manifest in self.registry.manifests() {
+            storage.llm.upsert_plugin(&manifest).await?;
+        }
         let data = storage.llm.load_plugin_data().await?;
         let chains =
             LlmPluginChains::compile_with(data, &self.registry, &self.metrics, &self.state)?;
         for manifest in self.registry.manifests() {
-            self.metrics.stats(&manifest.name);
+            self.metrics.seed_if_missing(&manifest.name);
         }
         *self.chains.write() = Arc::new(chains);
         Ok(())
@@ -1158,6 +1274,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: None,
             user_agent: None,
@@ -1166,7 +1284,12 @@ mod tests {
         let mut state = LlmRequestState::new();
         assert!(
             chain
-                .on_request(&meta, &mut request, &mut state)
+                .on_request(
+                    &meta,
+                    &mut LlmResponseHeaders::default(),
+                    &mut request,
+                    &mut state
+                )
                 .await
                 .unwrap()
                 .is_none()
@@ -1231,6 +1354,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: None,
             user_agent: None,
@@ -1322,6 +1447,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: None,
             user_agent: None,
@@ -1330,7 +1457,12 @@ mod tests {
         let mut request = ChatRequest::new("m", Vec::new());
         let mut state = LlmRequestState::new();
         chain
-            .on_request(&meta, &mut request, &mut state)
+            .on_request(
+                &meta,
+                &mut LlmResponseHeaders::default(),
+                &mut request,
+                &mut state,
+            )
             .await
             .unwrap();
         let mut response = ChatResponse::new(
@@ -1404,6 +1536,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: None,
             user_agent: None,
@@ -1413,15 +1547,27 @@ mod tests {
         let mut state = LlmRequestState::new();
         let open = chain_with_failure(FailPolicy::Open);
         assert!(
-            open.on_request(&meta, &mut request, &mut state)
-                .await
-                .unwrap()
-                .is_none()
+            open.on_request(
+                &meta,
+                &mut LlmResponseHeaders::default(),
+                &mut request,
+                &mut state
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
 
         let closed = chain_with_failure(FailPolicy::Closed);
         assert!(matches!(
-            closed.on_request(&meta, &mut request, &mut state).await,
+            closed
+                .on_request(
+                    &meta,
+                    &mut LlmResponseHeaders::default(),
+                    &mut request,
+                    &mut state
+                )
+                .await,
             Err(LlmChainError::Plugin(_))
         ));
     }
@@ -1476,6 +1622,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: None,
             user_agent: None,
@@ -1500,6 +1648,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: None,
             user_agent: None,
@@ -1522,7 +1672,12 @@ mod tests {
         let mut request = ChatRequest::new("m", Vec::new());
         let mut state = LlmRequestState::new();
         chain
-            .on_request(&test_meta(), &mut request, &mut state)
+            .on_request(
+                &test_meta(),
+                &mut LlmResponseHeaders::default(),
+                &mut request,
+                &mut state,
+            )
             .await
             .unwrap();
 
@@ -1531,11 +1686,77 @@ mod tests {
             .iter()
             .find(|view| view.name == "failing")
             .expect("metrics for the configured plugin");
+        assert_eq!(view.config_id, "c1");
+        assert_eq!(view.scope, LlmScope::Global);
+        assert_eq!(view.scope_id, "");
         assert_eq!(view.stages["request"].calls, 1);
         assert_eq!(view.stages["request"].failures, 1);
         assert_eq!(view.stages["request"].fail_open, 1);
         assert_eq!(view.stages["request"].rejections, 0);
         assert_eq!(view.stages["response"].calls, 0);
+    }
+
+    #[tokio::test]
+    async fn metrics_distinguish_configs_by_scope() {
+        let data = PluginData {
+            plugins: vec![plugin("mark", "p1", "llm", true)],
+            configs: vec![
+                config("c1", "p1", "global", ""),
+                config("c2", "p1", "consumer", "consumer-1"),
+            ],
+        };
+        let metrics = LlmPluginMetrics::default();
+        let state: Arc<dyn LlmPluginStateStore> = Arc::new(MemoryPluginStateStore::default());
+        let _chains = LlmPluginChains::compile_with(data, &registry(), &metrics, &state).unwrap();
+
+        let snapshot = metrics.snapshot();
+        let views: Vec<_> = snapshot.iter().filter(|view| view.name == "mark").collect();
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].config_id, "c1");
+        assert_eq!(views[0].scope, LlmScope::Global);
+        assert_eq!(views[1].config_id, "c2");
+        assert_eq!(views[1].scope, LlmScope::Consumer);
+        assert_eq!(views[1].scope_id, "consumer-1");
+    }
+
+    struct RequestScopedFactory(MarkPlugin);
+
+    impl LlmPluginFactory for RequestScopedFactory {
+        fn manifest(&self) -> PluginManifest {
+            self.0.manifest.clone()
+        }
+
+        fn supported_scopes(&self) -> &'static [LlmScope] {
+            &octra_llm_plugin_types::REQUEST_LLM_SCOPES
+        }
+
+        fn create(&self, _config: Value) -> std::result::Result<Arc<dyn LlmPlugin>, PluginError> {
+            Ok(Arc::new(MarkPlugin {
+                manifest: self.0.manifest.clone(),
+                mark: self.0.mark,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_scope_is_rejected() {
+        let mut registry = LlmPluginRegistry::new();
+        registry.register(RequestScopedFactory(MarkPlugin {
+            manifest: manifest("request-only"),
+            mark: "request-only",
+        }));
+        let data = PluginData {
+            plugins: vec![plugin("request-only", "p1", "llm", true)],
+            configs: vec![config("c1", "p1", "provider", "provider-1")],
+        };
+        let error = LlmPluginChains::compile(data, &registry)
+            .err()
+            .expect("provider scope is outside the supported set");
+        let message = error.to_string();
+        assert!(
+            message.contains("does not support provider scope"),
+            "unexpected error: {message}"
+        );
     }
 
     #[tokio::test]

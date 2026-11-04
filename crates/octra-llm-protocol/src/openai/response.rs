@@ -300,6 +300,7 @@ pub fn error_type(kind: octra_llm_core::ErrorKind) -> &'static str {
         ErrorKind::Forbidden => "permission_error",
         ErrorKind::NotFound => "invalid_request_error",
         ErrorKind::PayloadTooLarge => "invalid_request_error",
+        ErrorKind::RateLimited => "rate_limit_error",
         ErrorKind::Upstream => "upstream_error",
         ErrorKind::Config => "upstream_error",
         ErrorKind::Timeout => "timeout_error",

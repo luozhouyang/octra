@@ -43,6 +43,7 @@ pub struct RuntimeSnapshot {
     policy_global: PolicyLimits,
     policy_consumers: BTreeMap<String, PolicyLimits>,
     virtual_keys: BTreeMap<String, VirtualKeyPolicy>,
+    consumer_groups: BTreeMap<String, Vec<String>>,
 }
 
 /// Model and provider allowances granted by applicable policies. A dimension
@@ -88,7 +89,18 @@ impl RuntimeSnapshot {
     }
 
     /// Builds a snapshot from data whose accounts are already in `pool`.
-    pub fn build_with_pool(mut data: LlmRuntimeData, pool: &AccountPool) -> Self {
+    pub fn build_with_pool(data: LlmRuntimeData, pool: &AccountPool) -> Self {
+        Self::build_with_pool_and_groups(data, pool, BTreeMap::new())
+    }
+
+    /// Builds a snapshot with consumer-group memberships loaded from the API
+    /// store. Group data is kept out of `LlmRuntimeData` because it belongs to
+    /// the client-identity plane, not LLM routing.
+    pub fn build_with_pool_and_groups(
+        mut data: LlmRuntimeData,
+        pool: &AccountPool,
+        consumer_groups: BTreeMap<String, Vec<String>>,
+    ) -> Self {
         data.providers.sort_by(|a, b| {
             a.priority
                 .cmp(&b.priority)
@@ -175,7 +187,16 @@ impl RuntimeSnapshot {
             policy_global,
             policy_consumers,
             virtual_keys,
+            consumer_groups,
         }
+    }
+
+    /// Consumer groups the given consumer belongs to.
+    pub fn consumer_group_ids(&self, consumer_id: &str) -> &[String] {
+        self.consumer_groups
+            .get(consumer_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Whether the consumer may use the requested model. Global and
@@ -366,7 +387,9 @@ impl LlmRuntime {
         let account_pool = AccountPool::new();
         let data = storage.llm.load_runtime_data().await?;
         persist_quota_resets(&storage, account_pool.sync(&data.accounts));
-        let mut snapshot = RuntimeSnapshot::build_with_pool(data, &account_pool);
+        let consumer_groups = load_consumer_groups(&storage).await?;
+        let mut snapshot =
+            RuntimeSnapshot::build_with_pool_and_groups(data, &account_pool, consumer_groups);
         for issue in &snapshot.issues {
             tracing::warn!(
                 provider_id = %issue.provider_id,
@@ -388,7 +411,12 @@ impl LlmRuntime {
     pub async fn reload(&self) -> Result<()> {
         let data = self.storage.llm.load_runtime_data().await?;
         persist_quota_resets(&self.storage, self.account_pool.sync(&data.accounts));
-        let snapshot = Arc::new(RuntimeSnapshot::build_with_pool(data, &self.account_pool));
+        let consumer_groups = load_consumer_groups(&self.storage).await?;
+        let snapshot = Arc::new(RuntimeSnapshot::build_with_pool_and_groups(
+            data,
+            &self.account_pool,
+            consumer_groups,
+        ));
         let mut guard = self.snapshot.write().await;
         *guard = snapshot;
         Ok(())
@@ -402,6 +430,15 @@ impl LlmRuntime {
     pub fn accounts(&self) -> &AccountPool {
         &self.account_pool
     }
+}
+
+async fn load_consumer_groups(storage: &Storage) -> Result<BTreeMap<String, Vec<String>>> {
+    let memberships = storage.api.list_consumer_group_memberships().await?;
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (consumer_id, group_id) in memberships {
+        groups.entry(consumer_id).or_default().push(group_id);
+    }
+    Ok(groups)
 }
 
 fn persist_quota_resets(storage: &Arc<Storage>, resets: Vec<crate::accounts::QuotaReset>) {

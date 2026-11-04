@@ -12,8 +12,8 @@ pub use llm::{
     LlmPiiEngineRecord, LlmProviderAccountInput, LlmProviderAccountRecord, LlmProviderInput,
     LlmProviderRecord, LlmRouteRecord, LlmRoutingGroupRecord, LlmRoutingTargetInput,
     LlmRoutingTargetRecord, LlmRuntimeData, LlmStorageError, LlmUsageInput, LlmUsageRecord,
-    LlmUsageSummaryRow, LlmVirtualKeyInput, LlmVirtualKeyRecord, LlmVirtualKeyUsage,
-    canonical_timestamp,
+    LlmUsageSummaryRow, LlmVirtualKeyInput, LlmVirtualKeyRecord, LlmVirtualKeyRotation,
+    LlmVirtualKeyRotationResult, LlmVirtualKeyUsage, canonical_timestamp,
 };
 pub use logs::{AuditLog, NewRequestLog, RequestLog};
 pub use maintenance::{PruneReport, RetentionPolicy};

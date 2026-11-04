@@ -50,6 +50,8 @@ pub enum ErrorKind {
     NotFound,
     /// A gateway-owned limit (body size) was exceeded.
     PayloadTooLarge,
+    /// A gateway-owned rate limit was exceeded.
+    RateLimited,
     /// The upstream provider rejected or failed the request.
     Upstream,
     /// Configuration is wrong: unresolved secret, invalid base URL.
@@ -183,6 +185,7 @@ impl GatewayError {
             ErrorKind::Forbidden => "forbidden",
             ErrorKind::NotFound => "not_found",
             ErrorKind::PayloadTooLarge => "payload_too_large",
+            ErrorKind::RateLimited => "rate_limited",
             ErrorKind::Upstream => "upstream",
             ErrorKind::Config => "config",
             ErrorKind::Timeout => "timeout",

@@ -165,14 +165,20 @@ pub fn start(
 }
 
 /// Owned request metadata for the stream's lifetime.
+#[derive(Clone)]
 pub struct StreamMeta {
     pub request_id: String,
     pub model: String,
+    pub requested_model: String,
     pub provider_id: String,
     pub provider_name: String,
+    pub account_id: Option<String>,
+    pub account_name: Option<String>,
     pub ingress: Protocol,
     pub consumer_id: Option<String>,
     pub virtual_key_id: Option<String>,
+    pub virtual_key_family: Option<String>,
+    pub consumer_group_ids: Vec<String>,
     pub session_id: Option<String>,
     pub client_ip: Option<std::net::IpAddr>,
     pub user_agent: Option<String>,
@@ -186,11 +192,41 @@ impl StreamMeta {
             ingress: self.ingress,
             consumer_id: self.consumer_id.as_deref(),
             virtual_key_id: self.virtual_key_id.as_deref(),
+            virtual_key_family: self.virtual_key_family.as_deref(),
+            consumer_group_ids: &self.consumer_group_ids,
             session_id: self.session_id.as_deref(),
             client_ip: self.client_ip,
             user_agent: self.user_agent.as_deref(),
             intent: self.intent.as_deref(),
         }
+    }
+}
+
+/// Runs the error stage before an in-stream error frame is encoded, so
+/// plugins such as PII redaction also apply after the first byte.
+async fn apply_error_chain(
+    chain: Option<Arc<LlmPluginChain>>,
+    meta: &StreamMeta,
+    account_id: Option<&str>,
+    error: &mut GatewayError,
+    plugin_state: &mut LlmRequestState,
+) {
+    let Some(chain) = chain else {
+        return;
+    };
+    let meta = meta.clone();
+    let request_meta = meta.as_meta();
+    if let Err(chain_error) = chain
+        .on_error(
+            &request_meta,
+            Some(&meta.provider_id),
+            account_id,
+            error,
+            plugin_state,
+        )
+        .await
+    {
+        *error = crate::error::chain_error(chain_error);
     }
 }
 
@@ -289,8 +325,20 @@ impl BridgeState {
 
     /// Emits an error frame and records the failure. Buffered plugin output
     /// is flushed first so the client sees partial text before the error.
-    async fn fail_stream(&mut self, error: GatewayError) -> Vec<u8> {
+    async fn fail_stream(&mut self, mut error: GatewayError) -> Vec<u8> {
         let mut out = self.flush_pending().await.unwrap_or_default();
+        let account_id = self
+            .account
+            .as_ref()
+            .map(|account| account.record.id.clone());
+        apply_error_chain(
+            self.plugins.clone(),
+            &self.meta,
+            account_id.as_deref(),
+            &mut error,
+            &mut self.plugin_state,
+        )
+        .await;
         for frame in octra_llm_protocol::encode_stream_error(self.ingress, &error) {
             out.extend(frame.to_bytes());
         }
@@ -357,6 +405,7 @@ async fn record_stream(
         let request_meta = meta.as_meta();
         let event = LlmLogEvent {
             model: &meta.model,
+            requested_model: Some(&meta.requested_model),
             provider_id: Some(&meta.provider_id),
             provider_name: Some(&meta.provider_name),
             account_id: account.as_ref().map(|account| account.record.id.as_str()),
@@ -542,9 +591,21 @@ impl EventBridgeState {
         out
     }
 
-    async fn fail(&mut self, error: GatewayError) -> Vec<u8> {
+    async fn fail(&mut self, mut error: GatewayError) -> Vec<u8> {
         self.finished = true;
         let mut out = Vec::new();
+        let account_id = self
+            .account
+            .as_ref()
+            .map(|account| account.record.id.clone());
+        apply_error_chain(
+            self.plugins.clone(),
+            &self.meta,
+            account_id.as_deref(),
+            &mut error,
+            &mut self.plugin_state,
+        )
+        .await;
         for frame in octra_llm_protocol::encode_stream_error(self.ingress, &error) {
             out.extend(frame.to_bytes());
         }

@@ -17,7 +17,9 @@ use octra_llm_core::{
     ChatRequest, ChatResponse, ContentPart, GatewayError, Protocol, Usage, estimate_tokens,
 };
 use octra_llm_plugin_runtime::LlmPluginChain;
-use octra_llm_plugin_types::{LlmLogEvent, LlmProviderInfo, LlmRequestMeta, LlmRequestState};
+use octra_llm_plugin_types::{
+    LlmLogEvent, LlmProviderInfo, LlmRequestMeta, LlmRequestState, LlmResponseHeaders,
+};
 use octra_llm_protocol::decode_request;
 use serde_json::Value;
 use serde_json::json;
@@ -366,7 +368,7 @@ async fn authorize(
     );
     match keys::authenticate(&snapshot.data.virtual_keys, presented, Utc::now()) {
         KeyOutcome::Anonymous => Ok(None),
-        KeyOutcome::Authorized(key) => Ok(Some(key)),
+        KeyOutcome::Authorized(key) => Ok(Some(*key)),
         KeyOutcome::Rejected(reason) => {
             Err(GatewayError::unauthorized(reason).with_code("invalid_api_key"))
         }
@@ -395,12 +397,17 @@ async fn enforce_virtual_key_limits(
     }
     let now = Utc::now();
     let mut usage = BTreeMap::new();
+    let family = if key.key_family.trim().is_empty() {
+        key.id.as_str()
+    } else {
+        key.key_family.as_str()
+    };
     for limit in policy.limits() {
         let since = vk_policy::window_start(limit.window, now);
         let totals = state
             .storage
             .llm
-            .virtual_key_usage_since(&key.id, &since)
+            .virtual_key_usage_since_family(family, &since)
             .await
             .map_err(|error| {
                 tracing::warn!(
@@ -537,23 +544,32 @@ async fn handle(
     let session = header_str(&request, &state.config.llm.session_header).map(str::to_string);
     let user_agent = header_str(&request, "user-agent");
     let intent = header_str(&request, &state.config.llm.intent_header);
+    let consumer_group_ids = consumer_id
+        .map(|id| snapshot.consumer_group_ids(id))
+        .unwrap_or(&[]);
     let meta = LlmRequestMeta {
         request_id: &request_id,
         ingress,
         consumer_id,
         virtual_key_id: virtual_key_id.as_deref(),
+        virtual_key_family: key.as_ref().map(|key| key.key_family.as_str()),
+        consumer_group_ids,
         session_id: session.as_deref(),
         client_ip: request.client_ip,
         user_agent,
         intent,
     };
     let mut request_state = LlmRequestState::new();
+    let mut response_headers = LlmResponseHeaders::new();
     let request_chain = state
         .plugins
         .as_ref()
         .map(|plugins| plugins.request_chain(consumer_id, virtual_key_id.as_deref(), &ir.model));
     if let Some(chain) = &request_chain {
-        let rejection = match chain.on_request(&meta, &mut ir, &mut request_state).await {
+        let rejection = match chain
+            .on_request(&meta, &mut response_headers, &mut ir, &mut request_state)
+            .await
+        {
             Ok(rejection) => rejection,
             Err(error) => Some(chain_error(error)),
         };
@@ -570,7 +586,11 @@ async fn handle(
             tracker.record.error = Some(error.message.clone());
             tracker.finish_with_status(error.status);
             usage::spawn_record(state.storage.clone(), tracker.record.clone());
-            return with_request_id(protocol_response(ingress, &error), &request_id);
+            return finish(
+                protocol_response(ingress, &error),
+                &response_headers,
+                &request_id,
+            );
         }
         // A plugin may have rewritten the model; policy applies to the
         // effective model so an alias cannot escape an allow-list.
@@ -579,7 +599,11 @@ async fn handle(
             tracker.record.error = Some(error.message.clone());
             tracker.finish_with_status(error.status);
             usage::spawn_record(state.storage.clone(), tracker.record.clone());
-            return with_request_id(protocol_response(ingress, &error), &request_id);
+            return finish(
+                protocol_response(ingress, &error),
+                &response_headers,
+                &request_id,
+            );
         }
         let effective_error = if !snapshot.permits_model(consumer_id, &ir.model) {
             Some(
@@ -613,11 +637,16 @@ async fn handle(
             tracker.record.error = Some(error.message.clone());
             tracker.finish_with_status(error.status);
             usage::spawn_record(state.storage.clone(), tracker.record.clone());
-            return with_request_id(protocol_response(ingress, &error), &request_id);
+            return finish(
+                protocol_response(ingress, &error),
+                &response_headers,
+                &request_id,
+            );
         }
     }
     let effective_model = ir.model.clone();
 
+    let mut trace = ExecTrace::default();
     let response = execute(
         &state,
         &snapshot,
@@ -628,21 +657,38 @@ async fn handle(
         tracker,
         ingress,
         &mut request_state,
+        &mut trace,
     )
     .await;
     match response {
-        Ok(response) => with_request_id(response, &request_id),
+        Ok(response) => finish(response, &response_headers, &request_id),
         Err(mut error) => {
-            if let Some(chain) = &request_chain
+            // A bound attempt already ran `on_error` on its provider chain
+            // before logging. Fall back to the request chain only when the
+            // request failed before any attempt was made.
+            if trace.chain.is_none()
+                && let Some(chain) = request_chain.as_ref()
                 && let Err(chain_error) = chain
                     .on_error(&meta, None, None, &mut error, &mut request_state)
                     .await
             {
                 error = crate::error::chain_error(chain_error);
             }
-            with_request_id(protocol_response(ingress, &error), &request_id)
+            finish(
+                protocol_response(ingress, &error),
+                &response_headers,
+                &request_id,
+            )
         }
     }
+}
+
+/// Attaches plugin-provided headers, then the host request id.
+fn finish(mut response: Response, headers: &LlmResponseHeaders, request_id: &str) -> Response {
+    for (name, value) in headers.iter() {
+        response.headers_mut().insert(name, value.clone());
+    }
+    with_request_id(response, request_id)
 }
 
 fn with_request_id(mut response: Response, request_id: &str) -> Response {
@@ -665,6 +711,15 @@ fn fail_request(
     error
 }
 
+/// Routing facts needed after `execute` returns, most importantly which
+/// plugin chain and provider/account actually handled the final attempt.
+#[derive(Default)]
+struct ExecTrace {
+    chain: Option<Arc<LlmPluginChain>>,
+    provider_id: Option<String>,
+    account_id: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute(
     state: &LlmDataState,
@@ -676,6 +731,7 @@ async fn execute(
     mut tracker: UsageTracker,
     ingress: Protocol,
     request_state: &mut LlmRequestState,
+    trace: &mut ExecTrace,
 ) -> LlmResult<Response> {
     let Some(plan) = snapshot.resolve(effective_model) else {
         let error = GatewayError::not_found(format!(
@@ -724,7 +780,6 @@ async fn execute(
     }
     attempts.extend(fallback);
     let mut last_error: Option<GatewayError> = None;
-    let mut last_chain: Option<Arc<LlmPluginChain>> = None;
     let mut budget = 0usize;
     let virtual_key_policy = meta
         .virtual_key_id
@@ -883,11 +938,13 @@ async fn execute(
                 plugins.provider_chain(
                     meta.consumer_id,
                     meta.virtual_key_id,
-                    effective_model,
+                    requested_model,
                     &provider.id,
                 )
             });
-            last_chain = provider_chain.clone();
+            trace.chain = provider_chain.clone();
+            trace.provider_id = Some(provider.id.clone());
+            trace.account_id = account.as_ref().map(|account| account.record.id.clone());
             let provider_info = LlmProviderInfo {
                 attempt: budget as u32,
                 target_model_id: &target.model_id,
@@ -931,6 +988,7 @@ async fn execute(
                         if let Some(chain) = &provider_chain {
                             let event = LlmLogEvent {
                                 model: effective_model,
+                                requested_model: Some(requested_model),
                                 provider_id: Some(&provider.id),
                                 provider_name: Some(&provider.name),
                                 account_id: account.as_ref().map(|a| a.record.id.as_str()),
@@ -988,14 +1046,29 @@ async fn execute(
         }
     }
 
-    let error = last_error.unwrap_or_else(|| {
+    let mut error = last_error.unwrap_or_else(|| {
         GatewayError::not_found(format!(
             "model '{effective_model}' has no provider that can serve it"
         ))
     });
-    if let Some(chain) = &last_chain {
+    if let Some(chain) = &trace.chain {
+        // Sanitize/enrich the error before the log stage sees it, so audit
+        // records never carry raw upstream text that redaction would mask.
+        if let Err(chain_error) = chain
+            .on_error(
+                meta,
+                trace.provider_id.as_deref(),
+                trace.account_id.as_deref(),
+                &mut error,
+                request_state,
+            )
+            .await
+        {
+            error = crate::error::chain_error(chain_error);
+        }
         let event = LlmLogEvent {
             model: effective_model,
+            requested_model: Some(requested_model),
             provider_id: tracker.record.provider_id.as_deref(),
             provider_name: tracker.record.provider_name.as_deref(),
             account_id: tracker.record.account_id.as_deref(),
@@ -1023,6 +1096,7 @@ async fn log_rejection(
 ) {
     let event = LlmLogEvent {
         model,
+        requested_model: Some(model),
         provider_id: None,
         provider_name: None,
         account_id: None,
@@ -1143,18 +1217,25 @@ fn is_unauthorized(error: &GatewayError) -> bool {
 
 fn stream_meta(
     meta: &LlmRequestMeta<'_>,
+    requested_model: &str,
     target: &Target,
     provider: &ProviderConfig,
+    account: Option<&Arc<AccountRuntime>>,
     ingress: Protocol,
 ) -> stream::StreamMeta {
     stream::StreamMeta {
         request_id: meta.request_id.to_string(),
         model: target.model_id.clone(),
+        requested_model: requested_model.to_string(),
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
+        account_id: account.map(|account| account.record.id.clone()),
+        account_name: account.map(|account| account.record.name.clone()),
         ingress,
         consumer_id: meta.consumer_id.map(str::to_string),
         virtual_key_id: meta.virtual_key_id.map(str::to_string),
+        virtual_key_family: meta.virtual_key_family.map(str::to_string),
+        consumer_group_ids: meta.consumer_group_ids.to_vec(),
         session_id: meta.session_id.map(str::to_string),
         client_ip: meta.client_ip,
         user_agent: meta.user_agent.map(str::to_string),
@@ -1228,7 +1309,7 @@ async fn try_attempt(
                 tracker.clone(),
                 account.cloned(),
                 chain.cloned(),
-                stream_meta(meta, target, provider, ingress),
+                stream_meta(meta, requested_model, target, provider, account, ingress),
                 std::mem::take(request_state),
             );
             return Ok(AttemptOutcome {
@@ -1305,7 +1386,7 @@ async fn try_attempt(
             tracker.clone(),
             account.cloned(),
             chain.cloned(),
-            stream_meta(meta, target, provider, ingress),
+            stream_meta(meta, requested_model, target, provider, account, ingress),
             std::mem::take(request_state),
         );
         return Ok(AttemptOutcome {

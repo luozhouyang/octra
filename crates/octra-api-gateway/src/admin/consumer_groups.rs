@@ -44,6 +44,7 @@ pub async fn create(
     input.validate()?;
     let group = state.storage.api.create_consumer_group(&input).await?;
     reload_all(&state).await?;
+    state.notify_reload_hook();
     Ok((StatusCode::CREATED, Json(to_value(&group)?)))
 }
 
@@ -61,6 +62,7 @@ pub async fn update(
         .update_consumer_group(&group.id, &input)
         .await?;
     reload_all(&state).await?;
+    state.notify_reload_hook();
     Ok(Json(to_value(&group)?))
 }
 
@@ -88,6 +90,7 @@ pub async fn upsert(
         }
     };
     reload_all(&state).await?;
+    state.notify_reload_hook();
     Ok(Json(to_value(&group)?))
 }
 
@@ -98,6 +101,7 @@ pub async fn delete(
     let group = resolve(&state, &id).await?;
     state.storage.api.delete_consumer_group(&group.id).await?;
     reload_all(&state).await?;
+    state.notify_reload_hook();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -161,6 +165,7 @@ pub async fn add_member(
         .add_consumer_group_member(&group.id, &consumer_id)
         .await?;
     reload_all(&state).await?;
+    state.notify_reload_hook();
     Ok((StatusCode::CREATED, Json(to_value(&member)?)))
 }
 
@@ -175,6 +180,7 @@ pub async fn remove_member(
         .remove_consumer_group_member(&group.id, &consumer_id)
         .await?;
     reload_all(&state).await?;
+    state.notify_reload_hook();
     Ok(StatusCode::NO_CONTENT)
 }
 

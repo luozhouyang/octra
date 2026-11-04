@@ -76,6 +76,23 @@ The control plane binds to the loopback address by default, and every endpoint e
 
 Environment variables: `OCTRA_HOME`, `OCTRA_CONTROL_BIND`, `OCTRA_GATEWAY_BIND`, `OCTRA_LOG_LEVEL`, `OCTRA_LOG_FORMAT` (`pretty` / `json`), `OCTRA_CONTROL_TOKEN`, `OCTRA_CONTROL_URL` (CLI).
 
+## Connect coding agents
+
+Claude Code, Codex CLI, and OpenCode can use Octra as their LLM endpoint. Create
+an LLM route whose `virtual_model_id` matches the model name the agent sends,
+then create a virtual key for the agent:
+
+```bash
+pnpm cli keys create --name claude-code --consumer <consumer-id> \
+  --permissions '{"allowed_models":["octra-default"]}'
+```
+
+Put the returned `octra-...` key in the agent's settings. The control token
+(`control.token`, port 8081) is an admin credential and must never be given to
+an agent. See [examples/agents/README.md](./examples/agents/README.md) for the
+control-plane setup, Claude Code / Codex / OpenCode templates, rate-limit
+headers, and key rotation.
+
 ## Implemented today
 
 - Standalone daemon with two listeners and unified graceful shutdown.
@@ -93,7 +110,8 @@ Environment variables: `OCTRA_HOME`, `OCTRA_CONTROL_BIND`, `OCTRA_GATEWAY_BIND`,
 ## Not yet implemented (tracked on the roadmap)
 
 - Pingora-based proxy engine (the current unified data plane uses Axum + reqwest).
-- OpenAI Responses and Gemini protocol adapters.
+- Additional vendor-specific protocol adapters beyond OpenAI, Anthropic,
+  OpenAI Responses, and Gemini.
 - Agent discovery / config adapter / bridge.
 - WASM plugin runtime (the native plugin system and built-ins are implemented).
 - OS Keychain integration for secrets.

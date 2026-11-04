@@ -16,11 +16,14 @@ use serde_json::json;
 
 use crate::manifest;
 
+const SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug)]
 pub struct RequestAudit {
     manifest: PluginManifest,
     include_usage: bool,
     include_error: bool,
+    include_client: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +31,7 @@ pub struct RequestAudit {
 struct Config {
     include_usage: bool,
     include_error: bool,
+    include_client: bool,
 }
 
 impl Default for Config {
@@ -35,6 +39,7 @@ impl Default for Config {
         Self {
             include_usage: true,
             include_error: true,
+            include_client: false,
         }
     }
 }
@@ -59,6 +64,7 @@ impl LlmPluginFactory for RequestAuditFactory {
             manifest: self.manifest(),
             include_usage: config.include_usage,
             include_error: config.include_error,
+            include_client: config.include_client,
         }))
     }
 }
@@ -78,6 +84,7 @@ impl LlmPlugin for RequestAudit {
 impl RequestAudit {
     fn record(&self, meta: &LlmRequestMeta<'_>, event: &LlmLogEvent<'_>) -> Value {
         let mut record = json!({
+            "schema_version": SCHEMA_VERSION,
             "request_id": meta.request_id,
             "ingress": meta.ingress.as_str(),
             "consumer_id": meta.consumer_id,
@@ -85,6 +92,7 @@ impl RequestAudit {
             "session_id": meta.session_id,
             "intent": meta.intent,
             "model": event.model,
+            "requested_model": event.requested_model,
             "provider_id": event.provider_id,
             "provider_name": event.provider_name,
             "account_id": event.account_id,
@@ -94,6 +102,10 @@ impl RequestAudit {
             "streaming": event.streaming,
             "finish_reason": event.finish_reason,
         });
+        if self.include_client {
+            record["client_ip"] = json!(meta.client_ip.map(|ip| ip.to_string()));
+            record["user_agent"] = json!(meta.user_agent);
+        }
         if self.include_usage {
             record["usage"] = usage_record(event.usage);
         }
@@ -128,6 +140,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: Some("consumer-1"),
             virtual_key_id: Some("key-1"),
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: Some("127.0.0.1".parse().unwrap()),
             user_agent: Some("client/1.0"),
@@ -138,6 +152,7 @@ mod tests {
     fn event<'a>(usage: &'a Usage) -> LlmLogEvent<'a> {
         LlmLogEvent {
             model: "gpt-test",
+            requested_model: Some("gpt-alias"),
             provider_id: Some("provider-1"),
             provider_name: Some("openai"),
             account_id: Some("account-1"),
@@ -168,10 +183,13 @@ mod tests {
             manifest: manifest("llm-request-audit", ""),
             include_usage: true,
             include_error: true,
+            include_client: false,
         }
         .record(&meta, &event);
 
+        assert_eq!(record["schema_version"], SCHEMA_VERSION);
         assert_eq!(record["request_id"], "req-1");
+        assert_eq!(record["requested_model"], "gpt-alias");
         assert_eq!(record["provider_id"], "provider-1");
         assert_eq!(record["account_name"], "primary");
         assert_eq!(record["streaming"], true);
@@ -193,12 +211,30 @@ mod tests {
             manifest: manifest("llm-request-audit", ""),
             include_usage: false,
             include_error: false,
+            include_client: false,
         };
         let meta = meta();
         let event = event(&usage);
         let record = plugin.record(&meta, &event);
         assert!(record.get("usage").is_none());
         assert!(record.get("error").is_none());
+    }
+
+    #[test]
+    fn client_metadata_is_opt_in() {
+        let plugin = RequestAudit {
+            manifest: manifest("llm-request-audit", ""),
+            include_usage: true,
+            include_error: true,
+            include_client: true,
+        };
+        let usage = Usage::default();
+        let meta = meta();
+        let event = event(&usage);
+        let record = plugin.record(&meta, &event);
+        assert_eq!(record["client_ip"], "127.0.0.1");
+        assert_eq!(record["user_agent"], "client/1.0");
+        assert!(record.get("messages").is_none());
     }
 
     #[test]

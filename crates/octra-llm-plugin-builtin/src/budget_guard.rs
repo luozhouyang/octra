@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use octra_api_plugin_types::{Capability, PluginError, PluginManifest};
 use octra_llm_core::{GatewayError, estimate_tokens};
 use octra_llm_plugin_types::{
-    LlmAction, LlmLogContext, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory, LlmPluginResult,
-    LlmPluginStateStore, LlmRequestContext,
+    LlmAction, LlmErrorContext, LlmLogContext, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory,
+    LlmPluginResult, LlmPluginStateStore, LlmRequestContext, LlmScope, REQUEST_LLM_SCOPES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -161,8 +161,13 @@ impl LlmPluginFactory for BudgetGuardFactory {
             "llm-budget-guard",
             "Reject requests that exceed a soft per-scope request or token budget",
         );
+        manifest.priority = 650;
         manifest.capabilities = vec![Capability::RequestBody];
         manifest
+    }
+
+    fn supported_scopes(&self) -> &'static [LlmScope] {
+        &REQUEST_LLM_SCOPES
     }
 
     fn create(&self, config: Value) -> Result<Arc<dyn LlmPlugin>, PluginError> {
@@ -281,6 +286,26 @@ impl LlmPlugin for BudgetGuard {
         self.persist(&snapshot);
         *cx.state = Value::Null;
     }
+
+    /// Refunds the token reservation when the request fails before a log event
+    /// can reconcile it. `on_log` clears the same slot, so this is idempotent.
+    async fn on_error(&self, cx: &mut LlmErrorContext<'_>) -> LlmPluginResult {
+        let Some(reserved) = cx.state.get(TOKEN_RESERVATION).and_then(Value::as_u64) else {
+            return Ok(LlmAction::Continue);
+        };
+        let snapshot = {
+            let mut window = self
+                .window
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            window.roll(now_ms(), self.period_ms);
+            window.tokens = window.tokens.saturating_sub(reserved);
+            window.clone()
+        };
+        self.persist(&snapshot);
+        *cx.state = Value::Null;
+        Ok(LlmAction::Continue)
+    }
 }
 
 impl BudgetGuard {
@@ -302,6 +327,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use octra_llm_core::{ChatRequest, Message, Protocol, Usage};
+    use octra_llm_plugin_types::LlmResponseHeaders;
     use octra_llm_plugin_types::{LlmLogEvent, LlmRequestMeta};
 
     fn meta() -> LlmRequestMeta<'static> {
@@ -310,6 +336,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: None,
             user_agent: None,
@@ -354,6 +382,7 @@ mod tests {
         let mut state = Value::Null;
         let mut cx = LlmRequestContext {
             meta: &meta,
+            headers: &mut LlmResponseHeaders::default(),
             request: &mut request,
             state: &mut state,
         };
@@ -376,6 +405,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn error_refunds_the_token_reservation_once() {
+        let plugin = guard(json!({"tokens": 100, "period": "hour"}));
+        let meta = meta();
+        let mut request = ChatRequest::new("m", vec![Message::user("hi")]);
+        let mut state = Value::Null;
+        let mut cx = LlmRequestContext {
+            meta: &meta,
+            headers: &mut LlmResponseHeaders::default(),
+            request: &mut request,
+            state: &mut state,
+        };
+        plugin.on_request(&mut cx).await.unwrap();
+        assert!(plugin.window.lock().unwrap().tokens > 0);
+
+        let mut error = GatewayError::upstream(500, "boom");
+        let mut cx = octra_llm_plugin_types::LlmErrorContext {
+            meta: &meta,
+            provider_id: None,
+            account_id: None,
+            error: &mut error,
+            state: &mut state,
+        };
+        plugin.on_error(&mut cx).await.unwrap();
+        assert_eq!(plugin.window.lock().unwrap().tokens, 0);
+        assert!(cx.state.is_null());
+
+        // A later on_log/on_error for the same request must not refund twice.
+        plugin.on_error(&mut cx).await.unwrap();
+        assert_eq!(plugin.window.lock().unwrap().tokens, 0);
+    }
+
+    #[tokio::test]
     async fn token_budget_reconciles_actual_usage() {
         let plugin = guard(json!({"tokens": 100, "period": "hour"}));
         let meta = meta();
@@ -383,6 +444,7 @@ mod tests {
         let mut state = Value::Null;
         let mut cx = LlmRequestContext {
             meta: &meta,
+            headers: &mut LlmResponseHeaders::default(),
             request: &mut request,
             state: &mut state,
         };
@@ -397,6 +459,7 @@ mod tests {
         };
         let event = LlmLogEvent {
             model: "m",
+            requested_model: None,
             provider_id: None,
             provider_name: None,
             account_id: None,

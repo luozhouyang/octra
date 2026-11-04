@@ -107,7 +107,14 @@ pub struct ApiControlState {
     pub plugins: Arc<PluginRuntime>,
     pub metrics: Arc<ApiMetrics>,
     pub wasm: Option<Arc<WasmControlState>>,
+    /// Optional notification used when consumer-group membership changes and
+    /// another runtime (for example the LLM identity snapshot) needs a reload.
+    pub reload_hook: Option<ApiReloadHook>,
 }
+
+/// A synchronous notification hook. Implementations should schedule async work
+/// themselves so control-plane handlers stay independent of other runtimes.
+pub type ApiReloadHook = Arc<dyn Fn() + Send + Sync>;
 
 impl ApiControlState {
     pub fn new(storage: Arc<Storage>, runtime: Arc<GatewayRuntime>) -> Self {
@@ -134,12 +141,24 @@ impl ApiControlState {
             plugins,
             metrics,
             wasm: None,
+            reload_hook: None,
         }
     }
 
     pub fn with_wasm(mut self, wasm: Arc<WasmControlState>) -> Self {
         self.wasm = Some(wasm);
         self
+    }
+
+    pub fn with_reload_hook(mut self, hook: ApiReloadHook) -> Self {
+        self.reload_hook = Some(hook);
+        self
+    }
+
+    pub(crate) fn notify_reload_hook(&self) {
+        if let Some(hook) = &self.reload_hook {
+            hook();
+        }
     }
 }
 

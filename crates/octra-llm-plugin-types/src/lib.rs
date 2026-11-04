@@ -10,6 +10,7 @@ use std::fmt;
 use std::net::IpAddr;
 
 use async_trait::async_trait;
+use http::header::{HeaderName, HeaderValue};
 use octra_api_plugin_types::{PluginError, PluginManifest};
 use octra_llm_core::{ChatRequest, ChatResponse, GatewayError, Protocol, StreamEvent, Usage};
 use serde::{Deserialize, Serialize};
@@ -86,7 +87,93 @@ pub type LlmStreamResult = Result<LlmStreamAction, PluginError>;
 
 /// Contract version a factory must implement to be registered. Bumped when a
 /// context or trait signature changes incompatibly.
-pub const LLM_PLUGIN_API_VERSION: u32 = 3;
+pub const LLM_PLUGIN_API_VERSION: u32 = 4;
+
+const MAX_RESPONSE_HEADERS: usize = 128;
+const MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
+
+/// Headers a request-stage plugin may add to the eventual HTTP response.
+///
+/// The host owns the sink and attaches it after the data plane has produced a
+/// response, so it works for JSON bodies, plugin rejections and SSE streams.
+/// Names and values are validated here; hop-by-hop, body-framing and
+/// host-reserved headers are rejected.
+#[derive(Debug, Default)]
+pub struct LlmResponseHeaders {
+    entries: Vec<(HeaderName, HeaderValue)>,
+}
+
+impl LlmResponseHeaders {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Validates and inserts a header. Returns false for illegal names or
+    /// values and for headers the host reserves for itself.
+    pub fn insert(&mut self, name: &str, value: &str) -> bool {
+        if self.entries.len() >= MAX_RESPONSE_HEADERS || value.len() > MAX_HEADER_VALUE_BYTES {
+            tracing::warn!(
+                header = name,
+                "dropping LLM response header over the host limit"
+            );
+            return false;
+        }
+        let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
+            tracing::warn!(
+                header = name,
+                "dropping LLM response header with an invalid name"
+            );
+            return false;
+        };
+        if is_reserved_response_header(&header_name) {
+            tracing::warn!(header = name, "dropping host-reserved LLM response header");
+            return false;
+        }
+        let Ok(header_value) = HeaderValue::from_str(value) else {
+            tracing::warn!(
+                header = name,
+                "dropping LLM response header with an invalid value"
+            );
+            return false;
+        };
+        self.entries
+            .retain(|(existing, _)| existing.as_str() != header_name.as_str());
+        self.entries.push((header_name, header_value));
+        true
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&HeaderName, &HeaderValue)> {
+        self.entries.iter().map(|(name, value)| (name, value))
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+fn is_reserved_response_header(name: &HeaderName) -> bool {
+    let name = name.as_str();
+    matches!(
+        name,
+        "connection"
+            | "content-length"
+            | "content-type"
+            | "host"
+            | "keep-alive"
+            | "set-cookie"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "www-authenticate"
+            | "x-accel-buffering"
+            | "x-request-id"
+    ) || name.starts_with("proxy-")
+}
 
 /// Read-only request metadata shared by every stage. Headers other than the
 /// user agent are not exposed, so credentials and cookies cannot leak into a
@@ -96,6 +183,10 @@ pub struct LlmRequestMeta<'a> {
     pub ingress: Protocol,
     pub consumer_id: Option<&'a str>,
     pub virtual_key_id: Option<&'a str>,
+    /// Stable identity shared by all keys in one rotation family.
+    pub virtual_key_family: Option<&'a str>,
+    /// Consumer groups the authenticated consumer belongs to.
+    pub consumer_group_ids: &'a [String],
     pub session_id: Option<&'a str>,
     pub client_ip: Option<IpAddr>,
     pub user_agent: Option<&'a str>,
@@ -137,6 +228,9 @@ pub struct LlmProviderInfo<'a> {
 
 pub struct LlmRequestContext<'a> {
     pub meta: &'a LlmRequestMeta<'a>,
+    /// Headers to attach to the final response. Shared by the whole request
+    /// chain and owned by the data plane.
+    pub headers: &'a mut LlmResponseHeaders,
     pub request: &'a mut ChatRequest,
     pub state: &'a mut Value,
 }
@@ -172,7 +266,10 @@ pub struct LlmErrorContext<'a> {
 
 /// Content-free observation data; never carries prompt or response text.
 pub struct LlmLogEvent<'a> {
+    /// Effective model used for routing, after request-stage rewrites.
     pub model: &'a str,
+    /// Client-facing model before rewrites, when it differs from `model`.
+    pub requested_model: Option<&'a str>,
     pub provider_id: Option<&'a str>,
     pub provider_name: Option<&'a str>,
     pub account_id: Option<&'a str>,
@@ -239,6 +336,26 @@ pub struct LlmPluginCreateContext<'a> {
     pub state: std::sync::Arc<dyn LlmPluginStateStore>,
 }
 
+/// Scopes every plugin supports unless it narrows the set. Request-stage
+/// plugins should exclude `Provider`, because the request chain is built
+/// before a provider is selected.
+pub const ALL_LLM_SCOPES: [LlmScope; 5] = [
+    LlmScope::Global,
+    LlmScope::Consumer,
+    LlmScope::VirtualKey,
+    LlmScope::Model,
+    LlmScope::Provider,
+];
+
+/// Scopes for plugins that only participate in the client-facing request,
+/// response and stream chain.
+pub const REQUEST_LLM_SCOPES: [LlmScope; 4] = [
+    LlmScope::Global,
+    LlmScope::Consumer,
+    LlmScope::VirtualKey,
+    LlmScope::Model,
+];
+
 /// Creates configured LLM plugin instances. Configuration is validated once
 /// when chains compile, never on the request path.
 pub trait LlmPluginFactory: Send + Sync {
@@ -246,6 +363,13 @@ pub trait LlmPluginFactory: Send + Sync {
 
     fn api_version(&self) -> u32 {
         LLM_PLUGIN_API_VERSION
+    }
+
+    /// Scopes this plugin can honour. The host rejects configurations outside
+    /// this set instead of compiling a chain where the plugin silently never
+    /// runs. Defaults to every scope.
+    fn supported_scopes(&self) -> &'static [LlmScope] {
+        &ALL_LLM_SCOPES
     }
 
     fn create(&self, config: Value) -> Result<std::sync::Arc<dyn LlmPlugin>, PluginError>;
@@ -262,5 +386,36 @@ pub trait LlmPluginFactory: Send + Sync {
 
     fn validate(&self, config: &Value) -> Result<(), PluginError> {
         self.create(config.clone()).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_headers_reject_reserved_and_invalid_names() {
+        let mut headers = LlmResponseHeaders::default();
+        assert!(headers.insert("X-RateLimit-Limit-Minute", "10"));
+        assert!(headers.insert("Retry-After", "1"));
+        assert!(!headers.insert("content-length", "10"));
+        assert!(!headers.insert("transfer-encoding", "chunked"));
+        assert!(!headers.insert("x-request-id", "nope"));
+        assert!(!headers.insert("bad header", "value"));
+        assert!(!headers.insert("X-Bad", "line\nbreak"));
+        assert_eq!(headers.len(), 2);
+    }
+
+    #[test]
+    fn response_headers_replace_duplicates() {
+        let mut headers = LlmResponseHeaders::default();
+        assert!(headers.insert("X-Test", "one"));
+        assert!(headers.insert("x-test", "two"));
+        assert_eq!(headers.len(), 1);
+        let values: Vec<String> = headers
+            .iter()
+            .map(|(_, value)| value.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(values, vec!["two"]);
     }
 }

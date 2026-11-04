@@ -18,8 +18,8 @@ use octra_api_plugin_types::{Capability, FailPolicy, PluginError, PluginManifest
 use octra_llm_core::{AssistantContent, ChatRequest, ContentPart, Message, StreamEvent};
 use octra_llm_plugin_types::{
     LlmAction, LlmErrorContext, LlmLogContext, LlmPlugin, LlmPluginFactory, LlmPluginResult,
-    LlmProviderRequestContext, LlmRequestContext, LlmResponseContext, LlmStreamAction,
-    LlmStreamContext, LlmStreamResult,
+    LlmProviderRequestContext, LlmRequestContext, LlmResponseContext, LlmScope, LlmStreamAction,
+    LlmStreamContext, LlmStreamResult, REQUEST_LLM_SCOPES,
 };
 use octra_pii_types::{
     DetectRequest, Detection, EngineReadiness, PiiDetector, PiiDetectorClient, PiiEngineResolver,
@@ -62,8 +62,18 @@ struct State {
 }
 
 impl State {
-    fn load(value: &Value) -> Self {
-        serde_json::from_value(value.clone()).unwrap_or_default()
+    fn load(value: &Value) -> Result<Self, PluginError> {
+        // Null means the request stage did not run (for example an admission
+        // rejection); a present but malformed value is corruption and must not
+        // silently drop the placeholder mapping.
+        if value.is_null() {
+            return Ok(Self::default());
+        }
+        serde_json::from_value(value.clone()).map_err(|error| {
+            PluginError::fail_closed(format!(
+                "llm-pii-redaction request state is corrupt: {error}"
+            ))
+        })
     }
 
     fn store(&self, value: &mut Value) {
@@ -606,6 +616,7 @@ impl RedactionFactory {
         );
         manifest.fail_policy = FailPolicy::Closed;
         manifest.timeout_ms = 200;
+        manifest.priority = 700;
         manifest.capabilities = vec![Capability::RequestBody, Capability::ResponseBody];
         manifest
     }
@@ -614,6 +625,10 @@ impl RedactionFactory {
 impl LlmPluginFactory for RedactionFactory {
     fn manifest(&self) -> PluginManifest {
         Self::manifest()
+    }
+
+    fn supported_scopes(&self) -> &'static [LlmScope] {
+        &REQUEST_LLM_SCOPES
     }
 
     fn create(&self, config: Value) -> Result<Arc<dyn LlmPlugin>, PluginError> {
@@ -960,7 +975,7 @@ impl LlmPlugin for Redaction {
         if !self.reversible() {
             return Ok(LlmAction::Continue);
         }
-        let state = State::load(cx.state);
+        let state = State::load(cx.state)?;
         if state.mapping.is_empty() {
             return Ok(LlmAction::Continue);
         }
@@ -975,7 +990,7 @@ impl LlmPlugin for Redaction {
         if !self.reversible() {
             return Ok(LlmStreamAction::Continue);
         }
-        let mut state = State::load(cx.state);
+        let mut state = State::load(cx.state)?;
         if state.mapping.is_empty() {
             return Ok(LlmStreamAction::Continue);
         }
@@ -1057,7 +1072,7 @@ impl LlmPlugin for Redaction {
                 kinds = ?kinds,
                 "PII found in an upstream error body"
             );
-            let mut state = State::load(cx.state);
+            let mut state = State::load(cx.state)?;
             state.redacted += redacted;
             for (kind, count) in kinds {
                 *state.redacted_kinds.entry(kind).or_default() += count;
@@ -1068,7 +1083,17 @@ impl LlmPlugin for Redaction {
     }
 
     async fn on_log(&self, cx: &mut LlmLogContext<'_>) {
-        let state = State::load(cx.state);
+        let state = match State::load(cx.state) {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::warn!(
+                    request_id = cx.meta.request_id,
+                    error = %error,
+                    "llm-pii-redaction cannot read its request state"
+                );
+                return;
+            }
+        };
         if state.redacted == 0 {
             return;
         }
@@ -1255,6 +1280,7 @@ mod tests {
         ChatRequest, ChatResponse, ErrorKind, FinishReason, GatewayError, Message, Protocol, Role,
         StreamEvent, UserContent,
     };
+    use octra_llm_plugin_types::LlmResponseHeaders;
     use octra_llm_plugin_types::{
         LlmErrorContext, LlmPlugin, LlmRequestContext, LlmRequestMeta, LlmResponseContext,
     };
@@ -1266,6 +1292,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: None,
             user_agent: None,
@@ -1299,6 +1327,7 @@ mod tests {
         let meta = meta();
         let mut cx = LlmRequestContext {
             meta: &meta,
+            headers: &mut LlmResponseHeaders::default(),
             request,
             state,
         };
@@ -1548,13 +1577,20 @@ mod tests {
         assert!(!masked.contains("a@b.com"), "{masked}");
     }
 
+    #[test]
+    fn corrupt_state_fails_closed() {
+        assert!(State::load(&Value::Null).is_ok());
+        assert!(State::load(&json!({"nonce": 1})).is_err());
+        assert!(State::load(&json!({"mapping": "not-a-map"})).is_err());
+    }
+
     #[tokio::test]
     async fn state_records_content_free_counts() {
         let plugin = plugin(json!({"rules": {"phone": true}}));
         let mut request = text_request("a@b.com and 13800138000");
         let mut state = Value::Null;
         mask_request(&plugin, &mut request, &mut state).await;
-        let counts = State::load(&state);
+        let counts = State::load(&state).unwrap();
         assert_eq!(counts.redacted, 2);
         assert_eq!(counts.redacted_kinds["email"], 1);
         assert_eq!(counts.redacted_kinds["phone"], 1);
@@ -1676,6 +1712,7 @@ mod tests {
         let meta = meta();
         let mut cx = LlmRequestContext {
             meta: &meta,
+            headers: &mut LlmResponseHeaders::default(),
             request: &mut request,
             state: &mut state,
         };
@@ -1712,6 +1749,7 @@ mod tests {
         let meta = meta();
         let mut cx = LlmRequestContext {
             meta: &meta,
+            headers: &mut LlmResponseHeaders::default(),
             request: &mut request,
             state: &mut state,
         };
@@ -1857,7 +1895,7 @@ mod tests {
             "{:?}",
             error.extra
         );
-        assert!(State::load(&state).redacted >= 4);
+        assert!(State::load(&state).unwrap().redacted >= 4);
     }
 
     #[test]

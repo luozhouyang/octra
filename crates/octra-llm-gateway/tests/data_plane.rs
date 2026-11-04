@@ -51,6 +51,16 @@ fn failing_upstream(_request: Captured) -> axum::response::Response {
     )
 }
 
+fn stream_failing_with_pii(_request: Captured) -> axum::response::Response {
+    let mut out = String::new();
+    out.push_str(&openai_chunk(
+        json!({"role": "assistant", "content": "start"}),
+        None,
+    ));
+    out.push_str("data: {\"error\":{\"message\":\"stream failed for a@b.com\"}}\n\n");
+    sse_response(out)
+}
+
 async fn openai_harness() -> (Harness, MockUpstream) {
     let harness = Harness::new().await;
     let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
@@ -545,6 +555,40 @@ async fn upstream_errors_keep_ingress_shape() {
 }
 
 #[tokio::test]
+async fn mid_stream_errors_run_the_error_stage() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, stream_failing_with_pii).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+    harness
+        .plugin_config("llm-pii-redaction", "global", None, json!({}))
+        .await;
+
+    let (status, _, body) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[],
+        Some(json!({
+            "model": "octra-default",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    // The first chunk reached the client, so the error happened mid-stream.
+    assert!(body.contains("start"), "body: {body}");
+    assert!(
+        !body.contains("a@b.com"),
+        "stream on_error did not run: {body}"
+    );
+    assert!(body.contains("[REDACTED:"), "body: {body}");
+}
+
+#[tokio::test]
 async fn unknown_model_is_404_in_ingress_shape() {
     let harness = Harness::new().await;
     let (status, _, body) = post_json(
@@ -778,6 +822,7 @@ async fn consumer_policies_restrict_models_and_providers() {
             enabled: true,
             expires_at: None,
             permissions_json: "{}".into(),
+            key_family: None,
         })
         .await
         .unwrap();
@@ -1229,6 +1274,7 @@ async fn model_map_cannot_bypass_model_policy() {
             enabled: true,
             expires_at: None,
             permissions_json: "{}".into(),
+            key_family: None,
         })
         .await
         .unwrap();
@@ -1324,6 +1370,41 @@ async fn think_tags_strips_reasoning_from_streams() {
         COMPLETION_PATH,
         &[],
         Some(openai_body("octra-default", true)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(!body.contains("secret reasoning"), "body: {body}");
+    assert!(body.contains("hello"), "body: {body}");
+}
+
+#[tokio::test]
+async fn model_scope_uses_the_requested_model_on_the_provider_chain() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, think_tag_stream).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("real-model", &[(provider, 0, 1)]).await;
+    harness
+        .plugin_config(
+            "llm-model-map",
+            "global",
+            None,
+            json!({"map": {"alias-model": "real-model"}}),
+        )
+        .await;
+    // The provider chain sees the effective model `real-model`, but model
+    // scope must still resolve against the client-facing `alias-model`.
+    harness
+        .plugin_config("llm-think-tags", "model", Some("alias-model"), json!({}))
+        .await;
+
+    let (status, _, body) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[],
+        Some(openai_body("alias-model", true)),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -1817,6 +1898,7 @@ async fn virtual_key_model_allow_list_blocks_other_models() {
                 enabled: true,
                 expires_at: None,
                 permissions_json: json!({"allowed_models": ["octra-default"]}).to_string(),
+                key_family: None,
             },
         )
         .await
@@ -2131,6 +2213,7 @@ async fn virtual_key_permissions_combine_with_consumer_policy() {
             enabled: true,
             expires_at: None,
             permissions_json: json!({"allowed_models": ["other-model"]}).to_string(),
+            key_family: None,
         })
         .await
         .unwrap();
@@ -2162,6 +2245,7 @@ async fn invalid_virtual_key_permissions_fail_closed() {
             enabled: true,
             expires_at: None,
             permissions_json: "{not json".into(),
+            key_family: None,
         })
         .await
         .unwrap();

@@ -18,7 +18,7 @@ use octra_storage::{
     LlmModelInput, LlmModelRecord, LlmPiiEngineInput, LlmPiiEngineRecord, LlmProviderAccountInput,
     LlmProviderAccountRecord, LlmProviderInput, LlmProviderRecord, LlmRouteRecord,
     LlmRoutingGroupRecord, LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmStorageError,
-    LlmUsageRecord, LlmVirtualKeyInput, LlmVirtualKeyRecord,
+    LlmUsageRecord, LlmVirtualKeyInput, LlmVirtualKeyRecord, LlmVirtualKeyRotation,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -113,6 +113,10 @@ pub fn router(state: LlmControlState) -> Router {
             get(get_virtual_key)
                 .put(update_virtual_key)
                 .delete(delete_virtual_key),
+        )
+        .route(
+            "/admin/llm/virtual-keys/{id}/rotate",
+            post(rotate_virtual_key),
         );
     let plugins = Router::new()
         .route("/admin/llm/plugins", get(list_plugins))
@@ -681,6 +685,36 @@ pub struct VirtualKeyBody {
     pub permissions_json: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RotateVirtualKeyBody {
+    pub name: Option<String>,
+    /// RFC 3339 timestamp; an empty string clears the expiry.
+    pub expires_at: Option<String>,
+    pub grace_seconds: Option<u64>,
+    pub permissions: Option<Value>,
+    #[serde(default)]
+    pub permissions_json: Option<String>,
+}
+
+impl RotateVirtualKeyBody {
+    fn permissions(&self) -> ApiResult<Option<String>> {
+        match (&self.permissions, &self.permissions_json) {
+            (None, None) => Ok(None),
+            (Some(_), Some(_)) => Err(ApiError::bad_request(
+                "send either `permissions` or `permissions_json`, not both",
+            )),
+            (Some(value), None) => {
+                if !value.is_object() {
+                    return Err(ApiError::bad_request("`permissions` must be a JSON object")
+                        .field("permissions"));
+                }
+                Ok(Some(value.to_string()))
+            }
+            (None, Some(raw)) => Ok(Some(raw.clone())),
+        }
+    }
+}
+
 fn parse_expiry(value: Option<String>) -> ApiResult<Option<DateTime<Utc>>> {
     match value {
         None => Ok(None),
@@ -724,6 +758,10 @@ pub struct VirtualKeyView {
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<String>,
     pub permissions: Value,
+    /// Stable identity shared by every key in one rotation family.
+    pub key_family: String,
+    /// Key replaced by this one, if it was created by rotation.
+    pub rotated_from: Option<String>,
     pub created_at: String,
 }
 
@@ -739,6 +777,8 @@ impl From<LlmVirtualKeyRecord> for VirtualKeyView {
             last_used_at: record.last_used_at,
             permissions: serde_json::from_str(&record.permissions_json)
                 .unwrap_or_else(|_| json!({})),
+            key_family: record.key_family,
+            rotated_from: record.rotated_from,
             created_at: record.created_at,
         }
     }
@@ -751,6 +791,18 @@ pub struct CreatedVirtualKey {
     /// Plaintext key, returned exactly once.
     pub key_value: String,
     pub warning: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RotatedVirtualKey {
+    #[serde(flatten)]
+    pub key: VirtualKeyView,
+    /// Plaintext key, returned exactly once.
+    pub key_value: String,
+    pub warning: &'static str,
+    /// Id of the key this one replaces.
+    pub replaces: String,
+    pub previous_expires_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1583,6 +1635,7 @@ async fn create_virtual_key(
         enabled: body.enabled.unwrap_or(true),
         expires_at,
         permissions_json: permissions,
+        key_family: None,
     };
     let record = state
         .storage
@@ -1636,6 +1689,7 @@ async fn update_virtual_key(
         enabled: body.enabled.unwrap_or(existing.enabled),
         expires_at,
         permissions_json: permissions,
+        key_family: None,
     };
     let record = state
         .storage
@@ -1645,6 +1699,67 @@ async fn update_virtual_key(
         .map_err(ApiError::from_storage)?;
     reload_now(&state).await?;
     Ok(extract::Json(record.into()))
+}
+
+async fn rotate_virtual_key(
+    State(state): State<LlmControlState>,
+    Path(id): Path<String>,
+    extract::Json(body): extract::Json<RotateVirtualKeyBody>,
+) -> ApiResult<(StatusCode, extract::Json<RotatedVirtualKey>)> {
+    let existing = state
+        .storage
+        .llm
+        .get_virtual_key(&id)
+        .await
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| ApiError::not_found("virtual key", &id))?;
+    let now = Utc::now();
+    if !existing.enabled {
+        return Err(ApiError::conflict("cannot rotate a disabled virtual key"));
+    }
+    if existing.expires_at.is_some_and(|expires| expires <= now) {
+        return Err(ApiError::conflict("cannot rotate an expired virtual key"));
+    }
+
+    let permissions = match body.permissions()? {
+        Some(permissions) => {
+            validate_permissions(&permissions)?;
+            Some(permissions)
+        }
+        None => None,
+    };
+    let expires_at = match body.expires_at {
+        Some(_) => parse_expiry(body.expires_at)?,
+        None => existing.expires_at.filter(|expires| *expires > now),
+    };
+    let name = body.name.unwrap_or_else(|| existing.name.clone());
+    let grace_seconds = body.grace_seconds.unwrap_or(86_400).min(2_592_000);
+    let plaintext = keys::generate_key();
+    let rotation = LlmVirtualKeyRotation {
+        name,
+        key_prefix: keys::display_prefix(&plaintext),
+        key_hash: keys::hash_key(&plaintext),
+        expires_at,
+        permissions_json: permissions,
+        grace_seconds,
+    };
+    let result = state
+        .storage
+        .llm
+        .rotate_virtual_key(&id, &rotation)
+        .await
+        .map_err(ApiError::from_storage)?;
+    reload_now(&state).await?;
+    Ok((
+        StatusCode::CREATED,
+        extract::Json(RotatedVirtualKey {
+            key: result.key.into(),
+            key_value: plaintext,
+            warning: "store this key now; it cannot be retrieved again",
+            replaces: result.replaces,
+            previous_expires_at: result.previous_expires_at.map(|value| value.to_rfc3339()),
+        }),
+    ))
 }
 
 async fn delete_virtual_key(
@@ -1936,6 +2051,7 @@ async fn create_plugin_config(
 ) -> ApiResult<(StatusCode, extract::Json<PluginConfigView>)> {
     let plugin = llm_plugin(&state, &id).await?;
     let scope = llm_scope(&body)?;
+    ensure_plugin_scope(&state, &plugin.name, scope)?;
     let config = body.config.unwrap_or_else(|| json!({}));
     validate_plugin_config(&state, &plugin.name, &config)?;
     ensure_scope_target(&state, scope, body.scope_id.as_deref()).await?;
@@ -1971,6 +2087,9 @@ async fn update_plugin_config(
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("plugin config", &id))?;
     let plugin = llm_plugin(&state, &existing.plugin_id).await?;
+    if let Some(scope) = LlmScope::parse(existing.scope.trim()) {
+        ensure_plugin_scope(&state, &plugin.name, scope)?;
+    }
     let config_json = match &body.config {
         Some(config) => {
             validate_plugin_config(&state, &plugin.name, config)?;
@@ -2031,6 +2150,30 @@ fn llm_scope(body: &PluginConfigBody) -> ApiResult<LlmScope> {
         ApiError::bad_request("`scope` must be global, consumer, virtual_key, model or provider")
             .field("scope")
     })
+}
+
+fn ensure_plugin_scope(state: &LlmControlState, plugin: &str, scope: LlmScope) -> ApiResult<()> {
+    let Some(plugins) = &state.plugins else {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM plugin runtime is not enabled",
+        ));
+    };
+    let registry = plugins.registry();
+    if registry.supports_scope(plugin, scope) {
+        return Ok(());
+    }
+    let supported = registry
+        .supported_scopes(plugin)
+        .iter()
+        .map(|scope| scope.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(ApiError::bad_request(format!(
+        "{plugin} does not support {} scope; supported scopes: {supported}",
+        scope.as_str()
+    ))
+    .field("scope"))
 }
 
 fn validate_plugin_config(state: &LlmControlState, plugin: &str, config: &Value) -> ApiResult<()> {

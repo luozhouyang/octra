@@ -8,11 +8,13 @@ license.workspace = true
 [dependencies]
 aho-corasick.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 octra-llm-core.workspace = true
 octra-pii-types.workspace = true
 octra-llm-plugin-types.workspace = true
 octra-llm-plugin-runtime.workspace = true
 octra-api-plugin-types.workspace = true
+parking_lot.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true

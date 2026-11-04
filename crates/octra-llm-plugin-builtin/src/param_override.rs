@@ -5,7 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use octra_api_plugin_types::{PluginError, PluginManifest};
 use octra_llm_plugin_types::{
-    LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext,
+    LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext, LlmScope,
+    REQUEST_LLM_SCOPES,
 };
 use serde_json::{Map, Value};
 
@@ -42,21 +43,24 @@ impl ParamOverrideFactory {
         };
         for (key, value) in set {
             match key.as_str() {
-                "temperature" => overrides.temperature = Some(number(value, key)?),
-                "top_p" => overrides.top_p = Some(number(value, key)?),
-                "top_k" => overrides.top_k = Some(integer(value, key)? as u32),
-                "max_tokens" => overrides.max_tokens = Some(integer(value, key)? as u32),
+                "temperature" => overrides.temperature = Some(ranged(value, key, 0.0, 2.0)?),
+                "top_p" => overrides.top_p = Some(ranged(value, key, 0.0, 1.0)?),
+                "top_k" => overrides.top_k = Some(positive_u32(value, key)?),
+                "max_tokens" => overrides.max_tokens = Some(positive_u32(value, key)?),
                 "stop" => {
                     let values = value.as_array().ok_or_else(|| {
                         PluginError::fail_closed("llm-param-override `stop` must be an array")
                     })?;
-                    overrides.stop = Some(
-                        values
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_string)
-                            .collect(),
-                    );
+                    let mut stops = Vec::with_capacity(values.len());
+                    for value in values {
+                        let stop = value.as_str().ok_or_else(|| {
+                            PluginError::fail_closed(
+                                "llm-param-override `stop` entries must be strings",
+                            )
+                        })?;
+                        stops.push(stop.to_string());
+                    }
+                    overrides.stop = Some(stops);
                 }
                 other => {
                     overrides.set.insert(other.to_string(), value.clone());
@@ -74,16 +78,30 @@ impl ParamOverrideFactory {
     }
 }
 
-fn number(value: &Value, key: &str) -> Result<f64, PluginError> {
-    value.as_f64().ok_or_else(|| {
+fn ranged(value: &Value, key: &str, min: f64, max: f64) -> Result<f64, PluginError> {
+    let number = value.as_f64().ok_or_else(|| {
         PluginError::fail_closed(format!("llm-param-override `{key}` must be a number"))
-    })
+    })?;
+    if !number.is_finite() || !(min..=max).contains(&number) {
+        return Err(PluginError::fail_closed(format!(
+            "llm-param-override `{key}` must be between {min} and {max}"
+        )));
+    }
+    Ok(number)
 }
 
-fn integer(value: &Value, key: &str) -> Result<i64, PluginError> {
-    value.as_i64().ok_or_else(|| {
+fn positive_u32(value: &Value, key: &str) -> Result<u32, PluginError> {
+    let integer = value.as_i64().ok_or_else(|| {
         PluginError::fail_closed(format!("llm-param-override `{key}` must be an integer"))
-    })
+    })?;
+    u32::try_from(integer)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            PluginError::fail_closed(format!(
+                "llm-param-override `{key}` must be a positive 32-bit integer"
+            ))
+        })
 }
 
 fn string_list(value: Option<&Value>, key: &str) -> Result<Vec<String>, PluginError> {
@@ -106,10 +124,16 @@ fn string_list(value: Option<&Value>, key: &str) -> Result<Vec<String>, PluginEr
 
 impl LlmPluginFactory for ParamOverrideFactory {
     fn manifest(&self) -> PluginManifest {
-        manifest(
+        let mut manifest = manifest(
             "llm-param-override",
             "Set or delete sampling parameters and extra request fields",
-        )
+        );
+        manifest.priority = 850;
+        manifest
+    }
+
+    fn supported_scopes(&self) -> &'static [LlmScope] {
+        &REQUEST_LLM_SCOPES
     }
 
     fn create(&self, config: Value) -> Result<Arc<dyn LlmPlugin>, PluginError> {
@@ -184,15 +208,18 @@ mod tests {
     use super::*;
     use octra_llm_core::{ChatRequest, Protocol};
     use octra_llm_plugin_types::LlmRequestMeta;
+    use octra_llm_plugin_types::LlmResponseHeaders;
     use serde_json::json;
 
     fn context<'a>(
         meta: &'a LlmRequestMeta<'a>,
+        headers: &'a mut LlmResponseHeaders,
         request: &'a mut ChatRequest,
         state: &'a mut serde_json::Value,
     ) -> LlmRequestContext<'a> {
         LlmRequestContext {
             meta,
+            headers,
             request,
             state,
         }
@@ -204,6 +231,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: None,
             user_agent: None,
@@ -227,7 +256,8 @@ mod tests {
         request.extra.insert("legacy".into(), json!(true));
         let meta = meta();
         let mut state = serde_json::Value::Null;
-        let mut cx = context(&meta, &mut request, &mut state);
+        let mut headers = LlmResponseHeaders::default();
+        let mut cx = context(&meta, &mut headers, &mut request, &mut state);
         plugin.on_request(&mut cx).await.unwrap();
         assert_eq!(request.temperature, Some(0.1));
         assert_eq!(request.max_tokens, Some(64));
@@ -250,5 +280,24 @@ mod tests {
                 .create(json!({"set": {}, "delete": "top_k"}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn rejects_out_of_range_and_non_positive_numbers() {
+        let too_large = (u32::MAX as i64) + 1;
+        for config in [
+            json!({"set": {"temperature": 2.5}}),
+            json!({"set": {"temperature": -0.1}}),
+            json!({"set": {"top_p": 1.5}}),
+            json!({"set": {"top_k": -1}}),
+            json!({"set": {"max_tokens": 0}}),
+            json!({"set": {"max_tokens": too_large}}),
+            json!({"set": {"stop": ["ok", 1]}}),
+        ] {
+            assert!(
+                ParamOverrideFactory.create(config.clone()).is_err(),
+                "accepted invalid config: {config}"
+            );
+        }
     }
 }

@@ -754,6 +754,7 @@ impl Harness {
                 enabled,
                 expires_at: parsed,
                 permissions_json: "{}".to_string(),
+                key_family: None,
             })
             .await
             .unwrap();
@@ -778,6 +779,7 @@ impl Harness {
                 enabled: true,
                 expires_at: None,
                 permissions_json: permissions.to_string(),
+                key_family: None,
             })
             .await
             .unwrap();

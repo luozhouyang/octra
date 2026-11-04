@@ -181,6 +181,10 @@ pub struct LlmVirtualKeyRecord {
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<String>,
     pub permissions_json: String,
+    /// Stable identity shared by every key produced by rotation.
+    pub key_family: String,
+    /// Key this one replaced, when it was created by rotation.
+    pub rotated_from: Option<String>,
     pub created_at: String,
 }
 
@@ -193,6 +197,27 @@ pub struct LlmVirtualKeyInput {
     pub enabled: bool,
     pub expires_at: Option<DateTime<Utc>>,
     pub permissions_json: String,
+    /// `None` derives the family from the new row id.
+    pub key_family: Option<String>,
+}
+
+/// Values for one rotation step. The old key is read inside the same
+/// transaction so lineage and expiry cannot race.
+#[derive(Debug, Clone)]
+pub struct LlmVirtualKeyRotation {
+    pub name: String,
+    pub key_prefix: String,
+    pub key_hash: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub permissions_json: Option<String>,
+    pub grace_seconds: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmVirtualKeyRotationResult {
+    pub key: LlmVirtualKeyRecord,
+    pub replaces: String,
+    pub previous_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,8 +506,14 @@ const ACCOUNT_COLUMNS: &str = "id, provider_id, name, secret_ref, weight, priori
      updated_at";
 
 fn virtual_key_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmVirtualKeyRecord {
+    let id: String = row.get("id");
     LlmVirtualKeyRecord {
-        id: row.get("id"),
+        key_family: row
+            .get::<Option<String>, _>("key_family")
+            .filter(|family| !family.trim().is_empty())
+            .unwrap_or_else(|| id.clone()),
+        rotated_from: row.get("rotated_from"),
+        id,
         name: row.get("name"),
         key_prefix: row.get("key_prefix"),
         key_hash: row.get("key_hash"),
@@ -499,7 +530,7 @@ fn virtual_key_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmVirtualKeyRecord {
 }
 
 const VIRTUAL_KEY_COLUMNS: &str = "id, name, key_prefix, key_hash, consumer_id, enabled, \
-     expires_at, last_used_at, permissions_json, created_at";
+     expires_at, last_used_at, permissions_json, key_family, rotated_from, created_at";
 
 fn usage_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmUsageRecord {
     LlmUsageRecord {
@@ -912,6 +943,31 @@ impl LlmStore {
              WHERE api_key_id = ? AND bucket_start >= ?",
         )
         .bind(api_key_id)
+        .bind(since)
+        .fetch_one(self.pool())
+        .await
+        .map_err(backend)?;
+        Ok(LlmVirtualKeyUsage {
+            tokens: row.get::<Option<i64>, _>("tokens").unwrap_or(0),
+            cost_micros: row.get::<Option<i64>, _>("cost_micros").unwrap_or(0),
+        })
+    }
+
+    /// Aggregates usage for every key in one rotation family. Deleted keys
+    /// drop out of the aggregate; rotation only expires keys.
+    pub async fn virtual_key_usage_since_family(
+        &self,
+        key_family: &str,
+        since: &str,
+    ) -> LlmResult<LlmVirtualKeyUsage> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(r.input_tokens + r.output_tokens + r.cache_write_tokens), 0) AS tokens,
+                 COALESCE(SUM(r.cost_micros), 0) AS cost_micros
+             FROM llm_usage_rollup r
+             JOIN llm_virtual_keys k ON k.id = r.api_key_id
+             WHERE COALESCE(k.key_family, k.id) = ? AND r.bucket_start >= ?",
+        )
+        .bind(key_family)
         .bind(since)
         .fetch_one(self.pool())
         .await
@@ -1364,9 +1420,14 @@ impl LlmStore {
             }
         }
         let id = uuid::Uuid::new_v4().to_string();
+        let key_family = input
+            .key_family
+            .clone()
+            .filter(|family| !family.trim().is_empty())
+            .unwrap_or_else(|| id.clone());
         sqlx::query(
-            "INSERT INTO llm_virtual_keys (id, name, key_prefix, key_hash, consumer_id, enabled, expires_at, permissions_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO llm_virtual_keys (id, name, key_prefix, key_hash, consumer_id, enabled, expires_at, permissions_json, key_family)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&input.name)
@@ -1376,6 +1437,7 @@ impl LlmStore {
         .bind(input.enabled as i64)
         .bind(input.expires_at.map(|value| value.to_rfc3339()))
         .bind(&input.permissions_json)
+        .bind(&key_family)
         .execute(self.pool())
         .await
         .map_err(conflict)?;
@@ -1409,6 +1471,95 @@ impl LlmStore {
         self.get_virtual_key(id)
             .await?
             .ok_or_else(|| not_found("virtual key", id))
+    }
+
+    /// Creates a replacement key and ages out the old one in one transaction.
+    /// The caller supplies the new plaintext hash/prefix; the family and
+    /// lineage are derived from the row being replaced.
+    pub async fn rotate_virtual_key(
+        &self,
+        old_id: &str,
+        rotation: &LlmVirtualKeyRotation,
+    ) -> LlmResult<LlmVirtualKeyRotationResult> {
+        let mut tx = self.pool().begin().await.map_err(backend)?;
+        let select = format!("SELECT {VIRTUAL_KEY_COLUMNS} FROM llm_virtual_keys WHERE id = ?");
+        let row = sqlx::query(&select)
+            .bind(old_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(backend)?
+            .ok_or_else(|| not_found("virtual key", old_id))?;
+        let old = virtual_key_from_row(&row);
+        let previous_expires_at = old.expires_at;
+        let now = Utc::now();
+
+        let old_expiry = if rotation.grace_seconds == 0 {
+            None
+        } else {
+            let grace = chrono::Duration::seconds(rotation.grace_seconds as i64);
+            let candidate = now + grace;
+            Some(
+                old.expires_at
+                    .map(|expires| expires.min(candidate))
+                    .unwrap_or(candidate),
+            )
+        };
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let family = if old.key_family.trim().is_empty() {
+            old.id.clone()
+        } else {
+            old.key_family.clone()
+        };
+        let permissions = rotation
+            .permissions_json
+            .clone()
+            .unwrap_or_else(|| old.permissions_json.clone());
+        sqlx::query(
+            "INSERT INTO llm_virtual_keys
+                (id, name, key_prefix, key_hash, consumer_id, enabled, expires_at,
+                 permissions_json, key_family, rotated_from)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&rotation.name)
+        .bind(&rotation.key_prefix)
+        .bind(&rotation.key_hash)
+        .bind(&old.consumer_id)
+        .bind(1_i64)
+        .bind(rotation.expires_at.map(|value| value.to_rfc3339()))
+        .bind(&permissions)
+        .bind(&family)
+        .bind(&old.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(conflict)?;
+
+        if rotation.grace_seconds == 0 {
+            sqlx::query("UPDATE llm_virtual_keys SET enabled = 0 WHERE id = ?")
+                .bind(&old.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(backend)?;
+        } else {
+            sqlx::query("UPDATE llm_virtual_keys SET expires_at = ? WHERE id = ?")
+                .bind(old_expiry.map(|value| value.to_rfc3339()))
+                .bind(&old.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(backend)?;
+        }
+
+        tx.commit().await.map_err(backend)?;
+        let key = self
+            .get_virtual_key(&id)
+            .await?
+            .ok_or_else(|| not_found("virtual key", &id))?;
+        Ok(LlmVirtualKeyRotationResult {
+            key,
+            replaces: old.id,
+            previous_expires_at,
+        })
     }
 
     pub async fn delete_virtual_key(&self, id: &str) -> LlmResult<bool> {
@@ -2068,6 +2219,7 @@ mod tests {
                 enabled: true,
                 expires_at: None,
                 permissions_json: "{}".to_string(),
+                key_family: None,
             })
             .await
             .unwrap();
@@ -2276,6 +2428,79 @@ mod tests {
             .unwrap();
         assert_eq!(since_07.tokens, 0);
         assert_eq!(since_07.cost_micros, 0);
+    }
+
+    #[tokio::test]
+    async fn virtual_key_usage_since_family_sums_rotated_keys() {
+        let storage = storage().await;
+        let family = "family-1".to_string();
+        let mut ids = Vec::new();
+        for (name, hash) in [("a", "hash-a"), ("b", "hash-b")] {
+            let key = storage
+                .llm
+                .create_virtual_key(&LlmVirtualKeyInput {
+                    name: name.into(),
+                    key_prefix: "octra-abc".into(),
+                    key_hash: hash.into(),
+                    consumer_id: None,
+                    enabled: true,
+                    expires_at: None,
+                    permissions_json: "{}".into(),
+                    key_family: Some(family.clone()),
+                })
+                .await
+                .unwrap();
+            ids.push(key.id);
+        }
+        for (request_id, key_id, tokens, cost) in [("a", &ids[0], 10, 3), ("b", &ids[1], 5, 2)] {
+            storage
+                .llm
+                .insert_usage(&LlmUsageInput {
+                    request_id: request_id.into(),
+                    virtual_model_id: "octra-default".into(),
+                    api_key_id: Some(key_id.clone()),
+                    input_tokens: tokens,
+                    cost_micros: Some(cost),
+                    created_at: Some("2026-10-01T05:12:00.000Z".into()),
+                    ..LlmUsageInput::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        let usage = storage
+            .llm
+            .virtual_key_usage_since_family(&family, "2026-10-01T05:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(usage.tokens, 15);
+        assert_eq!(usage.cost_micros, 5);
+    }
+
+    #[tokio::test]
+    async fn null_key_family_falls_back_to_the_key_id() {
+        let storage = storage().await;
+        let key = storage
+            .llm
+            .create_virtual_key(&LlmVirtualKeyInput {
+                name: "legacy".into(),
+                key_prefix: "octra-abc".into(),
+                key_hash: "legacy-hash".into(),
+                consumer_id: None,
+                enabled: true,
+                expires_at: None,
+                permissions_json: "{}".into(),
+                key_family: None,
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE llm_virtual_keys SET key_family = NULL WHERE id = ?")
+            .bind(&key.id)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let fetched = storage.llm.get_virtual_key(&key.id).await.unwrap().unwrap();
+        assert_eq!(fetched.key_family, key.id);
     }
 
     #[tokio::test]

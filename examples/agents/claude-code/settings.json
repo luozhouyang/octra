@@ -1,0 +1,10 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080",
+    "ANTHROPIC_AUTH_TOKEN": "octra-REPLACE_WITH_YOUR_VIRTUAL_KEY",
+    "ANTHROPIC_MODEL": "octra-default",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "octra-default",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "octra-default",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "octra-fast"
+  }
+}

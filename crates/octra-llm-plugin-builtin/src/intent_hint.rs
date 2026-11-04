@@ -18,7 +18,8 @@ use async_trait::async_trait;
 use octra_api_plugin_types::{Capability, PluginError, PluginManifest};
 use octra_llm_core::{ChatRequest, ContentPart, Role, estimate_tokens};
 use octra_llm_plugin_types::{
-    LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext,
+    LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext, LlmScope,
+    REQUEST_LLM_SCOPES,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -98,10 +99,16 @@ pub struct IntentHintFactory;
 
 impl LlmPluginFactory for IntentHintFactory {
     fn manifest(&self) -> PluginManifest {
-        manifest(
+        let mut manifest = manifest(
             "llm-intent-hint",
             "Tag requests with a routing intent hint for core model selection",
-        )
+        );
+        manifest.priority = 600;
+        manifest
+    }
+
+    fn supported_scopes(&self) -> &'static [LlmScope] {
+        &REQUEST_LLM_SCOPES
     }
 
     fn create(&self, config: Value) -> Result<Arc<dyn LlmPlugin>, PluginError> {
@@ -479,6 +486,7 @@ mod tests {
     use super::*;
     use octra_llm_core::{FunctionDefinition, Message, Protocol, Tool};
     use octra_llm_plugin_types::LlmRequestMeta;
+    use octra_llm_plugin_types::LlmResponseHeaders;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn meta(intent: Option<&str>) -> LlmRequestMeta<'_> {
@@ -487,6 +495,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: None,
             user_agent: None,
@@ -510,6 +520,7 @@ mod tests {
         let mut state = Value::Null;
         let mut cx = LlmRequestContext {
             meta: &meta,
+            headers: &mut LlmResponseHeaders::default(),
             request,
             state: &mut state,
         };

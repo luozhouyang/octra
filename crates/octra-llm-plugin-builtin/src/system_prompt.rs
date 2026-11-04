@@ -5,7 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use octra_api_plugin_types::{PluginError, PluginManifest};
 use octra_llm_plugin_types::{
-    LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext,
+    LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext, LlmScope,
+    REQUEST_LLM_SCOPES,
 };
 use serde_json::Value;
 
@@ -29,10 +30,16 @@ pub struct SystemPromptFactory;
 
 impl LlmPluginFactory for SystemPromptFactory {
     fn manifest(&self) -> PluginManifest {
-        manifest(
+        let mut manifest = manifest(
             "llm-system-prompt",
             "Prepend, append or replace the system prompt",
-        )
+        );
+        manifest.priority = 800;
+        manifest
+    }
+
+    fn supported_scopes(&self) -> &'static [LlmScope] {
+        &REQUEST_LLM_SCOPES
     }
 
     fn create(&self, config: Value) -> Result<Arc<dyn LlmPlugin>, PluginError> {
@@ -90,6 +97,7 @@ mod tests {
     use super::*;
     use octra_llm_core::{ChatRequest, Protocol, SystemPrompt};
     use octra_llm_plugin_types::LlmRequestMeta;
+    use octra_llm_plugin_types::LlmResponseHeaders;
     use serde_json::json;
 
     async fn apply(config: Value, request: &mut ChatRequest) {
@@ -99,6 +107,8 @@ mod tests {
             ingress: Protocol::Openai,
             consumer_id: None,
             virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
             session_id: None,
             client_ip: None,
             user_agent: None,
@@ -107,6 +117,7 @@ mod tests {
         let mut state = serde_json::Value::Null;
         let mut cx = LlmRequestContext {
             meta: &meta,
+            headers: &mut LlmResponseHeaders::default(),
             request,
             state: &mut state,
         };

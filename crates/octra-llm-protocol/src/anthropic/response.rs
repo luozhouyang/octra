@@ -303,6 +303,7 @@ pub fn error_type(error: &GatewayError) -> &'static str {
         ErrorKind::Forbidden => "permission_error",
         ErrorKind::NotFound => "not_found_error",
         ErrorKind::PayloadTooLarge => "request_too_large",
+        ErrorKind::RateLimited => "rate_limit_error",
         ErrorKind::Upstream | ErrorKind::Config => "api_error",
         ErrorKind::Timeout => "timeout_error",
         ErrorKind::Internal => "api_error",

@@ -202,6 +202,18 @@ async fn main() -> anyhow::Result<()> {
         api_metrics.clone(),
         plugin_runtime.clone(),
     );
+    // Consumer-group membership lives in the API store but is consumed by the
+    // LLM identity snapshot. Reload the LLM runtime after group mutations
+    // without making the API gateway depend on the LLM gateway.
+    let llm_reload_runtime = llm_runtime.clone();
+    api_control = api_control.with_reload_hook(Arc::new(move || {
+        let runtime = llm_reload_runtime.clone();
+        tokio::spawn(async move {
+            if let Err(error) = runtime.reload().await {
+                tracing::warn!(%error, "cannot reload LLM runtime after consumer group change");
+            }
+        });
+    }));
     if let Some(wasm) = wasm_control {
         api_control = api_control.with_wasm(wasm);
     }

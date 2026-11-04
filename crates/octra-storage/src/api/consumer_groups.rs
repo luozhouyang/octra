@@ -242,4 +242,25 @@ impl ApiStore {
         .map_err(|e| map_db_error(e, "consumer group member"))?;
         affected(result.rows_affected(), "consumer group member")
     }
+
+    /// All (consumer_id, consumer_group_id) pairs, used to build the LLM
+    /// runtime's client-identity snapshot.
+    pub async fn list_consumer_group_memberships(&self) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT consumer_id, consumer_group_id FROM consumer_group_consumers \
+             ORDER BY consumer_group_id ASC, consumer_id ASC",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "consumer group memberships"))?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("consumer_id"),
+                    row.get::<String, _>("consumer_group_id"),
+                )
+            })
+            .collect())
+    }
 }

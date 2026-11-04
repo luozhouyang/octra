@@ -78,6 +78,22 @@ Daemon 首次启动会在 `$OCTRA_HOME`（默认 `~/.octra`）下创建：
 
 环境变量：`OCTRA_HOME`、`OCTRA_CONTROL_BIND`、`OCTRA_GATEWAY_BIND`、`OCTRA_LOG_LEVEL`、`OCTRA_LOG_FORMAT`（`pretty` / `json`）、`OCTRA_CONTROL_TOKEN`、`OCTRA_CONTROL_URL`（CLI）。
 
+## 连接 Coding Agent
+
+Claude Code、Codex CLI、OpenCode 可以把 Octra 作为 LLM 端点。先创建一个
+`virtual_model_id` 与 Agent 请求模型名一致的 LLM route，再为 Agent 创建
+virtual key：
+
+```bash
+pnpm cli keys create --name claude-code --consumer <consumer-id> \
+  --permissions '{"allowed_models":["octra-default"]}'
+```
+
+把返回的 `octra-...` key 写入 Agent 配置。`control.token`（8081 端口）是
+管理面凭据，绝不能交给 Agent。控制面准备、Claude Code / Codex / OpenCode
+模板、限流响应头和轮转流程见
+[examples/agents/README.md](./examples/agents/README.md)。
+
 ## 当前已实现
 
 - 独立 Daemon，两个监听端口，统一优雅关闭。

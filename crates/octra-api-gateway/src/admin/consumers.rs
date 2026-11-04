@@ -91,5 +91,6 @@ pub async fn delete(
 ) -> AdminResult<StatusCode> {
     state.storage.api.delete_consumer(&id).await?;
     reload_all(&state).await?;
+    state.notify_reload_hook();
     Ok(StatusCode::NO_CONTENT)
 }

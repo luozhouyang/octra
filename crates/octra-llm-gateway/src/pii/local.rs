@@ -706,7 +706,9 @@ mod tests {
         assert_eq!(results.len(), 2);
         for result in &results {
             assert!(
-                result.iter().any(|detection| detection.kind == PiiKind::Email),
+                result
+                    .iter()
+                    .any(|detection| detection.kind == PiiKind::Email),
                 "detections: {result:?}"
             );
         }

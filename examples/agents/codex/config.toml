@@ -1,0 +1,8 @@
+model = "octra-default"
+model_provider = "octra"
+
+[model_providers.octra]
+name = "Octra"
+base_url = "http://127.0.0.1:8080/v1"
+env_key = "OCTRA_API_KEY"
+wire_api = "responses"

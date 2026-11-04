@@ -52,7 +52,7 @@ pub enum KeyOutcome {
     /// No keys are configured: anonymous local access.
     Anonymous,
     /// A valid, unexpired key matched.
-    Authorized(LlmVirtualKeyRecord),
+    Authorized(Box<LlmVirtualKeyRecord>),
     /// A key was presented but is unknown, disabled or expired.
     Rejected(&'static str),
 }
@@ -89,7 +89,7 @@ pub fn authenticate(
     if is_expired(key, now) {
         return KeyOutcome::Rejected("virtual key has expired");
     }
-    KeyOutcome::Authorized(key.clone())
+    KeyOutcome::Authorized(Box::new(key.clone()))
 }
 
 #[cfg(test)]
@@ -108,6 +108,8 @@ mod tests {
             expires_at: expires,
             last_used_at: None,
             permissions_json: "{}".into(),
+            key_family: "k1".into(),
+            rotated_from: None,
             created_at: String::new(),
         }
     }
@@ -171,7 +173,7 @@ mod tests {
         );
         assert_eq!(
             authenticate(keys, Some("secret".into()), now),
-            KeyOutcome::Authorized(live)
+            KeyOutcome::Authorized(Box::new(live))
         );
     }
 }

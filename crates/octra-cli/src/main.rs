@@ -31,12 +31,54 @@ enum Command {
     /// Manage LLM provider accounts
     #[command(subcommand)]
     Accounts(AccountsCommand),
+    /// Manage LLM virtual keys
+    #[command(subcommand)]
+    Keys(KeysCommand),
     /// Show recent LLM usage
     Usage {
         /// Maximum number of recent records
         #[arg(long, default_value_t = 50)]
         limit: i64,
     },
+}
+
+#[derive(Subcommand)]
+enum KeysCommand {
+    /// List virtual keys (prefixes only; plaintext is never stored)
+    List,
+    /// Create a virtual key and print its plaintext once
+    Create {
+        #[arg(long)]
+        name: String,
+        /// Consumer id to bind the key to
+        #[arg(long)]
+        consumer: Option<String>,
+        /// JSON permissions document, e.g. '{"allowed_models":["octra-gpt"]}'
+        #[arg(long)]
+        permissions: Option<String>,
+        /// RFC 3339 expiry timestamp
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
+    /// Rotate a virtual key and print the new plaintext once
+    Rotate {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// JSON permissions override; omitted copies the old key
+        #[arg(long)]
+        permissions: Option<String>,
+        /// Seconds the old key stays valid; 0 disables it immediately
+        #[arg(long)]
+        grace_seconds: Option<u64>,
+        /// RFC 3339 expiry for the new key
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
+    /// Disable a virtual key without deleting it
+    Revoke { id: String },
+    /// Delete a virtual key permanently
+    Delete { id: String },
 }
 
 #[derive(Subcommand)]
@@ -122,9 +164,74 @@ fn main() -> Result<()> {
             print_json(control.get(&format!("/admin/llm/usage?limit={limit}"))?)?
         }
         Command::Accounts(command) => accounts(&control, command)?,
+        Command::Keys(command) => keys(&control, command)?,
     }
 
     Ok(())
+}
+
+fn keys(control: &Control, command: KeysCommand) -> Result<()> {
+    match command {
+        KeysCommand::List => print_json(control.get("/admin/llm/virtual-keys")?)?,
+        KeysCommand::Create {
+            name,
+            consumer,
+            permissions,
+            expires_at,
+        } => {
+            let mut body = serde_json::json!({ "name": name });
+            if let Some(consumer) = consumer {
+                body["consumer_id"] = serde_json::json!(consumer);
+            }
+            if let Some(permissions) = parse_json_arg(permissions, "permissions")? {
+                body["permissions"] = permissions;
+            }
+            if let Some(expires_at) = expires_at {
+                body["expires_at"] = serde_json::json!(expires_at);
+            }
+            print_json(control.post_json("/admin/llm/virtual-keys", &body)?)?
+        }
+        KeysCommand::Rotate {
+            id,
+            name,
+            permissions,
+            grace_seconds,
+            expires_at,
+        } => {
+            let mut body = serde_json::Map::new();
+            if let Some(name) = name {
+                body.insert("name".into(), serde_json::json!(name));
+            }
+            if let Some(permissions) = parse_json_arg(permissions, "permissions")? {
+                body.insert("permissions".into(), permissions);
+            }
+            if let Some(grace_seconds) = grace_seconds {
+                body.insert("grace_seconds".into(), serde_json::json!(grace_seconds));
+            }
+            if let Some(expires_at) = expires_at {
+                body.insert("expires_at".into(), serde_json::json!(expires_at));
+            }
+            print_json(control.post_json(
+                &format!("/admin/llm/virtual-keys/{id}/rotate"),
+                &serde_json::Value::Object(body),
+            )?)?
+        }
+        KeysCommand::Revoke { id } => print_json(control.put(
+            &format!("/admin/llm/virtual-keys/{id}"),
+            &serde_json::json!({ "enabled": false }),
+        )?)?,
+        KeysCommand::Delete { id } => {
+            print_json(control.delete(&format!("/admin/llm/virtual-keys/{id}"))?)?
+        }
+    }
+    Ok(())
+}
+
+fn parse_json_arg(raw: Option<String>, field: &str) -> Result<Option<serde_json::Value>> {
+    raw.map(|raw| {
+        serde_json::from_str(&raw).with_context(|| format!("`{field}` must be valid JSON"))
+    })
+    .transpose()
 }
 
 fn accounts(control: &Control, command: AccountsCommand) -> Result<()> {

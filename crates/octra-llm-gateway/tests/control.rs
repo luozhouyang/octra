@@ -307,12 +307,15 @@ async fn virtual_key_is_returned_once_and_authenticates() {
     let plaintext = created["key_value"].as_str().unwrap().to_string();
     assert!(plaintext.starts_with("octra-"));
     assert!(created["warning"].is_string());
+    assert!(created["key_family"].is_string());
+    assert!(created["rotated_from"].is_null());
 
     let (status, fetched) = call(&harness, Method::GET, &format!("{KEYS}/{id}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(fetched.get("key_value").is_none());
     assert!(fetched.get("key_hash").is_none());
     assert_eq!(fetched["key_prefix"], &plaintext[..12]);
+    assert_eq!(fetched["key_family"], created["key_family"]);
 
     let (status, listed) = call(&harness, Method::GET, KEYS, None).await;
     assert_eq!(status, StatusCode::OK);
@@ -355,6 +358,80 @@ async fn virtual_key_is_returned_once_and_authenticates() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn virtual_key_rotation_copies_family_and_replaces_the_old_key() {
+    let harness = Harness::new().await;
+    let (status, created) = create(
+        &harness,
+        KEYS,
+        json!({
+            "name": "ci",
+            "permissions": {"allowed_models": ["octra-default"]}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let old_id = created["id"].as_str().unwrap().to_string();
+    let old_plaintext = created["key_value"].as_str().unwrap().to_string();
+    let family = created["key_family"].as_str().unwrap().to_string();
+
+    let (status, rotated) = call(
+        &harness,
+        Method::POST,
+        &format!("{KEYS}/{old_id}/rotate"),
+        Some(json!({"grace_seconds": 0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {rotated}");
+    let new_id = rotated["id"].as_str().unwrap().to_string();
+    let new_plaintext = rotated["key_value"].as_str().unwrap().to_string();
+    assert_ne!(old_id, new_id);
+    assert_ne!(old_plaintext, new_plaintext);
+    assert_eq!(rotated["key_family"], family);
+    assert_eq!(rotated["rotated_from"], old_id);
+    assert_eq!(rotated["replaces"], old_id);
+    assert_eq!(rotated["permissions"]["allowed_models"][0], "octra-default");
+
+    // The old key is disabled immediately with grace 0.
+    let (status, _, _) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[("x-api-key", &old_plaintext)],
+        openai_body("x", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // The new key authenticates (the model is missing, not the key).
+    let (status, _, _) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[("x-api-key", &new_plaintext)],
+        openai_body("x", false),
+    )
+    .await;
+    assert_ne!(status, StatusCode::UNAUTHORIZED);
+
+    // A disabled key cannot be rotated again.
+    let (status, body) = call(
+        &harness,
+        Method::POST,
+        &format!("{KEYS}/{old_id}/rotate"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+
+    let (status, _) = call(
+        &harness,
+        Method::POST,
+        &format!("{KEYS}/missing/rotate"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -736,6 +813,45 @@ async fn llm_plugin_catalog_and_config_crud() {
 }
 
 #[tokio::test]
+async fn llm_rate_limit_rejects_provider_scope() {
+    let harness = Harness::new().await;
+    let id = plugin_id(&harness, "llm-rate-limit").await;
+    let (status, body) = create(
+        &harness,
+        &format!("{PLUGINS}/{id}/configs"),
+        json!({
+            "scope": "provider",
+            "scope_id": "any",
+            "config": {"minute": 10}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["field"], "scope");
+}
+
+#[tokio::test]
+async fn request_stage_plugin_rejects_provider_scope() {
+    let harness = Harness::new().await;
+    let id = plugin_id(&harness, "llm-param-override").await;
+    let (status, body) = create(
+        &harness,
+        &format!("{PLUGINS}/{id}/configs"),
+        json!({
+            "scope": "provider",
+            "scope_id": "any",
+            "config": {"set": {"temperature": 0.2}}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["field"], "scope");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(message.contains("supported scopes"), "body: {body}");
+    assert!(message.contains("virtual_key, model"), "body: {body}");
+}
+
+#[tokio::test]
 async fn llm_plugin_config_is_validated() {
     let harness = Harness::new().await;
     let id = plugin_id(&harness, "llm-model-map").await;
@@ -755,7 +871,7 @@ async fn llm_plugin_config_is_validated() {
     let (status, body) = create(
         &harness,
         &configs,
-        json!({"scope": "provider", "scope_id": "missing", "config": {"map": {"a": "m"}}}),
+        json!({"scope": "model", "scope_id": "missing", "config": {"map": {"a": "m"}}}),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
@@ -1297,7 +1413,7 @@ async fn cli_probe_and_config_validation() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {probe}");
-    assert_eq!(probe["ok"], true);
+    assert_eq!(probe["ok"], true, "body: {probe}");
     assert_eq!(probe["version"], "fake-cli 1.2.3");
 
     // A provider without CLI configuration cannot be probed.
