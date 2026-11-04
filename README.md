@@ -104,7 +104,7 @@ headers, and key rotation.
 - LLM Gateway: canonical IR, OpenAI ↔ Anthropic request/response/SSE conversion, virtual models, routing groups with priority/weight fallback, OpenAI-compatible and Anthropic providers (`env:` / `file:` secret references), virtual keys hashed in SQLite, usage records, `count_tokens`, and consumer policies that restrict allowed models and providers.
 - MCP Gateway: Streamable HTTP and stdio upstreams, tool discovery and aggregation, `/mcp` JSON-RPC endpoint with sessions, per-consumer tool ACLs, API keys, and invocation audit rows.
 - CLI: `status`, `services`, `routes`, `reload`, `doctor`.
-- Tauri 2 + React desktop skeleton; the dashboard reaches the daemon through Tauri commands.
+- Tauri 2 + React desktop app with a shadcn-style component set and Tailwind CSS v4 design tokens for dark and light modes; the control plane is read directly over the loopback API.
 - Dual workspace and CI (Rust fmt/clippy/test; frontend typecheck/test/build).
 
 ## Not yet implemented (tracked on the roadmap)

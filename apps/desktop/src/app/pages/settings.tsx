@@ -1,13 +1,22 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button } from "@octra/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardDescription,
+  CardHeader,
+  CardSeparator,
+  CardTitle,
+  Input,
+  cn,
+} from "@octra/ui";
 import type { PiiModelAction, PiiModelStatus } from "@octra/types";
-import { useState, type FormEvent } from "react";
+import { Database, HardDrive, ShieldCheck, SlidersHorizontal, type LucideIcon } from "lucide-react";
+import { useState, type FormEvent, type ReactNode } from "react";
 
+import { PageHeader } from "../../components/page-header";
 import { actOnPiiModel, fetchPiiModels, isTauri } from "../../lib/control-api";
 import { useControlSettings } from "../../lib/store";
-
-const inputClass =
-  "mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-primary";
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) {
@@ -17,6 +26,32 @@ function formatBytes(bytes: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
   return `${Math.round(bytes / 1024)} KB`;
+}
+
+const sections: Array<{ id: string; label: string; icon: LucideIcon }> = [
+  { id: "connection", label: "Control plane", icon: SlidersHorizontal },
+  { id: "pii", label: "Local PII model", icon: ShieldCheck },
+  { id: "data", label: "Local data", icon: HardDrive },
+];
+
+function SettingRow({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-3 border-b border-border px-5 py-4 last:border-b-0 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-0.5">
+        <span className="text-xs text-foreground">{label}</span>
+        <span className="text-[10.5px] text-muted-foreground">{hint}</span>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">{children}</div>
+    </div>
+  );
 }
 
 function PiiModelCard({
@@ -37,90 +72,120 @@ function PiiModelCard({
       : 0;
 
   return (
-    <div className="mt-4 rounded-lg border border-border bg-background p-4">
+    <div className="rounded-xl border border-border bg-surface p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p className="font-medium">{model.display_name}</p>
-          <p className="mt-1 text-xs text-muted-foreground">
+        <div className="flex flex-col gap-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-foreground">{model.display_name}</span>
+            <Badge variant={model.enabled ? "accent" : "neutral"}>
+              {model.enabled ? "Enabled" : "Off"}
+            </Badge>
+            <Badge variant={model.installed ? "neutral" : downloading ? "violet" : "warning"}>
+              {model.installed ? "Installed" : model.state.state}
+            </Badge>
+            {model.engine_readiness === "failed" ? (
+              <Badge variant="danger">Engine failed</Badge>
+            ) : null}
+          </div>
+          <span className="font-mono text-[10.5px] text-muted-foreground">
             {model.license} · {formatBytes(model.size)} · revision {model.revision.slice(0, 12)}
-          </p>
+          </span>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button
-            type="button"
+            size="sm"
+            variant={model.enabled ? "secondary" : "default"}
             disabled={busy}
             onClick={() => onAction({ do: model.enabled ? "off" : "on" })}
           >
             {model.enabled ? "Turn off" : "Turn on"}
           </Button>
-          {!model.installed && !downloading && !model.enabled && (
-            <span className="self-center text-xs text-muted-foreground">
+          {!model.installed && !downloading && !model.enabled ? (
+            <span className="self-center text-[10.5px] text-muted-foreground">
               Turn on to download
             </span>
-          )}
-          {!model.installed && !downloading && model.enabled && (
-            <Button type="button" disabled={busy} onClick={() => onAction({ do: "on" })}>
+          ) : null}
+          {!model.installed && !downloading && model.enabled ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={busy}
+              onClick={() => onAction({ do: "on" })}
+            >
               Retry download
             </Button>
-          )}
-          {downloading && (
-            <Button type="button" disabled={busy} onClick={() => onAction({ do: "cancel" })}>
+          ) : null}
+          {downloading ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={busy}
+              onClick={() => onAction({ do: "cancel" })}
+            >
               Cancel
             </Button>
-          )}
-          {model.installed && (
-            <Button type="button" disabled={busy} onClick={() => onAction({ do: "remove" })}>
+          ) : null}
+          {model.installed ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => onAction({ do: "remove" })}
+            >
               Remove
             </Button>
-          )}
-          {model.engine_readiness === "failed" && (
-            <Button type="button" disabled={busy} onClick={() => onAction({ do: "on" })}>
+          ) : null}
+          {model.engine_readiness === "failed" ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={busy}
+              onClick={() => onAction({ do: "on" })}
+            >
               Retry
             </Button>
-          )}
+          ) : null}
         </div>
       </div>
 
-      <div className="mt-3 space-y-2 text-sm">
-        <p className="text-muted-foreground">
-          Status:{" "}
-          <span className="text-foreground">
-            {model.enabled ? "enabled" : "off"} · {model.installed ? "installed" : model.state.state}
-          </span>
-        </p>
-        {downloading && download && (
-          <div>
-            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-              <div className="h-full bg-primary transition-all" style={{ width: `${percent}%` }} />
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {formatBytes(download.downloaded)} / {formatBytes(download.total)}
-            </p>
+      {downloading && download ? (
+        <div className="mt-3">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-raised">
+            <div className="h-full bg-primary transition-all" style={{ width: `${percent}%` }} />
           </div>
-        )}
-        {model.last_error && <p className="text-xs text-danger">{model.last_error}</p>}
-        {model.engine_readiness === "failed" && (
-          <p className="text-xs text-danger">
-            Engine failed to load{model.engine_error ? `: ${model.engine_error}` : ""}
+          <p className="mt-1.5 font-mono text-[10.5px] text-muted-foreground">
+            {formatBytes(download.downloaded)} / {formatBytes(download.total)}
           </p>
-        )}
-      </div>
+        </div>
+      ) : null}
 
-      <div className="mt-4 flex flex-wrap items-end gap-3">
-        <label className="text-sm">
-          <span className="text-muted-foreground">Threshold ({model.floor}–0.99)</span>
-          <input
-            className={inputClass}
+      {model.last_error ? (
+        <p className="mt-3 text-[10.5px] text-danger">{model.last_error}</p>
+      ) : null}
+      {model.engine_readiness === "failed" ? (
+        <p className="mt-2 text-[10.5px] text-danger">
+          Engine failed to load{model.engine_error ? `: ${model.engine_error}` : ""}
+        </p>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap items-end gap-3 border-t border-border pt-3">
+        <label className="flex flex-col gap-1">
+          <span className="text-[10.5px] text-muted-foreground">
+            Threshold ({model.floor}–0.99)
+          </span>
+          <Input
             type="number"
             min={model.floor}
             max={0.99}
             step={0.01}
             value={score}
             onChange={(event) => setScore(Number(event.target.value))}
+            className="w-[120px]"
           />
         </label>
         <Button
-          type="button"
+          size="sm"
+          variant="secondary"
           disabled={busy}
           onClick={() => onAction({ do: "score", score })}
         >
@@ -163,96 +228,191 @@ export function SettingsPage() {
   }
 
   return (
-    <div className="space-y-8">
-      <header>
-        <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Local runtime and control plane connection.
-        </p>
-      </header>
+    <div className="flex flex-col gap-5">
+      <PageHeader
+        eyebrow="System / configuration"
+        title="Settings"
+        description="Runtime, storage and security settings for this daemon."
+        actions={
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setDraftBaseUrl(baseUrl);
+                setDraftToken(token);
+              }}
+            >
+              Reset
+            </Button>
+            <Button type="submit" form="connection-form">
+              Save changes
+            </Button>
+          </>
+        }
+      />
 
-      <section className="rounded-lg border border-border bg-card p-6">
-        <h2 className="text-sm font-medium">Control plane</h2>
+      <div className="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
+        <Card className="h-fit p-4 lg:sticky lg:top-4">
+          <span className="font-mono text-[10.5px] text-muted-foreground">Sections</span>
+          <nav className="mt-2 flex flex-col gap-0.5">
+            {sections.map((section, index) => (
+              <a
+                key={section.id}
+                href={`#${section.id}`}
+                className={cn(
+                  "flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[12.5px] transition-colors",
+                  index === 0
+                    ? "bg-primary-soft text-foreground"
+                    : "text-secondary hover:bg-raised hover:text-foreground",
+                )}
+              >
+                <section.icon
+                  className={cn(
+                    "h-[15px] w-[15px]",
+                    index === 0 ? "text-primary" : "text-muted-foreground",
+                  )}
+                  strokeWidth={1.5}
+                />
+                {section.label}
+              </a>
+            ))}
+          </nav>
+          <div className="my-3 h-px bg-border" />
+          <div className="flex flex-col gap-1">
+            <span className="font-mono text-[10.5px] text-muted-foreground">config.toml</span>
+            <span className="text-[10.5px] text-muted-foreground">Edited 2h ago · local only</span>
+          </div>
+        </Card>
 
-        {desktop ? (
-          <p className="mt-3 text-sm text-muted-foreground">
-            The desktop host reads credentials from{" "}
-            <code className="rounded bg-background px-1.5 py-0.5">
-              $OCTRA_HOME/control.token
-            </code>{" "}
-            and the daemon address from{" "}
-            <code className="rounded bg-background px-1.5 py-0.5">$OCTRA_HOME/config.toml</code>.
-          </p>
-        ) : (
-          <form className="mt-4 space-y-4" onSubmit={handleSubmit}>
-            <label className="block text-sm">
-              <span className="text-muted-foreground">Base URL</span>
-              <input
-                className={inputClass}
-                value={draftBaseUrl}
-                onChange={(event) => setDraftBaseUrl(event.target.value)}
-                placeholder="http://127.0.0.1:8081"
-              />
-            </label>
+        <div className="flex min-w-0 flex-col gap-4">
+          <Card id="connection">
+            <CardHeader>
+              <div className="flex flex-col gap-1">
+                <CardTitle>Control plane</CardTitle>
+                <CardDescription>Where this UI reaches the local daemon</CardDescription>
+              </div>
+              <Badge variant={desktop ? "neutral" : "accent"}>
+                {desktop ? "Desktop" : "Browser"}
+              </Badge>
+            </CardHeader>
+            <CardSeparator />
+            {desktop ? (
+              <div className="px-5 py-4 text-xs leading-5 text-secondary">
+                The desktop host reads credentials from{" "}
+                <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[11px]">
+                  $OCTRA_HOME/control.token
+                </code>{" "}
+                and the daemon address from{" "}
+                <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[11px]">
+                  $OCTRA_HOME/config.toml
+                </code>
+                .
+              </div>
+            ) : (
+              <form id="connection-form" onSubmit={handleSubmit}>
+                <SettingRow label="Base URL" hint="Address of the local control API">
+                  <Input
+                    value={draftBaseUrl}
+                    onChange={(event) => setDraftBaseUrl(event.target.value)}
+                    placeholder="http://127.0.0.1:8081"
+                    className="w-full sm:w-[260px]"
+                  />
+                </SettingRow>
+                <SettingRow label="Bearer token" hint="Read from $OCTRA_HOME/control.token">
+                  <Input
+                    type="password"
+                    value={draftToken}
+                    onChange={(event) => setDraftToken(event.target.value)}
+                    placeholder="Optional for loopback"
+                    className="w-full sm:w-[260px]"
+                  />
+                </SettingRow>
+                <div className="flex items-center justify-between px-5 py-3">
+                  <span className="text-[10.5px] text-muted-foreground">
+                    Applies to this browser only
+                  </span>
+                  <Button type="submit" size="sm">
+                    Save connection
+                  </Button>
+                </div>
+              </form>
+            )}
+          </Card>
 
-            <label className="block text-sm">
-              <span className="text-muted-foreground">Bearer token</span>
-              <input
-                className={inputClass}
-                type="password"
-                value={draftToken}
-                onChange={(event) => setDraftToken(event.target.value)}
-                placeholder="contents of $OCTRA_HOME/control.token"
-              />
-            </label>
+          <Card id="pii">
+            <CardHeader>
+              <div className="flex flex-col gap-1">
+                <CardTitle>Local PII model</CardTitle>
+                <CardDescription>
+                  Optional on-device detection for names, addresses and secrets that rules miss
+                </CardDescription>
+              </div>
+              <Badge variant="neutral">
+                <Database className="h-3 w-3" />
+                {piiModels.data?.length ?? 0} {piiModels.data?.length === 1 ? "model" : "models"}
+              </Badge>
+            </CardHeader>
+            <CardSeparator />
+            <div className="flex flex-col gap-3 p-4">
+              <p className="text-[11px] leading-5 text-muted-foreground">
+                Models download only when you turn them on and are kept under{" "}
+                <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[10.5px]">
+                  $OCTRA_HOME/cache/models
+                </code>
+                . Point the <span className="font-mono">llm-pii-redaction</span> plugin at{" "}
+                <span className="font-mono">astrlink-guard</span> to use it.
+              </p>
 
-            <Button type="submit">Save connection</Button>
-          </form>
-        )}
-      </section>
+              {piiModels.isPending ? (
+                <p className="text-xs text-muted-foreground">Loading models…</p>
+              ) : null}
+              {piiModels.isError ? (
+                <p className="text-xs text-danger">
+                  {piiModels.error instanceof Error
+                    ? piiModels.error.message
+                    : "cannot load models"}
+                </p>
+              ) : null}
+              {piiModels.data?.map((model) => (
+                <PiiModelCard
+                  key={`${model.id}:${model.threshold}`}
+                  model={model}
+                  busy={piiAction.isPending && piiAction.variables?.id === model.id}
+                  onAction={(action) => piiAction.mutate({ id: model.id, action })}
+                />
+              ))}
+              {piiAction.isError ? (
+                <p className="text-xs text-danger">
+                  {piiAction.error instanceof Error
+                    ? piiAction.error.message
+                    : "model action failed"}
+                </p>
+              ) : null}
+            </div>
+          </Card>
 
-      <section className="rounded-lg border border-border bg-card p-6">
-        <h2 className="text-sm font-medium">Local PII model</h2>
-        <p className="mt-3 text-sm text-muted-foreground">
-          Optional on-device detection for names, addresses and secrets that rules miss. Models are
-          downloaded only when you turn them on and are kept under{" "}
-          <code className="rounded bg-background px-1.5 py-0.5">$OCTRA_HOME/cache/models</code>.
-          Point the <code className="rounded bg-background px-1.5 py-0.5">llm-pii-redaction</code>{" "}
-          plugin at the engine name{" "}
-          <code className="rounded bg-background px-1.5 py-0.5">astrlink-guard</code> to use it.
-        </p>
-
-        {piiModels.isPending && (
-          <p className="mt-4 text-sm text-muted-foreground">Loading models…</p>
-        )}
-        {piiModels.isError && (
-          <p className="mt-4 text-sm text-danger">
-            {piiModels.error instanceof Error ? piiModels.error.message : "cannot load models"}
-          </p>
-        )}
-        {piiModels.data?.map((model) => (
-          <PiiModelCard
-            key={`${model.id}:${model.threshold}`}
-            model={model}
-            busy={piiAction.isPending && piiAction.variables?.id === model.id}
-            onAction={(action) => piiAction.mutate({ id: model.id, action })}
-          />
-        ))}
-        {piiAction.isError && (
-          <p className="mt-4 text-sm text-danger">
-            {piiAction.error instanceof Error ? piiAction.error.message : "model action failed"}
-          </p>
-        )}
-      </section>
-
-      <section className="rounded-lg border border-border bg-card p-6">
-        <h2 className="text-sm font-medium">Local data</h2>
-        <p className="mt-3 text-sm text-muted-foreground">
-          SQLite, configuration, and the control token live under{" "}
-          <code className="rounded bg-background px-1.5 py-0.5">$OCTRA_HOME</code>, which defaults
-          to <code className="rounded bg-background px-1.5 py-0.5">~/.octra</code>.
-        </p>
-      </section>
+          <Card id="data">
+            <CardHeader>
+              <div className="flex flex-col gap-1">
+                <CardTitle>Local data</CardTitle>
+                <CardDescription>Everything stays on this machine</CardDescription>
+              </div>
+            </CardHeader>
+            <CardSeparator />
+            <div className="px-5 py-4 text-xs leading-5 text-secondary">
+              SQLite, configuration and the control token live under{" "}
+              <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[11px]">
+                $OCTRA_HOME
+              </code>
+              , which defaults to{" "}
+              <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[11px]">
+                ~/.octra
+              </code>
+              .
+            </div>
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }

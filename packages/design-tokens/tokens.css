@@ -1,15 +1,81 @@
-:root {
-  --octra-background: 222 47% 6%;
-  --octra-foreground: 210 40% 98%;
-  --octra-card: 222 40% 10%;
-  --octra-card-foreground: 210 40% 96%;
-  --octra-muted: 217 33% 17%;
-  --octra-muted-foreground: 215 20% 65%;
-  --octra-border: 217 33% 20%;
-  --octra-input: 217 33% 22%;
-  --octra-primary: 243 75% 59%;
-  --octra-primary-foreground: 0 0% 100%;
-  --octra-success: 142 71% 45%;
-  --octra-danger: 0 72% 51%;
-  --octra-radius: 0.75rem;
+/*
+ * Octra design tokens.
+ *
+ * Two modes share one set of roles. Components only reference roles, never raw
+ * colors, so switching `data-theme` on <html> repaints the whole app.
+ */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --octra-background: #0b0d10;
+  --octra-surface: #0e1115;
+  --octra-card: #151920;
+  --octra-raised: #1b2028;
+
+  --octra-border: #f2f5f814;
+  --octra-border-strong: #f2f5f824;
+
+  --octra-foreground: #f2f5f8;
+  --octra-secondary: #aeb7c2;
+  --octra-muted: #7d8794;
+
+  --octra-primary: #4de0b8;
+  --octra-primary-hover: #6febcb;
+  --octra-primary-foreground: #06251d;
+  --octra-primary-soft: #4de0b81f;
+  --octra-primary-line: #4de0b83d;
+
+  --octra-sky: #5ab0ff;
+  --octra-violet: #b79cff;
+  --octra-amber: #ffc857;
+  --octra-coral: #ff7a85;
+
+  --octra-success: #4de0b8;
+  --octra-warning: #ffc857;
+  --octra-danger: #ff6b6b;
+
+  --octra-chart-grid: #f2f5f80f;
+  --octra-chart-area: #1c3334;
+  --octra-neutral-flow: #1e2025;
+
+  --octra-shadow-card: 0 1px 0 #ffffff0a inset;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --octra-background: #f4f5f2;
+  --octra-surface: #fafbf8;
+  --octra-card: #ffffff;
+  --octra-raised: #eef0ec;
+
+  --octra-border: #0f141014;
+  --octra-border-strong: #0f141024;
+
+  --octra-foreground: #10140f;
+  --octra-secondary: #4d544e;
+  --octra-muted: #6b736c;
+
+  --octra-primary: #0a7a5e;
+  --octra-primary-hover: #0b8a6c;
+  --octra-primary-foreground: #ffffff;
+  --octra-primary-soft: #0a7a5e14;
+  --octra-primary-line: #0a7a5e33;
+
+  --octra-sky: #1a6fb8;
+  --octra-violet: #7c5cd6;
+  --octra-amber: #a66a00;
+  --octra-coral: #c24e5b;
+
+  --octra-success: #0a7a5e;
+  --octra-warning: #a66a00;
+  --octra-danger: #c0392b;
+
+  --octra-chart-grid: #0f14100f;
+  --octra-chart-area: #e7f2ee;
+  --octra-neutral-flow: #edeeea;
+
+  --octra-shadow-card: 0 1px 2px #0f140f0a;
 }

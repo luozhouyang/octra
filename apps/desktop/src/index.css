@@ -1,20 +1,49 @@
 @import "tailwindcss";
 @import "@octra/design-tokens/tokens.css";
 
+@source "../../../packages/ui/src";
+
 @theme inline {
-  --color-background: hsl(var(--octra-background));
-  --color-foreground: hsl(var(--octra-foreground));
-  --color-card: hsl(var(--octra-card));
-  --color-card-foreground: hsl(var(--octra-card-foreground));
-  --color-muted: hsl(var(--octra-muted));
-  --color-muted-foreground: hsl(var(--octra-muted-foreground));
-  --color-border: hsl(var(--octra-border));
-  --color-input: hsl(var(--octra-input));
-  --color-primary: hsl(var(--octra-primary));
-  --color-primary-foreground: hsl(var(--octra-primary-foreground));
-  --color-success: hsl(var(--octra-success));
-  --color-danger: hsl(var(--octra-danger));
-  --radius-lg: var(--octra-radius);
+  --color-background: var(--octra-background);
+  --color-surface: var(--octra-surface);
+  --color-card: var(--octra-card);
+  --color-raised: var(--octra-raised);
+
+  --color-foreground: var(--octra-foreground);
+  --color-secondary: var(--octra-secondary);
+  --color-muted-foreground: var(--octra-muted);
+
+  --color-border: var(--octra-border);
+  --color-border-strong: var(--octra-border-strong);
+  --color-input: var(--octra-border);
+
+  --color-primary: var(--octra-primary);
+  --color-primary-hover: var(--octra-primary-hover);
+  --color-primary-foreground: var(--octra-primary-foreground);
+  --color-primary-soft: var(--octra-primary-soft);
+  --color-primary-line: var(--octra-primary-line);
+
+  --color-sky: var(--octra-sky);
+  --color-violet: var(--octra-violet);
+  --color-amber: var(--octra-amber);
+  --color-coral: var(--octra-coral);
+
+  --color-success: var(--octra-success);
+  --color-warning: var(--octra-warning);
+  --color-danger: var(--octra-danger);
+
+  --color-chart-grid: var(--octra-chart-grid);
+  --color-chart-area: var(--octra-chart-area);
+  --color-neutral-flow: var(--octra-neutral-flow);
+
+  --font-sans:
+    "Geist Variable", "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono:
+    "Geist Mono Variable", "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+  --radius-card: 1rem;
+  --radius-panel: 1.25rem;
+  --radius-control: 0.625rem;
 }
 
 html,
@@ -25,14 +54,53 @@ body,
 
 body {
   margin: 0;
-  background-color: hsl(var(--octra-background));
-  color: hsl(var(--octra-foreground));
-  font-family:
-    "Inter",
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    sans-serif;
+  background-color: var(--octra-background);
+  color: var(--octra-foreground);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  border-color: var(--octra-border);
+}
+
+::selection {
+  background: var(--octra-primary-soft);
+  color: var(--octra-foreground);
+}
+
+:focus-visible {
+  outline: 2px solid var(--octra-primary);
+  outline-offset: 2px;
+}
+
+/* Scrollbars stay quiet in both modes. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--octra-border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--octra-border-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+@utility card-surface {
+  background: var(--octra-card);
+  border: 1px solid var(--octra-border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--octra-shadow-card);
+}
+
+@utility hairline {
+  background: var(--octra-border);
 }

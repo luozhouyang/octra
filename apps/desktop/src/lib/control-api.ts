@@ -1,9 +1,5 @@
 import { ControlApiClient } from "@octra/api-client";
-import type {
-  HealthResponse,
-  PiiModelAction,
-  PiiModelStatus,
-} from "@octra/types";
+import type { HealthResponse, PiiModelAction, PiiModelStatus, SnapshotInfo } from "@octra/types";
 import { invoke } from "@tauri-apps/api/core";
 
 import { useControlSettings } from "./store";
@@ -21,6 +17,11 @@ export async function fetchHealth(): Promise<HealthResponse> {
   return new ControlApiClient({ baseUrl, token: token || undefined }).health();
 }
 
+export async function reloadSnapshot(): Promise<SnapshotInfo> {
+  const { baseUrl, token } = useControlSettings.getState();
+  return new ControlApiClient({ baseUrl, token: token || undefined }).reload();
+}
+
 export async function fetchPiiModels(): Promise<PiiModelStatus[]> {
   if (isTauri()) {
     return invoke<PiiModelStatus[]>("daemon_pii_models");
@@ -30,10 +31,7 @@ export async function fetchPiiModels(): Promise<PiiModelStatus[]> {
   return new ControlApiClient({ baseUrl, token: token || undefined }).piiModels();
 }
 
-export async function actOnPiiModel(
-  id: string,
-  action: PiiModelAction,
-): Promise<PiiModelStatus> {
+export async function actOnPiiModel(id: string, action: PiiModelAction): Promise<PiiModelStatus> {
   if (isTauri()) {
     return invoke<PiiModelStatus>("daemon_pii_action", { id, action });
   }
