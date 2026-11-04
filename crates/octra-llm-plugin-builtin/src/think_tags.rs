@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use octra_api_plugin_types::{PluginError, PluginManifest};
+use octra_api_plugin_types::{Capability, PluginError, PluginManifest};
 use octra_llm_core::{AssistantContent, StreamEvent};
 use octra_llm_plugin_types::{
     LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmResponseContext, LlmStreamAction,
@@ -62,6 +62,7 @@ impl LlmPluginFactory for ThinkTagsFactory {
                 }
             }
         }));
+        manifest.capabilities = vec![Capability::ResponseBody];
         manifest
     }
 

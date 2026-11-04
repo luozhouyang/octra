@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use octra_api_plugin_types::{FailPolicy, PluginError, PluginManifest};
+use octra_api_plugin_types::{Capability, FailPolicy, PluginError, PluginManifest};
 use octra_core::{Error, Result};
 use octra_llm_core::{GatewayError, StreamEvent};
 use octra_llm_plugin_types::{
@@ -444,6 +444,10 @@ struct LlmEntry {
     priority: i64,
     timeout: Duration,
     fail_policy: FailPolicy,
+    /// A plugin that declares `RequestBody` mutates the canonical request.
+    /// Request-stage failures on such plugins are always fatal: continuing
+    /// after a timeout could route a half-rewritten prompt upstream.
+    mutates_request: bool,
     stats: Arc<PluginStats>,
     plugin: Arc<dyn LlmPlugin>,
 }
@@ -512,7 +516,14 @@ impl LlmPluginChain {
                 request,
                 state: state.slot(&entry.name),
             };
-            match run_stage(entry, Stage::Request, entry.plugin.on_request(&mut cx)).await? {
+            match run_stage(
+                entry,
+                Stage::Request,
+                entry.plugin.on_request(&mut cx),
+                entry.mutates_request,
+            )
+            .await?
+            {
                 LlmAction::Continue => {}
                 LlmAction::Reject(error) => return Ok(Some(error)),
             }
@@ -538,6 +549,7 @@ impl LlmPluginChain {
                 entry,
                 Stage::ProviderRequest,
                 entry.plugin.on_provider_request(&mut cx),
+                entry.mutates_request,
             )
             .await?
             {
@@ -565,7 +577,14 @@ impl LlmPluginChain {
                 usage,
                 state: state.slot(&entry.name),
             };
-            match run_stage(entry, Stage::Response, entry.plugin.on_response(&mut cx)).await? {
+            match run_stage(
+                entry,
+                Stage::Response,
+                entry.plugin.on_response(&mut cx),
+                false,
+            )
+            .await?
+            {
                 LlmAction::Continue => {}
                 LlmAction::Reject(error) => return Ok(Some(error)),
             }
@@ -589,7 +608,7 @@ impl LlmPluginChain {
                 error,
                 state: state.slot(&entry.name),
             };
-            match run_stage(entry, Stage::Error, entry.plugin.on_error(&mut cx)).await? {
+            match run_stage(entry, Stage::Error, entry.plugin.on_error(&mut cx), false).await? {
                 LlmAction::Continue => {}
                 LlmAction::Reject(replacement) => {
                     *cx.error = replacement;
@@ -672,6 +691,7 @@ async fn run_stage<F>(
     entry: &LlmEntry,
     stage: Stage,
     future: F,
+    force_closed: bool,
 ) -> std::result::Result<LlmAction, LlmChainError>
 where
     F: std::future::Future<Output = LlmPluginResult>,
@@ -679,8 +699,25 @@ where
     let started = Instant::now();
     let (result, failure) = match tokio::time::timeout(entry.timeout, future).await {
         Ok(Ok(action)) => (Ok(action), None),
-        Ok(Err(error)) => (handle_plugin_error(entry, error), Some(StageFailure::Error)),
-        Err(_) => (timeout_error(entry), Some(StageFailure::Timeout)),
+        Ok(Err(error)) => {
+            let result = if force_closed {
+                Err(LlmChainError::Plugin(error))
+            } else {
+                handle_plugin_error(entry, error)
+            };
+            (result, Some(StageFailure::Error))
+        }
+        Err(_) => {
+            let result = if force_closed {
+                Err(LlmChainError::Plugin(PluginError::fail_closed(format!(
+                    "LLM plugin '{}' timed out while mutating the request",
+                    entry.name
+                ))))
+            } else {
+                timeout_error(entry)
+            };
+            (result, Some(StageFailure::Timeout))
+        }
     };
     let rejected = matches!(&result, Ok(LlmAction::Reject(_)));
     let fail_open = failure.is_some() && result.is_ok();
@@ -1060,6 +1097,7 @@ fn compile_config(
             priority: i64::from(manifest.priority),
             timeout: manifest.timeout(),
             fail_policy: manifest.fail_policy,
+            mutates_request: manifest.capabilities.contains(&Capability::RequestBody),
             stats: metrics.stats(&config.id, &plugin.name, scope, &config.scope_id),
             plugin: instance,
         },
@@ -1593,9 +1631,17 @@ mod tests {
     }
 
     fn chain_with_failure(policy: FailPolicy) -> Arc<LlmPluginChain> {
+        chain_with_failure_caps(policy, Vec::new())
+    }
+
+    fn chain_with_failure_caps(
+        policy: FailPolicy,
+        capabilities: Vec<Capability>,
+    ) -> Arc<LlmPluginChain> {
         let mut registry = LlmPluginRegistry::new();
         let mut entry = manifest("failing");
         entry.fail_policy = policy;
+        entry.capabilities = capabilities;
         registry.register(FailFactory(entry));
         let data = PluginData {
             plugins: vec![plugin("failing", "p1", "llm", true)],
@@ -1604,6 +1650,107 @@ mod tests {
         LlmPluginChains::compile(data, &registry)
             .unwrap()
             .chain_for(None, None, "m", None)
+    }
+
+    #[tokio::test]
+    async fn request_mutating_plugins_fail_closed_on_error() {
+        let meta = LlmRequestMeta {
+            request_id: "r",
+            ingress: Protocol::Openai,
+            consumer_id: None,
+            virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
+            session_id: None,
+            client_ip: None,
+            user_agent: None,
+            intent: None,
+        };
+        let mut request = ChatRequest::new("m", Vec::new());
+        let mut state = LlmRequestState::new();
+        let chain = chain_with_failure_caps(FailPolicy::Open, vec![Capability::RequestBody]);
+        assert!(matches!(
+            chain
+                .on_request(
+                    &meta,
+                    &mut LlmResponseHeaders::default(),
+                    &mut request,
+                    &mut state
+                )
+                .await,
+            Err(LlmChainError::Plugin(_))
+        ));
+    }
+
+    struct SlowPlugin {
+        manifest: PluginManifest,
+    }
+
+    #[async_trait]
+    impl LlmPlugin for SlowPlugin {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn on_request(&self, _cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok(LlmAction::Continue)
+        }
+    }
+
+    struct SlowFactory(PluginManifest);
+
+    impl LlmPluginFactory for SlowFactory {
+        fn manifest(&self) -> PluginManifest {
+            self.0.clone()
+        }
+
+        fn create(&self, _config: Value) -> std::result::Result<Arc<dyn LlmPlugin>, PluginError> {
+            Ok(Arc::new(SlowPlugin {
+                manifest: self.0.clone(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn request_mutating_plugins_fail_closed_on_timeout() {
+        let mut registry = LlmPluginRegistry::new();
+        let mut entry = manifest("slow");
+        entry.timeout_ms = 10;
+        entry.capabilities = vec![Capability::RequestBody];
+        registry.register(SlowFactory(entry));
+        let data = PluginData {
+            plugins: vec![plugin("slow", "p1", "llm", true)],
+            configs: vec![config("c1", "p1", "global", "")],
+        };
+        let chain = LlmPluginChains::compile(data, &registry)
+            .unwrap()
+            .chain_for(None, None, "m", None);
+        let meta = LlmRequestMeta {
+            request_id: "r",
+            ingress: Protocol::Openai,
+            consumer_id: None,
+            virtual_key_id: None,
+            virtual_key_family: None,
+            consumer_group_ids: &[],
+            session_id: None,
+            client_ip: None,
+            user_agent: None,
+            intent: None,
+        };
+        let mut request = ChatRequest::new("m", Vec::new());
+        let mut state = LlmRequestState::new();
+        assert!(matches!(
+            chain
+                .on_request(
+                    &meta,
+                    &mut LlmResponseHeaders::default(),
+                    &mut request,
+                    &mut state
+                )
+                .await,
+            Err(LlmChainError::Plugin(error)) if error.message.contains("timed out")
+        ));
     }
 
     #[tokio::test]
