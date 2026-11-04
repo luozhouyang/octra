@@ -11,7 +11,9 @@ mod kv;
 mod migrate;
 mod store;
 
-pub use artifact::{ArtifactLayout, copy_artifact, validate_artifact_dir};
+pub use artifact::{
+    ArtifactLayout, copy_artifact, validate_artifact_dir, validate_artifact_dir_for_kind,
+};
 pub use error::PluginStorageError;
 pub use migrate::MigrationReport;
 pub use store::{PluginStorageRoot, PluginStore};

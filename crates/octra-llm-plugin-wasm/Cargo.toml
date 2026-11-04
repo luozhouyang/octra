@@ -1,0 +1,30 @@
+[package]
+name = "octra-llm-plugin-wasm"
+description = "WASM component runtime for third-party LLM Gateway plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+octra-api-plugin-types.workspace = true
+octra-api-plugin-wasm.workspace = true
+octra-llm-core.workspace = true
+octra-llm-plugin-types.workspace = true
+octra-plugin-storage.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+wasmtime = { version = "50", default-features = false, features = [
+    "runtime",
+    "component-model",
+    "cranelift",
+    "std",
+] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
+
+[lints]
+workspace = true

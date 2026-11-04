@@ -88,6 +88,7 @@ octra-llm-gateway = { path = "crates/octra-llm-gateway" }
 octra-llm-plugin-types = { path = "crates/octra-llm-plugin-types" }
 octra-llm-plugin-builtin = { path = "crates/octra-llm-plugin-builtin" }
 octra-llm-plugin-runtime = { path = "crates/octra-llm-plugin-runtime" }
+octra-llm-plugin-wasm = { path = "crates/octra-llm-plugin-wasm" }
 octra-llm-protocol = { path = "crates/octra-llm-protocol" }
 octra-mcp-core = { path = "crates/octra-mcp-core" }
 octra-mcp-gateway = { path = "crates/octra-mcp-gateway" }

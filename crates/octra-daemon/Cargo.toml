@@ -16,6 +16,7 @@ octra-runtime.workspace = true
 octra-llm-gateway.workspace = true
 octra-llm-plugin-builtin.workspace = true
 octra-llm-plugin-runtime.workspace = true
+octra-llm-plugin-wasm.workspace = true
 octra-mcp-gateway.workspace = true
 octra-observability.workspace = true
 octra-api-plugin-builtin.workspace = true

@@ -19,13 +19,22 @@ pub struct ArtifactLayout {
 }
 
 pub fn validate_artifact_dir(dir: &Path) -> Result<ArtifactLayout, PluginStorageError> {
+    validate_artifact_dir_for_kind(dir, PluginKind::Api)
+}
+
+/// Validates an artifact for one plugin kind. API and LLM artifacts share the
+/// on-disk layout but have different capability rules.
+pub fn validate_artifact_dir_for_kind(
+    dir: &Path,
+    kind: PluginKind,
+) -> Result<ArtifactLayout, PluginStorageError> {
     let manifest_path = dir.join("plugin.json");
     let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
         PluginStorageError::InvalidManifest(format!("cannot read plugin.json: {error}"))
     })?;
     let manifest: PluginManifest = serde_json::from_str(&raw)
         .map_err(|error| PluginStorageError::InvalidManifest(error.to_string()))?;
-    validate_manifest(&manifest)?;
+    validate_manifest(&manifest, kind)?;
 
     let mut files = vec![PathBuf::from("plugin.json")];
     let wasm_path = dir.join("plugin.wasm");
@@ -93,7 +102,10 @@ pub fn copy_artifact(
     Ok(layout)
 }
 
-fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginStorageError> {
+fn validate_manifest(
+    manifest: &PluginManifest,
+    kind: PluginKind,
+) -> Result<(), PluginStorageError> {
     validate_plugin_name(&manifest.name)?;
     validate_version(&manifest.version)?;
     if manifest.api_version != "1" {
@@ -102,10 +114,12 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginStorageError
             manifest.api_version
         )));
     }
-    if manifest.kind != PluginKind::Api {
-        return Err(PluginStorageError::InvalidManifest(
-            "only API Gateway plugins can be installed here".to_string(),
-        ));
+    if manifest.kind != kind {
+        return Err(PluginStorageError::InvalidManifest(format!(
+            "artifact kind '{}' does not match the requested '{}'",
+            manifest.kind.as_str(),
+            kind.as_str()
+        )));
     }
     if manifest.runtime != PluginRuntimeKind::Wasm {
         return Err(PluginStorageError::InvalidManifest(
@@ -115,6 +129,15 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginStorageError
     if manifest.phases.contains(&PluginPhase::Certificate) {
         return Err(PluginStorageError::InvalidManifest(
             "the certificate phase is not supported by wasm plugins".to_string(),
+        ));
+    }
+    if kind == PluginKind::Llm
+        && (!manifest.entities.is_empty()
+            || !manifest.migrations.is_empty()
+            || !manifest.admin_routes.is_empty())
+    {
+        return Err(PluginStorageError::InvalidManifest(
+            "LLM wasm plugins do not support entities, migrations or admin routes yet".to_string(),
         ));
     }
     for spec in &manifest.entities {
@@ -249,6 +272,43 @@ mod tests {
         assert_eq!(layout.manifest.name, "demo-plugin");
         assert_eq!(layout.files.len(), 3);
         assert_eq!(layout.hash.len(), 64);
+    }
+
+    #[test]
+    fn accepts_llm_artifacts_only_for_the_llm_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let llm = r#"{
+            "api_version": "1",
+            "name": "llm-demo",
+            "version": "1.0.0",
+            "kind": "llm",
+            "runtime": "wasm",
+            "priority": 0,
+            "description": "demo",
+            "capabilities": [],
+            "phases": ["request"]
+        }"#;
+        artifact(dir.path(), llm, None);
+        assert!(validate_artifact_dir_for_kind(dir.path(), PluginKind::Llm).is_ok());
+        assert!(validate_artifact_dir(dir.path()).is_err());
+    }
+
+    #[test]
+    fn llm_artifacts_reject_api_store_features() {
+        let dir = tempfile::tempdir().unwrap();
+        let llm = r#"{
+            "api_version": "1",
+            "name": "llm-demo",
+            "version": "1.0.0",
+            "kind": "llm",
+            "runtime": "wasm",
+            "priority": 0,
+            "description": "demo",
+            "capabilities": [],
+            "entities": [{"name": "demo"}]
+        }"#;
+        artifact(dir.path(), llm, None);
+        assert!(validate_artifact_dir_for_kind(dir.path(), PluginKind::Llm).is_err());
     }
 
     #[test]

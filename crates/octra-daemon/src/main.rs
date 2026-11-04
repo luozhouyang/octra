@@ -18,6 +18,7 @@ use octra_api_plugin_wasm::{
 };
 use octra_config::Workspace;
 use octra_llm_gateway::{LlmControlState, LlmDataState, LlmPluginRuntime, LlmRuntime};
+use octra_llm_plugin_wasm::LlmWasmPluginFactory;
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
 use octra_plugin_storage::PluginStorageRoot;
 use octra_runtime::GatewayRuntime;
@@ -171,15 +172,39 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(%warning, "PII engine unavailable");
     }
 
+    let mut llm_registry = octra_llm_plugin_builtin::registry_with(Some(pii_engines.clone()));
+    if let Some(control) = wasm_control.as_ref() {
+        for record in storage
+            .llm
+            .list_installed_wasm_plugins()
+            .await
+            .context("cannot load installed LLM wasm plugins")?
+        {
+            if record.kind != "llm" {
+                continue;
+            }
+            let Some(path) = record.artifact_path.as_deref() else {
+                tracing::warn!(plugin = %record.name, "installed LLM wasm plugin has no artifact path");
+                continue;
+            };
+            match LlmWasmPluginFactory::from_artifact(&control.engine, std::path::Path::new(path)) {
+                Ok(factory) => llm_registry.register_arc(Arc::new(factory)),
+                Err(error) => {
+                    if config.plugins.strict_boot {
+                        return Err(anyhow::anyhow!(
+                            "cannot load LLM wasm plugin '{}': {error}",
+                            record.name
+                        ));
+                    }
+                    tracing::warn!(plugin = %record.name, %error, "skipping LLM wasm plugin");
+                }
+            }
+        }
+    }
     let llm_plugin_runtime = Arc::new(
-        LlmPluginRuntime::bootstrap(
-            storage.clone(),
-            Arc::new(octra_llm_plugin_builtin::registry_with(Some(
-                pii_engines.clone(),
-            ))),
-        )
-        .await
-        .context("cannot build the LLM plugin runtime")?,
+        LlmPluginRuntime::bootstrap(storage.clone(), Arc::new(llm_registry))
+            .await
+            .context("cannot build the LLM plugin runtime")?,
     );
 
     let token =

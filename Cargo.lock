@@ -3617,6 +3617,7 @@ dependencies = [
  "octra-llm-gateway",
  "octra-llm-plugin-builtin",
  "octra-llm-plugin-runtime",
+ "octra-llm-plugin-wasm",
  "octra-mcp-gateway",
  "octra-observability",
  "octra-plugin-storage",
@@ -3755,6 +3756,26 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "octra-llm-plugin-wasm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "octra-api-plugin-types",
+ "octra-api-plugin-wasm",
+ "octra-llm-core",
+ "octra-llm-plugin-types",
+ "octra-plugin-storage",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]

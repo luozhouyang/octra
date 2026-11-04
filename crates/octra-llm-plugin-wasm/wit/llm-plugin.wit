@@ -1,0 +1,72 @@
+// ABI contract for third-party LLM Gateway plugins.
+//
+// The host serializes canonical gateway types to JSON and passes one envelope
+// per stage. Plugins parse the JSON, mutate what they need, and return the
+// same shape. Keeping the ABI string-based avoids mirroring every message,
+// content-part and stream-event variant in WIT.
+
+package octra:llm-plugin@1.0.0;
+
+interface types {
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    enum stage {
+        request,
+        provider-request,
+        response,
+        stream-event,
+        error,
+        log,
+    }
+
+    record invocation {
+        stage: stage,
+        request-id: string,
+        scope: string,
+        scope-id: string,
+        config-json: string,
+        meta-json: string,
+        payload-json: string,
+        state-json: string,
+    }
+
+    record outcome {
+        /// One of `continue`, `reject`, `replace` or `ignore`.
+        action: string,
+        /// Mutated payload in the same shape as the invocation payload.
+        /// Missing means "leave the payload unchanged".
+        payload-json: option<string>,
+        /// Per-request state carried to the next stage.
+        state-json: string,
+        /// A serialized GatewayError, required when `action` is `reject`.
+        error-json: option<string>,
+        /// Headers to attach to the final response (request stage only).
+        headers: list<tuple<string, string>>,
+    }
+}
+
+interface host {
+    use types.{log-level};
+
+    log: func(level: log-level, message: string);
+    now-unix: func() -> s64;
+}
+
+interface plugin-api {
+    use types.{invocation, outcome};
+
+    /// Called once per component instance before the first stage.
+    configure: func(config-json: string) -> result<_, string>;
+    on-stage: func(call: invocation) -> result<outcome, string>;
+}
+
+world llm-plugin {
+    import host;
+    export plugin-api;
+}
