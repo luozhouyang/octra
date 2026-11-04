@@ -22,18 +22,28 @@ pub fn validate_artifact_dir(dir: &Path) -> Result<ArtifactLayout, PluginStorage
     validate_artifact_dir_for_kind(dir, PluginKind::Api)
 }
 
+/// Validates an artifact using the kind declared in its own `plugin.json`.
+pub fn validate_artifact_dir_any(dir: &Path) -> Result<ArtifactLayout, PluginStorageError> {
+    let manifest: PluginManifest = read_manifest(dir)?;
+    validate_artifact_dir_for_kind(dir, manifest.kind)
+}
+
+fn read_manifest(dir: &Path) -> Result<PluginManifest, PluginStorageError> {
+    let manifest_path = dir.join("plugin.json");
+    let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
+        PluginStorageError::InvalidManifest(format!("cannot read plugin.json: {error}"))
+    })?;
+    serde_json::from_str(&raw)
+        .map_err(|error| PluginStorageError::InvalidManifest(error.to_string()))
+}
+
 /// Validates an artifact for one plugin kind. API and LLM artifacts share the
 /// on-disk layout but have different capability rules.
 pub fn validate_artifact_dir_for_kind(
     dir: &Path,
     kind: PluginKind,
 ) -> Result<ArtifactLayout, PluginStorageError> {
-    let manifest_path = dir.join("plugin.json");
-    let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
-        PluginStorageError::InvalidManifest(format!("cannot read plugin.json: {error}"))
-    })?;
-    let manifest: PluginManifest = serde_json::from_str(&raw)
-        .map_err(|error| PluginStorageError::InvalidManifest(error.to_string()))?;
+    let manifest = read_manifest(dir)?;
     validate_manifest(&manifest, kind)?;
 
     let mut files = vec![PathBuf::from("plugin.json")];
@@ -79,7 +89,15 @@ pub fn copy_artifact(
     source: &Path,
     destination: &Path,
 ) -> Result<ArtifactLayout, PluginStorageError> {
-    let layout = validate_artifact_dir(source)?;
+    copy_artifact_for_kind(source, destination, PluginKind::Api)
+}
+
+pub fn copy_artifact_for_kind(
+    source: &Path,
+    destination: &Path,
+    kind: PluginKind,
+) -> Result<ArtifactLayout, PluginStorageError> {
+    let layout = validate_artifact_dir_for_kind(source, kind)?;
     if destination.exists() {
         let mut entries = std::fs::read_dir(destination)?;
         if entries.next().is_some() {

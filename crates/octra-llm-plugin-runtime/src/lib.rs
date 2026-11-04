@@ -31,7 +31,9 @@ use serde_json::Value;
 
 #[derive(Default)]
 pub struct LlmPluginRegistry {
-    factories: HashMap<String, Arc<dyn LlmPluginFactory>>,
+    /// Shared catalog. Dynamic installers (WASM artifacts) register here at
+    /// runtime; chain compilation reads a snapshot on the next reload.
+    factories: RwLock<HashMap<String, Arc<dyn LlmPluginFactory>>>,
 }
 
 impl LlmPluginRegistry {
@@ -39,14 +41,14 @@ impl LlmPluginRegistry {
         Self::default()
     }
 
-    pub fn register<F>(&mut self, factory: F)
+    pub fn register<F>(&self, factory: F)
     where
         F: LlmPluginFactory + 'static,
     {
         self.register_arc(Arc::new(factory));
     }
 
-    pub fn register_arc(&mut self, factory: Arc<dyn LlmPluginFactory>) {
+    pub fn register_arc(&self, factory: Arc<dyn LlmPluginFactory>) {
         let manifest = factory.manifest();
         if factory.api_version() != LLM_PLUGIN_API_VERSION {
             tracing::warn!(
@@ -57,12 +59,19 @@ impl LlmPluginRegistry {
             );
             return;
         }
-        self.factories.insert(manifest.name, factory);
+        self.factories.write().insert(manifest.name, factory);
+    }
+
+    /// Removes a dynamically registered plugin. Returns the factory so a
+    /// failed reload can restore it.
+    pub fn remove(&self, name: &str) -> Option<Arc<dyn LlmPluginFactory>> {
+        self.factories.write().remove(name)
     }
 
     pub fn manifests(&self) -> Vec<PluginManifest> {
         let mut manifests: Vec<_> = self
             .factories
+            .read()
             .values()
             .map(|factory| factory.manifest())
             .collect();
@@ -71,7 +80,7 @@ impl LlmPluginRegistry {
     }
 
     pub fn factory(&self, name: &str) -> Option<Arc<dyn LlmPluginFactory>> {
-        self.factories.get(name).cloned()
+        self.factories.read().get(name).cloned()
     }
 
     pub fn validate(&self, name: &str, config: &Value) -> std::result::Result<(), PluginError> {
@@ -1336,7 +1345,7 @@ mod tests {
     }
 
     fn registry() -> LlmPluginRegistry {
-        let mut registry = LlmPluginRegistry::new();
+        let registry = LlmPluginRegistry::new();
         registry.register(MarkFactory(MarkPlugin {
             manifest: manifest("mark"),
             mark: "marked",
@@ -1348,9 +1357,23 @@ mod tests {
         registry
     }
 
+    #[test]
+    fn registry_allows_runtime_registration_and_removal() {
+        let registry = LlmPluginRegistry::new();
+        assert!(registry.factory("mark").is_none());
+        registry.register(MarkFactory(MarkPlugin {
+            manifest: manifest("mark"),
+            mark: "marked",
+        }));
+        assert!(registry.factory("mark").is_some());
+        assert!(registry.remove("mark").is_some());
+        assert!(registry.factory("mark").is_none());
+        assert!(registry.remove("mark").is_none());
+    }
+
     #[tokio::test]
     async fn consumer_scope_overrides_global_and_api_plugins_are_ignored() {
-        let mut registry = registry();
+        let registry = registry();
         registry.register(MarkFactory(MarkPlugin {
             manifest: manifest("api-only"),
             mark: "api",
@@ -1454,7 +1477,7 @@ mod tests {
             }
         }
 
-        let mut registry = LlmPluginRegistry::new();
+        let registry = LlmPluginRegistry::new();
         registry.register(SplitFactory(SplitPlugin {
             manifest: manifest("split"),
         }));
@@ -1534,7 +1557,7 @@ mod tests {
     #[tokio::test]
     async fn response_stage_unwinds_in_reverse() {
         let log = Arc::new(parking_lot::Mutex::new(Vec::new()));
-        let mut registry = LlmPluginRegistry::new();
+        let registry = LlmPluginRegistry::new();
         registry.register(RecorderFactory {
             manifest: manifest("alpha"),
             log: log.clone(),
@@ -1638,7 +1661,7 @@ mod tests {
         policy: FailPolicy,
         capabilities: Vec<Capability>,
     ) -> Arc<LlmPluginChain> {
-        let mut registry = LlmPluginRegistry::new();
+        let registry = LlmPluginRegistry::new();
         let mut entry = manifest("failing");
         entry.fail_policy = policy;
         entry.capabilities = capabilities;
@@ -1714,7 +1737,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_mutating_plugins_fail_closed_on_timeout() {
-        let mut registry = LlmPluginRegistry::new();
+        let registry = LlmPluginRegistry::new();
         let mut entry = manifest("slow");
         entry.timeout_ms = 10;
         entry.capabilities = vec![Capability::RequestBody];
@@ -1833,7 +1856,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_expansion_is_bounded() {
-        let mut registry = LlmPluginRegistry::new();
+        let registry = LlmPluginRegistry::new();
         registry.register(ExpandFactory);
         let data = PluginData {
             plugins: vec![plugin("expand", "p1", "llm", true)],
@@ -1883,7 +1906,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_count_calls_failures_and_fail_open() {
-        let mut registry = LlmPluginRegistry::new();
+        let registry = LlmPluginRegistry::new();
         registry.register(FailFactory(manifest("failing")));
         let data = PluginData {
             plugins: vec![plugin("failing", "p1", "llm", true)],
@@ -2029,7 +2052,7 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_scope_is_rejected() {
-        let mut registry = LlmPluginRegistry::new();
+        let registry = LlmPluginRegistry::new();
         registry.register(RequestScopedFactory(MarkPlugin {
             manifest: manifest("request-only"),
             mark: "request-only",
@@ -2090,7 +2113,7 @@ mod tests {
             }
         }
 
-        let mut registry = LlmPluginRegistry::new();
+        let registry = LlmPluginRegistry::new();
         registry.register(OldFactory(manifest("old")));
         assert!(registry.factory("old").is_none());
         assert!(registry.manifests().is_empty());

@@ -11,15 +11,15 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, VerifyingKey};
 use octra_api_plugin_types::{
-    Capability, EntityQuery, PluginError, PluginManifest, PluginRuntimeKind,
+    Capability, EntityQuery, PluginError, PluginKind, PluginManifest, PluginRuntimeKind,
 };
 use octra_api_plugin_wasm::{PluginStatsSnapshot, WasmPluginFactory};
-use octra_plugin_storage::{copy_artifact, validate_artifact_dir};
+use octra_plugin_storage::{copy_artifact_for_kind, validate_artifact_dir_any};
 use octra_storage::{PluginArtifactInput, PluginArtifactRecord};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::ApiControlState;
+use crate::{ApiControlState, LlmWasmLifecycle};
 
 use super::error::{AdminError, AdminResult};
 use super::list::{ListQuery, ListResponse, deserialize, list_response, read_json_body, to_value};
@@ -91,7 +91,7 @@ pub async fn upload_artifact(
     let input: UploadArtifactRequest = deserialize(read_json_body(payload)?)?;
     let wasm = wasm(&state)?;
     let source = PathBuf::from(&input.path);
-    let layout = validate_artifact_dir(&source)
+    let layout = validate_artifact_dir_any(&source)
         .map_err(|error| AdminError::schema(format!("invalid artifact: {error}")))?;
     let size_bytes = layout.files.iter().try_fold(0u64, |total, file| {
         std::fs::metadata(source.join(file))
@@ -130,7 +130,7 @@ pub async fn upload_artifact(
         .artifact_dir
         .join(&layout.manifest.name)
         .join(&layout.manifest.version);
-    copy_artifact(&source, &destination)
+    copy_artifact_for_kind(&source, &destination, layout.manifest.kind)
         .map_err(|error| AdminError::schema(format!("cannot store artifact: {error}")))?;
 
     let manifest_json = serde_json::to_string(&layout.manifest)
@@ -169,6 +169,26 @@ pub async fn install(
     let (manifest, artifact, artifact_dir) =
         resolve_artifact(&state, &name, input.artifact_id.as_deref()).await?;
     ensure_capabilities(&manifest, &input.approve_capabilities)?;
+
+    if manifest.kind == PluginKind::Llm {
+        let lifecycle = llm_lifecycle(&state)?;
+        let record = state
+            .storage
+            .llm
+            .upsert_installed_plugin(&manifest, &artifact, "", &input.approve_capabilities)
+            .await?;
+        if let Err(error) = lifecycle.install(manifest, artifact_dir).await {
+            // The lifecycle hook has already restored the runtime factory.
+            let _ = state.storage.llm.delete_installed_plugin(&name).await;
+            return Err(AdminError::schema(format!(
+                "cannot activate LLM plugin: {error}"
+            )));
+        }
+        return Ok((
+            StatusCode::CREATED,
+            Json(json!({ "plugin": to_value(&record)?, "migrations": [] })),
+        ));
+    }
 
     let factory =
         WasmPluginFactory::from_artifact(&wasm.engine, &artifact_dir).map_err(plugin_error)?;
@@ -230,6 +250,45 @@ pub async fn upgrade(
         resolve_artifact(&state, &name, input.artifact_id.as_deref()).await?;
     ensure_capabilities(&manifest, &input.approve_capabilities)?;
 
+    if manifest.kind == PluginKind::Llm {
+        let lifecycle = llm_lifecycle(&state)?;
+        let old_manifest: PluginManifest = serde_json::from_str(&existing.manifest_json)
+            .map_err(|error| AdminError::internal(format!("invalid old manifest: {error}")))?;
+        let old_artifact = match existing.artifact_id.as_deref() {
+            Some(id) => state.storage.llm.get_plugin_artifact(id).await?,
+            None => None,
+        };
+        let old_storage_path = existing.storage_path.clone().unwrap_or_default();
+        let old_capabilities = existing.approved_capabilities.clone();
+        let record = state
+            .storage
+            .llm
+            .upsert_installed_plugin(&manifest, &artifact, "", &input.approve_capabilities)
+            .await?;
+        if let Err(error) = lifecycle.install(manifest, artifact_dir).await {
+            // Restore the old catalog row; the lifecycle hook has already
+            // restored the old runtime factory.
+            if let Some(old_artifact) = old_artifact {
+                let _ = state
+                    .storage
+                    .llm
+                    .upsert_installed_plugin(
+                        &old_manifest,
+                        &old_artifact,
+                        &old_storage_path,
+                        &old_capabilities,
+                    )
+                    .await;
+            }
+            return Err(AdminError::schema(format!(
+                "cannot activate LLM plugin: {error}"
+            )));
+        }
+        return Ok(Json(
+            json!({ "plugin": to_value(&record)?, "migrations": [] }),
+        ));
+    }
+
     let factory =
         WasmPluginFactory::from_artifact(&wasm.engine, &artifact_dir).map_err(plugin_error)?;
     let store = wasm
@@ -282,6 +341,29 @@ pub async fn uninstall(
         .ok_or_else(|| AdminError::not_found(format!("plugin '{name}' is not installed")))?;
     if record.source != "wasm" {
         return Err(AdminError::schema("only wasm plugins can be uninstalled"));
+    }
+
+    if record.kind == PluginKind::Llm.as_str() {
+        let lifecycle = llm_lifecycle(&state)?;
+        lifecycle
+            .uninstall(&name)
+            .await
+            .map_err(AdminError::schema)?;
+        if let Err(error) = state.storage.llm.delete_installed_plugin(&name).await {
+            // The runtime dropped the plugin; restore it from the artifact so
+            // the database and the runtime stay consistent.
+            if let Some(path) = record.artifact_path.as_deref()
+                && let Ok(manifest) = serde_json::from_str::<PluginManifest>(&record.manifest_json)
+            {
+                let _ = lifecycle.install(manifest, PathBuf::from(path)).await;
+            }
+            return Err(AdminError::internal(error.to_string()));
+        }
+        return Ok(Json(json!({
+            "name": name,
+            "uninstalled": true,
+            "purged": false,
+        })));
     }
 
     wasm.catalog.remove(&name);
@@ -427,7 +509,7 @@ async fn resolve_artifact(
             AdminError::not_found(format!("plugin artifact '{artifact_id}' not found"))
         })?;
     let directory = PathBuf::from(&artifact.path);
-    let layout = validate_artifact_dir(&directory)
+    let layout = validate_artifact_dir_any(&directory)
         .map_err(|error| AdminError::schema(format!("invalid artifact: {error}")))?;
     if layout.hash != artifact.hash {
         return Err(AdminError::schema(
@@ -523,6 +605,13 @@ fn ensure_capabilities(manifest: &PluginManifest, approved: &[Capability]) -> Ad
         ));
     }
     Ok(())
+}
+
+fn llm_lifecycle(state: &ApiControlState) -> AdminResult<&Arc<dyn LlmWasmLifecycle>> {
+    state
+        .llm_wasm
+        .as_ref()
+        .ok_or_else(|| AdminError::schema("LLM wasm plugins are not enabled in this daemon"))
 }
 
 fn storage_error(error: impl std::fmt::Display) -> AdminError {

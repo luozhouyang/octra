@@ -12,7 +12,8 @@ mod migrate;
 mod store;
 
 pub use artifact::{
-    ArtifactLayout, copy_artifact, validate_artifact_dir, validate_artifact_dir_for_kind,
+    ArtifactLayout, copy_artifact, copy_artifact_for_kind, validate_artifact_dir,
+    validate_artifact_dir_any, validate_artifact_dir_for_kind,
 };
 pub use error::PluginStorageError;
 pub use migrate::MigrationReport;

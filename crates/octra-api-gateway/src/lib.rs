@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use octra_api_plugin_runtime::PluginRuntime;
+use octra_api_plugin_types::PluginManifest;
 use octra_api_plugin_wasm::{WasmEngine, WasmHostProvider, WasmPluginCatalog};
 use octra_config::OctraConfig;
 use octra_plugin_storage::PluginStorageRoot;
@@ -110,6 +111,18 @@ pub struct ApiControlState {
     /// Optional notification used when consumer-group membership changes and
     /// another runtime (for example the LLM identity snapshot) needs a reload.
     pub reload_hook: Option<ApiReloadHook>,
+    /// Optional lifecycle hook for installing LLM WASM artifacts. The daemon
+    /// owns the LLM registry and runtime, keeping this crate independent of it.
+    pub llm_wasm: Option<Arc<dyn LlmWasmLifecycle>>,
+}
+
+/// Dynamic lifecycle operations the API installer delegates to the LLM
+/// runtime. Implementations must register/replace the factory and reload the
+/// LLM plugin chains; the API installer writes the catalog row.
+#[async_trait::async_trait]
+pub trait LlmWasmLifecycle: Send + Sync {
+    async fn install(&self, manifest: PluginManifest, artifact_dir: PathBuf) -> Result<(), String>;
+    async fn uninstall(&self, name: &str) -> Result<(), String>;
 }
 
 /// A synchronous notification hook. Implementations should schedule async work
@@ -142,11 +155,17 @@ impl ApiControlState {
             metrics,
             wasm: None,
             reload_hook: None,
+            llm_wasm: None,
         }
     }
 
     pub fn with_wasm(mut self, wasm: Arc<WasmControlState>) -> Self {
         self.wasm = Some(wasm);
+        self
+    }
+
+    pub fn with_llm_wasm_lifecycle(mut self, lifecycle: Arc<dyn LlmWasmLifecycle>) -> Self {
+        self.llm_wasm = Some(lifecycle);
         self
     }
 

@@ -335,3 +335,83 @@ async fn upgrade_keeps_plugin_storage() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(rows["data"].as_array().expect("rows").len(), 1);
 }
+
+struct RecordingLifecycle {
+    installed: std::sync::Mutex<Vec<String>>,
+    removed: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl octra_api_gateway::LlmWasmLifecycle for RecordingLifecycle {
+    async fn install(
+        &self,
+        manifest: octra_api_plugin_types::PluginManifest,
+        _artifact_dir: std::path::PathBuf,
+    ) -> Result<(), String> {
+        self.installed.lock().unwrap().push(manifest.name);
+        Ok(())
+    }
+
+    async fn uninstall(&self, name: &str) -> Result<(), String> {
+        self.removed.lock().unwrap().push(name.to_string());
+        Ok(())
+    }
+}
+
+fn llm_artifact(dir: &std::path::Path) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("plugin.json"),
+        json!({
+            "api_version": "1",
+            "name": "llm-demo",
+            "version": "1.0.0",
+            "kind": "llm",
+            "runtime": "wasm",
+            "priority": 0,
+            "description": "demo",
+            "capabilities": [],
+            "phases": ["request"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("plugin.wasm"), b"\0asm\x01\0\0\0").unwrap();
+    dir.to_path_buf()
+}
+
+#[tokio::test]
+async fn installs_and_uninstalls_an_llm_artifact_through_the_lifecycle_hook() {
+    let lifecycle = std::sync::Arc::new(RecordingLifecycle {
+        installed: std::sync::Mutex::new(Vec::new()),
+        removed: std::sync::Mutex::new(Vec::new()),
+    });
+    let env = WasmTestEnv::with_llm_lifecycle(lifecycle.clone()).await;
+    let artifact = llm_artifact(&env.dir.path().join("llm-demo-artifact"));
+
+    let (status, _, uploaded) = env
+        .send_control_json(
+            "POST",
+            "/admin/plugin-artifacts",
+            json!({"path": artifact.to_string_lossy()}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "upload failed: {uploaded}");
+    let artifact_id = uploaded["id"].as_str().expect("artifact id");
+
+    let (status, _, installed) = env
+        .send_control_json(
+            "POST",
+            "/admin/plugins/llm-demo/install",
+            json!({"artifact_id": artifact_id}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "install failed: {installed}");
+    assert_eq!(lifecycle.installed.lock().unwrap().as_slice(), ["llm-demo"]);
+
+    let (status, _, uninstalled) = env
+        .send_control_json("POST", "/admin/plugins/llm-demo/uninstall", json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "uninstall failed: {uninstalled}");
+    assert_eq!(lifecycle.removed.lock().unwrap().as_slice(), ["llm-demo"]);
+}

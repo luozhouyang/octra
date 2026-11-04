@@ -3449,6 +3449,7 @@ dependencies = [
 name = "octra-api-gateway"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "bcrypt",
@@ -3606,6 +3607,7 @@ name = "octra-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "octra-api-gateway",
  "octra-api-plugin-builtin",

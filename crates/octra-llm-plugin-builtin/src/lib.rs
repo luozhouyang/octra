@@ -39,7 +39,7 @@ pub fn registry() -> LlmPluginRegistry {
 pub fn registry_with(
     engines: Option<std::sync::Arc<dyn octra_pii_types::PiiEngineResolver>>,
 ) -> LlmPluginRegistry {
-    let mut registry = LlmPluginRegistry::new();
+    let registry = LlmPluginRegistry::new();
     registry.register(BudgetGuardFactory);
     registry.register(IntentHintFactory);
     registry.register(RequestAuditFactory);

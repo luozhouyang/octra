@@ -145,6 +145,14 @@ pub async fn gateway_with_wasm_state(
     config: OctraConfig,
     wasm: Option<Arc<WasmControlState>>,
 ) -> Gateway {
+    gateway_with_wasm_and_llm(config, wasm, None).await
+}
+
+pub async fn gateway_with_wasm_and_llm(
+    config: OctraConfig,
+    wasm: Option<Arc<WasmControlState>>,
+    llm: Option<Arc<dyn octra_api_gateway::LlmWasmLifecycle>>,
+) -> Gateway {
     let config = Arc::new(config);
     let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
     let runtime = Arc::new(GatewayRuntime::bootstrap(storage.clone()).await.unwrap());
@@ -177,6 +185,9 @@ pub async fn gateway_with_wasm_state(
         ApiControlState::with_plugins(storage.clone(), runtime.clone(), metrics, plugins.clone());
     if let Some(wasm) = wasm {
         control_state = control_state.with_wasm(wasm);
+    }
+    if let Some(llm) = llm {
+        control_state = control_state.with_llm_wasm_lifecycle(llm);
     }
     let control = control_router(control_state).layer(axum::middleware::from_fn_with_state(
         AuditState {
@@ -795,6 +806,17 @@ impl WasmTestEnv {
     }
 
     pub async fn with_max_artifact_bytes(max_artifact_bytes: u64) -> Self {
+        Self::build(max_artifact_bytes, None).await
+    }
+
+    pub async fn with_llm_lifecycle(llm: Arc<dyn octra_api_gateway::LlmWasmLifecycle>) -> Self {
+        Self::build(16 * 1024 * 1024, Some(llm)).await
+    }
+
+    async fn build(
+        max_artifact_bytes: u64,
+        llm: Option<Arc<dyn octra_api_gateway::LlmWasmLifecycle>>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let storage_root = Arc::new(PluginStorageRoot::new(dir.path().join("plugin-data")));
         let artifact_dir = dir.path().join("artifacts");
@@ -812,7 +834,8 @@ impl WasmTestEnv {
             trusted_keys: Vec::new(),
             allow_unsigned: true,
         });
-        let gateway = gateway_with_wasm_state(OctraConfig::default(), Some(wasm.clone())).await;
+        let gateway =
+            gateway_with_wasm_and_llm(OctraConfig::default(), Some(wasm.clone()), llm).await;
         Self {
             dir,
             gateway,

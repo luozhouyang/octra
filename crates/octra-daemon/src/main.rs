@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use axum::Router;
-use octra_api_gateway::{ApiControlState, ApiDataState, ApiMetrics, AuditState, WasmControlState};
+use octra_api_gateway::{
+    ApiControlState, ApiDataState, ApiMetrics, AuditState, LlmWasmLifecycle, WasmControlState,
+};
 use octra_api_plugin_runtime::{
     CompositePluginFactoryResolver, PluginFactoryResolver, PluginRegistry, PluginRuntime,
 };
@@ -18,12 +20,75 @@ use octra_api_plugin_wasm::{
 };
 use octra_config::Workspace;
 use octra_llm_gateway::{LlmControlState, LlmDataState, LlmPluginRuntime, LlmRuntime};
+use octra_llm_plugin_runtime::LlmPluginRegistry;
 use octra_llm_plugin_wasm::LlmWasmPluginFactory;
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
 use octra_plugin_storage::PluginStorageRoot;
 use octra_runtime::GatewayRuntime;
 use octra_types::{AppState, AuthState};
 use tokio_util::sync::CancellationToken;
+
+/// Bridges the API installer to the LLM plugin registry. The runtime is
+/// reloaded after every change; a failed reload restores the previous factory
+/// so the catalog and the compiled chains stay consistent.
+struct LlmWasmRuntime {
+    registry: Arc<LlmPluginRegistry>,
+    runtime: Arc<LlmPluginRuntime>,
+    engine: Arc<WasmEngine>,
+}
+
+#[async_trait::async_trait]
+impl LlmWasmLifecycle for LlmWasmRuntime {
+    async fn install(
+        &self,
+        manifest: PluginManifest,
+        artifact_dir: std::path::PathBuf,
+    ) -> Result<(), String> {
+        let factory = LlmWasmPluginFactory::from_artifact(&self.engine, &artifact_dir)
+            .map_err(|error| error.message)?;
+        let previous = self.registry.factory(&manifest.name);
+        self.registry.register_arc(Arc::new(factory));
+        match self.runtime.reload().await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                match previous {
+                    Some(previous) => self.registry.register_arc(previous),
+                    None => {
+                        self.registry.remove(&manifest.name);
+                    }
+                }
+                if let Err(rollback) = self.runtime.reload().await {
+                    tracing::warn!(
+                        %rollback,
+                        plugin = %manifest.name,
+                        "cannot restore LLM plugin chains after a failed install"
+                    );
+                }
+                Err(error.to_string())
+            }
+        }
+    }
+
+    async fn uninstall(&self, name: &str) -> Result<(), String> {
+        let previous = self.registry.remove(name);
+        match self.runtime.reload().await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if let Some(previous) = previous {
+                    self.registry.register_arc(previous);
+                    if let Err(rollback) = self.runtime.reload().await {
+                        tracing::warn!(
+                            %rollback,
+                            plugin = %name,
+                            "cannot restore LLM plugin chains after a failed uninstall"
+                        );
+                    }
+                }
+                Err(error.to_string())
+            }
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -172,7 +237,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(%warning, "PII engine unavailable");
     }
 
-    let mut llm_registry = octra_llm_plugin_builtin::registry_with(Some(pii_engines.clone()));
+    let llm_registry = octra_llm_plugin_builtin::registry_with(Some(pii_engines.clone()));
     if let Some(control) = wasm_control.as_ref() {
         for record in storage
             .llm
@@ -201,11 +266,20 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    let llm_registry = Arc::new(llm_registry);
     let llm_plugin_runtime = Arc::new(
-        LlmPluginRuntime::bootstrap(storage.clone(), Arc::new(llm_registry))
+        LlmPluginRuntime::bootstrap(storage.clone(), llm_registry.clone())
             .await
             .context("cannot build the LLM plugin runtime")?,
     );
+    let llm_wasm_lifecycle: Option<Arc<dyn LlmWasmLifecycle>> =
+        wasm_control.as_ref().map(|control| {
+            Arc::new(LlmWasmRuntime {
+                registry: llm_registry.clone(),
+                runtime: llm_plugin_runtime.clone(),
+                engine: control.engine.clone(),
+            }) as Arc<dyn LlmWasmLifecycle>
+        });
 
     let token =
         token::load_or_create(&workspace.token_file()).context("cannot prepare control token")?;
@@ -241,6 +315,9 @@ async fn main() -> anyhow::Result<()> {
     }));
     if let Some(wasm) = wasm_control {
         api_control = api_control.with_wasm(wasm);
+    }
+    if let Some(lifecycle) = llm_wasm_lifecycle {
+        api_control = api_control.with_llm_wasm_lifecycle(lifecycle);
     }
 
     let control_app = Router::new()
