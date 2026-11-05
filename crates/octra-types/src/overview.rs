@@ -257,7 +257,7 @@ async fn build(pool: &SqlitePool, range: Range) -> Result<Overview, sqlx::Error>
         .await?,
         llm: destinations(
             pool,
-            "SELECT COALESCE(provider_id, 'unassigned') AS label, COUNT(*) AS count
+            "SELECT COALESCE(NULLIF(provider_id, ''), 'unassigned') AS label, COUNT(*) AS count
                FROM llm_usage
               WHERE strftime('%s', created_at) >= ?1
               GROUP BY label
