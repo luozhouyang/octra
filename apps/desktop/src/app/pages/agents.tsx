@@ -155,6 +155,7 @@ export function AgentsPage() {
         base_url: baseUrl.trim(),
         virtual_model_id: model.trim(),
         virtual_key: plaintextKey.trim() || undefined,
+        config_path: selected.profile?.config_path,
       });
     },
     onSuccess: (result) => {
@@ -176,6 +177,7 @@ export function AgentsPage() {
         base_url: baseUrl.trim(),
         virtual_model_id: model.trim(),
         virtual_key: plaintextKey.trim(),
+        config_path: selected.profile?.config_path,
         expected_sha256: preview?.current_sha256 ?? undefined,
       });
     },

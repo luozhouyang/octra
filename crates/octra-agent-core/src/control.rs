@@ -163,6 +163,8 @@ pub struct RenderBody {
     pub base_url: Option<String>,
     pub virtual_model_id: Option<String>,
     pub virtual_key: Option<String>,
+    /// Overrides the adapter's default config path. Absolute paths only.
+    pub config_path: Option<String>,
     /// Hash returned by a previous preview; applying a changed file requires
     /// `force` when it no longer matches.
     pub expected_sha256: Option<String>,
@@ -455,11 +457,18 @@ async fn render(
                 .clone()
                 .ok_or_else(|| AgentError::InvalidConfig("virtual_model_id is required".into()))?,
             None,
-            None,
+            body.config_path.clone(),
         ),
     };
 
     validate_base_url(&base_url)?;
+    if let Some(path) = config_path.as_deref()
+        && !PathBuf::from(path).is_absolute()
+    {
+        return Err(AgentError::InvalidConfig(
+            "config_path must be absolute".into(),
+        ));
+    }
     let virtual_key = match body.virtual_key.as_deref() {
         Some(key) if !key.trim().is_empty() => key.trim().to_string(),
         _ if require_key => {

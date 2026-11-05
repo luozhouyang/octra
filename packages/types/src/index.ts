@@ -579,6 +579,7 @@ export interface AgentRenderInput {
   base_url?: string;
   virtual_model_id?: string;
   virtual_key?: string;
+  config_path?: string | null;
   expected_sha256?: string;
   force?: boolean;
 }
