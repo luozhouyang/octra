@@ -41,7 +41,7 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     fn read(&self, content: &str, path: &Path) -> Result<ConfigView, AgentError> {
-        let root = parse_object(content, path)?;
+        let (root, rewrote) = parse_object(content, path)?;
         let provider = root
             .get("provider")
             .and_then(Value::as_object)
@@ -79,6 +79,12 @@ impl AgentAdapter for OpenCodeAdapter {
         }
 
         let mut warnings = Vec::new();
+        if rewrote {
+            warnings.push(
+                "the configuration uses JSONC comments or trailing commas; applying rewrites it as plain JSON"
+                    .to_string(),
+            );
+        }
         if provider.is_some()
             && provider
                 .and_then(|provider| provider.get("models"))
@@ -111,9 +117,12 @@ impl AgentAdapter for OpenCodeAdapter {
         path: &Path,
         profile: &ApplyProfile,
     ) -> Result<RenderedConfig, AgentError> {
-        let mut root = match current {
-            Some(content) => Value::Object(parse_object(content, path)?),
-            None => Value::Object(Map::new()),
+        let (mut root, rewrote) = match current {
+            Some(content) => {
+                let (root, rewrote) = parse_object(content, path)?;
+                (Value::Object(root), rewrote)
+            }
+            None => (Value::Object(Map::new()), false),
         };
         let object = root.as_object_mut().expect("object was constructed above");
 
@@ -182,21 +191,135 @@ impl AgentAdapter for OpenCodeAdapter {
         Ok(RenderedConfig {
             content: format!("{content}\n"),
             changes,
-            warnings: Vec::new(),
+            warnings: if rewrote {
+                vec![
+                    "comments and trailing commas are not preserved; the file is rewritten as plain JSON"
+                        .to_string(),
+                ]
+            } else {
+                Vec::new()
+            },
         })
     }
 }
 
-fn parse_object(content: &str, path: &Path) -> Result<Map<String, Value>, AgentError> {
-    let value: Value = serde_json::from_str(content).map_err(|error| {
-        AgentError::InvalidConfig(format!(
-            "{} is not valid JSON (JSONC comments are not supported yet): {error}",
-            path.display()
-        ))
+fn parse_object(content: &str, path: &Path) -> Result<(Map<String, Value>, bool), AgentError> {
+    let (normalized, rewrote) = normalized_jsonc(content);
+    let value: Value = serde_json::from_str(&normalized).map_err(|error| {
+        AgentError::InvalidConfig(format!("{} is not valid JSON: {error}", path.display()))
     })?;
-    value.as_object().cloned().ok_or_else(|| {
+    let object = value.as_object().cloned().ok_or_else(|| {
         AgentError::InvalidConfig(format!("{} must contain a JSON object", path.display()))
-    })
+    })?;
+    Ok((object, rewrote))
+}
+
+/// Accepts JSONC by removing comments and trailing commas before parsing.
+fn normalized_jsonc(content: &str) -> (String, bool) {
+    let (without_comments, had_comments) = strip_comments(content);
+    let (without_commas, had_trailing_commas) = strip_trailing_commas(&without_comments);
+    (without_commas, had_comments || had_trailing_commas)
+}
+
+fn strip_comments(content: &str) -> (String, bool) {
+    let bytes = content.as_bytes();
+    let mut output = String::with_capacity(content.len());
+    let mut copied = 0;
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        match byte {
+            b'"' => {
+                in_string = true;
+                index += 1;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                output.push_str(&content[copied..index]);
+                let mut next = index + 2;
+                while next < bytes.len() && bytes[next] != b'\n' {
+                    next += 1;
+                }
+                copied = next;
+                index = next;
+                changed = true;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                output.push_str(&content[copied..index]);
+                let mut next = index + 2;
+                while next + 1 < bytes.len() && !(bytes[next] == b'*' && bytes[next + 1] == b'/') {
+                    next += 1;
+                }
+                copied = (next + 2).min(bytes.len());
+                index = copied;
+                changed = true;
+            }
+            _ => index += 1,
+        }
+    }
+
+    output.push_str(&content[copied..]);
+    (output, changed)
+}
+
+fn strip_trailing_commas(content: &str) -> (String, bool) {
+    let bytes = content.as_bytes();
+    let mut output = String::with_capacity(content.len());
+    let mut copied = 0;
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if byte == b'"' {
+            in_string = true;
+            index += 1;
+            continue;
+        }
+
+        let next = bytes[index + 1..]
+            .iter()
+            .find(|byte| !byte.is_ascii_whitespace())
+            .copied();
+        if byte == b',' && matches!(next, Some(b'}') | Some(b']')) {
+            output.push_str(&content[copied..index]);
+            copied = index + 1;
+            changed = true;
+        }
+        index += 1;
+    }
+
+    output.push_str(&content[copied..]);
+    (output, changed)
 }
 
 fn ensure_object<'a>(
@@ -296,19 +419,59 @@ mod tests {
     }
 
     #[test]
-    fn rejects_json_with_comments_without_rewriting_it() {
+    fn parses_jsonc_and_rewrites_it_as_plain_json() {
+        let existing = r#"{
+          // line comment
+          "model": "old",
+          "notes": "http://example.com//keep",
+          "provider": {"anthropic": {"name": "Anthropic"}}, /* block */
+        }"#;
+
+        let rendered = OpenCodeAdapter
+            .render(Some(existing), Path::new("/tmp/opencode.json"), &profile())
+            .unwrap();
+        let root: serde_json::Value = serde_json::from_str(&rendered.content).unwrap();
+
+        assert!(!rendered.content.contains("// line"));
+        assert!(!rendered.content.contains("/*"));
+        assert_eq!(root["notes"], "http://example.com//keep");
+        assert_eq!(root["provider"]["anthropic"]["name"], "Anthropic");
+        assert_eq!(root["model"], "octra/octra-default");
+        assert!(
+            rendered
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("plain JSON"))
+        );
+    }
+
+    #[test]
+    fn reads_jsonc_with_a_warning() {
+        let view = OpenCodeAdapter
+            .read(
+                "{\n// comment\n\"model\": \"octra/octra-default\",\n}",
+                Path::new("/tmp/opencode.json"),
+            )
+            .unwrap();
+
+        assert_eq!(view.model.as_deref(), Some("octra/octra-default"));
+        assert!(
+            view.warnings
+                .iter()
+                .any(|warning| warning.contains("JSONC"))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_json_without_rewriting_it() {
         let error = OpenCodeAdapter
             .render(
-                Some("{ // comment\n }"),
+                Some("{\"model\": }"),
                 Path::new("/tmp/opencode.json"),
                 &profile(),
             )
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("JSONC comments are not supported")
-        );
+        assert!(error.to_string().contains("not valid JSON"));
     }
 
     #[test]

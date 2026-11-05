@@ -123,7 +123,7 @@ headers, and key rotation.
 ## Security boundaries
 
 - SQLite stores only secret references and API-key hashes for gateway credentials, never plaintext provider secrets.
-- Agent configuration backups keep the exact original file so a restore is lossless. Those files may contain credentials, so the database file and backups inherit the local filesystem permissions.
+- Agent configuration backups keep the exact original file so a restore is lossless. Those files may contain credentials, so the database and its WAL sidecars are created with `0600` permissions and only the newest 20 backups per agent are kept. The control plane never returns backup content.
 - Applied agent configurations contain the virtual key by design; the control plane never returns it again.
 - The control plane enforces authentication and binds to loopback by default.
 - The data plane binds to loopback by default; API keys are optional per service, and LLM/MCP keys are enforced once configured.

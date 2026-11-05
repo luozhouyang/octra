@@ -206,6 +206,28 @@ impl AgentStore {
             .ok_or_else(|| Error::Storage("agent backup disappeared after insert".to_string()))
     }
 
+    /// Keeps only the newest `keep` backups for an agent. Backups may contain
+    /// credentials, so unbounded history would multiply the exposure.
+    pub async fn prune_backups(&self, agent_id: &str, keep: usize) -> Result<u64> {
+        let keep = i64::try_from(keep.clamp(1, 500)).unwrap_or(20);
+        let affected = sqlx::query(
+            "DELETE FROM agent_config_backups
+              WHERE agent_id = ?1
+                AND id NOT IN (
+                    SELECT id FROM agent_config_backups
+                     WHERE agent_id = ?1
+                     ORDER BY created_at DESC, rowid DESC
+                     LIMIT ?2
+                )",
+        )
+        .bind(agent_id)
+        .bind(keep)
+        .execute(self.pool())
+        .await
+        .map_err(backend)?;
+        Ok(affected.rows_affected())
+    }
+
     pub async fn get_backup(&self, id: &str) -> Result<Option<AgentBackup>> {
         let row = sqlx::query(
             "SELECT id, agent_id, profile_id, path, content AS original_content,
@@ -403,5 +425,47 @@ mod tests {
                 .restored_at
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn pruning_keeps_only_the_newest_backups() {
+        let storage = storage().await.unwrap();
+        let mut ids = Vec::new();
+        for content in ["one", "two", "three"] {
+            let backup = storage
+                .agents
+                .insert_backup(&NewAgentBackup {
+                    agent_id: "claude-code".to_string(),
+                    profile_id: None,
+                    path: "/tmp/settings.json".to_string(),
+                    original_content: Some(content.to_string()),
+                    original_sha256: format!("{content}-hash"),
+                    applied_sha256: format!("{content}-applied"),
+                    file_existed: true,
+                })
+                .await
+                .unwrap();
+            ids.push(backup.id);
+        }
+
+        let removed = storage
+            .agents
+            .prune_backups("claude-code", 2)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let mut remaining: Vec<String> = storage
+            .agents
+            .list_backups("claude-code", 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|backup| backup.id)
+            .collect();
+        remaining.sort();
+        let mut expected = ids[1..].to_vec();
+        expected.sort();
+        assert_eq!(remaining, expected);
     }
 }

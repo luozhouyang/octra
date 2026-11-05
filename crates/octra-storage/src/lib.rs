@@ -23,7 +23,7 @@ pub use plugins::{
     PluginArtifactInput, PluginArtifactRecord, PluginConfigRecord, PluginData, PluginRecord,
 };
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use octra_core::{Error, Result, RouteSummary, ServiceSummary, SnapshotCounts};
@@ -67,6 +67,7 @@ impl Storage {
         let storage = Self::from_options(options, 5).await?;
         storage.migrate().await?;
         storage.ensure_usage_rollup().await?;
+        restrict_database_permissions(path)?;
         Ok(storage)
     }
 
@@ -189,6 +190,38 @@ impl Storage {
     }
 }
 
+/// Keeps the database and its WAL sidecars private. They may contain agent
+/// configuration backups, which can include credentials.
+fn restrict_database_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut candidates: Vec<PathBuf> = vec![path.to_path_buf()];
+        for suffix in ["-wal", "-shm"] {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(suffix);
+            candidates.push(PathBuf::from(name));
+        }
+
+        for candidate in candidates {
+            if candidate.exists() {
+                std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|error| {
+                        Error::Storage(format!(
+                            "cannot restrict permissions on {}: {error}",
+                            candidate.display()
+                        ))
+                    })?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +278,29 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(kept, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn database_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("octra.db");
+        let storage = Storage::connect(&path).await.unwrap();
+        storage.ping().await.unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        for suffix in ["-wal", "-shm"] {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(suffix);
+            let sidecar = PathBuf::from(name);
+            if sidecar.exists() {
+                let mode = std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{}", sidecar.display());
+            }
+        }
     }
 }

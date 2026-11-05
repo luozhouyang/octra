@@ -337,6 +337,9 @@ async fn apply(
         PathBuf::from(&rendered.path).as_path(),
         &rendered.rendered.content,
     )?;
+    if let Err(error) = state.storage.agents.prune_backups(&id, 20).await {
+        warn!(%error, agent = %id, "cannot prune agent configuration backups");
+    }
 
     Ok(Json(AppliedView {
         agent_id: id,
