@@ -6,7 +6,7 @@
 
 **Local-first Unified Gateway** — 统一管理 API、LLM、MCP 服务，并提供跨平台桌面应用。
 
-当前仓库是 Octra 的可运行基础：独立 Daemon（统一数据面 + 认证控制面 + SQLite）、管理 CLI、Tauri 2 桌面端，以及 Rust/TypeScript 双 Workspace。API、LLM、MCP 三个 Gateway 的核心能力已实现；Agent 集成、插件与生产加固仍在路线图中。
+当前仓库是 Octra 的可运行基础：独立 Daemon（统一数据面 + 认证控制面 + SQLite）、管理 CLI、Tauri 2 桌面端，以及 Rust/TypeScript 双 Workspace。API、LLM、MCP 三个 Gateway 的核心能力已实现；Agent 配置托管与插件运行时已落地，生产加固仍在路线图中。
 
 ## 仓库布局
 
@@ -68,10 +68,10 @@ pnpm dev:web
 
 Daemon 首次启动会在 `$OCTRA_HOME`（默认 `~/.octra`）下创建：
 
-| 文件 | 说明 |
-|---|---|
-| `config.toml` | Daemon 配置 |
-| `octra.db` | SQLite 数据库（WAL） |
+| 文件            | 说明                                    |
+| --------------- | --------------------------------------- |
+| `config.toml`   | Daemon 配置                             |
+| `octra.db`      | SQLite 数据库（WAL）                    |
 | `control.token` | 控制面 Bearer Token，Unix 下权限 `0600` |
 
 控制面默认只绑定回环地址，且所有接口强制 Bearer 认证。数据面默认也绑定回环地址；需要其他网卡时修改 `gateway.listen_bind`。CLI 与桌面端从 `control.token` 读取凭据；`OCTRA_CONTROL_TOKEN` 可覆盖。
@@ -103,23 +103,26 @@ pnpm cli keys create --name claude-code --consumer <consumer-id> \
 - API Gateway：Host/Path/Method/Header 路由、最长前缀、轮询与加权负载均衡、路径剥离、超时、重试、API Key 认证、流式代理、访问日志与指标。
 - LLM Gateway：Canonical IR、OpenAI ↔ Anthropic 请求/响应/SSE 转换、虚拟模型、优先级/权重路由与回退、OpenAI-compatible 与 Anthropic Provider（`env:` / `file:` Secret 引用）、虚拟密钥哈希存储、用量记录、`count_tokens`。
 - MCP Gateway：Streamable HTTP 与 stdio 上游、工具发现与聚合、`/mcp` JSON-RPC 会话、按 Consumer 的 Tool ACL、API Key、调用审计。
+- 插件：Native 与 WASM（API / LLM）运行时、插件自有 SQLite 存储、配置 Schema、按实例的指标与延迟分位数，以及共享的限流/预算计数器。
+- Agent 集成：探测 Claude Code、Codex、OpenCode，预览并把 Octra Provider 写入其原生配置，支持原子写入与备份恢复。
 - CLI：`status`、`services`、`routes`、`reload`、`doctor`。
-- Tauri 2 + React 桌面端骨架，Dashboard 通过 Tauri command 访问 Daemon。
+- Tauri 2 + React 桌面端，使用统一设计 Token，所有页面直接读取本地控制面。
 - 双 Workspace、CI（Rust fmt/clippy/test；前端 typecheck/test/build）。
 
 ## 尚未实现（按路线图推进）
 
 - Pingora 代理引擎（当前统一数据面使用 Axum + reqwest）。
 - OpenAI Responses 与 Gemini 协议适配。
-- Agent Discovery / Config Adapter / Bridge。
-- 插件运行时（Native / WASM）。
+- 更多 Agent 适配器与 Agent Bridge。
 - OS Keychain Secrets 集成。
-- 独立 Telemetry 数据库与保留策略 Worker。
+- 独立 Telemetry 数据库（小时级 Rollup 与保留策略 Worker 已实现）。
 - 跨平台打包、签名与公证。
 
 ## 安全边界
 
-- SQLite 只保存 Secret 引用与 API Key 哈希，不保存明文凭据。
+- SQLite 中的网关凭据只保存 Secret 引用与 API Key 哈希，不保存明文 Provider Secret。
+- Agent 配置备份保存原始文件的完整内容以保证可恢复；这些文件可能包含凭据，因此数据库文件与备份继承本机文件权限。
+- 已应用的 Agent 配置按设计包含虚拟密钥明文；控制面之后不会再返回该密钥。
 - 控制面强制认证，默认仅回环地址。
 - 数据面默认仅回环地址；API 服务可选认证，LLM/MCP 在配置密钥后强制认证。
 - Provider Secret 通过 `env:` 或 `file:` 引用在请求时解析，不写入日志。

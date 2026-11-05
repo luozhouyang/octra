@@ -348,7 +348,14 @@ mod tests {
         assert_eq!(updated.name, "work");
 
         assert!(storage.agents.delete_profile(&created.id).await.unwrap());
-        assert!(storage.agents.get_profile(&created.id).await.unwrap().is_none());
+        assert!(
+            storage
+                .agents
+                .get_profile(&created.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -378,14 +385,23 @@ mod tests {
         assert_eq!(latest.original_content.as_deref(), Some("model = 'old'"));
 
         storage.agents.mark_restored(&backup.id).await.unwrap();
-        assert!(storage.agents.latest_backup("codex").await.unwrap().is_none());
-        assert!(storage
-            .agents
-            .get_backup(&backup.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .restored_at
-            .is_some());
+        assert!(
+            storage
+                .agents
+                .latest_backup("codex")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .agents
+                .get_backup(&backup.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .restored_at
+                .is_some()
+        );
     }
 }

@@ -14,15 +14,14 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use octra_config::OctraConfig;
-use octra_storage::agents::{AgentBackup, AgentProfile, NewAgentBackup, NewAgentProfile};
 use octra_storage::Storage;
+use octra_storage::agents::{AgentBackup, AgentProfile, NewAgentBackup, NewAgentProfile};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use url::Url;
 
 use crate::adapter::{
     AgentAdapter, AgentContext, ApplyProfile, ConfigChange, ConfigView, Detection, mask_secret,
-    same_base_url,
 };
 use crate::detect::detect;
 use crate::error::AgentError;
@@ -332,7 +331,10 @@ async fn apply(
         })
         .await?;
 
-    write_atomic(PathBuf::from(&rendered.path).as_path(), &rendered.rendered.content)?;
+    write_atomic(
+        PathBuf::from(&rendered.path).as_path(),
+        &rendered.rendered.content,
+    )?;
 
     Ok(Json(AppliedView {
         agent_id: id,
@@ -380,9 +382,10 @@ async fn restore(
     }
 
     let removed = if backup.file_existed {
-        let original = backup.original_content.as_deref().ok_or_else(|| {
-            ApiError::conflict("this backup has no original content to restore")
-        })?;
+        let original = backup
+            .original_content
+            .as_deref()
+            .ok_or_else(|| ApiError::conflict("this backup has no original content to restore"))?;
         write_atomic(&path, original)?;
         false
     } else {
@@ -471,6 +474,7 @@ async fn render(
         .map(PathBuf::from)
         .unwrap_or_else(|| adapter.config_path(&state.context));
     let current = read_optional(&path)?;
+    let expected_base_url = base_url.clone();
     let rendered = adapter.render(
         current.as_deref(),
         &path,
@@ -484,7 +488,7 @@ async fn render(
     // Re-parse the proposed document to catch rendering bugs before writing.
     let proposed_view = adapter.read(&rendered.content, &path)?;
     let mut warnings = rendered.warnings;
-    warnings.extend(adapter.health(&proposed_view, &state.gateway_base_url()));
+    warnings.extend(adapter.health(&proposed_view, &expected_base_url));
     warnings.extend(proposed_view.warnings);
 
     Ok(RenderedFile {
@@ -532,7 +536,7 @@ async fn build_view(
     let configured = config
         .base_url
         .as_deref()
-        .is_some_and(|base| same_base_url(base, &expected));
+        .is_some_and(|base| adapter.matches_base_url(base, &expected));
 
     let last_backup = state
         .storage
@@ -746,7 +750,7 @@ mod tests {
         assert!(rendered.rendered.content.contains("ANTHROPIC_BASE_URL"));
 
         let view = build_view(&state, adapter.as_ref()).await.unwrap();
-        assert!(view.config.exists == false);
+        assert!(!view.config.exists);
         assert!(!view.configured);
 
         let profile = storage
@@ -772,10 +776,7 @@ mod tests {
             super::local_base_url("0.0.0.0:8080"),
             "http://127.0.0.1:8080"
         );
-        assert_eq!(
-            super::local_base_url("[::]:8080"),
-            "http://127.0.0.1:8080"
-        );
+        assert_eq!(super::local_base_url("[::]:8080"), "http://127.0.0.1:8080");
         assert_eq!(
             super::local_base_url("127.0.0.1:8080"),
             "http://127.0.0.1:8080"

@@ -66,10 +66,10 @@ pnpm dev:web
 
 On first start, the daemon creates the following under `$OCTRA_HOME` (defaults to `~/.octra`):
 
-| File | Description |
-|---|---|
-| `config.toml` | Daemon configuration |
-| `octra.db` | SQLite database (WAL) |
+| File            | Description                                     |
+| --------------- | ----------------------------------------------- |
+| `config.toml`   | Daemon configuration                            |
+| `octra.db`      | SQLite database (WAL)                           |
 | `control.token` | Control-plane Bearer token; mode `0600` on Unix |
 
 The control plane binds to the loopback address by default, and every endpoint enforces Bearer authentication. The data plane binds to loopback by default as well; configure `gateway.listen_bind` if you need a different interface. The CLI and desktop app read credentials from `control.token`; `OCTRA_CONTROL_TOKEN` overrides it.
@@ -103,8 +103,10 @@ headers, and key rotation.
 - Plugin system: Kong-style phase chain with consumer > route > service > global scope precedence and priority ordering, fail-open/fail-closed policies, and built-in `key-auth`, `basic-auth`, `jwt`, `acl`, `correlation-id`, `request-transformer`, `response-transformer`, `cors`, `rate-limiting`, `header-rewrite`, and `circuit-breaker` plugins configured per scope.
 - LLM Gateway: canonical IR, OpenAI ↔ Anthropic request/response/SSE conversion, virtual models, routing groups with priority/weight fallback, OpenAI-compatible and Anthropic providers (`env:` / `file:` secret references), virtual keys hashed in SQLite, usage records, `count_tokens`, and consumer policies that restrict allowed models and providers.
 - MCP Gateway: Streamable HTTP and stdio upstreams, tool discovery and aggregation, `/mcp` JSON-RPC endpoint with sessions, per-consumer tool ACLs, API keys, and invocation audit rows.
+- Plugins: native and WASM (API and LLM) plugin runtimes, plugin-owned SQLite storage, config schemas, per-instance metrics and latency percentiles, and shared rate-limit/budget counters.
+- Agent integration: detects Claude Code, Codex and OpenCode, previews and applies the Octra provider into their native config files, and restores backups atomically.
 - CLI: `status`, `services`, `routes`, `reload`, `doctor`.
-- Tauri 2 + React desktop app with a shadcn-style component set and Tailwind CSS v4 design tokens for dark and light modes; the control plane is read directly over the loopback API.
+- Tauri 2 + React desktop app with a shadcn-style component set and Tailwind CSS v4 design tokens for dark and light modes; every console page reads the local control plane.
 - Dual workspace and CI (Rust fmt/clippy/test; frontend typecheck/test/build).
 
 ## Not yet implemented (tracked on the roadmap)
@@ -112,16 +114,17 @@ headers, and key rotation.
 - Pingora-based proxy engine (the current unified data plane uses Axum + reqwest).
 - Additional vendor-specific protocol adapters beyond OpenAI, Anthropic,
   OpenAI Responses, and Gemini.
-- Agent discovery / config adapter / bridge.
-- WASM plugin runtime (the native plugin system and built-ins are implemented).
+- Agent discovery / config adapter / bridge for agents beyond the three
+  supported adapters.
 - OS Keychain integration for secrets.
-- Request/response body transformation.
 - Separate telemetry database (hourly usage rollups and retention workers are implemented).
 - Cross-platform packaging, signing, and notarization.
 
 ## Security boundaries
 
-- SQLite stores only secret references and API-key hashes, never plaintext credential values.
+- SQLite stores only secret references and API-key hashes for gateway credentials, never plaintext provider secrets.
+- Agent configuration backups keep the exact original file so a restore is lossless. Those files may contain credentials, so the database file and backups inherit the local filesystem permissions.
+- Applied agent configurations contain the virtual key by design; the control plane never returns it again.
 - The control plane enforces authentication and binds to loopback by default.
 - The data plane binds to loopback by default; API keys are optional per service, and LLM/MCP keys are enforced once configured.
 - Provider secrets resolve from `env:` or `file:` references at request time and are never logged.

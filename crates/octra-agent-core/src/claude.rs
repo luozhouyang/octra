@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use crate::adapter::{
-    AgentAdapter, AgentContext, ApplyProfile, ConfigChange, ConfigField, ConfigView, RenderedConfig,
-    mask_secret,
-};
 use crate::AgentError;
+use crate::adapter::{
+    AgentAdapter, AgentContext, ApplyProfile, ConfigChange, ConfigField, ConfigView,
+    RenderedConfig, mask_secret,
+};
 
 pub const BASE_URL_KEY: &str = "ANTHROPIC_BASE_URL";
 pub const TOKEN_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
@@ -110,8 +110,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
             set_env(env, key, &profile.virtual_model_id, false, &mut changes);
         }
 
-        let content = serde_json::to_string_pretty(&root)
-            .map_err(|error| AgentError::InvalidConfig(format!("cannot encode settings: {error}")))?;
+        let content = serde_json::to_string_pretty(&root).map_err(|error| {
+            AgentError::InvalidConfig(format!("cannot encode settings: {error}"))
+        })?;
 
         Ok(RenderedConfig {
             content: format!("{content}\n"),
@@ -137,7 +138,13 @@ fn env_string<'a>(env: Option<&'a Map<String, Value>>, key: &str) -> Option<&'a 
 fn field(key: &str, value: Option<&str>, secret: bool) -> ConfigField {
     ConfigField {
         key: key.to_string(),
-        value: value.map(|value| if secret { mask_secret(value) } else { value.to_string() }),
+        value: value.map(|value| {
+            if secret {
+                mask_secret(value)
+            } else {
+                value.to_string()
+            }
+        }),
         masked: secret && value.is_some(),
     }
 }
@@ -154,7 +161,11 @@ fn set_env(
         changes.push(ConfigChange {
             field: key.to_string(),
             before: before.map(|before| if secret { mask_secret(&before) } else { before }),
-            after: Some(if secret { mask_secret(value) } else { value.to_string() }),
+            after: Some(if secret {
+                mask_secret(value)
+            } else {
+                value.to_string()
+            }),
         });
     }
     env.insert(key.to_string(), json!(value));
@@ -192,7 +203,11 @@ mod tests {
 
         assert_eq!(view.base_url.as_deref(), Some("http://127.0.0.1:8080"));
         assert!(view.provider_configured);
-        let token = view.fields.iter().find(|field| field.key == TOKEN_KEY).unwrap();
+        let token = view
+            .fields
+            .iter()
+            .find(|field| field.key == TOKEN_KEY)
+            .unwrap();
         assert!(token.masked);
         assert_eq!(token.value.as_deref(), Some("octr…mnop"));
     }
@@ -213,10 +228,12 @@ mod tests {
         assert_eq!(root["permissions"]["allow"][0], "Bash");
         assert_eq!(root["env"][BASE_URL_KEY], "http://127.0.0.1:8080");
         assert_eq!(root["env"][MODEL_KEY], "octra-default");
-        assert!(rendered
-            .changes
-            .iter()
-            .all(|change| !change.after.as_deref().is_some_and(|value| value.contains("abcdefghijklmnop"))));
+        assert!(rendered.changes.iter().all(|change| {
+            !change
+                .after
+                .as_deref()
+                .is_some_and(|value| value.contains("abcdefghijklmnop"))
+        }));
     }
 
     #[test]

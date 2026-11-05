@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use crate::adapter::{
-    AgentAdapter, AgentContext, ApplyProfile, ConfigChange, ConfigField, ConfigView, RenderedConfig,
-    base_url_for, mask_secret,
-};
 use crate::AgentError;
+use crate::adapter::{
+    AgentAdapter, AgentContext, ApplyProfile, ConfigChange, ConfigField, ConfigView,
+    RenderedConfig, base_url_for, mask_secret, same_base_url,
+};
 
 pub const PROVIDER_ID: &str = "octra";
 
@@ -34,6 +34,10 @@ impl AgentAdapter for OpenCodeAdapter {
 
     fn config_path(&self, ctx: &AgentContext) -> PathBuf {
         ctx.config_dir.join("opencode").join("opencode.json")
+    }
+
+    fn matches_base_url(&self, value: &str, expected: &str) -> bool {
+        same_base_url(value, &base_url_for(expected, "/v1"))
     }
 
     fn read(&self, content: &str, path: &Path) -> Result<ConfigView, AgentError> {
@@ -75,15 +79,19 @@ impl AgentAdapter for OpenCodeAdapter {
         }
 
         let mut warnings = Vec::new();
-        if provider.is_some() && provider.and_then(|provider| provider.get("models")).is_none() {
+        if provider.is_some()
+            && provider
+                .and_then(|provider| provider.get("models"))
+                .is_none()
+        {
             warnings.push("the octra provider has no models map".to_string());
         }
-        if let Some(model) = model {
-            if !model.starts_with(&format!("{PROVIDER_ID}/")) {
-                warnings.push(format!(
-                    "the default model '{model}' does not use the {PROVIDER_ID} provider"
-                ));
-            }
+        if let Some(model) = model
+            && !model.starts_with(&format!("{PROVIDER_ID}/"))
+        {
+            warnings.push(format!(
+                "the default model '{model}' does not use the {PROVIDER_ID} provider"
+            ));
         }
 
         Ok(ConfigView {
@@ -118,10 +126,7 @@ impl AgentAdapter for OpenCodeAdapter {
 
         let providers = ensure_object(object, "provider", path)?;
         let provider = ensure_object(providers, PROVIDER_ID, path)?;
-        provider.insert(
-            "npm".to_string(),
-            json!("@ai-sdk/openai-compatible"),
-        );
+        provider.insert("npm".to_string(), json!("@ai-sdk/openai-compatible"));
         provider.insert("name".to_string(), json!("Octra"));
 
         let base_url = base_url_for(&profile.base_url, "/v1");
@@ -155,10 +160,7 @@ impl AgentAdapter for OpenCodeAdapter {
         options.insert("apiKey".to_string(), json!(profile.virtual_key));
 
         let models = ensure_object(provider, "models", path)?;
-        models.insert(
-            profile.virtual_model_id.clone(),
-            json!({ "name": "Octra" }),
-        );
+        models.insert(profile.virtual_model_id.clone(), json!({ "name": "Octra" }));
 
         let model = format!("{PROVIDER_ID}/{}", profile.virtual_model_id);
         let previous_model = object
@@ -241,13 +243,21 @@ mod tests {
         let root: serde_json::Value = serde_json::from_str(&rendered.content).unwrap();
 
         assert_eq!(root["provider"]["anthropic"]["name"], "Anthropic");
-        assert_eq!(root["provider"]["octra"]["options"]["baseURL"], "http://127.0.0.1:8080/v1");
+        assert_eq!(
+            root["provider"]["octra"]["options"]["baseURL"],
+            "http://127.0.0.1:8080/v1"
+        );
         assert_eq!(root["model"], "octra/octra-default");
-        assert_eq!(root["provider"]["octra"]["models"]["octra-default"]["name"], "Octra");
-        assert!(!rendered
-            .changes
-            .iter()
-            .any(|change| change.after.as_deref().is_some_and(|value| value.contains("abcdefghijklmnop"))));
+        assert_eq!(
+            root["provider"]["octra"]["models"]["octra-default"]["name"],
+            "Octra"
+        );
+        assert!(!rendered.changes.iter().any(|change| {
+            change
+                .after
+                .as_deref()
+                .is_some_and(|value| value.contains("abcdefghijklmnop"))
+        }));
     }
 
     #[test]
@@ -276,7 +286,13 @@ mod tests {
             .find(|field| field.key.ends_with("apiKey"))
             .unwrap();
         assert!(api_key.masked);
-        assert!(!api_key.value.as_deref().unwrap().contains("abcdefghijklmnop"));
+        assert!(
+            !api_key
+                .value
+                .as_deref()
+                .unwrap()
+                .contains("abcdefghijklmnop")
+        );
     }
 
     #[test]
@@ -288,6 +304,20 @@ mod tests {
                 &profile(),
             )
             .unwrap_err();
-        assert!(error.to_string().contains("JSONC comments are not supported"));
+        assert!(
+            error
+                .to_string()
+                .contains("JSONC comments are not supported")
+        );
+    }
+
+    #[test]
+    fn treats_the_v1_prefix_as_the_same_gateway() {
+        assert!(
+            OpenCodeAdapter.matches_base_url("http://127.0.0.1:8080/v1", "http://127.0.0.1:8080")
+        );
+        assert!(
+            !OpenCodeAdapter.matches_base_url("http://127.0.0.1:8080/v2", "http://127.0.0.1:8080")
+        );
     }
 }

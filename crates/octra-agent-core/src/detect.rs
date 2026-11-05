@@ -89,6 +89,9 @@ mod tests {
 
     #[test]
     fn always_probes_the_bare_name() {
-        assert_eq!(candidate_names("codex").first().map(String::as_str), Some("codex"));
+        assert_eq!(
+            candidate_names("codex").first().map(String::as_str),
+            Some("codex")
+        );
     }
 }

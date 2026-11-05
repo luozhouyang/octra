@@ -143,12 +143,18 @@ pub trait AgentAdapter: Send + Sync {
             return Vec::new();
         }
         match view.base_url.as_deref() {
-            Some(base) if same_base_url(base, expected_base_url) => Vec::new(),
+            Some(base) if self.matches_base_url(base, expected_base_url) => Vec::new(),
             Some(base) => vec![format!(
                 "points at {base} instead of the local gateway {expected_base_url}"
             )],
             None => vec!["has no base URL".to_string()],
         }
+    }
+
+    /// Some agents store the OpenAI-compatible prefix (`/v1`) in their base
+    /// URL; adapters that do override this.
+    fn matches_base_url(&self, value: &str, expected: &str) -> bool {
+        same_base_url(value, expected)
     }
 }
 
@@ -183,7 +189,13 @@ mod tests {
 
     #[test]
     fn compares_base_urls_without_a_trailing_slash() {
-        assert!(same_base_url("http://127.0.0.1:8080/", "http://127.0.0.1:8080"));
-        assert!(!same_base_url("http://127.0.0.1:8080", "http://127.0.0.1:9080"));
+        assert!(same_base_url(
+            "http://127.0.0.1:8080/",
+            "http://127.0.0.1:8080"
+        ));
+        assert!(!same_base_url(
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:9080"
+        ));
     }
 }

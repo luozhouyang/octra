@@ -56,13 +56,17 @@ pub fn read_optional(path: &Path) -> Result<Option<String>, AgentError> {
 }
 
 /// Atomically replaces `path` with `content`, creating parent directories.
+///
+/// Symlinked configurations are written through to their target so the link
+/// (a common dotfile setup) survives.
 pub fn write_atomic(path: &Path, content: &str) -> Result<(), AgentError> {
+    let path = resolve_target(path)?;
     let parent = path.parent().ok_or_else(|| {
         AgentError::InvalidConfig(format!("{} has no parent directory", path.display()))
     })?;
     fs::create_dir_all(parent)?;
 
-    let temporary = temporary_path(path);
+    let temporary = temporary_path(&path);
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -73,7 +77,7 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<(), AgentError> {
         file.sync_all()?;
         drop(file);
         set_private_permissions(&temporary)?;
-        fs::rename(&temporary, path)?;
+        fs::rename(&temporary, &path)?;
         sync_parent(parent);
         Ok(())
     })();
@@ -82,6 +86,17 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<(), AgentError> {
         let _ = fs::remove_file(&temporary);
     }
     result.map_err(AgentError::Io)
+}
+
+fn resolve_target(path: &Path) -> Result<PathBuf, AgentError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            fs::canonicalize(path).map_err(AgentError::Io)
+        }
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(AgentError::Io(error)),
+    }
 }
 
 /// Removes a file created by an apply. Missing files are not an error.
@@ -145,7 +160,10 @@ mod tests {
 
         write_atomic(&path, "{\"a\":1}\n").unwrap();
 
-        assert_eq!(read_optional(&path).unwrap().as_deref(), Some("{\"a\":1}\n"));
+        assert_eq!(
+            read_optional(&path).unwrap().as_deref(),
+            Some("{\"a\":1}\n")
+        );
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
 
         #[cfg(unix)]
@@ -159,8 +177,30 @@ mod tests {
     #[test]
     fn missing_files_are_not_an_error() {
         let directory = tempdir().unwrap();
-        assert!(read_optional(&directory.path().join("absent.json"))
-            .unwrap()
-            .is_none());
+        assert!(
+            read_optional(&directory.path().join("absent.json"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_through_symlinked_configs() {
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("settings.json");
+        let link = directory.path().join("link.json");
+        fs::write(&target, "{}\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_atomic(&link, "{\"updated\":true}\n").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{\"updated\":true}\n");
     }
 }

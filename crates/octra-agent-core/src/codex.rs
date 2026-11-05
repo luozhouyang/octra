@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table, value};
 
-use crate::adapter::{
-    AgentAdapter, AgentContext, ApplyProfile, ConfigChange, ConfigField, ConfigView, RenderedConfig,
-    mask_secret,
-};
 use crate::AgentError;
+use crate::adapter::{
+    AgentAdapter, AgentContext, ApplyProfile, ConfigChange, ConfigField, ConfigView,
+    RenderedConfig, base_url_for, mask_secret, same_base_url,
+};
 
 pub const PROVIDER_ID: &str = "octra";
 const AUTHORIZATION_KEY: &str = "Authorization";
@@ -39,6 +39,10 @@ impl AgentAdapter for CodexAdapter {
 
     fn config_path(&self, ctx: &AgentContext) -> PathBuf {
         ctx.home.join(".codex").join("config.toml")
+    }
+
+    fn matches_base_url(&self, value: &str, expected: &str) -> bool {
+        same_base_url(value, &base_url_for(expected, "/v1"))
     }
 
     fn read(&self, content: &str, path: &Path) -> Result<ConfigView, AgentError> {
@@ -121,7 +125,10 @@ impl AgentAdapter for CodexAdapter {
         };
         let mut changes = Vec::new();
 
-        let previous_model = document.get("model").and_then(Item::as_str).map(str::to_string);
+        let previous_model = document
+            .get("model")
+            .and_then(Item::as_str)
+            .map(str::to_string);
         if previous_model.as_deref() != Some(profile.virtual_model_id.as_str()) {
             changes.push(ConfigChange {
                 field: "model".to_string(),
@@ -272,14 +279,22 @@ base_url = "https://api.openai.com/v1"
         assert!(rendered.content.contains("[model_providers.openai]"));
         assert!(rendered.content.contains("model = \"octra-default\""));
         assert!(rendered.content.contains("[model_providers.octra]"));
-        assert!(rendered.content.contains("base_url = \"http://127.0.0.1:8080/v1\""));
-        assert!(rendered
-            .content
-            .contains("Authorization = \"Bearer octra-abcdefghijklmnop\""));
-        assert!(!rendered
-            .changes
-            .iter()
-            .any(|change| change.after.as_deref().is_some_and(|value| value.contains("abcdefghijklmnop"))));
+        assert!(
+            rendered
+                .content
+                .contains("base_url = \"http://127.0.0.1:8080/v1\"")
+        );
+        assert!(
+            rendered
+                .content
+                .contains("Authorization = \"Bearer octra-abcdefghijklmnop\"")
+        );
+        assert!(!rendered.changes.iter().any(|change| {
+            change
+                .after
+                .as_deref()
+                .is_some_and(|value| value.contains("abcdefghijklmnop"))
+        }));
     }
 
     #[test]
@@ -296,7 +311,9 @@ base_url = "http://127.0.0.1:8080/v1"
 Authorization = "Bearer octra-abcdefghijklmnop"
 "#;
 
-        let view = CodexAdapter.read(content, Path::new("/tmp/config.toml")).unwrap();
+        let view = CodexAdapter
+            .read(content, Path::new("/tmp/config.toml"))
+            .unwrap();
 
         assert_eq!(view.base_url.as_deref(), Some("http://127.0.0.1:8080/v1"));
         assert!(view.provider_configured);
@@ -306,6 +323,20 @@ Authorization = "Bearer octra-abcdefghijklmnop"
             .find(|field| field.key.ends_with("Authorization"))
             .unwrap();
         assert!(authorization.masked);
-        assert!(!authorization.value.as_deref().unwrap().contains("abcdefghijklmnop"));
+        assert!(
+            !authorization
+                .value
+                .as_deref()
+                .unwrap()
+                .contains("abcdefghijklmnop")
+        );
+    }
+
+    #[test]
+    fn treats_the_v1_prefix_as_the_same_gateway() {
+        assert!(CodexAdapter.matches_base_url("http://127.0.0.1:8080/v1", "http://127.0.0.1:8080"));
+        assert!(
+            !CodexAdapter.matches_base_url("http://127.0.0.1:8080/v2", "http://127.0.0.1:8080")
+        );
     }
 }
