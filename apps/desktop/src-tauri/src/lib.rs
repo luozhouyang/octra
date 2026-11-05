@@ -43,98 +43,64 @@ fn control_token() -> Result<String, String> {
         .map_err(|_| "control token not found; start the daemon with `pnpm daemon`".to_string())
 }
 
-#[tauri::command]
-async fn daemon_health() -> Result<serde_json::Value, String> {
-    let token = control_token()?;
-    let response = reqwest::Client::new()
-        .get(format!("{}/api/v1/system/health", control_base_url()))
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|err| format!("cannot reach the Octra daemon: {err}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!("daemon returned {}", response.status()));
-    }
-
-    response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|err| format!("invalid daemon response: {err}"))
+#[derive(Debug, serde::Serialize)]
+struct DaemonResponse {
+    status: u16,
+    body: serde_json::Value,
 }
 
+/// Forwards one control-plane request through the desktop host.
+///
+/// The webview does not have the control token, so every page goes through
+/// this command. Only loopback control-plane paths are accepted; the base URL
+/// still comes from `$OCTRA_HOME/config.toml`.
 #[tauri::command]
-async fn daemon_reload() -> Result<serde_json::Value, String> {
+async fn daemon_request(
+    method: String,
+    path: String,
+    body: Option<serde_json::Value>,
+) -> Result<DaemonResponse, String> {
+    let path_without_query = path.split('?').next().unwrap_or(&path);
+    if !(path_without_query.starts_with("/api/v1/") || path_without_query.starts_with("/admin/")) {
+        return Err(format!("unsupported control path: {path}"));
+    }
+    let method = match method.to_ascii_uppercase().as_str() {
+        "GET" => reqwest::Method::GET,
+        "POST" => reqwest::Method::POST,
+        "PUT" => reqwest::Method::PUT,
+        "DELETE" => reqwest::Method::DELETE,
+        other => return Err(format!("unsupported method: {other}")),
+    };
+
     let token = control_token()?;
-    let response = reqwest::Client::new()
-        .post(format!("{}/api/v1/system/reload", control_base_url()))
-        .bearer_auth(token)
+    let mut request = reqwest::Client::new()
+        .request(method, format!("{}{path}", control_base_url()))
+        .bearer_auth(token);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+
+    let response = request
         .send()
         .await
         .map_err(|err| format!("cannot reach the Octra daemon: {err}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!("daemon returned {}", response.status()));
-    }
-
-    response
-        .json::<serde_json::Value>()
+    let status = response.status().as_u16();
+    let text = response
+        .text()
         .await
-        .map_err(|err| format!("invalid daemon response: {err}"))
-}
+        .map_err(|err| format!("cannot read daemon response: {err}"))?;
+    let body = if text.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text))
+    };
 
-#[tauri::command]
-async fn daemon_pii_models() -> Result<serde_json::Value, String> {
-    let token = control_token()?;
-    let response = reqwest::Client::new()
-        .get(format!("{}/admin/llm/pii-models", control_base_url()))
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|err| format!("cannot reach the Octra daemon: {err}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!("daemon returned {}", response.status()));
-    }
-
-    response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|err| format!("invalid daemon response: {err}"))
-}
-
-#[tauri::command]
-async fn daemon_pii_action(
-    id: String,
-    action: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let token = control_token()?;
-    let response = reqwest::Client::new()
-        .post(format!("{}/admin/llm/pii-models/{id}", control_base_url()))
-        .bearer_auth(token)
-        .json(&action)
-        .send()
-        .await
-        .map_err(|err| format!("cannot reach the Octra daemon: {err}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!("daemon returned {}", response.status()));
-    }
-
-    response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|err| format!("invalid daemon response: {err}"))
+    Ok(DaemonResponse { status, body })
 }
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            daemon_health,
-            daemon_reload,
-            daemon_pii_models,
-            daemon_pii_action
-        ])
+        .invoke_handler(tauri::generate_handler![daemon_request])
         .run(tauri::generate_context!())
         .expect("error while running the Octra desktop app");
 }

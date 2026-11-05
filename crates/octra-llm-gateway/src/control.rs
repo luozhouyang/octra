@@ -2271,6 +2271,7 @@ pub struct UsageQuery {
 pub struct UsageView {
     pub totals: UsageTotals,
     pub by_model: Vec<UsageModelRow>,
+    pub by_provider: Vec<UsageProviderRow>,
     pub recent: Vec<UsageRecordView>,
 }
 
@@ -2280,6 +2281,7 @@ pub struct UsageTotals {
     pub errors: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cost_micros: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -2289,6 +2291,17 @@ pub struct UsageModelRow {
     pub errors: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cost_micros: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UsageProviderRow {
+    pub provider_id: String,
+    pub requests: i64,
+    pub errors: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_micros: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -2361,6 +2374,12 @@ async fn usage(
         .usage_summary()
         .await
         .map_err(ApiError::from_storage)?;
+    let by_provider = state
+        .storage
+        .llm
+        .usage_by_provider()
+        .await
+        .map_err(ApiError::from_storage)?;
     let recent = state
         .storage
         .llm
@@ -2373,6 +2392,7 @@ async fn usage(
             errors: totals.errors,
             input_tokens: totals.input_tokens,
             output_tokens: totals.output_tokens,
+            cost_micros: totals.cost_micros,
         },
         by_model: by_model
             .into_iter()
@@ -2382,6 +2402,18 @@ async fn usage(
                 errors: row.errors,
                 input_tokens: row.input_tokens,
                 output_tokens: row.output_tokens,
+                cost_micros: row.cost_micros,
+            })
+            .collect(),
+        by_provider: by_provider
+            .into_iter()
+            .map(|row| UsageProviderRow {
+                provider_id: row.provider_id,
+                requests: row.requests,
+                errors: row.errors,
+                input_tokens: row.input_tokens,
+                output_tokens: row.output_tokens,
+                cost_micros: row.cost_micros,
             })
             .collect(),
         recent: recent.into_iter().map(UsageRecordView::from).collect(),

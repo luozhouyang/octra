@@ -296,6 +296,17 @@ pub struct LlmUsageSummaryRow {
     pub errors: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cost_micros: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmUsageProviderRow {
+    pub provider_id: String,
+    pub requests: i64,
+    pub errors: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_micros: i64,
 }
 
 /// Snapshot of the routing configuration used by the LLM data plane.
@@ -1674,7 +1685,8 @@ impl LlmStore {
     pub async fn usage_summary(&self) -> LlmResult<Vec<LlmUsageSummaryRow>> {
         let rows = sqlx::query(
             "SELECT virtual_model_id, SUM(requests) AS requests, SUM(errors) AS errors,
-                 SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens
+                 SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                 SUM(cost_micros) AS cost_micros
              FROM llm_usage_rollup GROUP BY virtual_model_id ORDER BY requests DESC",
         )
         .fetch_all(self.pool())
@@ -1688,6 +1700,30 @@ impl LlmStore {
                 errors: row.get::<Option<i64>, _>("errors").unwrap_or(0),
                 input_tokens: row.get::<Option<i64>, _>("input_tokens").unwrap_or(0),
                 output_tokens: row.get::<Option<i64>, _>("output_tokens").unwrap_or(0),
+                cost_micros: row.get::<Option<i64>, _>("cost_micros").unwrap_or(0),
+            })
+            .collect())
+    }
+
+    pub async fn usage_by_provider(&self) -> LlmResult<Vec<LlmUsageProviderRow>> {
+        let rows = sqlx::query(
+            "SELECT provider_id, SUM(requests) AS requests, SUM(errors) AS errors,
+                 SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                 SUM(cost_micros) AS cost_micros
+             FROM llm_usage_rollup GROUP BY provider_id ORDER BY requests DESC",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(backend)?;
+        Ok(rows
+            .iter()
+            .map(|row| LlmUsageProviderRow {
+                provider_id: row.get("provider_id"),
+                requests: row.get::<Option<i64>, _>("requests").unwrap_or(0),
+                errors: row.get::<Option<i64>, _>("errors").unwrap_or(0),
+                input_tokens: row.get::<Option<i64>, _>("input_tokens").unwrap_or(0),
+                output_tokens: row.get::<Option<i64>, _>("output_tokens").unwrap_or(0),
+                cost_micros: row.get::<Option<i64>, _>("cost_micros").unwrap_or(0),
             })
             .collect())
     }
@@ -1697,7 +1733,8 @@ impl LlmStore {
             "SELECT COALESCE(SUM(requests), 0) AS requests,
                  COALESCE(SUM(errors), 0) AS errors,
                  COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                 COALESCE(SUM(output_tokens), 0) AS output_tokens
+                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                 COALESCE(SUM(cost_micros), 0) AS cost_micros
              FROM llm_usage_rollup",
         )
         .fetch_one(self.pool())
@@ -1709,6 +1746,7 @@ impl LlmStore {
             errors: row.get::<Option<i64>, _>("errors").unwrap_or(0),
             input_tokens: row.get::<Option<i64>, _>("input_tokens").unwrap_or(0),
             output_tokens: row.get::<Option<i64>, _>("output_tokens").unwrap_or(0),
+            cost_micros: row.get::<Option<i64>, _>("cost_micros").unwrap_or(0),
         })
     }
 }

@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import {
   Badge,
   Button,
@@ -22,30 +23,97 @@ import { useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
 import { StatStrip, type StatItem } from "../../components/stat-strip";
-import { routeRows, upstreamPools } from "../../lib/sample-data";
-import { toneBar, toneDot, toneText } from "../../lib/tone";
+import { controlClient } from "../../lib/control-api";
+import { formatNumber } from "../../lib/format";
+import { toneDot, toneText } from "../../lib/tone";
 
-type StatusFilter = "all" | "healthy" | "degraded";
-
-const stats: StatItem[] = [
-  { label: "Routes", value: "34", meta: "4 shadows · 2 rewrites", tone: "primary" },
-  { label: "Upstreams", value: "9", meta: "2 degraded", tone: "amber" },
-  { label: "Targets", value: "18", meta: "3 unhealthy", tone: "coral" },
-  { label: "Requests", value: "9,247", meta: "48.8% of traffic", tone: "sky" },
-];
+type StatusFilter = "all" | "enabled" | "disabled";
 
 export function GatewayPage() {
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [query, setQuery] = useState("");
 
+  const servicesQuery = useQuery({
+    queryKey: ["api-services"],
+    queryFn: () => controlClient().apiServices(),
+    retry: 1,
+  });
+  const routesQuery = useQuery({
+    queryKey: ["api-routes"],
+    queryFn: () => controlClient().apiRoutes(),
+    retry: 1,
+  });
+  const upstreamsQuery = useQuery({
+    queryKey: ["api-upstreams"],
+    queryFn: () => controlClient().upstreams(),
+    retry: 1,
+  });
+  const targetsQuery = useQuery({
+    queryKey: ["api-targets"],
+    queryFn: () => controlClient().targets(),
+    retry: 1,
+  });
+  const metricsQuery = useQuery({
+    queryKey: ["api-metrics"],
+    queryFn: () => controlClient().apiMetrics(),
+    retry: 1,
+  });
+
+  const services = servicesQuery.data?.data ?? [];
+  const routes = routesQuery.data?.data ?? [];
+  const upstreams = upstreamsQuery.data?.data ?? [];
+  const targets = targetsQuery.data?.data ?? [];
+  const metrics = metricsQuery.data;
+
+  const serviceNames = new Map(services.map((service) => [service.id, service.name] as const));
+
+  const poolStats = new Map<string, { targets: number; weight: number }>();
+  for (const target of targets) {
+    const pool = poolStats.get(target.upstream_id) ?? { targets: 0, weight: 0 };
+    pool.targets += 1;
+    pool.weight += target.weight;
+    poolStats.set(target.upstream_id, pool);
+  }
+
+  const enabledRoutes = routes.filter((route) => route.enabled).length;
+  const enabledServices = services.filter((service) => service.enabled).length;
+
+  const stats: StatItem[] = [
+    {
+      label: "Routes",
+      value: String(routes.length),
+      meta: `${enabledRoutes} enabled`,
+      tone: "primary",
+    },
+    {
+      label: "Upstreams",
+      value: String(upstreams.length),
+      meta: `${targets.length} targets`,
+      tone: "amber",
+    },
+    {
+      label: "Services",
+      value: String(services.length),
+      meta: `${enabledServices} enabled`,
+      tone: "sky",
+    },
+    {
+      label: "Requests",
+      value: formatNumber(metrics?.requests_total ?? 0),
+      meta: `avg ${(metrics?.latency_avg_ms ?? 0).toFixed(0)} ms`,
+      tone: "coral",
+    },
+  ];
+
   const needle = query.trim().toLowerCase();
-  const visibleRoutes = routeRows.filter((row) => {
-    const matchesStatus = filter === "all" || row.status.toLowerCase() === filter;
-    const matchesQuery =
-      needle.length === 0 ||
-      row.method.toLowerCase().includes(needle) ||
-      row.path.toLowerCase().includes(needle) ||
-      row.upstream.toLowerCase().includes(needle);
+  const visibleRoutes = routes.filter((route) => {
+    const serviceName = route.service_id ? serviceNames.get(route.service_id) : undefined;
+    const matchesStatus =
+      filter === "all" || (filter === "enabled" ? route.enabled : !route.enabled);
+    const haystack = [...route.methods, ...route.paths, ...route.hosts, serviceName ?? ""]
+      .join(" ")
+      .toLowerCase();
+    const matchesQuery = needle.length === 0 || haystack.includes(needle);
     return matchesStatus && matchesQuery;
   });
 
@@ -97,8 +165,8 @@ export function GatewayPage() {
                 onChange={setFilter}
                 options={[
                   { value: "all", label: "All" },
-                  { value: "healthy", label: "Healthy" },
-                  { value: "degraded", label: "Degraded" },
+                  { value: "enabled", label: "Enabled" },
+                  { value: "disabled", label: "Disabled" },
                 ]}
               />
             </div>
@@ -108,59 +176,81 @@ export function GatewayPage() {
             <TableHeader>
               <TableRow className="h-9 border-b border-border">
                 <TableHead>Route</TableHead>
-                <TableHead>Upstream</TableHead>
-                <TableHead>Targets</TableHead>
-                <TableHead>p95</TableHead>
+                <TableHead>Service</TableHead>
+                <TableHead>Hosts</TableHead>
+                <TableHead>Strip</TableHead>
                 <TableHead>Status</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {visibleRoutes.map((row) => (
-                <TableRow key={`${row.method} ${row.path}`} className="h-14">
-                  <TableCell>
-                    <div className="flex items-center gap-2">
-                      <span className="rounded bg-raised px-1.5 py-0.5 font-mono text-[9.5px] text-secondary">
-                        {row.method}
-                      </span>
-                      <span className="font-mono text-[11.5px]">{row.path}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-1.5">
-                      <span className={cn("h-[5px] w-[5px] rounded-full", toneDot[row.tone])} />
-                      <span className="font-mono text-[11px] text-secondary">{row.upstream}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <span className="font-mono text-[11px] text-muted-foreground">
-                      {row.targets}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <span className="font-mono text-[11px] text-secondary">{row.p95}</span>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-1.5">
-                      <span className={cn("h-[5px] w-[5px] rounded-full", toneDot[row.tone])} />
-                      <span className={cn("text-[11px]", toneText[row.tone])}>{row.status}</span>
-                    </div>
+              {routesQuery.isPending ? (
+                <TableRow className="h-14">
+                  <TableCell colSpan={5} className="text-center text-[11px] text-muted-foreground">
+                    Loading routes…
                   </TableCell>
                 </TableRow>
-              ))}
+              ) : routesQuery.isError ? (
+                <TableRow className="h-14">
+                  <TableCell colSpan={5} className="text-center text-[11px] text-muted-foreground">
+                    Cannot reach the control plane.{" "}
+                    <span className="text-danger">{routesQuery.error.message}</span>
+                  </TableCell>
+                </TableRow>
+              ) : visibleRoutes.length === 0 ? (
+                <TableRow className="h-14">
+                  <TableCell colSpan={5} className="text-center text-[11px] text-muted-foreground">
+                    No routes registered.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                visibleRoutes.map((route) => {
+                  const serviceName = route.service_id
+                    ? serviceNames.get(route.service_id)
+                    : undefined;
+                  const tone = route.enabled ? "primary" : "muted";
+                  return (
+                    <TableRow key={route.id} className="h-14">
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <span className="rounded bg-raised px-1.5 py-0.5 font-mono text-[9.5px] text-secondary">
+                            {route.methods[0] ?? "ANY"}
+                          </span>
+                          <span className="font-mono text-[11.5px]">{route.paths[0] ?? "*"}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <span className="font-mono text-[11px] text-secondary">
+                          {serviceName ?? "—"}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <span className="font-mono text-[11px] text-muted-foreground">
+                          {route.hosts.length > 0 ? route.hosts.join(", ") : "*"}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <span className="font-mono text-[11px] text-muted-foreground">
+                          {route.strip_path ? "yes" : "no"}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1.5">
+                          <span className={cn("h-[5px] w-[5px] rounded-full", toneDot[tone])} />
+                          <span className={cn("text-[11px]", toneText[tone])}>
+                            {route.enabled ? "Enabled" : "Disabled"}
+                          </span>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
+              )}
             </TableBody>
           </Table>
           <CardFooter>
             <span className="text-[11px] text-muted-foreground">
-              Showing {visibleRoutes.length} of 34 routes
+              Showing {visibleRoutes.length} of {routes.length} routes
             </span>
-            <div className="flex items-center gap-2">
-              <Button variant="secondary" size="sm">
-                Previous
-              </Button>
-              <Button variant="secondary" size="sm" className="bg-raised">
-                Next
-              </Button>
-            </div>
           </CardFooter>
         </Card>
 
@@ -168,33 +258,48 @@ export function GatewayPage() {
           <CardHeader>
             <div className="flex flex-col gap-1">
               <CardTitle>Upstream pools</CardTitle>
-              <CardDescription>Health checked every 10 seconds</CardDescription>
+              <CardDescription>Algorithms and pooled target weights</CardDescription>
             </div>
-            <Badge variant="accent">9 pools</Badge>
+            <Badge variant="accent">{upstreams.length} pools</Badge>
           </CardHeader>
           <CardSeparator />
           <div className="flex flex-1 flex-col gap-2.5 p-4">
-            {upstreamPools.map((pool) => (
-              <div key={pool.name} className="rounded-xl border border-border bg-surface p-3.5">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="font-mono text-xs">{pool.name}</span>
-                  <span className={cn("text-[10.5px]", toneText[pool.tone])}>{pool.status}</span>
-                </div>
-                <div className="mt-2 flex items-center justify-between gap-3 text-[10.5px]">
-                  <span className="text-muted-foreground">{pool.meta}</span>
-                  <span className="font-mono text-secondary">{pool.p95}</span>
-                </div>
-                <div className="mt-2.5 h-1 w-full overflow-hidden rounded-full bg-raised">
+            {upstreamsQuery.isPending ? (
+              <p className="text-[11px] text-muted-foreground">Loading upstreams…</p>
+            ) : upstreamsQuery.isError ? (
+              <p className="text-[11px] text-muted-foreground">
+                Cannot reach the control plane.{" "}
+                <span className="text-danger">{upstreamsQuery.error.message}</span>
+              </p>
+            ) : upstreams.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">No upstreams registered.</p>
+            ) : (
+              upstreams.map((upstream) => {
+                const pool = poolStats.get(upstream.id);
+                return (
                   <div
-                    className={cn("h-full rounded-full", toneBar[pool.tone])}
-                    style={{ width: `${pool.fill * 100}%` }}
-                  />
-                </div>
-              </div>
-            ))}
+                    key={upstream.id}
+                    className="rounded-xl border border-border bg-surface p-3.5"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-mono text-xs">{upstream.name}</span>
+                      <span className="text-[10.5px] text-muted-foreground">
+                        {upstream.algorithm}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between gap-3 text-[10.5px]">
+                      <span className="text-muted-foreground">{pool?.targets ?? 0} targets</span>
+                      <span className="font-mono text-secondary">
+                        {formatNumber(pool?.weight ?? 0)} weight
+                      </span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
           <CardFooter>
-            <span className="text-[11px] text-muted-foreground">2 degraded targets</span>
+            <span className="text-[11px] text-muted-foreground">{targets.length} targets</span>
             <Button variant="ghost" size="sm" className="-mr-2">
               Rebalance
               <ArrowRight className="h-3.5 w-3.5" />

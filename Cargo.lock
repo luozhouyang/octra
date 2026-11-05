@@ -3948,6 +3948,7 @@ name = "octra-types"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "http-body-util",
  "octra-config",
  "octra-core",
@@ -3955,6 +3956,7 @@ dependencies = [
  "octra-storage",
  "serde",
  "serde_json",
+ "sqlx",
  "subtle",
  "tokio",
  "tower",

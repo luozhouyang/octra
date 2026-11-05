@@ -11,6 +11,7 @@ import {
   Segmented,
   cn,
 } from "@octra/ui";
+import type { ControlConfig, Overview, OverviewRange } from "@octra/types";
 import {
   Activity,
   ChevronRight,
@@ -26,15 +27,14 @@ import { useState } from "react";
 import { PageHeader } from "../../components/page-header";
 import { RequestChart } from "../../components/request-chart";
 import { StatStrip } from "../../components/stat-strip";
-import { TrafficFabric } from "../../components/traffic-fabric";
-import { fetchHealth, reloadSnapshot } from "../../lib/control-api";
-import { formatRelativeTime, formatUptime, hostFromBaseUrl } from "../../lib/format";
 import {
-  chartViewFor,
-  gatewayHealth,
-  trafficFabric,
-  trafficSeriesSummary,
-} from "../../lib/sample-data";
+  TrafficFabric,
+  type FabricData,
+  type FabricDestination,
+  type FabricFlow,
+} from "../../components/traffic-fabric";
+import { controlClient, fetchHealth, reloadSnapshot } from "../../lib/control-api";
+import { formatNumber, formatRelativeTime, formatUptime, hostFromBaseUrl } from "../../lib/format";
 import { useControlSettings } from "../../lib/store";
 import { toneSoft, toneText, type Tone } from "../../lib/tone";
 
@@ -45,11 +45,22 @@ const healthIcons: Record<string, typeof Route> = {
   "Control plane": Globe,
 };
 
+const gatewayColors: Record<string, string> = {
+  api: "var(--octra-sky)",
+  llm: "var(--octra-violet)",
+  mcp: "var(--octra-amber)",
+};
+
+interface GatewayHealth {
+  name: string;
+  value: string;
+  tone: "sky" | "violet" | "amber" | "primary";
+}
+
 export function Dashboard() {
   const queryClient = useQueryClient();
   const baseUrl = useControlSettings((state) => state.baseUrl);
-  const [range, setRange] = useState<"1h" | "24h" | "7d">("24h");
-  const chart = chartViewFor(range);
+  const [range, setRange] = useState<OverviewRange>("24h");
 
   const health = useQuery({
     queryKey: ["health"],
@@ -58,9 +69,26 @@ export function Dashboard() {
     retry: 1,
   });
 
+  const overview = useQuery({
+    queryKey: ["overview", range],
+    queryFn: () => controlClient().overview(range),
+    refetchInterval: 30_000,
+    retry: 1,
+  });
+
+  const config = useQuery({
+    queryKey: ["config"],
+    queryFn: () => controlClient().config(),
+    staleTime: 60_000,
+    retry: 1,
+  });
+
   const reload = useMutation({
     mutationFn: reloadSnapshot,
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ["health"] }),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["health"] });
+      void queryClient.invalidateQueries({ queryKey: ["overview"] });
+    },
   });
 
   const data = health.data;
@@ -69,6 +97,15 @@ export function Dashboard() {
   const updatedAt = health.dataUpdatedAt
     ? formatRelativeTime(new Date(health.dataUpdatedAt).toISOString())
     : "—";
+
+  const traffic = overview.data;
+  const totals = traffic?.totals;
+  const success = totals && totals.requests > 0 ? 1 - totals.errors / totals.requests : 1;
+  const avgLatency = weightedLatency(traffic);
+  const chart = traffic ? buildChart(traffic) : emptyChart(range);
+  const fabric = traffic ? buildFabric(traffic) : null;
+  const insight = traffic ? topDestination(traffic) : null;
+  const gateways = gatewayHealth(config.data, hostFromBaseUrl(baseUrl), online);
 
   const stats = [
     {
@@ -152,18 +189,29 @@ export function Dashboard() {
               <Activity className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} />
               <CardTitle>Traffic fabric</CardTitle>
             </div>
-            <CardDescription>
-              Every request, from gateway to upstream · last 24 hours
-            </CardDescription>
+            <CardDescription>{chart.description}</CardDescription>
           </div>
           <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
-            <FabricStat label="Requests" value={trafficSeriesSummary.requests} big />
-            <FabricStat label="Success" value={trafficSeriesSummary.success} />
-            <FabricStat label="p95" value={trafficSeriesSummary.p95} />
+            <FabricStat label="Requests" value={formatNumber(totals?.requests ?? 0)} big />
+            <FabricStat label="Success" value={`${(success * 100).toFixed(1)}%`} />
+            <FabricStat
+              label="Avg latency"
+              value={avgLatency === null ? "—" : `${avgLatency} ms`}
+            />
           </div>
         </CardHeader>
         <div className="overflow-x-auto border-y border-border bg-surface px-4 py-4 sm:px-5">
-          <TrafficFabric data={trafficFabric} className="min-w-[860px]" />
+          {fabric && (totals?.requests ?? 0) > 0 ? (
+            <TrafficFabric data={fabric} className="min-w-[860px]" />
+          ) : (
+            <div className="flex h-[360px] items-center justify-center text-xs text-muted-foreground">
+              {overview.isPending
+                ? "Loading traffic…"
+                : overview.isError
+                  ? "Cannot reach the control plane."
+                  : "No traffic recorded in this window."}
+            </div>
+          )}
         </div>
         <CardFooter className="flex-wrap gap-3">
           <div className="flex items-center gap-2">
@@ -172,7 +220,9 @@ export function Dashboard() {
               Ribbon width = requests · hover a flow to inspect
             </span>
           </div>
-          <span className="ml-auto text-[11px] text-secondary">{trafficSeriesSummary.insight}</span>
+          <span className="ml-auto text-[11px] text-secondary">
+            {insight ? `${insight.label} · ${insight.share}` : "No destination data"}
+          </span>
         </CardFooter>
       </Card>
 
@@ -203,12 +253,13 @@ export function Dashboard() {
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div className="flex flex-wrap items-baseline gap-2.5">
                 <span className="font-mono text-2xl font-medium">
-                  {chart.requests}
+                  {formatNumber(totals?.requests ?? 0)}
                 </span>
                 <span className="text-[11px] text-muted-foreground">requests</span>
-                <Badge variant="accent">
-                  <span aria-hidden>↗</span>
-                  {chart.delta}
+                <Badge variant={totals && totals.errors > 0 ? "warning" : "accent"}>
+                  {totals && totals.requests > 0
+                    ? `${((totals.errors / totals.requests) * 100).toFixed(1)}% errors`
+                    : "no errors"}
                 </Badge>
               </div>
               <div className="flex items-center gap-3.5">
@@ -216,23 +267,25 @@ export function Dashboard() {
                 <Legend color="bg-coral" label="Errors" />
               </div>
             </div>
-            <RequestChart values={chart.series.values} errors={chart.series.errors} />
+            <RequestChart values={chart.values} errors={chart.errors} />
             <div className="flex justify-between font-mono text-[10.5px] text-muted-foreground">
-              {chart.labels.map((label) => (
-                <span key={label}>{label}</span>
+              {chart.labels.map((label, index) => (
+                <span key={`${label}-${index}`}>{label}</span>
               ))}
             </div>
           </div>
           <CardFooter>
             <div className="flex items-center gap-2 text-[11px]">
-              <span className="text-muted-foreground">p95</span>
-              <span className="font-mono text-secondary">38 ms</span>
+              <span className="text-muted-foreground">avg latency</span>
+              <span className="font-mono text-secondary">
+                {avgLatency === null ? "—" : `${avgLatency} ms`}
+              </span>
               <span className="text-muted-foreground">·</span>
               <span className="text-muted-foreground">error rate</span>
-              <span className="font-mono text-secondary">0.7%</span>
+              <span className="font-mono text-secondary">{(1 - success).toFixed(1)}%</span>
             </div>
             <span className="font-mono text-[11px] text-muted-foreground">
-              sampled from {chart.requests} requests
+              {formatNumber(totals?.requests ?? 0)} requests in the window
             </span>
           </CardFooter>
         </Card>
@@ -246,21 +299,25 @@ export function Dashboard() {
               </div>
               <CardDescription>Data planes and control plane</CardDescription>
             </div>
-            <Badge variant="accent">3 / 3</Badge>
+            <Badge variant="accent">{online ? "Live" : "Offline"}</Badge>
           </CardHeader>
           <CardSeparator />
           <div className="flex items-center gap-3.5 p-4 sm:p-5">
-            <Donut value={0.993} />
+            <Donut value={success} />
             <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-[15px] font-medium">99.3%</span>
-              <span className="text-[10.5px] text-muted-foreground">success over 24 hours</span>
+              <span className="font-mono text-[15px] font-medium">
+                {(success * 100).toFixed(1)}%
+              </span>
+              <span className="text-[10.5px] text-muted-foreground">
+                success in the selected window
+              </span>
             </div>
-            <Badge variant="accent" className="ml-auto">
-              Nominal
+            <Badge variant={success >= 0.99 ? "accent" : "warning"} className="ml-auto">
+              {success >= 0.99 ? "Nominal" : "Attention"}
             </Badge>
           </div>
           <ul className="flex flex-col gap-1 px-4 pb-2">
-            {gatewayHealth.map((row) => {
+            {gateways.map((row) => {
               const Icon = healthIcons[row.name] ?? Globe;
               return (
                 <li key={row.name} className="flex h-9 items-center gap-2.5">
@@ -293,6 +350,167 @@ export function Dashboard() {
       </div>
     </div>
   );
+}
+
+function buildFabric(overview: Overview): FabricData {
+  const total = overview.totals.requests || 1;
+  const gateways = [
+    { id: "api", label: "API gateway", value: overview.totals.api },
+    { id: "llm", label: "LLM gateway", value: overview.totals.llm },
+    { id: "mcp", label: "MCP gateway", value: overview.totals.mcp },
+  ].map((gateway) => ({
+    ...gateway,
+    display: formatNumber(gateway.value),
+    share: `${((gateway.value / total) * 100).toFixed(1)}%`,
+    color: gatewayColors[gateway.id] ?? "var(--octra-primary)",
+  }));
+
+  const destinations: FabricDestination[] = [];
+  const flows: FabricFlow[] = [];
+  const groups: Array<[string, Overview["destinations"]["api"]]> = [
+    ["api", overview.destinations.api],
+    ["llm", overview.destinations.llm],
+    ["mcp", overview.destinations.mcp],
+  ];
+
+  let index = 0;
+  for (const [gateway, rows] of groups) {
+    for (const row of rows) {
+      const id = `${gateway}-${index}`;
+      destinations.push({
+        id,
+        label: row.label,
+        value: row.count,
+        display: formatNumber(row.count),
+        share: `${((row.count / total) * 100).toFixed(1)}%`,
+      });
+      flows.push({ gateway, destination: id, value: row.count, lead: index === 0 });
+      index += 1;
+    }
+  }
+
+  return { gateways, destinations, flows };
+}
+
+function buildChart(overview: Overview): {
+  values: number[];
+  errors: number[];
+  labels: string[];
+  description: string;
+  requests: number;
+} {
+  const requests = overview.series.api.map(
+    (value, index) => value + (overview.series.llm[index] ?? 0) + (overview.series.mcp[index] ?? 0),
+  );
+  const requestMax = Math.max(1, ...requests);
+  const errorMax = Math.max(1, ...overview.series.errors);
+
+  return {
+    values: requests.map((value) => value / requestMax),
+    errors: overview.series.errors.map((value) => value / errorMax),
+    labels: bucketLabels(overview),
+    description: chartDescription(overview.range),
+    requests: overview.totals.requests,
+  };
+}
+
+function emptyChart(range: OverviewRange): {
+  values: number[];
+  errors: number[];
+  labels: string[];
+  description: string;
+  requests: number;
+} {
+  return {
+    values: [0, 0, 0, 0, 0, 0],
+    errors: [0, 0, 0, 0, 0, 0],
+    labels: ["", "", "", "", ""],
+    description: chartDescription(range),
+    requests: 0,
+  };
+}
+
+function chartDescription(range: OverviewRange): string {
+  const bucket = range === "1h" ? "5-minute" : range === "24h" ? "hourly" : "daily";
+  return `All gateways · last ${range} · ${bucket} buckets`;
+}
+
+function bucketLabels(overview: Overview): string[] {
+  const buckets = overview.buckets;
+  if (buckets.length === 0) {
+    return [];
+  }
+  const indexes = [
+    0,
+    Math.floor((buckets.length - 1) / 4),
+    Math.floor((buckets.length - 1) / 2),
+    Math.floor(((buckets.length - 1) * 3) / 4),
+    buckets.length - 1,
+  ];
+  return [...new Set(indexes)].map((index) => formatBucket(buckets[index]!, overview.range));
+}
+
+function formatBucket(epochSeconds: number, range: OverviewRange): string {
+  const date = new Date(epochSeconds * 1000);
+  if (range === "7d") {
+    return `${date.getMonth() + 1}/${date.getDate()}`;
+  }
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function weightedLatency(overview: Overview | undefined): number | null {
+  if (!overview) {
+    return null;
+  }
+  const weights: Array<[number | null, number]> = [
+    [overview.latency.api_avg_ms, overview.totals.api],
+    [overview.latency.llm_avg_ms, overview.totals.llm],
+    [overview.latency.mcp_avg_ms, overview.totals.mcp],
+  ];
+  let sum = 0;
+  let count = 0;
+  for (const [latency, requests] of weights) {
+    if (latency !== null && requests > 0) {
+      sum += latency * requests;
+      count += requests;
+    }
+  }
+  return count > 0 ? Math.round(sum / count) : null;
+}
+
+function topDestination(overview: Overview): { label: string; share: string } | null {
+  const rows = [
+    ...overview.destinations.api,
+    ...overview.destinations.llm,
+    ...overview.destinations.mcp,
+  ];
+  const top = rows.sort((left, right) => right.count - left.count)[0];
+  if (!top || overview.totals.requests === 0) {
+    return null;
+  }
+  return {
+    label: top.label,
+    share: `${((top.count / overview.totals.requests) * 100).toFixed(1)}% of traffic`,
+  };
+}
+
+function gatewayHealth(
+  config: ControlConfig | undefined,
+  controlHost: string,
+  online: boolean,
+): GatewayHealth[] {
+  const dataHost = normalizeBind(config?.gateway.listen_bind, "127.0.0.1:8080");
+  return [
+    { name: "API Gateway", value: `${dataHost}/api`, tone: "sky" },
+    { name: "LLM Gateway", value: `${dataHost}/llm`, tone: "violet" },
+    { name: "MCP Gateway", value: `${dataHost}/mcp`, tone: "amber" },
+    { name: "Control plane", value: online ? controlHost : "offline", tone: "primary" },
+  ];
+}
+
+function normalizeBind(bind: string | undefined, fallback: string): string {
+  const value = (bind ?? fallback).trim();
+  return value.replace(/^0\.0\.0\.0:/, "127.0.0.1:").replace(/^\[::\]:/, "127.0.0.1:");
 }
 
 function FabricStat({ label, value, big }: { label: string; value: string; big?: boolean }) {
