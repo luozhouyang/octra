@@ -68,6 +68,7 @@ tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 tokenizers = "0.21.4"
 toml = "0.8"
+toml_edit = "0.22"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "limit", "timeout"] }
 tracing = "0.1"
@@ -75,6 +76,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
+octra-agent-core = { path = "crates/octra-agent-core" }
 octra-api-core = { path = "crates/octra-api-core" }
 octra-api-gateway = { path = "crates/octra-api-gateway" }
 octra-config = { path = "crates/octra-config" }

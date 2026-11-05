@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use axum::Router;
+use octra_agent_core::{AgentControlState, control_router as agent_control_router};
 use octra_api_gateway::{
     ApiControlState, ApiDataState, ApiMetrics, AuditState, LlmWasmLifecycle, WasmControlState,
 };
@@ -279,6 +280,10 @@ async fn main() -> anyhow::Result<()> {
         .merge(octra_mcp_gateway::control_router(McpControlState::new(
             mcp_runtime.clone(),
             storage.clone(),
+        )))
+        .merge(agent_control_router(AgentControlState::new(
+            storage.clone(),
+            config.clone(),
         )))
         .layer(axum::middleware::from_fn_with_state(
             AuditState {

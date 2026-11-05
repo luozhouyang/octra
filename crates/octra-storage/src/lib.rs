@@ -1,5 +1,6 @@
 //! SQLite persistence layer. Secrets are stored as references only.
 
+pub mod agents;
 pub mod api;
 pub mod llm;
 pub mod logs;
@@ -7,6 +8,7 @@ pub mod maintenance;
 pub mod mcp;
 pub mod plugins;
 
+pub use agents::{AgentBackup, AgentProfile, AgentStore, NewAgentBackup, NewAgentProfile};
 pub use llm::{
     LlmAccountUsage, LlmModelInput, LlmModelRecord, LlmOAuthTokenRecord, LlmPiiEngineInput,
     LlmPiiEngineRecord, LlmProviderAccountInput, LlmProviderAccountRecord, LlmProviderInput,
@@ -37,6 +39,7 @@ pub struct RuntimeData {
 
 pub struct Storage {
     pool: SqlitePool,
+    pub agents: agents::AgentStore,
     pub api: api::ApiStore,
     pub llm: llm::LlmStore,
     pub mcp: mcp::McpStore,
@@ -86,6 +89,7 @@ impl Storage {
             .map_err(|err| Error::Storage(format!("cannot open sqlite: {err}")))?;
 
         Ok(Self {
+            agents: agents::AgentStore::new(pool.clone()),
             api: api::ApiStore::new(pool.clone()),
             llm: llm::LlmStore::new(pool.clone()),
             mcp: mcp::McpStore::new(pool.clone()),

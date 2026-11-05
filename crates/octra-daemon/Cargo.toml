@@ -9,6 +9,7 @@ license.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 axum.workspace = true
+octra-agent-core.workspace = true
 octra-api-gateway.workspace = true
 octra-config.workspace = true
 octra-core.workspace = true

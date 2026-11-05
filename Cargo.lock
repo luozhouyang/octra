@@ -3436,6 +3436,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "octra-agent-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "dirs 6.0.0",
+ "octra-config",
+ "octra-core",
+ "octra-storage",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml_edit 0.22.27",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "octra-api-core"
 version = "0.1.0"
 dependencies = [
@@ -3609,6 +3631,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "octra-agent-core",
  "octra-api-gateway",
  "octra-api-plugin-builtin",
  "octra-api-plugin-runtime",
