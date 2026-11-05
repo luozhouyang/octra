@@ -12,16 +12,7 @@ import {
   cn,
 } from "@octra/ui";
 import type { ControlConfig, Overview, OverviewRange } from "@octra/types";
-import {
-  Activity,
-  ChevronRight,
-  Globe,
-  Plug,
-  RefreshCw,
-  Route,
-  Sparkles,
-  Terminal,
-} from "lucide-react";
+import { Activity, Globe, Plug, RefreshCw, Route, Sparkles } from "lucide-react";
 import { useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
@@ -141,16 +132,10 @@ export function Dashboard() {
         title="Overview"
         description="Three gateways, one local runtime. Every request on this machine, from the caller that sent it to the upstream that answered."
         actions={
-          <>
-            <Button variant="secondary">
-              <Terminal className="h-3.5 w-3.5" />
-              CLI reference
-            </Button>
-            <Button onClick={() => reload.mutate()} disabled={reload.isPending}>
-              <RefreshCw className={cn("h-3.5 w-3.5", reload.isPending && "animate-spin")} />
-              Reload snapshot
-            </Button>
-          </>
+          <Button onClick={() => reload.mutate()} disabled={reload.isPending}>
+            <RefreshCw className={cn("h-3.5 w-3.5", reload.isPending && "animate-spin")} />
+            Reload snapshot
+          </Button>
         }
       />
 
@@ -341,9 +326,6 @@ export function Dashboard() {
           <CardFooter>
             <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
               Last reload <span className="font-mono text-secondary">{updatedAt}</span>
-            </span>
-            <span className="flex items-center gap-1.5 text-[11px] text-secondary">
-              View logs <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
             </span>
           </CardFooter>
         </Card>

@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Badge,
-  Button,
   Card,
   CardDescription,
   CardFooter,
@@ -11,7 +10,6 @@ import {
   Switch,
   cn,
 } from "@octra/ui";
-import { ArrowRight, BookOpen, GripVertical, Plus } from "lucide-react";
 
 import { PageHeader } from "../../components/page-header";
 import { StatStrip } from "../../components/stat-strip";
@@ -123,18 +121,6 @@ export function PluginsPage() {
         eyebrow="Control / policy"
         title="Plugins"
         description="Request hooks and policy stages evaluated in order for every call."
-        actions={
-          <>
-            <Button variant="secondary">
-              <BookOpen className="h-3.5 w-3.5" />
-              Plugin docs
-            </Button>
-            <Button>
-              <Plus className="h-3.5 w-3.5" />
-              Add plugin
-            </Button>
-          </>
-        }
       />
 
       <StatStrip items={stats} />
@@ -146,10 +132,6 @@ export function PluginsPage() {
               <CardTitle>Pipeline</CardTitle>
               <CardDescription>Sorted by priority; higher values execute first</CardDescription>
             </div>
-            <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
-              <GripVertical className="h-3.5 w-3.5" strokeWidth={1.5} />
-              Reorder
-            </span>
           </CardHeader>
           <CardSeparator />
           <ul>
@@ -279,9 +261,6 @@ export function PluginsPage() {
           <CardFooter>
             <span className="text-[11px] text-muted-foreground">
               {metricsEntries.length} configured instances · hook contract v1
-            </span>
-            <span className="flex items-center gap-1.5 text-[11px] text-secondary">
-              View logs <ArrowRight className="h-3.5 w-3.5 text-muted-foreground" />
             </span>
           </CardFooter>
         </Card>

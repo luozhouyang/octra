@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   Badge,
-  Button,
   Card,
   CardDescription,
   CardFooter,
@@ -17,7 +16,7 @@ import {
   TableRow,
   cn,
 } from "@octra/ui";
-import { Info, Plus, Server, Terminal } from "lucide-react";
+import { Info, Server } from "lucide-react";
 import { useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
@@ -145,18 +144,6 @@ export function McpPage() {
         eyebrow="Runtime / MCP"
         title="MCP Gateway"
         description="Server registrations, tool discovery and call routing for local MCP clients."
-        actions={
-          <>
-            <Button variant="secondary">
-              <Terminal className="h-3.5 w-3.5" />
-              Test call
-            </Button>
-            <Button>
-              <Plus className="h-3.5 w-3.5" />
-              Add server
-            </Button>
-          </>
-        }
       />
 
       <StatStrip items={stats} />
@@ -259,7 +246,7 @@ export function McpPage() {
           </Table>
           <div className="flex h-10 items-center justify-between bg-surface px-5">
             <span className="font-mono text-[10.5px] text-muted-foreground">Recent calls</span>
-            <span className="font-mono text-[10.5px] text-muted-foreground">live</span>
+            <span className="font-mono text-[10.5px] text-muted-foreground">latest 200</span>
           </div>
           <div className="divide-y divide-border">
             {invocationsQuery.isPending ? (

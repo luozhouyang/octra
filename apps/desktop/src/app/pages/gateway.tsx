@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   Badge,
-  Button,
   Card,
   CardDescription,
   CardFooter,
@@ -18,7 +17,7 @@ import {
   TableRow,
   cn,
 } from "@octra/ui";
-import { ArrowRight, FileCode, Plus, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
@@ -123,18 +122,6 @@ export function GatewayPage() {
         eyebrow="Runtime / API"
         title="API Gateway"
         description="Routes, upstream pools and targets served by the HTTP data plane."
-        actions={
-          <>
-            <Button variant="secondary">
-              <FileCode className="h-3.5 w-3.5" />
-              View config
-            </Button>
-            <Button>
-              <Plus className="h-3.5 w-3.5" />
-              New route
-            </Button>
-          </>
-        }
       />
 
       <StatStrip items={stats} />
@@ -300,10 +287,6 @@ export function GatewayPage() {
           </div>
           <CardFooter>
             <span className="text-[11px] text-muted-foreground">{targets.length} targets</span>
-            <Button variant="ghost" size="sm" className="-mr-2">
-              Rebalance
-              <ArrowRight className="h-3.5 w-3.5" />
-            </Button>
           </CardFooter>
         </Card>
       </div>

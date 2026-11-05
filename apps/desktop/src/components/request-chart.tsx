@@ -53,7 +53,7 @@ export function RequestChart({ values, errors, className }: RequestChartProps) {
       viewBox={`0 0 ${W} ${H}`}
       preserveAspectRatio="none"
       role="img"
-      aria-label="Request volume over the last 24 hours"
+      aria-label="Request volume over the selected window"
       className={cn("h-[170px] w-full", className)}
     >
       {[0, 42.5, 85, 127.5, 169.5].map((y) => (

@@ -2,7 +2,6 @@ import { useQuery } from "@tanstack/react-query";
 import type { LlmProvider, LlmUsage } from "@octra/types";
 import {
   Badge,
-  Button,
   Card,
   CardDescription,
   CardFooter,
@@ -17,7 +16,6 @@ import {
   TableRow,
   cn,
 } from "@octra/ui";
-import { Plus, Receipt } from "lucide-react";
 
 import { PageHeader } from "../../components/page-header";
 import { StatStrip, type StatItem } from "../../components/stat-strip";
@@ -62,18 +60,6 @@ export function LlmPage() {
         eyebrow="Runtime / LLM"
         title="LLM Gateway"
         description="Model routes, provider fallbacks and token accounting for every completion."
-        actions={
-          <>
-            <Button variant="secondary">
-              <Receipt className="h-3.5 w-3.5" />
-              Pricing table
-            </Button>
-            <Button>
-              <Plus className="h-3.5 w-3.5" />
-              New model route
-            </Button>
-          </>
-        }
       />
 
       {error ? (
