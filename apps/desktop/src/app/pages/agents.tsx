@@ -64,6 +64,11 @@ export function AgentsPage() {
     queryFn: () => controlClient().llmVirtualKeys(),
     retry: 1,
   });
+  const mode = useQuery({
+    queryKey: ["agent-mode"],
+    queryFn: () => controlClient().agentMode(),
+    retry: 1,
+  });
   const selected = useMemo(
     () => agents.data?.find((agent) => agent.id === selectedId) ?? agents.data?.[0] ?? null,
     [agents.data, selectedId],
@@ -282,6 +287,17 @@ export function AgentsPage() {
           </>
         }
       />
+
+      {mode.data?.sandbox ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber/40 bg-amber/5 px-4 py-2.5 text-[11px] text-amber">
+          <ShieldCheck className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
+          <span>
+            Sandbox mode. Agent configs are read from and written to{" "}
+            <span className="font-mono">{mode.data.home}</span>; your real agent files are
+            untouched.
+          </span>
+        </div>
+      ) : null}
 
       <StatStrip items={stats} />
 

@@ -35,8 +35,10 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+http-body-util.workspace = true
 octra-llm-core.workspace = true
 tempfile = "3"
+tower.workspace = true
 
 [lints]
 workspace = true

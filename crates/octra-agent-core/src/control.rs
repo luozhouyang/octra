@@ -39,11 +39,12 @@ pub struct AgentControlState {
 
 impl AgentControlState {
     pub fn new(storage: Arc<Storage>, config: Arc<OctraConfig>) -> Self {
+        let context = AgentContext::from_config(&config);
         Self {
             storage,
             config,
             registry: AgentRegistry::builtin(),
-            context: AgentContext::from_env(),
+            context,
             apply_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -78,6 +79,7 @@ impl AgentControlState {
 pub fn control_router(state: AgentControlState) -> Router {
     Router::new()
         .route("/api/v1/agents", get(list_agents))
+        .route("/api/v1/agents/mode", get(get_mode))
         .route("/api/v1/agents/{id}", get(get_agent))
         .route("/api/v1/agents/{id}/config", get(get_config))
         .route(
@@ -108,6 +110,13 @@ pub struct AgentView {
     pub profile: Option<AgentProfile>,
     pub last_backup: Option<AgentBackup>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentMode {
+    pub sandbox: bool,
+    pub home: String,
+    pub config_dir: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,6 +196,14 @@ async fn list_agents(State(state): State<AgentControlState>) -> ApiResult<Json<V
         agents.push(build_view(&state, adapter.as_ref()).await?);
     }
     Ok(Json(agents))
+}
+
+async fn get_mode(State(state): State<AgentControlState>) -> Json<AgentMode> {
+    Json(AgentMode {
+        sandbox: state.context.sandbox,
+        home: state.context.home.display().to_string(),
+        config_dir: state.context.config_dir.display().to_string(),
+    })
 }
 
 async fn get_agent(

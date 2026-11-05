@@ -18,7 +18,7 @@ pub use adapter::{
     AgentAdapter, AgentContext, ApplyProfile, ConfigChange, ConfigField, ConfigView, Detection,
     RenderedConfig,
 };
-pub use control::{AgentControlState, control_router};
+pub use control::{AgentControlState, AgentMode, control_router};
 pub use error::{AgentError, AgentResult};
 pub use octra_storage::agents::{AgentBackup, AgentProfile, NewAgentBackup, NewAgentProfile};
 

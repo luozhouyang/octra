@@ -2,6 +2,7 @@ import type {
   AgentApplied,
   AgentBackup,
   AgentConfigView,
+  AgentMode,
   AgentPreview,
   AgentProfile,
   AgentProfileInput,
@@ -238,6 +239,10 @@ export class ControlApiClient {
 
   agents(signal?: AbortSignal): Promise<AgentView[]> {
     return this.request<AgentView[]>("/api/v1/agents", { signal });
+  }
+
+  agentMode(signal?: AbortSignal): Promise<AgentMode> {
+    return this.request<AgentMode>("/api/v1/agents/mode", { signal });
   }
 
   agent(id: string, signal?: AbortSignal): Promise<AgentView> {

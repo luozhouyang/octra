@@ -94,6 +94,21 @@ pnpm cli keys create --name claude-code --consumer <consumer-id> \
 模板、限流响应头和轮转流程见
 [examples/agents/README.md](./examples/agents/README.md)。
 
+### 在不改动真实配置的情况下测试
+
+启动 Daemon 前配置沙箱：
+
+```toml
+[agents]
+sandbox_home = "/tmp/octra-agent-sandbox"
+sandbox_path = "/tmp/octra-agent-bin"
+```
+
+`sandbox_home` 会替代真实用户 Home 用于探测、读取和写入；`sandbox_path`
+用于查找 `claude`、`codex`、`opencode`，放几个假的可执行文件即可，省略时使用
+真实 `PATH`。控制面通过 `GET /api/v1/agents/mode` 返回当前模式，Agents 页面会
+显示沙箱横幅；预览操作始终只读。
+
 ## 当前已实现
 
 - 独立 Daemon，两个监听端口，统一优雅关闭。

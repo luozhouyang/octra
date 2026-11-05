@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use octra_config::OctraConfig;
 use serde::Serialize;
 
 use crate::AgentError;
@@ -20,6 +21,9 @@ pub struct AgentContext {
     pub home: PathBuf,
     pub config_dir: PathBuf,
     pub path_var: std::ffi::OsString,
+    /// True when the context points at a synthetic home instead of the real
+    /// user home.
+    pub sandbox: bool,
 }
 
 impl AgentContext {
@@ -31,6 +35,7 @@ impl AgentContext {
             home,
             config_dir,
             path_var,
+            sandbox: false,
         }
     }
 
@@ -42,6 +47,41 @@ impl AgentContext {
             home,
             config_dir,
             path_var: std::env::var_os("PATH").unwrap_or_default(),
+            sandbox: true,
+        }
+    }
+
+    /// Uses `[agents].sandbox_home` when configured, otherwise the real home.
+    ///
+    /// Sandbox mode is explicit: a daemon started without it can only touch
+    /// the user's real agent files, which keeps the default behavior obvious.
+    pub fn from_config(config: &OctraConfig) -> Self {
+        let Some(home) = config
+            .agents
+            .sandbox_home
+            .as_deref()
+            .map(str::trim)
+            .filter(|home| !home.is_empty())
+        else {
+            return Self::from_env();
+        };
+
+        let home = PathBuf::from(home);
+        let config_dir = home.join(".config");
+        let path_var = config
+            .agents
+            .sandbox_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+
+        Self {
+            home,
+            config_dir,
+            path_var,
+            sandbox: true,
         }
     }
 }

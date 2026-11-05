@@ -93,6 +93,22 @@ an agent. See [examples/agents/README.md](./examples/agents/README.md) for the
 control-plane setup, Claude Code / Codex / OpenCode templates, rate-limit
 headers, and key rotation.
 
+### Testing without touching real configs
+
+Start the daemon with a sandbox before opening the Agents page:
+
+```toml
+[agents]
+sandbox_home = "/tmp/octra-agent-sandbox"
+sandbox_path = "/tmp/octra-agent-bin"
+```
+
+`sandbox_home` replaces the real user home for detection, reads and writes.
+`sandbox_path` is searched for `claude`, `codex` and `opencode`; fake
+executables are enough. When it is omitted, the real `PATH` is used. The
+control API reports the mode at `GET /api/v1/agents/mode`, the Agents page
+shows a sandbox banner, and preview never writes anything.
+
 ## Implemented today
 
 - Standalone daemon with two listeners and unified graceful shutdown.

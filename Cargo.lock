@@ -3631,6 +3631,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "http-body-util",
  "octra-agent-core",
  "octra-api-gateway",
  "octra-api-plugin-builtin",
@@ -3655,6 +3656,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
  "uuid",
 ]

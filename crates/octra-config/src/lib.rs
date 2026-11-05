@@ -18,6 +18,7 @@ pub struct OctraConfig {
     pub gateway: GatewayConfig,
     pub llm: LlmConfig,
     pub mcp: McpConfig,
+    pub agents: AgentsConfig,
     pub storage: StorageConfig,
     pub logging: LoggingConfig,
     pub plugins: PluginsConfig,
@@ -65,6 +66,17 @@ pub struct LlmConfig {
 pub struct McpConfig {
     pub request_timeout_secs: u64,
     pub tool_call_timeout_secs: u64,
+}
+
+/// Local agent discovery and configuration hosting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// When set, discovery and config writes use this directory as the
+    /// synthetic home instead of the real user home. Intended for testing.
+    pub sandbox_home: Option<String>,
+    /// Optional PATH used for binary detection in sandbox mode.
+    pub sandbox_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

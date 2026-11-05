@@ -534,6 +534,12 @@ export interface AgentView {
   warnings: string[];
 }
 
+export interface AgentMode {
+  sandbox: boolean;
+  home: string;
+  config_dir: string;
+}
+
 export interface AgentConfigChange {
   field: string;
   before: string | null;
