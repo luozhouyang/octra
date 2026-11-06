@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod api;
+pub mod events;
 pub mod llm;
 pub mod logs;
 pub mod maintenance;
@@ -9,6 +10,7 @@ pub mod mcp;
 pub mod plugins;
 
 pub use agents::{AgentBackup, AgentProfile, AgentStore, NewAgentBackup, NewAgentProfile};
+pub use events::{EventDeliveryRecord, EventRecord, JobRecord, NewEvent, NewJob};
 pub use llm::{
     LlmAccountUsage, LlmModelInput, LlmModelRecord, LlmOAuthTokenRecord, LlmPiiEngineInput,
     LlmPiiEngineRecord, LlmProviderAccountInput, LlmProviderAccountRecord, LlmProviderInput,

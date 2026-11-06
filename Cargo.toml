@@ -32,6 +32,7 @@ base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
+cron = "0.17"
 dirs = "6"
 futures-util = "0.3"
 hex = "0.4"
@@ -100,4 +101,5 @@ octra-api-plugin-builtin = { path = "crates/octra-api-plugin-builtin" }
 octra-api-plugin-runtime = { path = "crates/octra-api-plugin-runtime" }
 octra-api-plugin-wasm = { path = "crates/octra-api-plugin-wasm" }
 octra-plugin-storage = { path = "crates/octra-plugin-storage" }
+octra-plugin-events = { path = "crates/octra-plugin-events" }
 octra-storage = { path = "crates/octra-storage" }

@@ -1,5 +1,5 @@
 {
-  "api_version": "1",
+  "api_version": "2",
   "name": "llm-demo",
   "version": "1.0.0",
   "kind": "llm",

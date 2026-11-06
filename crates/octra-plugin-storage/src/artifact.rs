@@ -126,10 +126,11 @@ fn validate_manifest(
 ) -> Result<(), PluginStorageError> {
     validate_plugin_name(&manifest.name)?;
     validate_version(&manifest.version)?;
-    if manifest.api_version != "1" {
+    if manifest.api_version != octra_api_plugin_types::API_PLUGIN_API_VERSION {
         return Err(PluginStorageError::InvalidManifest(format!(
-            "unsupported api_version '{}'",
-            manifest.api_version
+            "unsupported api_version '{}' (expected '{}')",
+            manifest.api_version,
+            octra_api_plugin_types::API_PLUGIN_API_VERSION
         )));
     }
     if manifest.kind != kind {
@@ -152,10 +153,13 @@ fn validate_manifest(
     if kind == PluginKind::Llm
         && (!manifest.entities.is_empty()
             || !manifest.migrations.is_empty()
-            || !manifest.admin_routes.is_empty())
+            || !manifest.admin_routes.is_empty()
+            || !manifest.subscriptions.is_empty()
+            || !manifest.jobs.is_empty())
     {
         return Err(PluginStorageError::InvalidManifest(
-            "LLM wasm plugins do not support entities, migrations or admin routes yet".to_string(),
+            "LLM wasm plugins do not support entities, migrations, admin routes, events or jobs yet"
+                .to_string(),
         ));
     }
     for spec in &manifest.entities {
@@ -165,6 +169,80 @@ fn validate_manifest(
         validate_migration_path(&migration.file)?;
     }
     validate_admin_routes(manifest)?;
+    validate_subscriptions(manifest)?;
+    validate_jobs(manifest)?;
+    Ok(())
+}
+
+fn validate_subscriptions(manifest: &PluginManifest) -> Result<(), PluginStorageError> {
+    let declares = manifest.capabilities.contains(&Capability::Events);
+    if manifest.subscriptions.is_empty() {
+        if declares {
+            return Err(PluginStorageError::InvalidManifest(
+                "the events capability requires at least one subscription".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    if !declares {
+        return Err(PluginStorageError::InvalidManifest(
+            "subscriptions require the events capability".to_string(),
+        ));
+    }
+    if manifest.subscriptions.len() > octra_api_plugin_types::MAX_SUBSCRIPTIONS {
+        return Err(PluginStorageError::InvalidManifest(format!(
+            "a plugin may declare at most {} subscriptions",
+            octra_api_plugin_types::MAX_SUBSCRIPTIONS
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for subscription in &manifest.subscriptions {
+        octra_api_plugin_types::validate_topic_pattern(&subscription.topic)
+            .map_err(PluginStorageError::InvalidManifest)?;
+        if !seen.insert(subscription.topic.as_str()) {
+            return Err(PluginStorageError::InvalidManifest(format!(
+                "duplicate subscription topic '{}'",
+                subscription.topic
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_jobs(manifest: &PluginManifest) -> Result<(), PluginStorageError> {
+    let declares = manifest.capabilities.contains(&Capability::Jobs);
+    if manifest.jobs.is_empty() {
+        if declares {
+            return Err(PluginStorageError::InvalidManifest(
+                "the jobs capability requires at least one job".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    if !declares {
+        return Err(PluginStorageError::InvalidManifest(
+            "jobs require the jobs capability".to_string(),
+        ));
+    }
+    if manifest.jobs.len() > octra_api_plugin_types::MAX_SCHEDULED_JOBS {
+        return Err(PluginStorageError::InvalidManifest(format!(
+            "a plugin may declare at most {} scheduled jobs",
+            octra_api_plugin_types::MAX_SCHEDULED_JOBS
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for job in &manifest.jobs {
+        octra_api_plugin_types::validate_job_name(&job.name)
+            .map_err(PluginStorageError::InvalidManifest)?;
+        octra_api_plugin_types::parse_schedule(&job.schedule)
+            .map_err(PluginStorageError::InvalidManifest)?;
+        if !seen.insert(job.name.as_str()) {
+            return Err(PluginStorageError::InvalidManifest(format!(
+                "duplicate job name '{}'",
+                job.name
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -265,7 +343,7 @@ mod tests {
     fn manifest(migrations: &str) -> String {
         format!(
             r#"{{
-                "api_version": "1",
+                "api_version": "2",
                 "name": "demo-plugin",
                 "version": "1.0.0",
                 "kind": "api",
@@ -296,7 +374,7 @@ mod tests {
     fn accepts_llm_artifacts_only_for_the_llm_kind() {
         let dir = tempfile::tempdir().unwrap();
         let llm = r#"{
-            "api_version": "1",
+            "api_version": "2",
             "name": "llm-demo",
             "version": "1.0.0",
             "kind": "llm",
@@ -315,7 +393,7 @@ mod tests {
     fn llm_artifacts_reject_api_store_features() {
         let dir = tempfile::tempdir().unwrap();
         let llm = r#"{
-            "api_version": "1",
+            "api_version": "2",
             "name": "llm-demo",
             "version": "1.0.0",
             "kind": "llm",
@@ -356,7 +434,7 @@ mod tests {
     fn capability_manifest(capabilities: &str) -> String {
         format!(
             r#"{{
-                "api_version": "1",
+                "api_version": "2",
                 "name": "demo-plugin",
                 "version": "1.0.0",
                 "kind": "api",
@@ -397,7 +475,7 @@ mod tests {
     fn admin_manifest(capabilities: &str, routes: &str) -> String {
         format!(
             r#"{{
-                "api_version": "1",
+                "api_version": "2",
                 "name": "demo-plugin",
                 "version": "1.0.0",
                 "kind": "api",

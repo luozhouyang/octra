@@ -18,6 +18,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+mod services;
+
+pub use services::{
+    API_PLUGIN_API_VERSION, EventPublisher, EventSubscriber, GatewayEvent, JobInvocation,
+    MAX_JOB_NAME_LEN, MAX_SCHEDULED_JOBS, MAX_SUBSCRIPTIONS, MAX_TOPIC_LEN, PluginServiceSource,
+    ScheduledJob, ScheduledJobSpec, SubscriptionSpec, next_run_after, next_run_from_now,
+    parse_schedule, topic_matches, validate_job_name, validate_topic_pattern,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {
@@ -133,6 +142,8 @@ pub enum Capability {
     StorageEntities,
     Auth,
     AdminApi,
+    Events,
+    Jobs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +264,12 @@ pub struct PluginManifest {
     /// `/admin/plugins/{name}/api` and require the `admin_api` capability.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub admin_routes: Vec<AdminRouteSpec>,
+    /// Event topics the plugin consumes. Requires the `events` capability.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscriptions: Vec<SubscriptionSpec>,
+    /// Cron jobs the host runs for the plugin. Requires the `jobs` capability.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<ScheduledJobSpec>,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -260,7 +277,7 @@ fn default_timeout_ms() -> u64 {
 }
 
 fn default_api_version() -> String {
-    "1".to_string()
+    API_PLUGIN_API_VERSION.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -678,6 +695,18 @@ pub trait ApiGatewayPlugin: Send + Sync {
     }
 
     async fn on_log(&self, _cx: &LogContext<'_>) {}
+
+    /// Handles an event this plugin subscribed to. Errors are retried by the
+    /// event bus according to its retry policy.
+    async fn on_event(&self, _event: &GatewayEvent) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    /// Runs one scheduled job. Errors are recorded on the job row; the next
+    /// cron occurrence still runs.
+    async fn on_job(&self, _job: &JobInvocation) -> Result<(), PluginError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

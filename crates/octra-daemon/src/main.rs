@@ -234,6 +234,11 @@ async fn main() -> anyhow::Result<()> {
         token::load_or_create(&workspace.token_file()).context("cannot prepare control token")?;
     let token = Arc::new(token);
 
+    let event_bus = Arc::new(octra_plugin_events::EventBus::new(
+        storage.clone(),
+        plugin_runtime.clone(),
+    ));
+
     let app_state = AppState {
         runtime: api_runtime.clone(),
         storage: storage.clone(),
@@ -268,6 +273,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(lifecycle) = llm_wasm_lifecycle {
         api_control = api_control.with_llm_wasm_lifecycle(lifecycle);
     }
+    api_control = api_control.with_events(event_bus.clone());
 
     let control_app = Router::new()
         .merge(octra_types::core_router(app_state))
@@ -285,6 +291,9 @@ async fn main() -> anyhow::Result<()> {
             storage.clone(),
             config.clone(),
         )))
+        .merge(octra_plugin_events::control_router(
+            octra_plugin_events::EventControlState::new(event_bus.clone()),
+        ))
         .layer(axum::middleware::from_fn_with_state(
             AuditState {
                 storage: storage.clone(),
@@ -309,7 +318,8 @@ async fn main() -> anyhow::Result<()> {
         )))
         .merge(octra_api_gateway::data_plane_router(
             ApiDataState::with_plugins(api_runtime, config.clone(), api_metrics, plugin_runtime)
-                .with_storage(storage.clone()),
+                .with_storage(storage.clone())
+                .with_events(event_bus.clone()),
         ));
 
     let control_listener = tokio::net::TcpListener::bind(&config.daemon.control_bind)
@@ -341,6 +351,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let shutdown = CancellationToken::new();
+    event_bus.start(shutdown.clone());
     tokio::spawn(shutdown_signal(shutdown.clone()));
     tokio::spawn(health_check_loop(health_runtime, shutdown.clone()));
     if config.storage.retention.enabled {

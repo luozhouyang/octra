@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use octra_api_plugin_runtime::PluginRuntime;
-use octra_api_plugin_types::PluginManifest;
+use octra_api_plugin_types::{EventPublisher, PluginManifest};
 use octra_api_plugin_wasm::{WasmEngine, WasmHostProvider, WasmPluginCatalog};
 use octra_config::OctraConfig;
 use octra_plugin_storage::PluginStorageRoot;
@@ -41,6 +41,7 @@ pub struct ApiDataState {
     pub client: reqwest::Client,
     pub client_ip: Arc<ClientIpResolver>,
     pub metrics: Arc<ApiMetrics>,
+    pub events: Option<Arc<dyn EventPublisher>>,
 }
 
 impl ApiDataState {
@@ -72,7 +73,15 @@ impl ApiDataState {
             client,
             client_ip,
             metrics,
+            events: None,
         }
+    }
+
+    /// Publishes gateway lifecycle events. Without this the data plane keeps
+    /// its existing logging only.
+    pub fn with_events(mut self, events: Arc<dyn EventPublisher>) -> Self {
+        self.events = Some(events);
+        self
     }
 
     /// Records access logs to storage. Without this the data plane keeps its
@@ -114,6 +123,7 @@ pub struct ApiControlState {
     /// Optional lifecycle hook for installing LLM WASM artifacts. The daemon
     /// owns the LLM registry and runtime, keeping this crate independent of it.
     pub llm_wasm: Option<Arc<dyn LlmWasmLifecycle>>,
+    pub events: Option<Arc<dyn EventPublisher>>,
 }
 
 /// Dynamic lifecycle operations the API installer delegates to the LLM
@@ -169,7 +179,13 @@ impl ApiControlState {
             wasm: None,
             reload_hook: None,
             llm_wasm: None,
+            events: None,
         }
+    }
+
+    pub fn with_events(mut self, events: Arc<dyn EventPublisher>) -> Self {
+        self.events = Some(events);
+        self
     }
 
     pub fn with_wasm(mut self, wasm: Arc<WasmControlState>) -> Self {

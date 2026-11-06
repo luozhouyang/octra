@@ -30,6 +30,7 @@ use octra_runtime::{
     strip_matched_prefix,
 };
 use octra_storage::NewRequestLog;
+use serde_json::json;
 
 use crate::ApiDataState;
 
@@ -92,6 +93,21 @@ pub async fn proxy(
                 consumer_id: None,
                 error: None,
             },
+        );
+        publish_request_event(
+            &state,
+            json!({
+                "request_id": request_id,
+                "method": method.as_str(),
+                "path": path,
+                "status": response.status().as_u16(),
+                "latency_ms": elapsed.as_millis() as u64,
+                "route_id": null,
+                "service_id": null,
+                "target_url": null,
+                "consumer_id": null,
+                "error": null,
+            }),
         );
         return with_request_id(response, &request_id);
     };
@@ -993,7 +1009,29 @@ async fn complete(
         },
     );
 
+    publish_request_event(
+        state,
+        json!({
+            "request_id": request_id,
+            "method": method.as_str(),
+            "path": path,
+            "status": status,
+            "latency_ms": finish.latency.as_millis() as u64,
+            "route_id": route.id.clone(),
+            "service_id": (!service.id.is_empty()).then(|| service.id.clone()),
+            "target_url": finish.target.clone(),
+            "consumer_id": consumer.clone(),
+            "error": finish.error.clone(),
+        }),
+    );
+
     with_request_id(response, request_id)
+}
+
+fn publish_request_event(state: &ApiDataState, payload: serde_json::Value) {
+    if let Some(events) = &state.events {
+        events.publish("api.request.completed", "api-gateway", payload);
+    }
 }
 
 fn persist_request_log(state: &ApiDataState, log: NewRequestLog) {

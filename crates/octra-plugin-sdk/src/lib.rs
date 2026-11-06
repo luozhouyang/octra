@@ -39,6 +39,25 @@ pub enum LogLevel {
     Error,
 }
 
+/// An event delivered because the plugin declared a matching subscription.
+#[derive(Debug, Clone)]
+pub struct Event {
+    pub id: String,
+    pub topic: String,
+    pub source: String,
+    pub timestamp: i64,
+    pub payload: Value,
+}
+
+/// One scheduled job invocation.
+#[derive(Debug, Clone)]
+pub struct Job {
+    pub id: String,
+    pub name: String,
+    pub scheduled_for: i64,
+    pub attempt: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     Config,
@@ -59,7 +78,6 @@ impl Error {
             message: message.into(),
         }
     }
-
     pub fn storage(message: impl Into<String>) -> Self {
         Self {
             kind: ErrorKind::Storage,
@@ -870,6 +888,14 @@ pub trait ApiPlugin: Sized + Send + 'static {
     }
 
     fn on_log(&self, _entry: &LogEntry) {}
+
+    fn on_event(&self, _event: &Event) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn on_job(&self, _job: &Job) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// Implements the component exports for `$plugin`.
@@ -1003,6 +1029,47 @@ macro_rules! export_plugin {
                     .map_err(|_| "plugin state lock poisoned".to_string())?;
                 *state = ::std::option::Option::Some(plugin);
                 ::std::result::Result::Ok(())
+            }
+
+            fn on_event(
+                event: $bindings::octra::api_plugin::types::Event,
+            ) -> ::std::result::Result<(), ::std::string::String> {
+                let payload = $crate::__serde_json::from_str(&event.payload_json)
+                    .map_err(|error| ::std::format!("invalid event payload: {error}"))?;
+                let event = $crate::Event {
+                    id: event.id,
+                    topic: event.topic,
+                    source: event.source,
+                    timestamp: event.timestamp,
+                    payload,
+                };
+                let state = __OCTRA_PLUGIN_STATE
+                    .lock()
+                    .map_err(|_| "plugin state lock poisoned".to_string())?;
+                let plugin = state
+                    .as_ref()
+                    .ok_or_else(|| "plugin is not configured".to_string())?;
+                <$plugin as $crate::ApiPlugin>::on_event(plugin, &event)
+                    .map_err(|error| error.to_string())
+            }
+
+            fn on_job(
+                job: $bindings::octra::api_plugin::types::Job,
+            ) -> ::std::result::Result<(), ::std::string::String> {
+                let job = $crate::Job {
+                    id: job.id,
+                    name: job.name,
+                    scheduled_for: job.scheduled_for,
+                    attempt: job.attempt,
+                };
+                let state = __OCTRA_PLUGIN_STATE
+                    .lock()
+                    .map_err(|_| "plugin state lock poisoned".to_string())?;
+                let plugin = state
+                    .as_ref()
+                    .ok_or_else(|| "plugin is not configured".to_string())?;
+                <$plugin as $crate::ApiPlugin>::on_job(plugin, &job)
+                    .map_err(|error| error.to_string())
             }
 
             fn on_admin_request(

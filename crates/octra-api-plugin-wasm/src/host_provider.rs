@@ -262,7 +262,7 @@ mod tests {
             phases: Vec::new(),
             capabilities: vec![Capability::StorageEntities],
             config_schema: None,
-            api_version: "1".to_string(),
+            api_version: "2".to_string(),
             entities: vec![EntitySpec {
                 name: "demo".to_string(),
                 primary_key: vec!["id".to_string()],
@@ -275,6 +275,8 @@ mod tests {
             }],
             migrations: Vec::new(),
             admin_routes: Vec::new(),
+            subscriptions: Vec::new(),
+            jobs: Vec::new(),
         }
     }
 

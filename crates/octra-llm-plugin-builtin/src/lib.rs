@@ -65,10 +65,12 @@ pub(crate) fn manifest(name: &str, description: &str) -> PluginManifest {
         phases: Vec::new(),
         capabilities: vec![Capability::RequestBody],
         config_schema: None,
-        api_version: "1".to_string(),
+        api_version: "2".to_string(),
         entities: Vec::new(),
         migrations: Vec::new(),
         admin_routes: Vec::new(),
+        subscriptions: Vec::new(),
+        jobs: Vec::new(),
     }
 }
 

@@ -670,10 +670,12 @@ mod tests {
             phases: Vec::new(),
             capabilities: Vec::new(),
             config_schema: None,
-            api_version: "1".into(),
+            api_version: "2".into(),
             entities: Vec::new(),
             migrations: Vec::new(),
             admin_routes: Vec::new(),
+            subscriptions: Vec::new(),
+            jobs: Vec::new(),
         };
         assert_eq!(
             phases(&manifest),

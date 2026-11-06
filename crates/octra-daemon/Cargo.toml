@@ -26,6 +26,7 @@ octra-api-plugin-builtin.workspace = true
 octra-api-plugin-runtime.workspace = true
 octra-api-plugin-types.workspace = true
 octra-api-plugin-wasm.workspace = true
+octra-plugin-events.workspace = true
 octra-plugin-storage.workspace = true
 octra-storage.workspace = true
 serde_json.workspace = true

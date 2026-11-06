@@ -15,7 +15,7 @@ use octra_api_plugin_types::{
 };
 use octra_api_plugin_wasm::{InstalledWasmPlugin, PluginStatsSnapshot, WasmPluginFactory};
 use octra_plugin_storage::{copy_artifact_for_kind, validate_artifact_dir_any};
-use octra_storage::{PluginArtifactInput, PluginArtifactRecord};
+use octra_storage::{PluginArtifactInput, PluginArtifactRecord, PluginRecord};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -229,6 +229,7 @@ pub async fn install(
                 "cannot activate LLM plugin: {error}"
             )));
         }
+        publish_plugin_event(&state, "plugin.installed", &record);
         return Ok((
             StatusCode::CREATED,
             Json(json!({ "plugin": to_value(&record)?, "migrations": [] })),
@@ -299,6 +300,7 @@ pub async fn install(
         }
     };
 
+    publish_plugin_event(&state, "plugin.installed", &record);
     Ok((
         StatusCode::CREATED,
         Json(json!({ "plugin": to_value(&record)?, "migrations": report })),
@@ -381,6 +383,7 @@ pub async fn upgrade(
                 "cannot activate LLM plugin: {error}"
             )));
         }
+        publish_plugin_event(&state, "plugin.upgraded", &record);
         return Ok(Json(
             json!({ "plugin": to_value(&record)?, "migrations": [] }),
         ));
@@ -457,6 +460,7 @@ pub async fn upgrade(
             .remove_component(previous_hash.as_deref().unwrap_or_default());
     }
 
+    publish_plugin_event(&state, "plugin.upgraded", &record);
     Ok(Json(
         json!({ "plugin": to_value(&record)?, "migrations": report }),
     ))
@@ -495,6 +499,7 @@ pub async fn uninstall(
             }
             return Err(AdminError::internal(error.to_string()));
         }
+        publish_plugin_event(&state, "plugin.uninstalled", &record);
         return Ok(Json(json!({
             "name": name,
             "uninstalled": true,
@@ -527,6 +532,7 @@ pub async fn uninstall(
         wasm.engine.remove_component(hash);
     }
 
+    publish_plugin_event(&state, "plugin.uninstalled", &record);
     Ok(Json(json!({
         "name": name,
         "uninstalled": true,
@@ -826,6 +832,22 @@ fn plugin_error(error: PluginError) -> AdminError {
     AdminError::schema(error.message)
 }
 
+fn publish_plugin_event(state: &ApiControlState, topic: &str, record: &PluginRecord) {
+    if let Some(events) = &state.events {
+        events.publish(
+            topic,
+            "plugin-lifecycle",
+            json!({
+                "name": record.name,
+                "version": record.version,
+                "kind": record.kind,
+                "source": record.source,
+                "runtime": record.runtime_type,
+            }),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,7 +949,7 @@ mod tests {
         std::fs::write(
             dir.join("plugin.json"),
             json!({
-                "api_version": "1",
+                "api_version": "2",
                 "name": name,
                 "version": version,
                 "kind": "api",

@@ -8,9 +8,9 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use octra_api_plugin_types::{
     ApiGatewayPlugin, BodyContext, Capability, ConsumerInfo, CredentialInfo, ErrorContext,
-    GatewayState, LogContext, PluginAction, PluginError, PluginHost, PluginManifest, PluginResult,
-    RequestBodyContext, RequestContext, ResponseBodyContext, ResponseContext,
-    UpstreamRequestContext,
+    GatewayEvent, GatewayState, JobInvocation, LogContext, PluginAction, PluginError, PluginHost,
+    PluginManifest, PluginResult, RequestBodyContext, RequestContext, ResponseBodyContext,
+    ResponseContext, UpstreamRequestContext,
 };
 use parking_lot::Mutex;
 use tokio::task::spawn_blocking;
@@ -438,6 +438,29 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
             }
         }
     }
+
+    async fn on_event(&self, event: &GatewayEvent) -> Result<(), PluginError> {
+        let event = wit::Event {
+            id: event.id.clone(),
+            topic: event.topic.clone(),
+            source: event.source.clone(),
+            timestamp: event.timestamp,
+            payload_json: event.payload.to_string(),
+        };
+        self.dispatch(move |inner| inner.call_event(event).map(|()| ((), Outcome::Continue)))
+            .await
+    }
+
+    async fn on_job(&self, job: &JobInvocation) -> Result<(), PluginError> {
+        let job = wit::Job {
+            id: job.id.clone(),
+            name: job.name.clone(),
+            scheduled_for: job.scheduled_for,
+            attempt: job.attempt,
+        };
+        self.dispatch(move |inner| inner.call_job(job).map(|()| ((), Outcome::Continue)))
+            .await
+    }
 }
 
 impl WasmPluginInner {
@@ -666,6 +689,23 @@ impl WasmPluginInner {
                 Err(WasmCallError::Trap(error.to_string()))
             }
         }
+    }
+    fn call_event(&self, event: wit::Event) -> Result<(), WasmCallError> {
+        let id = event.id.clone();
+        self.invoke(&id, |store, bindings| {
+            bindings
+                .octra_api_plugin_plugin_api()
+                .call_on_event(store, &event)
+        })
+    }
+
+    fn call_job(&self, job: wit::Job) -> Result<(), WasmCallError> {
+        let id = job.id.clone();
+        self.invoke(&id, |store, bindings| {
+            bindings
+                .octra_api_plugin_plugin_api()
+                .call_on_job(store, &job)
+        })
     }
 }
 

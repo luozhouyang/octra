@@ -1,6 +1,6 @@
 // ABI contract for third-party API Gateway plugins.
 
-package octra:api-plugin@1.0.0;
+package octra:api-plugin@2.0.0;
 
 interface types {
     enum log-level {
@@ -148,6 +148,24 @@ interface types {
         headers: list<tuple<string, string>>,
         body: list<u8>,
     }
+
+    /// One event delivered to a subscription. Payloads are content-free by
+    /// convention; the host never includes credentials or request bodies.
+    record event {
+        id: string,
+        topic: string,
+        source: string,
+        timestamp: s64,
+        payload-json: string,
+    }
+
+    /// One scheduled job invocation.
+    record job {
+        id: string,
+        name: string,
+        scheduled-for: s64,
+        attempt: u32,
+    }
 }
 
 interface host {
@@ -199,10 +217,14 @@ interface plugin-api {
         error-action,
         admin-request,
         admin-response,
+        event,
+        job,
     };
 
     configure: func(config-json: string) -> result<_, string>;
     on-admin-request: func(req: admin-request) -> result<admin-response, string>;
+    on-event: func(event: event) -> result<_, string>;
+    on-job: func(job: job) -> result<_, string>;
     on-rewrite: func(req: request) -> result<action, string>;
     on-request: func(req: request) -> result<action, string>;
     on-request-body: func(req: request, body: list<u8>) -> result<request-body-action, string>;

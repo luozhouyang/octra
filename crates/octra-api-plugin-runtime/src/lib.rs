@@ -13,9 +13,10 @@ use bytes::Bytes;
 use octra_api_core::PluginInstance;
 use octra_api_plugin_types::{
     ApiGatewayPlugin, ApiGatewayPluginFactory, BodyContext, Capability, EntityQuery, ErrorContext,
-    FailPolicy, LogContext, LogLevel, PluginAction, PluginError, PluginHost, PluginManifest,
-    PluginPhase, PluginStorage, RequestBodyContext, RequestContext, ResponseBodyContext,
-    ResponseContext, StorageError, UpstreamRequestContext,
+    EventSubscriber, FailPolicy, GatewayEvent, JobInvocation, LogContext, LogLevel, PluginAction,
+    PluginError, PluginHost, PluginManifest, PluginPhase, PluginServiceSource, PluginStorage,
+    RequestBodyContext, RequestContext, ResponseBodyContext, ResponseContext, ScheduledJob,
+    StorageError, UpstreamRequestContext,
 };
 use octra_core::Result;
 use parking_lot::{Mutex, RwLock};
@@ -602,10 +603,84 @@ where
 #[derive(Default)]
 struct PluginChains {
     entries: Vec<PluginEntry>,
+    subscribers: Vec<Arc<PluginSubscriber>>,
+    jobs: Vec<Arc<PluginJob>>,
     pre_cache: Mutex<HashMap<(String, String, String), Arc<PluginChain>>>,
     post_cache: Mutex<HashMap<String, Arc<PluginChain>>>,
     empty: Arc<PluginChain>,
     has_any: bool,
+}
+
+struct PluginSubscriber {
+    id: String,
+    plugin_name: String,
+    instance_id: String,
+    topics: Vec<String>,
+    plugin: Arc<dyn ApiGatewayPlugin>,
+}
+
+#[async_trait::async_trait]
+impl EventSubscriber for PluginSubscriber {
+    fn subscriber_id(&self) -> &str {
+        &self.id
+    }
+
+    fn plugin_name(&self) -> &str {
+        &self.plugin_name
+    }
+
+    fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    fn topics(&self) -> &[String] {
+        &self.topics
+    }
+
+    async fn deliver(&self, event: &GatewayEvent) -> std::result::Result<(), PluginError> {
+        self.plugin.on_event(event).await
+    }
+}
+
+struct PluginJob {
+    id: String,
+    plugin_name: String,
+    instance_id: String,
+    name: String,
+    schedule: String,
+    timeout: Duration,
+    plugin: Arc<dyn ApiGatewayPlugin>,
+}
+
+#[async_trait::async_trait]
+impl ScheduledJob for PluginJob {
+    fn job_id(&self) -> &str {
+        &self.id
+    }
+
+    fn plugin_name(&self) -> &str {
+        &self.plugin_name
+    }
+
+    fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    fn job_name(&self) -> &str {
+        &self.name
+    }
+
+    fn schedule(&self) -> &str {
+        &self.schedule
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    async fn run(&self, job: &JobInvocation) -> std::result::Result<(), PluginError> {
+        self.plugin.on_job(job).await
+    }
 }
 
 impl PluginChains {
@@ -615,6 +690,8 @@ impl PluginChains {
         host_provider: &dyn PluginHostProvider,
     ) -> Result<Self> {
         let mut entries = Vec::new();
+        let mut subscribers = Vec::new();
+        let mut jobs = Vec::new();
         for plugin in plugins {
             if !plugin.enabled {
                 continue;
@@ -632,6 +709,36 @@ impl PluginChains {
                 }
             };
             let manifest = instance.manifest();
+
+            if !manifest.subscriptions.is_empty() {
+                let topics = manifest
+                    .subscriptions
+                    .iter()
+                    .map(|subscription| subscription.topic.clone())
+                    .collect();
+                subscribers.push(Arc::new(PluginSubscriber {
+                    id: format!("{}#{}", plugin.name, plugin.id),
+                    plugin_name: plugin.name.clone(),
+                    instance_id: plugin.id.clone(),
+                    topics,
+                    plugin: instance.clone(),
+                }));
+            }
+
+            for job in &manifest.jobs {
+                jobs.push(Arc::new(PluginJob {
+                    id: format!("{}#{}#{}", plugin.name, plugin.id, job.name),
+                    plugin_name: plugin.name.clone(),
+                    instance_id: plugin.id.clone(),
+                    name: job.name.clone(),
+                    schedule: job.schedule.clone(),
+                    timeout: Duration::from_millis(
+                        job.timeout_ms.unwrap_or(manifest.timeout_ms).max(1),
+                    ),
+                    plugin: instance.clone(),
+                }));
+            }
+
             entries.push(PluginEntry {
                 id: plugin.id.clone(),
                 name: plugin.name.clone(),
@@ -665,6 +772,8 @@ impl PluginChains {
         Ok(Self {
             has_any: !entries.is_empty(),
             entries,
+            subscribers,
+            jobs,
             pre_cache: Mutex::new(HashMap::new()),
             post_cache: Mutex::new(HashMap::new()),
             empty: Arc::new(PluginChain::default()),
@@ -1040,6 +1149,40 @@ impl PluginRuntime {
     pub fn has_plugins(&self) -> bool {
         self.chains.read().has_any
     }
+
+    /// Snapshot of subscriptions declared by the currently compiled plugin
+    /// instances. Reloading the runtime replaces the snapshot atomically.
+    pub fn service_subscribers(&self) -> Vec<Arc<dyn EventSubscriber>> {
+        self.chains
+            .read()
+            .subscribers
+            .iter()
+            .cloned()
+            .map(|subscriber| subscriber as Arc<dyn EventSubscriber>)
+            .collect()
+    }
+
+    /// Snapshot of scheduled jobs declared by the currently compiled plugin
+    /// instances.
+    pub fn service_jobs(&self) -> Vec<Arc<dyn ScheduledJob>> {
+        self.chains
+            .read()
+            .jobs
+            .iter()
+            .cloned()
+            .map(|job| job as Arc<dyn ScheduledJob>)
+            .collect()
+    }
+}
+
+impl PluginServiceSource for PluginRuntime {
+    fn subscribers(&self) -> Vec<Arc<dyn EventSubscriber>> {
+        self.service_subscribers()
+    }
+
+    fn jobs(&self) -> Vec<Arc<dyn ScheduledJob>> {
+        self.service_jobs()
+    }
 }
 
 #[cfg(test)]
@@ -1145,10 +1288,12 @@ mod tests {
                 phases: self.phases.clone(),
                 capabilities: self.capabilities.clone(),
                 config_schema: None,
-                api_version: "1".to_string(),
+                api_version: "2".to_string(),
                 entities: Vec::new(),
                 migrations: Vec::new(),
                 admin_routes: Vec::new(),
+                subscriptions: Vec::new(),
+                jobs: Vec::new(),
             }
         }
     }
