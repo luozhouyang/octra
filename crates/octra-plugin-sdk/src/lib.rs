@@ -1491,12 +1491,11 @@ macro_rules! export_plugin {
             }
         }
 
-        // Invoke the interface's canonical-ABI macro directly. The outer
-        // `export!` helper resolves its own module through `self`, which is
-        // wrong when a plugin keeps its generated bindings in a submodule.
-        $bindings::exports::octra::api_plugin::plugin_api::__export_octra_api_plugin_plugin_api_1_0_0_cabi!(
-            __OctraPluginExport with_types_in $bindings::exports::octra::api_plugin::plugin_api
-        );
+        // Use the generated, version-agnostic `export!` helper with an explicit
+        // type root. The canonical-ABI macro is named after the WIT package
+        // version (`octra:api-plugin@X.Y.Z`), so referring to it directly would
+        // break whenever `wit/plugin.wit` is bumped.
+        $bindings::export!(__OctraPluginExport with_types_in $bindings);
     };
 }
 

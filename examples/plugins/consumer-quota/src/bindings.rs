@@ -456,6 +456,51 @@ pub mod octra {
                         .finish()
                 }
             }
+            /// One event delivered to a subscription. Payloads are content-free by
+            /// convention; the host never includes credentials or request bodies.
+            #[derive(Clone)]
+            pub struct Event {
+                pub id: _rt::String,
+                pub topic: _rt::String,
+                pub source: _rt::String,
+                pub timestamp: i64,
+                pub payload_json: _rt::String,
+            }
+            impl ::core::fmt::Debug for Event {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("Event")
+                        .field("id", &self.id)
+                        .field("topic", &self.topic)
+                        .field("source", &self.source)
+                        .field("timestamp", &self.timestamp)
+                        .field("payload-json", &self.payload_json)
+                        .finish()
+                }
+            }
+            /// One scheduled job invocation.
+            #[derive(Clone)]
+            pub struct Job {
+                pub id: _rt::String,
+                pub name: _rt::String,
+                pub scheduled_for: i64,
+                pub attempt: u32,
+            }
+            impl ::core::fmt::Debug for Job {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("Job")
+                        .field("id", &self.id)
+                        .field("name", &self.name)
+                        .field("scheduled-for", &self.scheduled_for)
+                        .field("attempt", &self.attempt)
+                        .finish()
+                }
+            }
         }
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod host {
@@ -472,7 +517,7 @@ pub mod octra {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "log"]
                         fn wit_import1(_: i32, _: *mut u8, _: usize);
@@ -488,7 +533,7 @@ pub mod octra {
             pub fn now_unix() -> i64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "now-unix"]
                         fn wit_import0() -> i64;
@@ -517,7 +562,7 @@ pub mod octra {
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "instance-id"]
                         fn wit_import1(_: *mut u8);
@@ -608,7 +653,7 @@ pub mod octra {
                     };
                     let ptr11 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "authenticate"]
                         fn wit_import12(
@@ -705,7 +750,7 @@ pub mod octra {
             pub fn authenticated() -> bool {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "authenticated"]
                         fn wit_import0() -> i32;
@@ -735,7 +780,7 @@ pub mod octra {
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "current-auth"]
                         fn wit_import1(_: *mut u8);
@@ -912,7 +957,7 @@ pub mod octra {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-get"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -1007,7 +1052,7 @@ pub mod octra {
                     };
                     let ptr3 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-put"]
                         fn wit_import4(
@@ -1091,7 +1136,7 @@ pub mod octra {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-delete"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -1161,7 +1206,7 @@ pub mod octra {
                     };
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-incr"]
                         fn wit_import3(
@@ -1249,7 +1294,7 @@ pub mod octra {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "entity-get"]
                         fn wit_import3(
@@ -1353,7 +1398,7 @@ pub mod octra {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "entity-upsert"]
                         fn wit_import3(
@@ -1445,7 +1490,7 @@ pub mod octra {
                     };
                     let ptr5 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "entity-increment"]
                         fn wit_import6(
@@ -1548,7 +1593,7 @@ pub mod octra {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "entity-delete"]
                         fn wit_import3(
@@ -1631,7 +1676,7 @@ pub mod octra {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@1.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
                     unsafe extern "C" {
                         #[link_name = "entity-query"]
                         fn wit_import3(
@@ -1725,6 +1770,8 @@ pub mod exports {
                 pub type ErrorAction = super::super::super::super::octra::api_plugin::types::ErrorAction;
                 pub type AdminRequest = super::super::super::super::octra::api_plugin::types::AdminRequest;
                 pub type AdminResponse = super::super::super::super::octra::api_plugin::types::AdminResponse;
+                pub type Event = super::super::super::super::octra::api_plugin::types::Event;
+                pub type Job = super::super::super::super::octra::api_plugin::types::Job;
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub unsafe fn _export_configure_cabi<T: Guest>(
@@ -2018,6 +2065,132 @@ pub mod exports {
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<usize>();
                             _rt::cabi_dealloc(l11, l12, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_on_event_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: *mut u8,
+                    arg5: usize,
+                    arg6: i64,
+                    arg7: *mut u8,
+                    arg8: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
+                    let len2 = arg5;
+                    let bytes2 = _rt::Vec::from_raw_parts(arg4.cast(), len2, len2);
+                    let len3 = arg8;
+                    let bytes3 = _rt::Vec::from_raw_parts(arg7.cast(), len3, len3);
+                    let result4 = T::on_event(super::super::super::super::octra::api_plugin::types::Event {
+                        id: _rt::string_lift(bytes0),
+                        topic: _rt::string_lift(bytes1),
+                        source: _rt::string_lift(bytes2),
+                        timestamp: arg6,
+                        payload_json: _rt::string_lift(bytes3),
+                    });
+                    let ptr5 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result4 {
+                        Ok(_) => {
+                            *ptr5.add(0).cast::<u8>() = (0i32) as u8;
+                        }
+                        Err(e) => {
+                            *ptr5.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec6 = (e.into_bytes()).into_boxed_slice();
+                            let ptr6 = vec6.as_ptr().cast::<u8>();
+                            let len6 = vec6.len();
+                            ::core::mem::forget(vec6);
+                            *ptr5
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len6;
+                            *ptr5
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr6.cast_mut();
+                        }
+                    };
+                    ptr5
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_on_event<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_on_job_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: i64,
+                    arg5: i32,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
+                    let result2 = T::on_job(super::super::super::super::octra::api_plugin::types::Job {
+                        id: _rt::string_lift(bytes0),
+                        name: _rt::string_lift(bytes1),
+                        scheduled_for: arg4,
+                        attempt: arg5 as u32,
+                    });
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(_) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_on_job<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
                         }
                     }
                 }
@@ -5393,6 +5566,8 @@ pub mod exports {
                     fn on_admin_request(
                         req: AdminRequest,
                     ) -> Result<AdminResponse, _rt::String>;
+                    fn on_event(event: Event) -> Result<(), _rt::String>;
+                    fn on_job(job: Job) -> Result<(), _rt::String>;
                     fn on_rewrite(req: Request) -> Result<Action, _rt::String>;
                     fn on_request(req: Request) -> Result<Action, _rt::String>;
                     fn on_request_body(
@@ -5417,18 +5592,18 @@ pub mod exports {
                     fn on_log(entry: LogEntry) -> ();
                 }
                 #[doc(hidden)]
-                macro_rules! __export_octra_api_plugin_plugin_api_1_0_0_cabi {
+                macro_rules! __export_octra_api_plugin_plugin_api_2_0_0_cabi {
                     ($ty:ident with_types_in $($path_to_types:tt)*) => {
                         const _ : () = { #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@1.0.0#configure")] unsafe extern "C"
+                        "octra:api-plugin/plugin-api@2.0.0#configure")] unsafe extern "C"
                         fn export_configure(arg0 : * mut u8, arg1 : usize,) -> * mut u8 {
                         unsafe { $($path_to_types)*:: _export_configure_cabi::<$ty >
                         (arg0, arg1) } } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@1.0.0#configure")] unsafe
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#configure")] unsafe
                         extern "C" fn _post_return_configure(arg0 : * mut u8,) { unsafe {
                         $($path_to_types)*:: __post_return_configure::<$ty > (arg0) } }
                         #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@1.0.0#on-admin-request")] unsafe
+                        "octra:api-plugin/plugin-api@2.0.0#on-admin-request")] unsafe
                         extern "C" fn export_on_admin_request(arg0 : * mut u8, arg1 :
                         usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
                         usize, arg6 : * mut u8, arg7 : usize, arg8 : * mut u8, arg9 :
@@ -5437,46 +5612,66 @@ pub mod exports {
                         _export_on_admin_request_cabi::<$ty > (arg0, arg1, arg2, arg3,
                         arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13) }
                         } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@1.0.0#on-admin-request")]
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-admin-request")]
                         unsafe extern "C" fn _post_return_on_admin_request(arg0 : * mut
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_on_admin_request::<$ty > (arg0) } } #[unsafe
-                        (export_name = "octra:api-plugin/plugin-api@1.0.0#on-rewrite")]
-                        unsafe extern "C" fn export_on_rewrite(arg0 : * mut u8,) -> * mut
-                        u8 { unsafe { $($path_to_types)*:: _export_on_rewrite_cabi::<$ty
-                        > (arg0) } } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@1.0.0#on-rewrite")] unsafe
+                        (export_name = "octra:api-plugin/plugin-api@2.0.0#on-event")]
+                        unsafe extern "C" fn export_on_event(arg0 : * mut u8, arg1 :
+                        usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
+                        usize, arg6 : i64, arg7 : * mut u8, arg8 : usize,) -> * mut u8 {
+                        unsafe { $($path_to_types)*:: _export_on_event_cabi::<$ty >
+                        (arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) } }
+                        #[unsafe (export_name =
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-event")] unsafe
+                        extern "C" fn _post_return_on_event(arg0 : * mut u8,) { unsafe {
+                        $($path_to_types)*:: __post_return_on_event::<$ty > (arg0) } }
+                        #[unsafe (export_name =
+                        "octra:api-plugin/plugin-api@2.0.0#on-job")] unsafe extern "C" fn
+                        export_on_job(arg0 : * mut u8, arg1 : usize, arg2 : * mut u8,
+                        arg3 : usize, arg4 : i64, arg5 : i32,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_on_job_cabi::<$ty > (arg0, arg1,
+                        arg2, arg3, arg4, arg5) } } #[unsafe (export_name =
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-job")] unsafe
+                        extern "C" fn _post_return_on_job(arg0 : * mut u8,) { unsafe {
+                        $($path_to_types)*:: __post_return_on_job::<$ty > (arg0) } }
+                        #[unsafe (export_name =
+                        "octra:api-plugin/plugin-api@2.0.0#on-rewrite")] unsafe extern
+                        "C" fn export_on_rewrite(arg0 : * mut u8,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_on_rewrite_cabi::<$ty > (arg0) } }
+                        #[unsafe (export_name =
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-rewrite")] unsafe
                         extern "C" fn _post_return_on_rewrite(arg0 : * mut u8,) { unsafe
                         { $($path_to_types)*:: __post_return_on_rewrite::<$ty > (arg0) }
                         } #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@1.0.0#on-request")] unsafe extern
+                        "octra:api-plugin/plugin-api@2.0.0#on-request")] unsafe extern
                         "C" fn export_on_request(arg0 : * mut u8,) -> * mut u8 { unsafe {
                         $($path_to_types)*:: _export_on_request_cabi::<$ty > (arg0) } }
                         #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@1.0.0#on-request")] unsafe
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-request")] unsafe
                         extern "C" fn _post_return_on_request(arg0 : * mut u8,) { unsafe
                         { $($path_to_types)*:: __post_return_on_request::<$ty > (arg0) }
                         } #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@1.0.0#on-request-body")] unsafe
+                        "octra:api-plugin/plugin-api@2.0.0#on-request-body")] unsafe
                         extern "C" fn export_on_request_body(arg0 : * mut u8,) -> * mut
                         u8 { unsafe { $($path_to_types)*::
                         _export_on_request_body_cabi::<$ty > (arg0) } } #[unsafe
                         (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@1.0.0#on-request-body")]
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-request-body")]
                         unsafe extern "C" fn _post_return_on_request_body(arg0 : * mut
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_on_request_body::<$ty > (arg0) } } #[unsafe
                         (export_name =
-                        "octra:api-plugin/plugin-api@1.0.0#on-upstream-request")] unsafe
+                        "octra:api-plugin/plugin-api@2.0.0#on-upstream-request")] unsafe
                         extern "C" fn export_on_upstream_request(arg0 : * mut u8,) -> *
                         mut u8 { unsafe { $($path_to_types)*::
                         _export_on_upstream_request_cabi::<$ty > (arg0) } } #[unsafe
                         (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@1.0.0#on-upstream-request")]
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-upstream-request")]
                         unsafe extern "C" fn _post_return_on_upstream_request(arg0 : *
                         mut u8,) { unsafe { $($path_to_types)*::
                         __post_return_on_upstream_request::<$ty > (arg0) } } #[unsafe
-                        (export_name = "octra:api-plugin/plugin-api@1.0.0#on-response")]
+                        (export_name = "octra:api-plugin/plugin-api@2.0.0#on-response")]
                         unsafe extern "C" fn export_on_response(arg0 : * mut u8, arg1 :
                         usize, arg2 : i32, arg3 : * mut u8, arg4 : usize, arg5 : i32,
                         arg6 : * mut u8, arg7 : usize, arg8 : * mut u8, arg9 : usize,
@@ -5484,11 +5679,11 @@ pub mod exports {
                         $($path_to_types)*:: _export_on_response_cabi::<$ty > (arg0,
                         arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10,
                         arg11) } } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@1.0.0#on-response")]
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-response")]
                         unsafe extern "C" fn _post_return_on_response(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_on_response::<$ty >
                         (arg0) } } #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@1.0.0#on-response-buffer")] unsafe
+                        "octra:api-plugin/plugin-api@2.0.0#on-response-buffer")] unsafe
                         extern "C" fn export_on_response_buffer(arg0 : * mut u8, arg1 :
                         usize, arg2 : i32, arg3 : * mut u8, arg4 : usize, arg5 : i32,
                         arg6 : * mut u8, arg7 : usize, arg8 : * mut u8, arg9 : usize,
@@ -5497,31 +5692,31 @@ pub mod exports {
                         _export_on_response_buffer_cabi::<$ty > (arg0, arg1, arg2, arg3,
                         arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13) }
                         } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@1.0.0#on-response-buffer")]
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-response-buffer")]
                         unsafe extern "C" fn _post_return_on_response_buffer(arg0 : * mut
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_on_response_buffer::<$ty > (arg0) } } #[unsafe
                         (export_name =
-                        "octra:api-plugin/plugin-api@1.0.0#on-response-chunk")] unsafe
+                        "octra:api-plugin/plugin-api@2.0.0#on-response-chunk")] unsafe
                         extern "C" fn export_on_response_chunk(arg0 : * mut u8, arg1 :
                         usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
                         usize, arg6 : * mut u8, arg7 : usize, arg8 : * mut u8, arg9 :
                         usize,) -> * mut u8 { unsafe { $($path_to_types)*::
                         _export_on_response_chunk_cabi::<$ty > (arg0, arg1, arg2, arg3,
                         arg4, arg5, arg6, arg7, arg8, arg9) } } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@1.0.0#on-response-chunk")]
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-response-chunk")]
                         unsafe extern "C" fn _post_return_on_response_chunk(arg0 : * mut
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_on_response_chunk::<$ty > (arg0) } } #[unsafe
-                        (export_name = "octra:api-plugin/plugin-api@1.0.0#on-error")]
+                        (export_name = "octra:api-plugin/plugin-api@2.0.0#on-error")]
                         unsafe extern "C" fn export_on_error(arg0 : * mut u8,) -> * mut
                         u8 { unsafe { $($path_to_types)*:: _export_on_error_cabi::<$ty >
                         (arg0) } } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@1.0.0#on-error")] unsafe
+                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-error")] unsafe
                         extern "C" fn _post_return_on_error(arg0 : * mut u8,) { unsafe {
                         $($path_to_types)*:: __post_return_on_error::<$ty > (arg0) } }
                         #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@1.0.0#on-log")] unsafe extern "C" fn
+                        "octra:api-plugin/plugin-api@2.0.0#on-log")] unsafe extern "C" fn
                         export_on_log(arg0 : * mut u8, arg1 : usize, arg2 : * mut u8,
                         arg3 : usize, arg4 : * mut u8, arg5 : usize, arg6 : i32, arg7 :
                         i64, arg8 : i32, arg9 : * mut u8, arg10 : usize, arg11 : * mut
@@ -5532,7 +5727,7 @@ pub mod exports {
                     };
                 }
                 #[doc(hidden)]
-                pub(crate) use __export_octra_api_plugin_plugin_api_1_0_0_cabi;
+                pub(crate) use __export_octra_api_plugin_plugin_api_2_0_0_cabi;
                 #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
                 #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
                 struct _RetArea(
@@ -5698,7 +5893,7 @@ macro_rules! __export_plugin_impl {
     };
     ($ty:ident with_types_in $($path_to_types_root:tt)*) => {
         $($path_to_types_root)*::
-        exports::octra::api_plugin::plugin_api::__export_octra_api_plugin_plugin_api_1_0_0_cabi!($ty
+        exports::octra::api_plugin::plugin_api::__export_octra_api_plugin_plugin_api_2_0_0_cabi!($ty
         with_types_in $($path_to_types_root)*:: exports::octra::api_plugin::plugin_api);
     };
 }
@@ -5706,13 +5901,13 @@ macro_rules! __export_plugin_impl {
 pub(crate) use __export_plugin_impl as export;
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:octra:api-plugin@1.0.0:plugin:encoded world"
+    link_section = "component-type:wit-bindgen:0.41.0:octra:api-plugin@2.0.0:plugin:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3099] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x9e\x17\x01A\x02\x01\
-A\x15\x01B,\x01m\x05\x05trace\x05debug\x04info\x04warn\x05error\x04\0\x09log-lev\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3297] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe4\x18\x01A\x02\x01\
+A\x17\x01B0\x01m\x05\x05trace\x05debug\x04info\x04warn\x05error\x04\0\x09log-lev\
 el\x03\0\0\x01o\x02ss\x01p\x02\x01ks\x01r\x09\x0arequest-ids\x06methods\x04paths\
 \x05querys\x07headers\x03\x09client-ip\x04\x0bconsumer-id\x04\x08route-ids\x0ase\
 rvice-ids\x04\0\x07request\x03\0\x05\x01p}\x01r\x03\x06status{\x07headers\x03\x04\
@@ -5738,12 +5933,14 @@ ages\x04\0\x0aerror-info\x03\0\"\x01q\x02\x08continue\0\0\x07respond\x01\x09\0\x
 consumer-custom-id\x04\x0dcredential-id\x04\x0fcredential-type\x04\x04\0\x0dauth\
 -identity\x03\0&\x01r\x07\x0arequest-ids\x06methods\x04paths\x05querys\x07header\
 s\x03\x06params\x03\x04body\x07\x04\0\x0dadmin-request\x03\0(\x01r\x03\x06status\
-{\x07headers\x03\x04body\x07\x04\0\x0eadmin-response\x03\0*\x03\0\x1coctra:api-p\
-lugin/types@1.0.0\x05\0\x02\x03\0\0\x09log-level\x02\x03\0\0\x0dauth-identity\x01\
-B*\x02\x03\x02\x01\x01\x04\0\x09log-level\x03\0\0\x02\x03\x02\x01\x02\x04\0\x0da\
-uth-identity\x03\0\x02\x01@\x02\x05level\x01\x07messages\x01\0\x04\0\x03log\x01\x04\
-\x01@\0\0x\x04\0\x08now-unix\x01\x05\x01@\0\0s\x04\0\x0binstance-id\x01\x06\x01j\
-\0\x01s\x01@\x01\x08identity\x03\0\x07\x04\0\x0cauthenticate\x01\x08\x01@\0\0\x7f\
+{\x07headers\x03\x04body\x07\x04\0\x0eadmin-response\x03\0*\x01r\x05\x02ids\x05t\
+opics\x06sources\x09timestampx\x0cpayload-jsons\x04\0\x05event\x03\0,\x01r\x04\x02\
+ids\x04names\x0dscheduled-forx\x07attempty\x04\0\x03job\x03\0.\x03\0\x1coctra:ap\
+i-plugin/types@2.0.0\x05\0\x02\x03\0\0\x09log-level\x02\x03\0\0\x0dauth-identity\
+\x01B*\x02\x03\x02\x01\x01\x04\0\x09log-level\x03\0\0\x02\x03\x02\x01\x02\x04\0\x0d\
+auth-identity\x03\0\x02\x01@\x02\x05level\x01\x07messages\x01\0\x04\0\x03log\x01\
+\x04\x01@\0\0x\x04\0\x08now-unix\x01\x05\x01@\0\0s\x04\0\x0binstance-id\x01\x06\x01\
+j\0\x01s\x01@\x01\x08identity\x03\0\x07\x04\0\x0cauthenticate\x01\x08\x01@\0\0\x7f\
 \x04\0\x0dauthenticated\x01\x09\x01k\x03\x01@\0\0\x0a\x04\0\x0ccurrent-auth\x01\x0b\
 \x01ks\x01j\x01\x0c\x01s\x01@\x01\x03keys\0\x0d\x04\0\x06kv-get\x01\x0e\x01ky\x01\
 @\x03\x03keys\x05values\x0bttl-seconds\x0f\0\x07\x04\0\x06kv-put\x01\x10\x01j\x01\
@@ -5754,31 +5951,34 @@ lues-jsons\0\x07\x04\0\x0dentity-upsert\x01\x16\x01@\x05\x06entitys\x08key-jsons
 \x05fields\x05deltax\x0aextra-json\x0c\0\x13\x04\0\x10entity-increment\x01\x17\x01\
 @\x02\x06entitys\x08key-jsons\0\x11\x04\0\x0dentity-delete\x01\x18\x01j\x01s\x01\
 s\x01@\x02\x06entitys\x0aquery-jsons\0\x19\x04\0\x0centity-query\x01\x1a\x03\0\x1b\
-octra:api-plugin/host@1.0.0\x05\x03\x02\x03\0\0\x07request\x02\x03\0\0\x08respon\
+octra:api-plugin/host@2.0.0\x05\x03\x02\x03\0\0\x07request\x02\x03\0\0\x08respon\
 se\x02\x03\0\0\x06action\x02\x03\0\0\x0fresponse-action\x02\x03\0\0\x09log-entry\
 \x02\x03\0\0\x10upstream-request\x02\x03\0\0\x09body-info\x02\x03\0\0\x13request\
 -body-action\x02\x03\0\0\x0bbody-action\x02\x03\0\0\x0aerror-info\x02\x03\0\0\x0c\
-error-action\x02\x03\0\0\x0dadmin-request\x02\x03\0\0\x0eadmin-response\x01B7\x02\
-\x03\x02\x01\x04\x04\0\x07request\x03\0\0\x02\x03\x02\x01\x05\x04\0\x08response\x03\
-\0\x02\x02\x03\x02\x01\x06\x04\0\x06action\x03\0\x04\x02\x03\x02\x01\x07\x04\0\x0f\
-response-action\x03\0\x06\x02\x03\x02\x01\x08\x04\0\x09log-entry\x03\0\x08\x02\x03\
-\x02\x01\x09\x04\0\x10upstream-request\x03\0\x0a\x02\x03\x02\x01\x0a\x04\0\x09bo\
-dy-info\x03\0\x0c\x02\x03\x02\x01\x0b\x04\0\x13request-body-action\x03\0\x0e\x02\
-\x03\x02\x01\x0c\x04\0\x0bbody-action\x03\0\x10\x02\x03\x02\x01\x0d\x04\0\x0aerr\
-or-info\x03\0\x12\x02\x03\x02\x01\x0e\x04\0\x0cerror-action\x03\0\x14\x02\x03\x02\
-\x01\x0f\x04\0\x0dadmin-request\x03\0\x16\x02\x03\x02\x01\x10\x04\0\x0eadmin-res\
-ponse\x03\0\x18\x01j\0\x01s\x01@\x01\x0bconfig-jsons\0\x1a\x04\0\x09configure\x01\
-\x1b\x01j\x01\x19\x01s\x01@\x01\x03req\x17\0\x1c\x04\0\x10on-admin-request\x01\x1d\
-\x01j\x01\x05\x01s\x01@\x01\x03req\x01\0\x1e\x04\0\x0aon-rewrite\x01\x1f\x04\0\x0a\
-on-request\x01\x1f\x01p}\x01j\x01\x0f\x01s\x01@\x02\x03req\x01\x04body\x20\0!\x04\
-\0\x0fon-request-body\x01\"\x01@\x01\x03req\x0b\0\x1e\x04\0\x13on-upstream-reque\
-st\x01#\x01j\x01\x07\x01s\x01@\x01\x04resp\x03\0$\x04\0\x0bon-response\x01%\x01j\
-\x01\x11\x01s\x01@\x02\x04resp\x03\x04body\x20\0&\x04\0\x12on-response-buffer\x01\
-'\x01@\x02\x04info\x0d\x05chunk\x20\0&\x04\0\x11on-response-chunk\x01(\x01j\x01\x15\
-\x01s\x01@\x01\x03err\x13\0)\x04\0\x08on-error\x01*\x01@\x01\x05entry\x09\x01\0\x04\
-\0\x06on-log\x01+\x04\0!octra:api-plugin/plugin-api@1.0.0\x05\x11\x04\0\x1doctra\
-:api-plugin/plugin@1.0.0\x04\0\x0b\x0c\x01\0\x06plugin\x03\0\0\0G\x09producers\x01\
-\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+error-action\x02\x03\0\0\x0dadmin-request\x02\x03\0\0\x0eadmin-response\x02\x03\0\
+\0\x05event\x02\x03\0\0\x03job\x01B?\x02\x03\x02\x01\x04\x04\0\x07request\x03\0\0\
+\x02\x03\x02\x01\x05\x04\0\x08response\x03\0\x02\x02\x03\x02\x01\x06\x04\0\x06ac\
+tion\x03\0\x04\x02\x03\x02\x01\x07\x04\0\x0fresponse-action\x03\0\x06\x02\x03\x02\
+\x01\x08\x04\0\x09log-entry\x03\0\x08\x02\x03\x02\x01\x09\x04\0\x10upstream-requ\
+est\x03\0\x0a\x02\x03\x02\x01\x0a\x04\0\x09body-info\x03\0\x0c\x02\x03\x02\x01\x0b\
+\x04\0\x13request-body-action\x03\0\x0e\x02\x03\x02\x01\x0c\x04\0\x0bbody-action\
+\x03\0\x10\x02\x03\x02\x01\x0d\x04\0\x0aerror-info\x03\0\x12\x02\x03\x02\x01\x0e\
+\x04\0\x0cerror-action\x03\0\x14\x02\x03\x02\x01\x0f\x04\0\x0dadmin-request\x03\0\
+\x16\x02\x03\x02\x01\x10\x04\0\x0eadmin-response\x03\0\x18\x02\x03\x02\x01\x11\x04\
+\0\x05event\x03\0\x1a\x02\x03\x02\x01\x12\x04\0\x03job\x03\0\x1c\x01j\0\x01s\x01\
+@\x01\x0bconfig-jsons\0\x1e\x04\0\x09configure\x01\x1f\x01j\x01\x19\x01s\x01@\x01\
+\x03req\x17\0\x20\x04\0\x10on-admin-request\x01!\x01@\x01\x05event\x1b\0\x1e\x04\
+\0\x08on-event\x01\"\x01@\x01\x03job\x1d\0\x1e\x04\0\x06on-job\x01#\x01j\x01\x05\
+\x01s\x01@\x01\x03req\x01\0$\x04\0\x0aon-rewrite\x01%\x04\0\x0aon-request\x01%\x01\
+p}\x01j\x01\x0f\x01s\x01@\x02\x03req\x01\x04body&\0'\x04\0\x0fon-request-body\x01\
+(\x01@\x01\x03req\x0b\0$\x04\0\x13on-upstream-request\x01)\x01j\x01\x07\x01s\x01\
+@\x01\x04resp\x03\0*\x04\0\x0bon-response\x01+\x01j\x01\x11\x01s\x01@\x02\x04res\
+p\x03\x04body&\0,\x04\0\x12on-response-buffer\x01-\x01@\x02\x04info\x0d\x05chunk\
+&\0,\x04\0\x11on-response-chunk\x01.\x01j\x01\x15\x01s\x01@\x01\x03err\x13\0/\x04\
+\0\x08on-error\x010\x01@\x01\x05entry\x09\x01\0\x04\0\x06on-log\x011\x04\0!octra\
+:api-plugin/plugin-api@2.0.0\x05\x13\x04\0\x1doctra:api-plugin/plugin@2.0.0\x04\0\
+\x0b\x0c\x01\0\x06plugin\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-\
+component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {
