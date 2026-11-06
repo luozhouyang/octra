@@ -343,6 +343,18 @@ impl EventBus {
 
 impl EventPublisher for EventBus {
     fn publish(&self, topic: &str, source: &str, payload: Value) {
+        // Without a matching subscriber the dispatcher would persist the event
+        // and immediately mark it complete, so skip the write entirely. This
+        // keeps the outbox empty on deployments with no event plugins.
+        let subscribed = self.source.subscribers().iter().any(|subscriber| {
+            subscriber
+                .topics()
+                .iter()
+                .any(|pattern| topic_matches(pattern, topic))
+        });
+        if !subscribed {
+            return;
+        }
         let payload_json = match serde_json::to_string(&payload) {
             Ok(payload_json) => payload_json,
             Err(error) => {
