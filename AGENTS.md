@@ -11,6 +11,14 @@ English is the default and primary language of this repository.
 - `README.md` is English and is the default entry point. `docs/` content may be translated, but English comes first: an English version must exist and is the source of truth. Translations live in separate files (e.g. `README.zh-CN.md`) and must not replace or preempt the English version.
 - When Chinese and English versions conflict, the English version wins.
 
+## Living docs
+
+- Tracked engineering decisions live in `.livingdocs/` as an OKF bundle: a constitution, ADRs, and living Mermaid architecture views.
+- Read the in-force view with `living-docs read --docs-dir .livingdocs`; do not read `index.md` directly.
+- Before changing a decision, read the relevant record and use `living-docs supersede`; never rewrite an accepted record in place.
+- After a structural change, run `living-docs check .livingdocs` and update the affected ADR or architecture view in the same change.
+- `docs/` remains local-only scratch space and is not part of the living-docs bundle.
+
 ## `docs/` is local-only
 
 - `docs/` holds local design notes and drafts. It is git-ignored and must never be committed.

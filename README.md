@@ -12,7 +12,7 @@ This repository is the runnable foundation of Octra: a standalone Daemon with a 
 octra/
 ├── apps/
 │   └── desktop/            # Tauri 2 + React + Vite desktop app
-│       └── src-tauri/      # Tauri Rust host (where sidecar management lives)
+│       └── src-tauri/      # Tauri Rust host (control-plane bridge)
 ├── crates/
 │   ├── octra-core/         # Domain types and errors
 │   ├── octra-config/       # Configuration and local directory resolution
@@ -41,6 +41,10 @@ octra/
 ├── scripts/
 └── tests/                  # Integration / protocol compatibility / cross-platform tests
 ```
+
+## Engineering decisions
+
+Tracked decisions and architecture views live in [`.livingdocs/`](./.livingdocs/index.md), an OKF bundle maintained with [Living Docs](https://github.com/ejklock/living-docs-skill). Read the in-force view with `living-docs read --docs-dir .livingdocs` and run `living-docs check .livingdocs` after a structural change. Local scratch notes remain in the git-ignored `docs/` directory.
 
 ## Quick start
 
@@ -127,18 +131,17 @@ shows a sandbox banner, and preview never writes anything.
 
 ## Not yet implemented (tracked on the roadmap)
 
-- Pingora-based proxy engine (the current unified data plane uses Axum + reqwest).
 - Additional vendor-specific protocol adapters beyond OpenAI, Anthropic,
   OpenAI Responses, and Gemini.
 - Agent discovery / config adapter / bridge for agents beyond the three
   supported adapters.
+- Desktop-side daemon lifecycle management (start, stop, health supervision).
 - OS Keychain integration for secrets.
-- Separate telemetry database (hourly usage rollups and retention workers are implemented).
 - Cross-platform packaging, signing, and notarization.
 
 ## Security boundaries
 
-- SQLite stores only secret references and API-key hashes for gateway credentials, never plaintext provider secrets.
+- SQLite stores secret references and API-key hashes for static gateway credentials; OAuth tokens live in a dedicated table and, like agent config backups, rely on the database's `0600` permissions. Provider secrets are never returned by the control API.
 - Agent configuration backups keep the exact original file so a restore is lossless. Those files may contain credentials, so the database and its WAL sidecars are created with `0600` permissions and only the newest 20 backups per agent are kept. The control plane never returns backup content.
 - Applied agent configurations contain the virtual key by design; the control plane never returns it again.
 - The control plane enforces authentication and binds to loopback by default.
