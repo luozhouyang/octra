@@ -14,6 +14,8 @@ pub struct RetentionPolicy {
     pub mcp_invocations_days: u32,
     pub audit_logs_days: u32,
     pub usage_rollup_days: u32,
+    /// Completed and failed plugin events. Pending events are never pruned.
+    pub plugin_events_days: u32,
     pub batch_size: u32,
 }
 
@@ -24,6 +26,7 @@ pub struct PruneReport {
     pub mcp_invocations: u64,
     pub audit_logs: u64,
     pub usage_rollup: u64,
+    pub plugin_events: u64,
 }
 
 const ROLLUP_MARKER: &str = "usage_rollup_v1";
@@ -65,6 +68,15 @@ impl Storage {
             )
             .await?;
         let usage_rollup = self.prune_rollup(policy.usage_rollup_days).await?;
+        let plugin_events = if policy.plugin_events_days == 0 {
+            0
+        } else {
+            let days = i64::from(policy.plugin_events_days);
+            let cutoff = Utc::now()
+                .timestamp()
+                .saturating_sub(days.saturating_mul(86_400));
+            self.prune_events(cutoff, policy.batch_size).await?
+        };
         if let Err(error) = self.llm.prune_llm_counters(Utc::now().timestamp()).await {
             tracing::debug!(%error, "LLM counter prune failed");
         }
@@ -74,6 +86,7 @@ impl Storage {
             audit_logs,
             mcp_invocations,
             usage_rollup,
+            plugin_events,
         };
 
         // Both are best-effort: a busy checkpoint or stale statistics must not
@@ -230,6 +243,7 @@ mod tests {
             mcp_invocations_days: days,
             audit_logs_days: days,
             usage_rollup_days: days,
+            plugin_events_days: days,
             batch_size,
         }
     }
@@ -302,29 +316,74 @@ mod tests {
             .unwrap();
         }
 
+        let now = Utc::now().timestamp();
+        let old_seconds = now - 40 * 86_400;
+        let new_seconds = now - 86_400;
+        for (id, status, created_at) in [
+            ("old-completed", "completed", old_seconds),
+            ("old-failed", "failed", old_seconds),
+            ("old-pending", "pending", old_seconds),
+            ("new-completed", "completed", new_seconds),
+        ] {
+            sqlx::query(
+                "INSERT INTO events
+                    (id, topic, source, payload_json, status, attempts, max_attempts,
+                     next_attempt_at, created_at)
+                 VALUES (?, 'test.topic', 'test', '{}', ?, 0, 5, 0, ?)",
+            )
+            .bind(id)
+            .bind(status)
+            .bind(created_at)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO event_deliveries (event_id, subscriber_id, plugin_name,
+                 plugin_instance_id, status, attempts, max_attempts, next_attempt_at)
+             VALUES ('old-completed', 'sub', 'plugin', 'instance', 'delivered', 1, 5, 0)",
+        )
+        .execute(storage.pool())
+        .await
+        .unwrap();
+
         let report = storage.prune(&policy(30, 1)).await.unwrap();
         assert_eq!(report.llm_usage, 1);
         assert_eq!(report.request_logs, 1);
         assert_eq!(report.audit_logs, 1);
         assert_eq!(report.mcp_invocations, 1);
         assert_eq!(report.usage_rollup, 1);
+        assert_eq!(report.plugin_events, 2);
 
         assert_eq!(row_count(&storage, "llm_usage").await, 1);
         assert_eq!(row_count(&storage, "request_logs").await, 1);
         assert_eq!(row_count(&storage, "audit_logs").await, 1);
         assert_eq!(row_count(&storage, "mcp_invocations").await, 1);
         assert_eq!(row_count(&storage, "llm_usage_rollup").await, 1);
+        assert_eq!(row_count(&storage, "events").await, 2);
+        assert_eq!(row_count(&storage, "event_deliveries").await, 0);
     }
 
     #[tokio::test]
     async fn zero_days_keeps_everything() {
         let storage = Storage::connect_in_memory().await.unwrap();
         insert_usage(&storage, "old-usage", &days_ago(400)).await;
+        sqlx::query(
+            "INSERT INTO events
+                (id, topic, source, payload_json, status, attempts, max_attempts,
+                 next_attempt_at, created_at)
+             VALUES ('old-event', 'test.topic', 'test', '{}', 'completed', 0, 5, 0, ?)",
+        )
+        .bind(Utc::now().timestamp() - 400 * 86_400)
+        .execute(storage.pool())
+        .await
+        .unwrap();
 
         let report = storage.prune(&policy(0, 100)).await.unwrap();
         assert_eq!(report, PruneReport::default());
         assert_eq!(row_count(&storage, "llm_usage").await, 1);
         assert_eq!(row_count(&storage, "llm_usage_rollup").await, 1);
+        assert_eq!(row_count(&storage, "events").await, 1);
     }
 
     #[tokio::test]

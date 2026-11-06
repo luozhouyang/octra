@@ -18,6 +18,7 @@ async fn run(storage: Arc<Storage>, config: RetentionConfig, shutdown: Cancellat
         mcp_invocations_days: config.mcp_invocations_days,
         audit_logs_days: config.audit_logs_days,
         usage_rollup_days: config.usage_rollup_days,
+        plugin_events_days: config.plugin_events_days,
         batch_size: config.batch_size,
     };
     let mut ticker = tokio::time::interval(Duration::from_secs(config.interval_secs));

@@ -265,6 +265,15 @@ mod tests {
         .unwrap();
         assert_eq!(indexes, 4);
 
+        let event_index: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master
+              WHERE type = 'index' AND name = 'idx_events_status_created'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(event_index, 1);
+
         let dropped: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_llm_usage_api_key'",
         )

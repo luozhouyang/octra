@@ -403,17 +403,32 @@ impl Storage {
         Ok(())
     }
 
-    /// Deletes completed or failed events older than `before`.
-    pub async fn prune_events(&self, before: i64) -> Result<u64> {
-        let result = sqlx::query(
-            "DELETE FROM events
-              WHERE status IN ('completed', 'failed') AND created_at < ?1",
-        )
-        .bind(before)
-        .execute(self.pool())
-        .await
-        .map_err(|error| map_error("cannot prune events", error))?;
-        Ok(result.rows_affected())
+    /// Deletes completed or failed events older than `before` in batches.
+    /// Deliveries are removed by the foreign-key cascade. Pending events are
+    /// never pruned, even when they are old, because they still owe delivery.
+    pub async fn prune_events(&self, before: i64, batch_size: u32) -> Result<u64> {
+        let batch = i64::from(batch_size.max(1));
+        let mut total = 0u64;
+        loop {
+            let result = sqlx::query(
+                "DELETE FROM events WHERE id IN (
+                     SELECT id FROM events
+                      WHERE status IN ('completed', 'failed') AND created_at < ?1
+                      ORDER BY created_at LIMIT ?2
+                 )",
+            )
+            .bind(before)
+            .bind(batch)
+            .execute(self.pool())
+            .await
+            .map_err(|error| map_error("cannot prune events", error))?;
+            let deleted = result.rows_affected();
+            total = total.saturating_add(deleted);
+            if deleted < batch as u64 {
+                break;
+            }
+        }
+        Ok(total)
     }
 
     /// Reconciles the persisted job rows with the currently enabled plugin

@@ -33,6 +33,8 @@ request_logs_days = 30
 mcp_invocations_days = 90
 audit_logs_days = 365
 usage_rollup_days = 400
+# Completed and failed plugin events; pending events are never pruned.
+plugin_events_days = 7
 interval_secs = 3600
 batch_size = 5000
 

@@ -96,6 +96,8 @@ pub struct RetentionConfig {
     pub mcp_invocations_days: u32,
     pub audit_logs_days: u32,
     pub usage_rollup_days: u32,
+    /// Completed and failed plugin events. Pending events are never pruned.
+    pub plugin_events_days: u32,
     pub interval_secs: u64,
     pub batch_size: u32,
 }
@@ -211,6 +213,7 @@ impl Default for RetentionConfig {
             mcp_invocations_days: 90,
             audit_logs_days: 365,
             usage_rollup_days: 400,
+            plugin_events_days: 7,
             interval_secs: 3_600,
             batch_size: 5_000,
         }
