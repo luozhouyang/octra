@@ -354,6 +354,10 @@ export interface McpServer {
   name: string;
   type: string;
   sources: string[];
+  route_path: string | null;
+  auth_strategy_id: string | null;
+  acl_allow_when: string[];
+  acl_deny_when: string[];
   transport: "stdio" | "http";
   command: string | null;
   url: string | null;
@@ -367,12 +371,27 @@ export interface McpServer {
   tool_count: number;
 }
 
+export interface McpAuthStrategy {
+  id: string;
+  name: string;
+  kind: string;
+  config: unknown;
+  enabled: boolean;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface McpTool {
   id: string;
   server_id: string;
   name: string;
   description: string;
   schema: unknown;
+  kind: string;
+  http_method: string | null;
+  http_path: string | null;
+  http_config: unknown;
   enabled: boolean;
   created_at: string;
   server_name: string;

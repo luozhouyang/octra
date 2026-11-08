@@ -1,8 +1,8 @@
-import type { ConsumerGroup, McpServer, McpTool } from "@octra/types";
+import type { ConsumerGroup, McpAuthStrategy, McpServer, McpTool } from "@octra/types";
 import { Button, Input, Switch } from "@octra/ui";
 import { useState, type FormEvent, type ReactNode } from "react";
 
-export type McpFormKind = "server" | "tool" | "key" | "acl";
+export type McpFormKind = "server" | "tool" | "key" | "acl" | "strategy";
 
 export interface McpTypedFormProps {
   kind: McpFormKind;
@@ -10,6 +10,7 @@ export interface McpTypedFormProps {
   servers: McpServer[];
   tools: McpTool[];
   consumerGroups: ConsumerGroup[];
+  authStrategies: McpAuthStrategy[];
   pending: boolean;
   onSave: (body: Record<string, unknown>) => void;
   onCancel: () => void;
@@ -26,28 +27,49 @@ export function McpTypedForm(props: McpTypedFormProps) {
       return <KeyForm {...props} />;
     case "acl":
       return <AclForm {...props} />;
+    case "strategy":
+      return <StrategyForm {...props} />;
   }
 }
 
-function ServerForm({ initial, servers, pending, onSave, onCancel, onDelete }: McpTypedFormProps) {
+function ServerForm({
+  initial,
+  servers,
+  authStrategies,
+  pending,
+  onSave,
+  onCancel,
+  onDelete,
+}: McpTypedFormProps) {
   const source = asRecord(initial);
   const [name, setName] = useState(() => readString(source, "name"));
   const [mode, setMode] = useState(() => readServerMode(source.type));
   const [sources, setSources] = useState(() => readSources(source.sources));
+  const [routePath, setRoutePath] = useState(() => readString(source, "route_path"));
+  const [authStrategyId, setAuthStrategyId] = useState(() =>
+    readString(source, "auth_strategy_id"),
+  );
+  const [aclAllowWhen, setAclAllowWhen] = useState(() => readLines(source.acl_allow_when));
+  const [aclDenyWhen, setAclDenyWhen] = useState(() => readLines(source.acl_deny_when));
   const [transport, setTransport] = useState(() => readTransport(source.transport));
   const [command, setCommand] = useState(() => readString(source, "command"));
   const [url, setUrl] = useState(() => readString(source, "url"));
   const [enabled, setEnabled] = useState(() => readBoolean(source, "enabled", true));
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  const stdio = transport === "stdio";
+  const conversion = mode === "conversion-listener" || mode === "conversion-only";
+  const stdio = !conversion && transport === "stdio";
   const body: Record<string, unknown> = {
     name: name.trim(),
     type: mode,
     sources: mode === "listener" ? splitSources(sources) : [],
+    route_path: routePath.trim() === "" ? null : routePath.trim(),
+    auth_strategy_id: authStrategyId === "" ? null : authStrategyId,
+    acl_allow_when: splitLines(aclAllowWhen),
+    acl_deny_when: splitLines(aclDenyWhen),
     transport,
     command: stdio && command.trim() !== "" ? command.trim() : null,
-    url: !stdio && url.trim() !== "" ? url.trim() : null,
+    url: !stdio && !conversion && url.trim() !== "" ? url.trim() : null,
     enabled,
     config: readObject(source, "config"),
     headers: readObject(source, "headers"),
@@ -69,7 +91,15 @@ function ServerForm({ initial, servers, pending, onSave, onCancel, onDelete }: M
     if (name.trim() === "") {
       nextErrors.name = "Name is required.";
     }
-    if (stdio) {
+    if (routePath.trim() !== "" && !routePath.trim().startsWith("/")) {
+      nextErrors.route_path = "Route path must start with /.";
+    }
+    if (conversion) {
+      const config = readObject(source, "config");
+      if (!isRecord(config.openapi)) {
+        nextErrors.openapi = "Conversion modes require config.openapi (document or document_url).";
+      }
+    } else if (stdio) {
       if (command.trim() === "") {
         nextErrors.command = "stdio servers require a command.";
       }
@@ -112,11 +142,44 @@ function ServerForm({ initial, servers, pending, onSave, onCancel, onDelete }: M
             <option value="http">http</option>
           </Select>
         </Field>
-        <Field label="Mode" hint="Kong-shaped server type; conversion modes are not implemented.">
+        <Field
+          label="Mode"
+          hint="Kong-shaped server type. Conversion modes read config.openapi."
+        >
           <Select value={mode} onChange={setMode}>
             <option value="passthrough-listener">passthrough-listener</option>
             <option value="listener">listener</option>
             <option value="upstream-server">upstream-server</option>
+            <option value="conversion-listener">conversion-listener</option>
+            <option value="conversion-only">conversion-only</option>
+          </Select>
+        </Field>
+        <Field
+          label="Route path"
+          hint="Optional; defaults to /mcp/<name>. Must start with /."
+          error={errors.route_path}
+        >
+          <Input
+            value={routePath}
+            onChange={(event) => setRoutePath(event.target.value)}
+            placeholder="/mcp/filesystem"
+            className="font-mono text-[11px]"
+            aria-invalid={Boolean(errors.route_path)}
+          />
+        </Field>
+        <Field label="Auth strategy" hint="Empty uses the default strategy or MCP API keys.">
+          <Select value={authStrategyId} onChange={setAuthStrategyId}>
+            <option value="">Default / MCP API keys</option>
+            {authStrategyId !== "" &&
+            !authStrategies.some((strategy) => strategy.id === authStrategyId) ? (
+              <option value={authStrategyId}>{authStrategyId} (missing)</option>
+            ) : null}
+            {authStrategies.map((strategy) => (
+              <option key={strategy.id} value={strategy.id}>
+                {strategy.name} · {strategy.kind}
+                {strategy.is_default ? " · default" : ""}
+              </option>
+            ))}
           </Select>
         </Field>
         {mode === "listener" ? (
@@ -134,7 +197,7 @@ function ServerForm({ initial, servers, pending, onSave, onCancel, onDelete }: M
             />
           </Field>
         ) : null}
-        {stdio ? (
+        {!conversion && stdio ? (
           <Field
             label="Command"
             required
@@ -149,7 +212,7 @@ function ServerForm({ initial, servers, pending, onSave, onCancel, onDelete }: M
               aria-invalid={Boolean(errors.command)}
             />
           </Field>
-        ) : (
+        ) : !conversion ? (
           <Field
             label="URL"
             required
@@ -164,16 +227,43 @@ function ServerForm({ initial, servers, pending, onSave, onCancel, onDelete }: M
               aria-invalid={Boolean(errors.url)}
             />
           </Field>
-        )}
+        ) : null}
         <Field label="Enabled">
           <div className="flex h-9 items-center">
             <Switch checked={enabled} onCheckedChange={setEnabled} label="Server enabled" />
           </div>
         </Field>
+        <Field
+          label="CEL allow_when"
+          hint="One expression per line. Deny wins; per-tool ACL rows override."
+        >
+          <textarea
+            value={aclAllowWhen}
+            onChange={(event) => setAclAllowWhen(event.target.value)}
+            rows={3}
+            spellCheck={false}
+            placeholder={"consumer_group.names.contains('internal-teams')"}
+            className="min-h-[70px] w-full resize-y rounded-lg border border-border bg-surface p-2 font-mono text-[10.5px] text-secondary outline-none focus:border-primary/40 focus:ring-2 focus:ring-primary/15"
+          />
+        </Field>
+        <Field label="CEL deny_when" hint="One expression per line. Evaluated before allow_when.">
+          <textarea
+            value={aclDenyWhen}
+            onChange={(event) => setAclDenyWhen(event.target.value)}
+            rows={3}
+            spellCheck={false}
+            placeholder={"consumer.id == 'blocked-user'"}
+            className="min-h-[70px] w-full resize-y rounded-lg border border-border bg-surface p-2 font-mono text-[10.5px] text-secondary outline-none focus:border-primary/40 focus:ring-2 focus:ring-primary/15"
+          />
+        </Field>
       </div>
+      {errors.openapi ? (
+        <span className="text-[10px] text-danger">{errors.openapi}</span>
+      ) : null}
       <p className="text-[9.5px] text-muted-foreground">
         stdio servers need command; HTTP servers need url. Listener sources are matched by server
-        name or id and normalize to names.
+        name or id and normalize to names. Conversion modes need config.openapi in the advanced
+        body; generated HTTP tools are managed by refresh.
       </p>
       <AdvancedJsonField
         state={advanced}
@@ -577,6 +667,201 @@ function AclForm({
   );
 }
 
+function StrategyForm({ initial, pending, onSave, onCancel, onDelete }: McpTypedFormProps) {
+  const source = asRecord(initial);
+  const config = isRecord(source.config) ? source.config : {};
+  const [name, setName] = useState(() => readString(source, "name"));
+  const [issuer, setIssuer] = useState(() => readString(config, "issuer"));
+  const [jwksUri, setJwksUri] = useState(() => readString(config, "jwks_uri"));
+  const [audience, setAudience] = useState(() => readString(config, "audience"));
+  const [scopes, setScopes] = useState(() => readCommaList(config.required_scopes));
+  const [consumerClaim, setConsumerClaim] = useState(() =>
+    readString(config, "consumer_claim", "sub"),
+  );
+  const [usernameClaim, setUsernameClaim] = useState(() =>
+    readString(config, "username_claim"),
+  );
+  const [groupsClaim, setGroupsClaim] = useState(() => readString(config, "groups_claim"));
+  const [algorithms, setAlgorithms] = useState(() => readCommaList(config.algorithms));
+  const [cacheSecs, setCacheSecs] = useState(() => readNumberText(config, "jwks_cache_secs", 300));
+  const [enabled, setEnabled] = useState(() => readBoolean(source, "enabled", true));
+  const [isDefault, setIsDefault] = useState(() => readBoolean(source, "is_default", false));
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  const body: Record<string, unknown> = {
+    name: name.trim(),
+    kind: "oidc",
+    enabled,
+    is_default: isDefault,
+    config: {
+      issuer: issuer.trim(),
+      jwks_uri: jwksUri.trim(),
+      audience: audience.trim() === "" ? null : audience.trim(),
+      required_scopes: splitCommaList(scopes),
+      consumer_claim: consumerClaim.trim() || "sub",
+      username_claim: usernameClaim.trim() === "" ? null : usernameClaim.trim(),
+      groups_claim: groupsClaim.trim() === "" ? null : groupsClaim.trim(),
+      algorithms: splitCommaList(algorithms),
+      jwks_cache_secs: Number(cacheSecs) || 300,
+    },
+  };
+  const advanced = useAdvancedJson(body);
+
+  function submit() {
+    const nextErrors: Record<string, string> = {};
+    if (advanced.dirty) {
+      const parsed = parseAdvanced(advanced.text, nextErrors);
+      if (!parsed) {
+        setErrors(nextErrors);
+        return;
+      }
+      setErrors({});
+      onSave(parsed);
+      return;
+    }
+    if (name.trim() === "") {
+      nextErrors.name = "Name is required.";
+    }
+    if (!/^https?:\/\//i.test(issuer.trim())) {
+      nextErrors.issuer = "Issuer must be an absolute http(s) URL.";
+    }
+    if (!/^https?:\/\//i.test(jwksUri.trim())) {
+      nextErrors.jwks_uri = "JWKS URI must be an absolute http(s) URL.";
+    }
+    const seconds = Number(cacheSecs);
+    if (!Number.isFinite(seconds) || seconds < 1 || seconds > 86400) {
+      nextErrors.cache = "JWKS cache must be between 1 and 86400 seconds.";
+    }
+    if (Object.keys(nextErrors).length > 0) {
+      setErrors(nextErrors);
+      return;
+    }
+    setErrors({});
+    onSave(body);
+  }
+
+  return (
+    <FormShell
+      pending={pending}
+      errors={errors}
+      onCancel={onCancel}
+      onDelete={onDelete}
+      onSubmit={submit}
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Name" required error={errors.name}>
+          <Input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="corporate-oidc"
+          />
+        </Field>
+        <Field label="Kind">
+          <Select value="oidc" onChange={() => undefined}>
+            <option value="oidc">oidc</option>
+          </Select>
+        </Field>
+        <Field label="Issuer" required error={errors.issuer}>
+          <Input
+            value={issuer}
+            onChange={(event) => setIssuer(event.target.value)}
+            placeholder="https://idp.example.com"
+            className="font-mono text-[11px]"
+          />
+        </Field>
+        <Field label="JWKS URI" required error={errors.jwks_uri}>
+          <Input
+            value={jwksUri}
+            onChange={(event) => setJwksUri(event.target.value)}
+            placeholder="https://idp.example.com/.well-known/jwks.json"
+            className="font-mono text-[11px]"
+          />
+        </Field>
+        <Field label="Audience">
+          <Input
+            value={audience}
+            onChange={(event) => setAudience(event.target.value)}
+            placeholder="octra-mcp"
+            className="font-mono text-[11px]"
+          />
+        </Field>
+        <Field label="Required scopes" hint="Comma-separated. Every scope must be present.">
+          <Input
+            value={scopes}
+            onChange={(event) => setScopes(event.target.value)}
+            placeholder="mcp.read, mcp.call"
+            className="font-mono text-[11px]"
+          />
+        </Field>
+        <Field label="Consumer claim">
+          <Input
+            value={consumerClaim}
+            onChange={(event) => setConsumerClaim(event.target.value)}
+            placeholder="sub"
+            className="font-mono text-[11px]"
+          />
+        </Field>
+        <Field label="Username claim">
+          <Input
+            value={usernameClaim}
+            onChange={(event) => setUsernameClaim(event.target.value)}
+            placeholder="preferred_username"
+            className="font-mono text-[11px]"
+          />
+        </Field>
+        <Field label="Groups claim">
+          <Input
+            value={groupsClaim}
+            onChange={(event) => setGroupsClaim(event.target.value)}
+            placeholder="groups"
+            className="font-mono text-[11px]"
+          />
+        </Field>
+        <Field label="Algorithms" hint="Comma-separated; empty uses RS256 and ES256.">
+          <Input
+            value={algorithms}
+            onChange={(event) => setAlgorithms(event.target.value)}
+            placeholder="RS256, ES256"
+            className="font-mono text-[11px]"
+          />
+        </Field>
+        <Field label="JWKS cache seconds" error={errors.cache}>
+          <Input
+            type="number"
+            min={1}
+            max={86400}
+            value={cacheSecs}
+            onChange={(event) => setCacheSecs(event.target.value)}
+          />
+        </Field>
+        <Field label="Enabled">
+          <div className="flex h-9 items-center">
+            <Switch checked={enabled} onCheckedChange={setEnabled} label="Strategy enabled" />
+          </div>
+        </Field>
+        <Field label="Default">
+          <div className="flex h-9 items-center gap-2">
+            <input
+              type="checkbox"
+              checked={isDefault}
+              onChange={(event) => setIsDefault(event.target.checked)}
+              className="h-4 w-4 rounded border-border accent-primary"
+            />
+            <span className="text-[11px] text-secondary">
+              Use when a server does not select a strategy
+            </span>
+          </div>
+        </Field>
+      </div>
+      <AdvancedJsonField
+        state={advanced}
+        error={advanced.dirty ? errors.advanced : undefined}
+        hint="optional full request body."
+      />
+    </FormShell>
+  );
+}
+
 function FormShell({
   pending,
   saveDisabled = false,
@@ -798,9 +1083,39 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function readString(source: Record<string, unknown>, key: string): string {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function readString(
+  source: Record<string, unknown>,
+  key: string,
+  fallback = "",
+): string {
   const value = source[key];
-  return typeof value === "string" ? value : "";
+  return typeof value === "string" ? value : fallback;
+}
+
+function readNumberText(source: Record<string, unknown>, key: string, fallback: number): string {
+  const value = source[key];
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : String(fallback);
+}
+
+function readCommaList(value: unknown): string {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string").join(", ")
+    : "";
+}
+
+function splitCommaList(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 function readBoolean(source: Record<string, unknown>, key: string, fallback: boolean): boolean {
@@ -820,10 +1135,25 @@ function readTransport(value: unknown): "stdio" | "http" {
 }
 
 function readServerMode(value: unknown): string {
-  if (value === "listener" || value === "upstream-server") {
+  if (
+    value === "listener" ||
+    value === "upstream-server" ||
+    value === "conversion-listener" ||
+    value === "conversion-only"
+  ) {
     return value;
   }
   return "passthrough-listener";
+}
+
+function readLines(value: unknown): string {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string").join("\n")
+    : "";
+}
+
+function splitLines(value: string): string[] {
+  return [...new Set(value.split("\n").map((entry) => entry.trim()).filter(Boolean))];
 }
 
 function readSources(value: unknown): string {

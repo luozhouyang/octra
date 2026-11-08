@@ -30,7 +30,7 @@ import { toneBar, toneDot, type Tone } from "../../lib/tone";
 import { McpTypedForm } from "./mcp-forms";
 
 type TransportFilter = "all" | "stdio" | "http";
-type McpEntityKind = "server" | "tool" | "key" | "acl";
+type McpEntityKind = "server" | "tool" | "key" | "acl" | "strategy";
 
 interface McpEditorState {
   kind: McpEntityKind;
@@ -62,6 +62,7 @@ const ENTITY_KINDS: ReadonlyArray<{
   { value: "tool", label: "Tool", newLabel: "New tool" },
   { value: "key", label: "API key", newLabel: "New key" },
   { value: "acl", label: "ACL", newLabel: "New ACL" },
+  { value: "strategy", label: "Auth strategy", newLabel: "New auth strategy" },
 ];
 
 function statusTone(status: string): Tone {
@@ -116,6 +117,11 @@ export function McpPage() {
     queryFn: () => controlClient().consumerGroups(),
     retry: 1,
   });
+  const authStrategiesQuery = useQuery({
+    queryKey: ["mcp-auth-strategies"],
+    queryFn: () => controlClient().mcpAuthStrategies(),
+    retry: 1,
+  });
 
   const servers = serversQuery.data ?? [];
   const tools = toolsQuery.data ?? [];
@@ -123,6 +129,7 @@ export function McpPage() {
   const sessions = sessionsQuery.data ?? [];
   const keys = keysQuery.data ?? [];
   const acls = aclsQuery.data ?? [];
+  const authStrategies = authStrategiesQuery.data ?? [];
   const consumerGroups = consumerGroupsQuery.data ?? [];
 
   const visibleServers =
@@ -272,6 +279,14 @@ export function McpPage() {
             acl.allowed ? "allow" : "deny"
           } · ${acl.id}`,
           entity: acl,
+        }));
+      case "strategy":
+        return authStrategies.map((strategy) => ({
+          id: strategy.id,
+          label: `${strategy.name} · ${strategy.kind}${
+            strategy.is_default ? " · default" : ""
+          } · ${strategy.id}`,
+          entity: strategy,
         }));
     }
   }
@@ -453,6 +468,7 @@ export function McpPage() {
               servers={servers}
               tools={tools}
               consumerGroups={consumerGroups}
+              authStrategies={authStrategies}
               pending={busy}
               onSave={(body) => save.mutate({ target: editor, body })}
               onCancel={() => openCreate(editor.kind)}
@@ -759,6 +775,8 @@ function kindLabel(kind: McpEntityKind): string {
       return "API key";
     case "acl":
       return "ACL";
+    case "strategy":
+      return "Auth strategy";
   }
 }
 
@@ -772,6 +790,8 @@ function kindNoun(kind: McpEntityKind): string {
       return "API key";
     case "acl":
       return "ACL";
+    case "strategy":
+      return "auth strategy";
   }
 }
 
@@ -789,6 +809,8 @@ function editorHint(kind: McpEntityKind): string {
       return "Keys return plaintext once. Pass consumer_id or consumer_name, not both; expires_at is YYYY-MM-DD.";
     case "acl":
       return "ACLs need tool_id and allowed, plus exactly one of consumer_id or consumer_group_id; omit both for the tool default. Updates only change allowed.";
+    case "strategy":
+      return "OIDC strategies need issuer, jwks_uri, and either an audience or required scopes. Secrets are never returned.";
   }
 }
 
@@ -803,6 +825,10 @@ function saveMcpEntity(editor: McpEditorState, body: Record<string, unknown>): P
       return client.mcpCreateKey(body);
     case "acl":
       return editor.id ? client.mcpUpdateAcl(editor.id, body) : client.mcpCreateAcl(body);
+    case "strategy":
+      return editor.id
+        ? client.mcpUpdateAuthStrategy(editor.id, body)
+        : client.mcpCreateAuthStrategy(body);
   }
 }
 
@@ -817,6 +843,8 @@ function deleteMcpEntity(kind: McpEntityKind, id: string): Promise<void> {
       return client.mcpDeleteKey(id);
     case "acl":
       return client.mcpDeleteAcl(id);
+    case "strategy":
+      return client.mcpDeleteAuthStrategy(id);
   }
 }
 

@@ -37,6 +37,7 @@ import type {
   LlmVirtualKey,
   McpAcl,
   McpApiKey,
+  McpAuthStrategy,
   McpInvocation,
   McpServer,
   McpSession,
@@ -318,6 +319,25 @@ export class ControlApiClient {
     return this.request<unknown>(`/api/v1/mcp/servers/${encodeURIComponent(id)}/refresh`, {
       method: "POST",
     });
+  }
+
+  mcpAuthStrategies(signal?: AbortSignal): Promise<McpAuthStrategy[]> {
+    return this.request<McpAuthStrategy[]>("/api/v1/mcp/auth-strategies", { signal });
+  }
+
+  mcpCreateAuthStrategy(body: unknown): Promise<McpAuthStrategy> {
+    return this.postJson<McpAuthStrategy>("/api/v1/mcp/auth-strategies", body);
+  }
+
+  mcpUpdateAuthStrategy(id: string, body: unknown): Promise<McpAuthStrategy> {
+    return this.putJson<McpAuthStrategy>(
+      `/api/v1/mcp/auth-strategies/${encodeURIComponent(id)}`,
+      body,
+    );
+  }
+
+  mcpDeleteAuthStrategy(id: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/mcp/auth-strategies/${encodeURIComponent(id)}`);
   }
 
   mcpTools(serverId?: string, signal?: AbortSignal): Promise<McpTool[]> {
