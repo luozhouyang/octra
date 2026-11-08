@@ -127,7 +127,7 @@ This table is the authoritative progress summary for v0.1. "Implemented" means t
 | R5 Agent integration | Implemented | Three adapters, atomic apply/restore, backups; sandbox end-to-end test covers Claude Code only, not Codex/OpenCode |
 | R6 Plugins | Implemented | Native/WASM, capabilities, storage, events, jobs; event bus lacks delivery/retry/job integration tests; no delivery-lag operational view |
 | R7 Persistence | Implemented | 24 migrations, WAL, retention, `0600`; write-contention benchmark not done |
-| R8 Console/CLI | Partial | Eight live pages: AI Control has typed forms for all six AI entity types, API Gateway has JSON-editor CRUD for services/routes/upstreams/targets; MCP and consumer policies remain desktop read-only; CLI covers status, API services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, keys/usage, full AI entity CRUD, and AI activation actions |
+| R8 Console/CLI | Partial | Eight live pages: AI Control has typed forms for all six AI entity types, API Gateway and MCP have JSON-editor CRUD for their core entities; consumer policies remain desktop/CLI read-only; CLI covers status, API services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, keys/usage, full AI entity CRUD, and AI activation actions |
 | R9 Security | Implemented with accepted exceptions | Secret references, hashed keys, control token boundary, `0600`, masked control responses; OAuth tokens are plaintext in the protected database; browser mode stores a token in settings |
 | R10 Observability/retention | Implemented core | Logs, usage, metrics, events, retention; API metrics are in-memory; no OTLP; no delivery-lag metric |
 
