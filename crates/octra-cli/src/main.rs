@@ -28,9 +28,6 @@ enum Command {
     Reload,
     /// Print local paths and daemon reachability
     Doctor,
-    /// Manage LLM provider accounts
-    #[command(subcommand)]
-    Accounts(AccountsCommand),
     /// Manage LLM virtual keys
     #[command(subcommand)]
     Keys(KeysCommand),
@@ -39,6 +36,215 @@ enum Command {
         /// Maximum number of recent records
         #[arg(long, default_value_t = 50)]
         limit: i64,
+    },
+    /// Inspect and activate the AI-native LLM control plane
+    #[command(subcommand)]
+    Ai(AiCommand),
+}
+
+#[derive(Subcommand)]
+enum AiCommand {
+    /// Show AI control-plane counts, last compile, and revision count
+    Status,
+    /// Compile and validate the current control plane
+    Validate,
+    /// Compile, record a revision, and activate it
+    Apply,
+    /// List applied revisions
+    Revisions,
+    /// Restore a revision snapshot
+    Rollback {
+        /// Revision id
+        id: String,
+    },
+    /// Manage AI providers
+    #[command(subcommand)]
+    Providers(AiProvidersCommand),
+    /// Manage AI provider accounts
+    #[command(subcommand)]
+    Accounts(AiAccountsCommand),
+    /// Manage AI models
+    #[command(subcommand)]
+    Models(AiModelsCommand),
+    /// Manage AI model targets
+    #[command(subcommand)]
+    Targets(AiTargetsCommand),
+    /// Manage AI policies
+    #[command(subcommand)]
+    Policies(AiPoliciesCommand),
+    /// Manage AI policy attachments
+    #[command(subcommand)]
+    Attachments(AiAttachmentsCommand),
+}
+
+#[derive(Subcommand)]
+enum AiProvidersCommand {
+    /// List AI providers
+    List,
+    /// Create a provider from a JSON body
+    Create {
+        /// JSON object with the provider fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update a provider from a JSON body
+    Update {
+        /// Provider id
+        id: String,
+        /// JSON object with the fields to change, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete a provider
+    Delete {
+        /// Provider id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AiAccountsCommand {
+    /// List accounts for a provider
+    List {
+        /// Provider id
+        #[arg(long)]
+        provider: String,
+    },
+    /// Create an account for a provider from a JSON body
+    Create {
+        /// Provider id
+        #[arg(long)]
+        provider: String,
+        /// JSON object with the account fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update an account from a JSON body
+    Update {
+        /// Account id
+        id: String,
+        /// JSON object with the fields to change, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete an account
+    Delete {
+        /// Account id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AiModelsCommand {
+    /// List AI models
+    List,
+    /// Create a model from a JSON body
+    Create {
+        /// JSON object with the model fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update a model from a JSON body
+    Update {
+        /// Model id
+        id: String,
+        /// JSON object with the fields to change, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete a model
+    Delete {
+        /// Model id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AiTargetsCommand {
+    /// List targets for a model
+    List {
+        /// Model id
+        #[arg(long)]
+        model: String,
+    },
+    /// Create a target for a model from a JSON body
+    Create {
+        /// Model id
+        #[arg(long)]
+        model: String,
+        /// JSON object with the target fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update a target from a JSON body
+    Update {
+        /// Target id
+        id: String,
+        /// JSON object with the fields to change, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete a target
+    Delete {
+        /// Target id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AiPoliciesCommand {
+    /// List AI policies
+    List,
+    /// Create a policy from a JSON body
+    Create {
+        /// JSON object with the policy fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update a policy from a JSON body
+    Update {
+        /// Policy id
+        id: String,
+        /// JSON object with the fields to change, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete a policy
+    Delete {
+        /// Policy id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AiAttachmentsCommand {
+    /// List attachments for a policy
+    List {
+        /// Policy id
+        #[arg(long)]
+        policy: String,
+    },
+    /// Create an attachment for a policy from a JSON body
+    Create {
+        /// Policy id
+        #[arg(long)]
+        policy: String,
+        /// JSON object with the attachment fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update an attachment from a JSON body
+    Update {
+        /// Attachment id
+        id: String,
+        /// JSON object with the fields to change, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete an attachment
+    Delete {
+        /// Attachment id
+        id: String,
     },
 }
 
@@ -81,69 +287,6 @@ enum KeysCommand {
     Delete { id: String },
 }
 
-#[derive(Subcommand)]
-enum AccountsCommand {
-    /// List accounts for a provider
-    List {
-        /// Provider id
-        provider: String,
-    },
-    /// Create an account for a provider
-    Create {
-        /// Provider id
-        provider: String,
-        /// Account name
-        name: String,
-        /// Secret reference, e.g. env:OPENAI_KEY_B
-        #[arg(long)]
-        secret_ref: Option<String>,
-        #[arg(long, default_value_t = 1)]
-        weight: i64,
-        #[arg(long, default_value_t = 0)]
-        priority: i64,
-        /// Quota limit in the configured unit
-        #[arg(long)]
-        quota_limit: Option<i64>,
-        /// requests, tokens or cost_micros
-        #[arg(long, default_value = "requests")]
-        quota_unit: String,
-        /// none, day or month
-        #[arg(long, default_value = "none")]
-        quota_period: String,
-    },
-    /// Update an existing account
-    Update {
-        /// Account id
-        id: String,
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long)]
-        secret_ref: Option<String>,
-        #[arg(long)]
-        weight: Option<i64>,
-        #[arg(long)]
-        priority: Option<i64>,
-        #[arg(long)]
-        enabled: Option<bool>,
-        #[arg(long)]
-        quota_limit: Option<i64>,
-        #[arg(long)]
-        quota_unit: Option<String>,
-        #[arg(long)]
-        quota_period: Option<String>,
-    },
-    /// Delete an account
-    Delete {
-        /// Account id
-        id: String,
-    },
-    /// Reset an account's quota counter and cooldown
-    ResetQuota {
-        /// Account id
-        id: String,
-    },
-}
-
 struct Control {
     workspace: Workspace,
     base_url: String,
@@ -163,8 +306,8 @@ fn main() -> Result<()> {
         Command::Usage { limit } => {
             print_json(control.get(&format!("/admin/llm/usage?limit={limit}"))?)?
         }
-        Command::Accounts(command) => accounts(&control, command)?,
         Command::Keys(command) => keys(&control, command)?,
+        Command::Ai(command) => ai(&control, command)?,
     }
 
     Ok(())
@@ -227,84 +370,173 @@ fn keys(control: &Control, command: KeysCommand) -> Result<()> {
     Ok(())
 }
 
+fn ai(control: &Control, command: AiCommand) -> Result<()> {
+    match command {
+        AiCommand::Status => print_json(control.get("/api/v1/ai/status")?),
+        AiCommand::Validate => print_json(control.post("/api/v1/ai/validate")?),
+        AiCommand::Apply => print_json(control.post("/api/v1/ai/apply")?),
+        AiCommand::Revisions => print_json(control.get("/api/v1/ai/revisions")?),
+        AiCommand::Rollback { id } => {
+            print_json(control.post(&format!("/api/v1/ai/revisions/{id}/rollback"))?)
+        }
+        AiCommand::Providers(command) => ai_providers(control, command),
+        AiCommand::Accounts(command) => ai_accounts(control, command),
+        AiCommand::Models(command) => ai_models(control, command),
+        AiCommand::Targets(command) => ai_targets(control, command),
+        AiCommand::Policies(command) => ai_policies(control, command),
+        AiCommand::Attachments(command) => ai_attachments(control, command),
+    }
+}
+
+fn ai_providers(control: &Control, command: AiProvidersCommand) -> Result<()> {
+    match command {
+        AiProvidersCommand::List => print_json(control.get("/api/v1/ai/providers")?),
+        AiProvidersCommand::Create { body } => ai_create(control, "/api/v1/ai/providers", &body),
+        AiProvidersCommand::Update { id, body } => {
+            ai_update(control, &format!("/api/v1/ai/providers/{id}"), &body)
+        }
+        AiProvidersCommand::Delete { id } => {
+            print_json(control.delete(&format!("/api/v1/ai/providers/{id}"))?)
+        }
+    }
+}
+
+fn ai_accounts(control: &Control, command: AiAccountsCommand) -> Result<()> {
+    match command {
+        AiAccountsCommand::List { provider } => {
+            print_json(control.get(&format!("/api/v1/ai/providers/{provider}/accounts"))?)
+        }
+        AiAccountsCommand::Create { provider, body } => ai_create(
+            control,
+            &format!("/api/v1/ai/providers/{provider}/accounts"),
+            &body,
+        ),
+        AiAccountsCommand::Update { id, body } => {
+            ai_update(control, &format!("/api/v1/ai/accounts/{id}"), &body)
+        }
+        AiAccountsCommand::Delete { id } => {
+            print_json(control.delete(&format!("/api/v1/ai/accounts/{id}"))?)
+        }
+    }
+}
+
+fn ai_models(control: &Control, command: AiModelsCommand) -> Result<()> {
+    match command {
+        AiModelsCommand::List => print_json(control.get("/api/v1/ai/models")?),
+        AiModelsCommand::Create { body } => ai_create(control, "/api/v1/ai/models", &body),
+        AiModelsCommand::Update { id, body } => {
+            ai_update(control, &format!("/api/v1/ai/models/{id}"), &body)
+        }
+        AiModelsCommand::Delete { id } => {
+            print_json(control.delete(&format!("/api/v1/ai/models/{id}"))?)
+        }
+    }
+}
+
+fn ai_targets(control: &Control, command: AiTargetsCommand) -> Result<()> {
+    match command {
+        AiTargetsCommand::List { model } => {
+            print_json(control.get(&format!("/api/v1/ai/models/{model}/targets"))?)
+        }
+        AiTargetsCommand::Create { model, body } => ai_create(
+            control,
+            &format!("/api/v1/ai/models/{model}/targets"),
+            &body,
+        ),
+        AiTargetsCommand::Update { id, body } => {
+            ai_update(control, &format!("/api/v1/ai/targets/{id}"), &body)
+        }
+        AiTargetsCommand::Delete { id } => {
+            print_json(control.delete(&format!("/api/v1/ai/targets/{id}"))?)
+        }
+    }
+}
+
+fn ai_policies(control: &Control, command: AiPoliciesCommand) -> Result<()> {
+    match command {
+        AiPoliciesCommand::List => print_json(control.get("/api/v1/ai/policies")?),
+        AiPoliciesCommand::Create { body } => ai_create(control, "/api/v1/ai/policies", &body),
+        AiPoliciesCommand::Update { id, body } => {
+            ai_update(control, &format!("/api/v1/ai/policies/{id}"), &body)
+        }
+        AiPoliciesCommand::Delete { id } => {
+            print_json(control.delete(&format!("/api/v1/ai/policies/{id}"))?)
+        }
+    }
+}
+
+fn ai_attachments(control: &Control, command: AiAttachmentsCommand) -> Result<()> {
+    match command {
+        AiAttachmentsCommand::List { policy } => {
+            print_json(control.get(&format!("/api/v1/ai/policies/{policy}/attachments"))?)
+        }
+        AiAttachmentsCommand::Create { policy, body } => ai_create(
+            control,
+            &format!("/api/v1/ai/policies/{policy}/attachments"),
+            &body,
+        ),
+        AiAttachmentsCommand::Update { id, body } => {
+            ai_update(control, &format!("/api/v1/ai/attachments/{id}"), &body)
+        }
+        AiAttachmentsCommand::Delete { id } => {
+            print_json(control.delete(&format!("/api/v1/ai/attachments/{id}"))?)
+        }
+    }
+}
+
+fn ai_create(control: &Control, path: &str, body: &str) -> Result<()> {
+    let body = parse_json_body(body)?;
+    print_json(control.post_json(path, &body)?)
+}
+
+fn ai_update(control: &Control, path: &str, body: &str) -> Result<()> {
+    let body = parse_json_body(body)?;
+    print_json(control.put(path, &body)?)
+}
+
+fn parse_json_body(raw: &str) -> Result<serde_json::Value> {
+    let text = if raw == "-" {
+        read_stdin_body()?
+    } else if let Some(path) = raw.strip_prefix('@') {
+        if path.is_empty() {
+            bail!("`--body @` requires a file path");
+        }
+        std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read `--body` file '{path}'"))?
+    } else {
+        raw.to_string()
+    };
+
+    if text.trim().is_empty() {
+        bail!("`--body` input is empty");
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| "`--body` must be valid JSON")?;
+    if !value.is_object() {
+        bail!("`--body` must be a JSON object");
+    }
+    Ok(value)
+}
+
+fn read_stdin_body() -> Result<String> {
+    use std::io::Read;
+
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .context("cannot read `--body` from stdin")?;
+    if text.trim().is_empty() {
+        bail!("`--body -` requires JSON on stdin but stdin was empty");
+    }
+    Ok(text)
+}
+
 fn parse_json_arg(raw: Option<String>, field: &str) -> Result<Option<serde_json::Value>> {
     raw.map(|raw| {
         serde_json::from_str(&raw).with_context(|| format!("`{field}` must be valid JSON"))
     })
     .transpose()
-}
-
-fn accounts(control: &Control, command: AccountsCommand) -> Result<()> {
-    match command {
-        AccountsCommand::List { provider } => {
-            print_json(control.get(&format!("/admin/llm/providers/{provider}/accounts"))?)?
-        }
-        AccountsCommand::Create {
-            provider,
-            name,
-            secret_ref,
-            weight,
-            priority,
-            quota_limit,
-            quota_unit,
-            quota_period,
-        } => {
-            let mut body = serde_json::json!({
-                "name": name,
-                "weight": weight,
-                "priority": priority,
-                "quota_unit": quota_unit,
-                "quota_period": quota_period,
-            });
-            if let Some(secret_ref) = secret_ref {
-                body["secret_ref"] = serde_json::json!(secret_ref);
-            }
-            if let Some(quota_limit) = quota_limit {
-                body["quota_limit"] = serde_json::json!(quota_limit);
-            }
-            print_json(
-                control.post_json(&format!("/admin/llm/providers/{provider}/accounts"), &body)?,
-            )?
-        }
-        AccountsCommand::Update {
-            id,
-            name,
-            secret_ref,
-            weight,
-            priority,
-            enabled,
-            quota_limit,
-            quota_unit,
-            quota_period,
-        } => {
-            let mut body = serde_json::Map::new();
-            for (key, value) in [
-                ("name", name.map(serde_json::Value::from)),
-                ("secret_ref", secret_ref.map(serde_json::Value::from)),
-                ("weight", weight.map(serde_json::Value::from)),
-                ("priority", priority.map(serde_json::Value::from)),
-                ("enabled", enabled.map(serde_json::Value::from)),
-                ("quota_limit", quota_limit.map(serde_json::Value::from)),
-                ("quota_unit", quota_unit.map(serde_json::Value::from)),
-                ("quota_period", quota_period.map(serde_json::Value::from)),
-            ] {
-                if let Some(value) = value {
-                    body.insert(key.to_string(), value);
-                }
-            }
-            print_json(control.put(
-                &format!("/admin/llm/accounts/{id}"),
-                &serde_json::Value::Object(body),
-            )?)?
-        }
-        AccountsCommand::Delete { id } => {
-            print_json(control.delete(&format!("/admin/llm/accounts/{id}"))?)?
-        }
-        AccountsCommand::ResetQuota { id } => {
-            print_json(control.post(&format!("/admin/llm/accounts/{id}/quota/reset"))?)?
-        }
-    }
-    Ok(())
 }
 
 impl Control {
@@ -444,4 +676,45 @@ fn doctor(control: &Control) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_json_body_accepts_inline_object() {
+        let body = parse_json_body(r#"{"name":"mock"}"#).unwrap();
+        assert_eq!(body["name"], "mock");
+    }
+
+    #[test]
+    fn parse_json_body_rejects_non_object_json() {
+        let error = parse_json_body("[1,2,3]").unwrap_err().to_string();
+        assert!(error.contains("JSON object"));
+    }
+
+    #[test]
+    fn parse_json_body_reads_file_reference() {
+        let path = std::env::temp_dir().join(format!(
+            "octra-cli-body-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, r#"{"name":"from-file"}"#).unwrap();
+        let body = parse_json_body(&format!("@{}", path.display())).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(body["name"], "from-file");
+    }
+
+    #[test]
+    fn parse_json_body_rejects_unreadable_file() {
+        let error = parse_json_body("@/definitely/not/a/real/octra-body.json")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot read `--body` file"));
+    }
 }
