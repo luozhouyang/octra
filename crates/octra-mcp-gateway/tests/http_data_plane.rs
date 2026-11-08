@@ -839,6 +839,595 @@ async fn consumer_and_group_acls_follow_precedence() {
     assert_eq!(body["result"]["content"][0]["text"], "b");
 }
 
+async fn set_server_acl(
+    gateway: &Gateway,
+    server_id: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    gateway
+        .control(
+            "POST",
+            &format!("/api/v1/mcp/servers/{server_id}/acls"),
+            body,
+        )
+        .await
+}
+
+#[tokio::test]
+async fn server_mode_and_source_validation_is_kong_shaped() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let source_id = gateway.add_http_server("source", &upstream).await;
+
+    // Existing/transport servers default to passthrough-listener.
+    let (status, source) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/servers/{source_id}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{source}");
+    assert_eq!(source["type"], "passthrough-listener");
+    assert_eq!(source["sources"], json!([]));
+
+    // A listener aggregates named sources; ids are accepted too and both
+    // normalize to the canonical server name.
+    let (status, listener) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "aggregate",
+                "url": "http://127.0.0.1:9/mcp",
+                "mode": "listener",
+                "sources": ["source", source_id],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{listener}");
+    assert_eq!(listener["type"], "listener");
+    assert_eq!(listener["sources"], json!(["source"]));
+    assert_eq!(listener["tool_count"], 0);
+
+    // Only listeners may declare sources.
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "plain",
+                "url": "http://127.0.0.1:9/mcp",
+                "type": "upstream-server",
+                "sources": ["source"],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sources can only be set")
+    );
+
+    // Unknown sources are rejected before the row is written.
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "ghost-listener",
+                "url": "http://127.0.0.1:9/mcp",
+                "type": "listener",
+                "sources": ["missing"],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown MCP source server")
+    );
+
+    // A listener cannot source another listener.
+    let listener_id = listener["id"].as_str().unwrap();
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "nested-listener",
+                "url": "http://127.0.0.1:9/mcp",
+                "type": "listener",
+                "sources": [listener_id],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("expected 'upstream-server' or 'passthrough-listener'")
+    );
+
+    // Conversion modes are recognized Kong names but unimplemented here.
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "converted",
+                "url": "http://127.0.0.1:9/mcp",
+                "type": "conversion-only",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("conversion modes are out of scope")
+    );
+
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({"name": "bogus", "url": "http://127.0.0.1:9/mcp", "type": "proxy"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid MCP server mode")
+    );
+
+    // Updating an unrelated field keeps the stored type and sources.
+    let (status, updated) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{listener_id}"),
+            json!({"name": "aggregate", "url": "http://127.0.0.1:9/mcp"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["type"], "listener");
+    assert_eq!(updated["sources"], json!(["source"]));
+
+    // An explicit source list on a non-listener update is still rejected.
+    let (status, body) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{source_id}"),
+            json!({"name": "source", "url": upstream.url(), "sources": [listener_id]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sources can only be set")
+    );
+}
+
+#[tokio::test]
+async fn server_acl_control_plane_round_trips() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+    let (_, consumer_id) = create_keyed_consumer(&gateway, "agent-a").await;
+    let group_id = create_consumer_group(&gateway, "team", &[&consumer_id]).await;
+
+    // Unknown servers cannot own ACLs.
+    let (status, body) = set_server_acl(&gateway, "missing", json!({"allowed": false})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, _) = gateway
+        .control("GET", "/api/v1/mcp/servers/missing/acls", json!(null))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Scope validation mirrors the tool ACL rules.
+    let (status, body) = set_server_acl(
+        &gateway,
+        &server_id,
+        json!({
+            "consumer_id": consumer_id,
+            "consumer_group_id": group_id,
+            "allowed": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, body) = set_server_acl(
+        &gateway,
+        &server_id,
+        json!({"consumer_id": "missing", "allowed": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown consumer_id")
+    );
+
+    let (status, body) = set_server_acl(
+        &gateway,
+        &server_id,
+        json!({"consumer_group_id": "missing", "allowed": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown consumer_group_id")
+    );
+
+    let (status, group_acl) = set_server_acl(
+        &gateway,
+        &server_id,
+        json!({"consumer_group_id": group_id, "allowed": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{group_acl}");
+    assert_eq!(group_acl["server_id"], server_id);
+    assert!(group_acl["consumer_id"].is_null());
+
+    // Omitting both ids writes the server default.
+    let (status, default_acl) =
+        set_server_acl(&gateway, &server_id, json!({"allowed": false})).await;
+    assert_eq!(status, StatusCode::CREATED, "{default_acl}");
+    assert!(default_acl["consumer_id"].is_null());
+    assert!(default_acl["consumer_group_id"].is_null());
+    assert_eq!(default_acl["allowed"], false);
+
+    // Re-posting the same scope updates in place.
+    let (status, updated_default) =
+        set_server_acl(&gateway, &server_id, json!({"allowed": true})).await;
+    assert_eq!(status, StatusCode::CREATED, "{updated_default}");
+    assert_eq!(updated_default["id"], default_acl["id"]);
+    assert_eq!(updated_default["allowed"], true);
+
+    let (status, listed) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/servers/{server_id}/acls"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+
+    let acl_id = group_acl["id"].as_str().unwrap();
+    let (status, single) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/server-acls/{acl_id}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{single}");
+
+    let (status, updated) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/server-acls/{acl_id}"),
+            json!({"allowed": false}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["allowed"], false);
+    assert_eq!(updated["consumer_group_id"], group_id);
+
+    assert_eq!(
+        gateway
+            .control_delete(&format!("/api/v1/mcp/server-acls/{acl_id}"))
+            .await,
+        StatusCode::NO_CONTENT
+    );
+    let (status, _) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/server-acls/{acl_id}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        gateway
+            .control_delete(&format!("/api/v1/mcp/server-acls/{acl_id}"))
+            .await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn no_listener_keeps_the_global_catalog() {
+    let first = start_upstream(UpstreamMode::Json).await;
+    let second = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("first", &first).await;
+    gateway.add_http_server("second", &second).await;
+
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(&session, json!(2), "tools/list", json!({}), None)
+        .await;
+    assert_eq!(
+        tool_names(&body),
+        vec!["first__boom", "first__echo", "second__boom", "second__echo",]
+    );
+}
+
+#[tokio::test]
+async fn listener_with_sources_only_exposes_source_tools() {
+    let first = start_upstream(UpstreamMode::Json).await;
+    let second = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("first", &first).await;
+    gateway.add_http_server("second", &second).await;
+    gateway.add_listener("front", &["first"]).await;
+
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(&session, json!(2), "tools/list", json!({}), None)
+        .await;
+    assert_eq!(tool_names(&body), vec!["first__boom", "first__echo"]);
+
+    // The source tool still routes.
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({"name": "first__echo", "arguments": {"message": "via-listener"}}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "via-listener");
+    assert_eq!(*first.state.calls.lock().unwrap(), vec!["echo".to_string()]);
+
+    // Tools outside the listener's sources are not addressable.
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(4),
+            "tools/call",
+            json!({"name": "second__echo"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32002);
+    assert!(second.state.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn listener_with_empty_sources_aggregates_all_upstreams() {
+    let first = start_upstream(UpstreamMode::Json).await;
+    let second = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("first", &first).await;
+    gateway.add_http_server("second", &second).await;
+    gateway.add_listener("front", &[]).await;
+
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(&session, json!(2), "tools/list", json!({}), None)
+        .await;
+    assert_eq!(
+        tool_names(&body),
+        vec!["first__boom", "first__echo", "second__boom", "second__echo",]
+    );
+
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({"name": "second__echo", "arguments": {"message": "all"}}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "all");
+}
+
+#[tokio::test]
+async fn server_default_acl_governs_tools_without_tool_rows() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+
+    // Server default deny closes every tool that has no rows of its own.
+    let (status, acl) = set_server_acl(&gateway, &server_id, json!({"allowed": false})).await;
+    assert_eq!(status, StatusCode::CREATED, "{acl}");
+
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(&session, json!(2), "tools/list", json!({}), None)
+        .await;
+    assert!(tool_names(&body).is_empty(), "{body}");
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({"name": "remote__echo"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+
+    // A per-tool allow overrides the server default for that tool only.
+    let echo_id = find_tool_id(&gateway, &server_id, "echo").await;
+    let (status, _) = set_acl(&gateway, json!({"tool_id": echo_id, "allowed": true})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(4),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "override"}}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "override");
+    let (_, body) = gateway
+        .rpc(&session, json!(5), "tools/list", json!({}), None)
+        .await;
+    assert_eq!(tool_names(&body), vec!["remote__echo"]);
+
+    // Flipping the server default to allow reopens boom (still no tool rows)
+    // while echo keeps following its own overriding rows.
+    let (status, _) = set_server_acl(&gateway, &server_id, json!({"allowed": true})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(6),
+            "tools/call",
+            json!({"name": "remote__boom"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32000, "boom reaches the upstream");
+}
+
+#[tokio::test]
+async fn tool_acl_deny_overrides_an_allow_server_default() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+
+    let (status, _) = set_server_acl(&gateway, &server_id, json!({"allowed": true})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let echo_id = find_tool_id(&gateway, &server_id, "echo").await;
+    let (status, _) = set_acl(&gateway, json!({"tool_id": echo_id, "allowed": false})).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(&session, json!(2), "tools/list", json!({}), None)
+        .await;
+    assert_eq!(tool_names(&body), vec!["remote__boom"]);
+
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({"name": "remote__echo"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+
+    // A tool without its own rows still follows the allowing server default.
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(4),
+            "tools/call",
+            json!({"name": "remote__boom"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32000, "boom reaches the upstream");
+}
+
+#[tokio::test]
+async fn server_acl_consumer_and_group_precedence_is_preserved() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+    let (key_a, consumer_a) = create_keyed_consumer(&gateway, "agent-a").await;
+    let allow_group = create_consumer_group(&gateway, "allow-team", &[&consumer_a]).await;
+    let deny_group = create_consumer_group(&gateway, "deny-team", &[&consumer_a]).await;
+
+    // Start from a server default deny.
+    let (status, _) = set_server_acl(&gateway, &server_id, json!({"allowed": false})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let session_a = gateway.open_session(Some(&key_a)).await;
+    let (_, body) = gateway
+        .rpc(
+            &session_a,
+            json!(2),
+            "tools/call",
+            json!({"name": "remote__echo"}),
+            Some(&key_a),
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+
+    // A matching group allow grants over the default deny.
+    let (status, _) = set_server_acl(
+        &gateway,
+        &server_id,
+        json!({"consumer_group_id": allow_group, "allowed": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, body) = gateway
+        .rpc(
+            &session_a,
+            json!(3),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "group"}}),
+            Some(&key_a),
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "group");
+
+    // Any matching group deny overrides the group allow.
+    let (status, _) = set_server_acl(
+        &gateway,
+        &server_id,
+        json!({"consumer_group_id": deny_group, "allowed": false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, body) = gateway
+        .rpc(
+            &session_a,
+            json!(4),
+            "tools/call",
+            json!({"name": "remote__echo"}),
+            Some(&key_a),
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+
+    // An explicit consumer allow wins over the group deny.
+    let (status, _) = set_server_acl(
+        &gateway,
+        &server_id,
+        json!({"consumer_id": consumer_a, "allowed": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, body) = gateway
+        .rpc(
+            &session_a,
+            json!(5),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "consumer"}}),
+            Some(&key_a),
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "consumer");
+}
+
 #[tokio::test]
 async fn refresh_rediscovers_tools_and_unknown_servers_fail() {
     let upstream = start_upstream(UpstreamMode::Json).await;

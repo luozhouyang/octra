@@ -251,6 +251,36 @@ impl Gateway {
         server["id"].as_str().unwrap().to_string()
     }
 
+    /// Registers a Kong-style `listener` over the given source server names.
+    ///
+    /// Server records stay transport-backed, so the listener still needs a
+    /// transport. The unroutable URL keeps discovery empty and makes the test
+    /// catalog show exactly the aggregated source tools.
+    pub async fn add_listener(&self, name: &str, sources: &[&str]) -> String {
+        let (status, server) = self
+            .control(
+                "POST",
+                "/api/v1/mcp/servers",
+                json!({
+                    "name": name,
+                    "transport": "http",
+                    "url": "http://127.0.0.1:9/mcp",
+                    "type": "listener",
+                    "sources": sources,
+                }),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "create listener failed: {server}"
+        );
+        assert_eq!(server["type"], "listener", "{server}");
+        assert_eq!(server["tool_count"], 0, "{server}");
+        assert_eq!(server["sources"], json!(sources));
+        server["id"].as_str().unwrap().to_string()
+    }
+
     pub async fn control(&self, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
         let mut headers = HeaderMap::new();
         headers.insert(

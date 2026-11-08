@@ -2,7 +2,7 @@
 //! invocation records.
 
 use octra_core::{Error, Result};
-use octra_mcp_core::domain::McpTool;
+use octra_mcp_core::domain::{McpServerAcl, McpTool};
 use octra_mcp_core::{
     McpApiKey, McpInvocation, McpServer, McpSession, McpToolAcl, NewMcpServer, Transport,
 };
@@ -10,8 +10,8 @@ use serde_json::{Map, Value};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 
-const SERVER_COLUMNS: &str = "id, name, transport, command, url, enabled, config_json, headers_json, \
-     protocol_version, last_seen_at, created_at, updated_at";
+const SERVER_COLUMNS: &str = "id, name, transport, mode, sources_json, command, url, enabled, \
+     config_json, headers_json, protocol_version, last_seen_at, created_at, updated_at";
 
 const TOOL_COLUMNS: &str = "id, server_id, name, description, schema, enabled, created_at";
 
@@ -22,6 +22,9 @@ const INVOCATION_COLUMNS: &str = "id, server_id, tool_id, consumer_id, request_i
 
 const ACL_COLUMNS: &str =
     "id, tool_id, consumer_id, consumer_group_id, allowed, created_at, updated_at";
+
+const SERVER_ACL_COLUMNS: &str =
+    "id, server_id, consumer_id, consumer_group_id, allowed, created_at, updated_at";
 
 const KEY_COLUMNS: &str = "id, name, key_prefix, consumer_id, enabled, expires_at, created_at";
 
@@ -78,6 +81,18 @@ fn decode_json(value: Option<String>) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// Decodes a JSON array of strings. Malformed or non-array values degrade to
+/// an empty list, matching the "no sources configured" behaviour.
+fn decode_string_list(value: Option<String>) -> Vec<String> {
+    value
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn encode_string_list(values: &[String]) -> String {
+    Value::Array(values.iter().cloned().map(Value::String).collect()).to_string()
+}
+
 fn get_opt_i64(row: &SqliteRow, column: &str) -> Option<i64> {
     row.try_get::<Option<i64>, _>(column).ok().flatten()
 }
@@ -110,14 +125,19 @@ impl McpStore {
             server.config.to_string()
         };
         let headers = Value::Object(server.headers.clone()).to_string();
+        let sources = encode_string_list(&server.sources);
 
         sqlx::query(
-            "INSERT INTO mcp_servers (id, name, transport, command, url, enabled, config_json, headers_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO mcp_servers
+                 (id, name, transport, mode, sources_json, command, url, enabled,
+                  config_json, headers_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .bind(&id)
         .bind(&server.name)
         .bind(server.transport.as_str())
+        .bind(&server.mode)
+        .bind(sources)
         .bind(server.command.as_deref())
         .bind(server.url.as_deref())
         .bind(i64::from(server.enabled))
@@ -139,16 +159,20 @@ impl McpStore {
         server: &NewMcpServer,
     ) -> Result<Option<McpServer>> {
         let headers = Value::Object(server.headers.clone()).to_string();
+        let sources = encode_string_list(&server.sources);
         let result = sqlx::query(
             "UPDATE mcp_servers
-                SET name = ?2, transport = ?3, command = ?4, url = ?5, enabled = ?6,
-                    config_json = ?7, headers_json = ?8, protocol_version = NULL, last_seen_at = NULL,
+                SET name = ?2, transport = ?3, mode = ?4, sources_json = ?5, command = ?6,
+                    url = ?7, enabled = ?8, config_json = ?9, headers_json = ?10,
+                    protocol_version = NULL, last_seen_at = NULL,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
               WHERE id = ?1",
         )
         .bind(id)
         .bind(&server.name)
         .bind(server.transport.as_str())
+        .bind(&server.mode)
+        .bind(sources)
         .bind(server.command.as_deref())
         .bind(server.url.as_deref())
         .bind(i64::from(server.enabled))
@@ -476,6 +500,118 @@ impl McpStore {
         Ok(row.is_some_and(|row| row.get::<i64, _>("allowed") != 0))
     }
 
+    // ----- server ACLs ---------------------------------------------------
+
+    /// Inserts or updates the server-default rule for one scope.
+    ///
+    /// The scope is a consumer, a consumer group, or the server default when
+    /// both ids are `None`. Rules at this level apply to every tool of the
+    /// server that has no ACL rows of its own.
+    pub async fn upsert_server_acl(
+        &self,
+        server_id: &str,
+        consumer_id: Option<&str>,
+        consumer_group_id: Option<&str>,
+        allowed: bool,
+    ) -> Result<McpServerAcl> {
+        if consumer_id.is_some() && consumer_group_id.is_some() {
+            return Err(Error::Storage(
+                "mcp server acl scope must target at most one of consumer_id and consumer_group_id"
+                    .to_string(),
+            ));
+        }
+
+        // Matches exactly one scope: the requested ids, with the other scope
+        // column required to be null.
+        let scope = "server_id = ?1 \
+             AND ((?2 IS NULL AND consumer_id IS NULL) OR consumer_id = ?2) \
+             AND ((?3 IS NULL AND consumer_group_id IS NULL) OR consumer_group_id = ?3)";
+
+        let mut tx = self
+            .mcp_pool()
+            .begin()
+            .await
+            .map_err(|err| storage_error("cannot begin mcp server acl upsert", err))?;
+
+        let updated = sqlx::query(&format!(
+            "UPDATE mcp_server_acls
+                SET allowed = ?4,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE {scope}"
+        ))
+        .bind(server_id)
+        .bind(consumer_id)
+        .bind(consumer_group_id)
+        .bind(i64::from(allowed))
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| storage_error("cannot update mcp server acl", err))?;
+
+        if updated.rows_affected() == 0 {
+            sqlx::query(
+                "INSERT INTO mcp_server_acls (id, server_id, consumer_id, consumer_group_id, allowed)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(server_id)
+            .bind(consumer_id)
+            .bind(consumer_group_id)
+            .bind(i64::from(allowed))
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| storage_error("cannot insert mcp server acl", err))?;
+        }
+
+        let row = sqlx::query(&format!(
+            "SELECT {SERVER_ACL_COLUMNS} FROM mcp_server_acls WHERE {scope}"
+        ))
+        .bind(server_id)
+        .bind(consumer_id)
+        .bind(consumer_group_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| storage_error("cannot load mcp server acl", err))?;
+
+        tx.commit()
+            .await
+            .map_err(|err| storage_error("cannot commit mcp server acl upsert", err))?;
+
+        Ok(decode_server_acl(&row))
+    }
+
+    pub async fn get_server_acl(&self, id: &str) -> Result<Option<McpServerAcl>> {
+        let row = sqlx::query(&format!(
+            "SELECT {SERVER_ACL_COLUMNS} FROM mcp_server_acls WHERE id = ?1"
+        ))
+        .bind(id)
+        .fetch_optional(self.mcp_pool())
+        .await
+        .map_err(|err| storage_error("cannot load mcp server acl", err))?;
+        Ok(row.as_ref().map(decode_server_acl))
+    }
+
+    pub async fn list_server_acls(&self, server_id: &str) -> Result<Vec<McpServerAcl>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {SERVER_ACL_COLUMNS} FROM mcp_server_acls
+              WHERE server_id = ?1
+              ORDER BY created_at ASC"
+        ))
+        .bind(server_id)
+        .fetch_all(self.mcp_pool())
+        .await
+        .map_err(|err| storage_error("cannot list mcp server acls", err))?;
+        Ok(rows.iter().map(decode_server_acl).collect())
+    }
+
+    pub async fn delete_server_acl(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM mcp_server_acls WHERE id = ?1")
+            .bind(id)
+            .execute(self.mcp_pool())
+            .await
+            .map_err(|err| storage_error("cannot delete mcp server acl", err))?;
+        Ok(result.rows_affected() > 0)
+    }
+
     // ----- consumers -----------------------------------------------------
 
     pub async fn ensure_consumer(&self, id: &str, name: &str) -> Result<()> {
@@ -757,6 +893,8 @@ fn decode_server(row: &SqliteRow) -> McpServer {
         id: row.get("id"),
         name: row.get("name"),
         transport: parse_transport(&row.get::<String, _>("transport")),
+        mode: row.get("mode"),
+        sources: decode_string_list(row.get("sources_json")),
         command: row.get("command"),
         url: row.get("url"),
         enabled: row.get::<i64, _>("enabled") != 0,
@@ -820,6 +958,18 @@ fn decode_acl(row: &SqliteRow) -> McpToolAcl {
     }
 }
 
+fn decode_server_acl(row: &SqliteRow) -> McpServerAcl {
+    McpServerAcl {
+        id: row.get("id"),
+        server_id: row.get("server_id"),
+        consumer_id: row.get("consumer_id"),
+        consumer_group_id: row.get("consumer_group_id"),
+        allowed: row.get::<i64, _>("allowed") != 0,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
 fn decode_key(row: &SqliteRow) -> McpApiKey {
     McpApiKey {
         id: row.get("id"),
@@ -845,6 +995,8 @@ mod tests {
         NewMcpServer {
             name: name.into(),
             transport: Transport::Http,
+            mode: octra_mcp_core::domain::default_server_mode(),
+            sources: Vec::new(),
             command: None,
             url: Some("https://example.test/mcp".into()),
             enabled: true,
@@ -902,6 +1054,173 @@ mod tests {
         );
         assert!(storage.mcp.delete_server(&created.id).await.unwrap());
         assert!(storage.mcp.get_server(&created.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn server_mode_and_sources_round_trip() {
+        let storage = storage().await;
+
+        // New rows default to the legacy passthrough listener with no sources.
+        let created = storage
+            .mcp
+            .insert_server(&http_server("plain"))
+            .await
+            .unwrap();
+        assert_eq!(
+            created.mode,
+            octra_mcp_core::domain::MCP_SERVER_MODE_PASSTHROUGH_LISTENER
+        );
+        assert!(created.sources.is_empty());
+
+        let mut listener = http_server("aggregate");
+        listener.mode = octra_mcp_core::domain::MCP_SERVER_MODE_LISTENER.into();
+        listener.sources = vec!["plain".into(), "remote".into()];
+        let listener = storage.mcp.insert_server(&listener).await.unwrap();
+        assert_eq!(
+            listener.mode,
+            octra_mcp_core::domain::MCP_SERVER_MODE_LISTENER
+        );
+        assert_eq!(listener.sources, vec!["plain", "remote"]);
+
+        let loaded = storage.mcp.get_server(&listener.id).await.unwrap().unwrap();
+        assert_eq!(loaded.mode, "listener");
+        assert_eq!(loaded.sources, vec!["plain", "remote"]);
+
+        // Updates replace mode and sources wholesale.
+        let mut update = http_server("aggregate");
+        update.mode = octra_mcp_core::domain::MCP_SERVER_MODE_UPSTREAM_SERVER.into();
+        let updated = storage
+            .mcp
+            .update_server(&listener.id, &update)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.mode, "upstream-server");
+        assert!(updated.sources.is_empty());
+
+        // A malformed sources column degrades to an empty list, never an error.
+        sqlx::query("UPDATE mcp_servers SET sources_json = 'not-json' WHERE id = ?1")
+            .bind(&listener.id)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let loaded = storage.mcp.get_server(&listener.id).await.unwrap().unwrap();
+        assert!(loaded.sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_acls_upsert_per_scope_and_override_independently() {
+        let storage = storage().await;
+        let server = storage
+            .mcp
+            .insert_server(&http_server("svc"))
+            .await
+            .unwrap();
+        let other = storage
+            .mcp
+            .insert_server(&http_server("other"))
+            .await
+            .unwrap();
+        storage.mcp.ensure_consumer("c1", "one").await.unwrap();
+        let group = storage
+            .api
+            .create_consumer_group(&octra_api_core::CreateConsumerGroup {
+                name: "team".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let acl = storage
+            .mcp
+            .upsert_server_acl(&server.id, Some("c1"), None, true)
+            .await
+            .unwrap();
+        assert_eq!(acl.server_id, server.id);
+        assert!(acl.allowed);
+
+        // The same scope updates in place.
+        let acl = storage
+            .mcp
+            .upsert_server_acl(&server.id, Some("c1"), None, false)
+            .await
+            .unwrap();
+        assert!(!acl.allowed);
+        assert_eq!(
+            storage
+                .mcp
+                .list_server_acls(&server.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Group and default scopes are independent rows.
+        storage
+            .mcp
+            .upsert_server_acl(&server.id, None, Some(&group.id), true)
+            .await
+            .unwrap();
+        let default_acl = storage
+            .mcp
+            .upsert_server_acl(&server.id, None, None, false)
+            .await
+            .unwrap();
+        assert!(default_acl.consumer_id.is_none());
+        assert!(default_acl.consumer_group_id.is_none());
+        assert!(!default_acl.allowed);
+        assert_eq!(
+            storage
+                .mcp
+                .list_server_acls(&server.id)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+
+        // Another server keeps its own empty rule set.
+        assert!(
+            storage
+                .mcp
+                .list_server_acls(&other.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Both scopes at once is rejected before touching SQL.
+        assert!(
+            storage
+                .mcp
+                .upsert_server_acl(&server.id, Some("c1"), Some(&group.id), true)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            storage
+                .mcp
+                .list_server_acls(&server.id)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let loaded = storage.mcp.get_server_acl(&acl.id).await.unwrap().unwrap();
+        assert!(!loaded.allowed);
+        assert!(storage.mcp.delete_server_acl(&acl.id).await.unwrap());
+        assert!(storage.mcp.get_server_acl(&acl.id).await.unwrap().is_none());
+        assert_eq!(
+            storage
+                .mcp
+                .list_server_acls(&server.id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]

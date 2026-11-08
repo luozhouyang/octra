@@ -13,7 +13,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use octra_data_plane::body_bytes_limited;
-use octra_mcp_core::domain::{McpServer, McpTool, NewMcpServer, status, validate_secret_reference};
+use octra_mcp_core::domain::{
+    MCP_SERVER_MODE_LISTENER, McpServer, McpServerAcl, McpTool, NewMcpServer, default_server_mode,
+    is_source_server_mode, status, validate_secret_reference, validate_server_mode,
+};
 use octra_mcp_core::{Transport, domain::McpApiKey};
 use octra_storage::mcp::DiscoveredTool;
 use serde::{Deserialize, Serialize};
@@ -31,7 +34,17 @@ pub fn router(state: McpControlState) -> Router {
             "/api/v1/mcp/servers/{id}",
             get(get_server).put(update_server).delete(delete_server),
         )
+        .route(
+            "/api/v1/mcp/servers/{id}/acls",
+            get(list_server_acls).post(create_server_acl),
+        )
         .route("/api/v1/mcp/servers/{id}/refresh", post(refresh_server))
+        .route(
+            "/api/v1/mcp/server-acls/{id}",
+            get(get_server_acl)
+                .put(update_server_acl)
+                .delete(delete_server_acl),
+        )
         .route("/api/v1/mcp/tools", get(list_tools).post(create_tool))
         .route(
             "/api/v1/mcp/tools/{id}",
@@ -149,6 +162,10 @@ async fn json_body<T: serde::de::DeserializeOwned>(
 pub struct ServerRequest {
     pub name: String,
     pub transport: Option<Transport>,
+    /// Kong calls this field `type`; `mode` is accepted as an alias.
+    #[serde(rename = "type", alias = "mode")]
+    pub mode: Option<String>,
+    pub sources: Option<Vec<String>>,
     pub command: Option<String>,
     pub url: Option<String>,
     pub enabled: bool,
@@ -161,6 +178,8 @@ impl Default for ServerRequest {
         Self {
             name: String::new(),
             transport: None,
+            mode: None,
+            sources: None,
             command: None,
             url: None,
             enabled: true,
@@ -172,6 +191,10 @@ impl Default for ServerRequest {
 
 impl ServerRequest {
     /// Builds the repository record after transport inference and validation.
+    ///
+    /// When `type`/`mode` is omitted the server keeps the legacy
+    /// `passthrough-listener` default; callers that update an existing server
+    /// restore its stored mode and sources before validating.
     pub fn into_new_server(self) -> ApiResult<NewMcpServer> {
         let transport = self.transport.unwrap_or_else(|| {
             if self
@@ -201,9 +224,14 @@ impl ServerRequest {
             headers.insert(name, Value::String(value));
         }
 
+        let mode = self.mode.unwrap_or_else(default_server_mode);
+        validate_server_mode(&mode).map_err(ApiError::bad_request)?;
+
         let server = NewMcpServer {
             name: self.name.trim().to_string(),
             transport,
+            mode,
+            sources: self.sources.unwrap_or_default(),
             command: self.command,
             url: self.url,
             enabled: self.enabled,
@@ -213,6 +241,67 @@ impl ServerRequest {
         server.validate().map_err(ApiError::bad_request)?;
         Ok(server)
     }
+}
+
+/// Resolves `sources` references (server ids or names) to canonical server
+/// names and rejects references a listener may not aggregate.
+///
+/// Only `listener` servers may declare sources, and each reference must point
+/// at an existing `upstream-server` or `passthrough-listener`.
+async fn resolve_sources(
+    state: &McpControlState,
+    mode: &str,
+    sources: &[String],
+) -> ApiResult<Vec<String>> {
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    if mode != MCP_SERVER_MODE_LISTENER {
+        return Err(ApiError::bad_request(format!(
+            "sources can only be set when type is 'listener', not '{mode}'"
+        )));
+    }
+
+    let mut resolved: Vec<String> = Vec::new();
+    for reference in sources {
+        let reference = reference.trim();
+        if reference.is_empty() {
+            return Err(ApiError::bad_request(
+                "sources entries must be non-empty server ids or names",
+            ));
+        }
+        let target = state
+            .storage
+            .mcp
+            .get_server(reference)
+            .await
+            .map_err(storage)?;
+        let target = match target {
+            Some(target) => Some(target),
+            None => state
+                .storage
+                .mcp
+                .get_server_by_name(reference)
+                .await
+                .map_err(storage)?,
+        };
+        let Some(target) = target else {
+            return Err(ApiError::bad_request(format!(
+                "unknown MCP source server: {reference}"
+            )));
+        };
+        if !is_source_server_mode(&target.mode) {
+            return Err(ApiError::bad_request(format!(
+                "MCP source server '{reference}' has type '{}'; expected 'upstream-server' or \
+                 'passthrough-listener'",
+                target.mode
+            )));
+        }
+        if !resolved.contains(&target.name) {
+            resolved.push(target.name.clone());
+        }
+    }
+    Ok(resolved)
 }
 
 #[derive(Debug, Serialize)]
@@ -245,7 +334,8 @@ async fn list_servers(
 
 async fn create_server(State(state): State<McpControlState>, body: Body) -> ApiResult<Response> {
     let request: ServerRequest = json_body(&state, body).await?;
-    let new_server = request.into_new_server()?;
+    let mut new_server = request.into_new_server()?;
+    new_server.sources = resolve_sources(&state, &new_server.mode, &new_server.sources).await?;
     let display_name = new_server.name.clone();
 
     let server = state
@@ -306,10 +396,22 @@ async fn update_server(
         .ok_or_else(|| ApiError::not_found("MCP server"))?;
 
     let request: ServerRequest = json_body(&state, body).await?;
+    let mode_given = request.mode.is_some();
+    let sources_given = request.sources.is_some();
     let mut candidate = request.into_new_server()?;
     if candidate.name.trim().is_empty() {
         candidate.name = existing.name.clone();
     }
+    // Omitted fields keep the stored values, mirroring how an omitted name
+    // keeps the existing one. An explicit `sources` list still requires
+    // `type: listener`.
+    if !mode_given {
+        candidate.mode = existing.mode.clone();
+    }
+    if !sources_given {
+        candidate.sources = existing.sources.clone();
+    }
+    candidate.sources = resolve_sources(&state, &candidate.mode, &candidate.sources).await?;
 
     let display_name = candidate.name.clone();
     let updated = state
@@ -943,6 +1045,45 @@ async fn list_acls(
     ))
 }
 
+/// Validates the two optional scope ids shared by tool and server ACLs.
+async fn validate_acl_scope(
+    state: &McpControlState,
+    consumer_id: Option<&str>,
+    consumer_group_id: Option<&str>,
+) -> ApiResult<()> {
+    if consumer_id.is_some() && consumer_group_id.is_some() {
+        return Err(ApiError::bad_request(
+            "pass either consumer_id or consumer_group_id, not both",
+        ));
+    }
+    if let Some(consumer_id) = consumer_id
+        && !state
+            .storage
+            .mcp
+            .consumer_exists(consumer_id)
+            .await
+            .map_err(storage)?
+    {
+        return Err(ApiError::bad_request(format!(
+            "unknown consumer_id: {consumer_id}"
+        )));
+    }
+    if let Some(consumer_group_id) = consumer_group_id
+        && state
+            .storage
+            .api
+            .get_consumer_group(consumer_group_id)
+            .await
+            .map_err(storage)?
+            .is_none()
+    {
+        return Err(ApiError::bad_request(format!(
+            "unknown consumer_group_id: {consumer_group_id}"
+        )));
+    }
+    Ok(())
+}
+
 async fn create_acl(
     State(state): State<McpControlState>,
     body: Body,
@@ -961,36 +1102,12 @@ async fn create_acl(
             request.tool_id
         )));
     }
-    if request.consumer_id.is_some() && request.consumer_group_id.is_some() {
-        return Err(ApiError::bad_request(
-            "pass either consumer_id or consumer_group_id, not both",
-        ));
-    }
-    if let Some(consumer_id) = request.consumer_id.as_deref()
-        && !state
-            .storage
-            .mcp
-            .consumer_exists(consumer_id)
-            .await
-            .map_err(storage)?
-    {
-        return Err(ApiError::bad_request(format!(
-            "unknown consumer_id: {consumer_id}"
-        )));
-    }
-    if let Some(consumer_group_id) = request.consumer_group_id.as_deref()
-        && state
-            .storage
-            .api
-            .get_consumer_group(consumer_group_id)
-            .await
-            .map_err(storage)?
-            .is_none()
-    {
-        return Err(ApiError::bad_request(format!(
-            "unknown consumer_group_id: {consumer_group_id}"
-        )));
-    }
+    validate_acl_scope(
+        &state,
+        request.consumer_id.as_deref(),
+        request.consumer_group_id.as_deref(),
+    )
+    .await?;
 
     let acl = state
         .storage
@@ -1060,6 +1177,154 @@ async fn delete_acl(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("MCP ACL"))
+    }
+}
+
+// ----- server ACLs -------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct ServerAclRequest {
+    /// Exactly one of `consumer_id` and `consumer_group_id` may be set; with
+    /// neither, the rule is the server default.
+    pub consumer_id: Option<String>,
+    pub consumer_group_id: Option<String>,
+    pub allowed: bool,
+}
+
+impl Default for ServerAclRequest {
+    fn default() -> Self {
+        Self {
+            consumer_id: None,
+            consumer_group_id: None,
+            allowed: true,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct ServerAclUpdate {
+    pub allowed: Option<bool>,
+}
+
+async fn require_server(state: &McpControlState, id: &str) -> ApiResult<()> {
+    if state
+        .storage
+        .mcp
+        .get_server(id)
+        .await
+        .map_err(storage)?
+        .is_none()
+    {
+        return Err(ApiError::not_found("MCP server"));
+    }
+    Ok(())
+}
+
+async fn list_server_acls(
+    State(state): State<McpControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Vec<McpServerAcl>>> {
+    require_server(&state, &id).await?;
+    Ok(Json(
+        state
+            .storage
+            .mcp
+            .list_server_acls(&id)
+            .await
+            .map_err(storage)?,
+    ))
+}
+
+async fn create_server_acl(
+    State(state): State<McpControlState>,
+    Path(id): Path<String>,
+    body: Body,
+) -> ApiResult<(StatusCode, Json<McpServerAcl>)> {
+    require_server(&state, &id).await?;
+    let request: ServerAclRequest = json_body(&state, body).await?;
+    validate_acl_scope(
+        &state,
+        request.consumer_id.as_deref(),
+        request.consumer_group_id.as_deref(),
+    )
+    .await?;
+
+    let acl = state
+        .storage
+        .mcp
+        .upsert_server_acl(
+            &id,
+            request.consumer_id.as_deref(),
+            request.consumer_group_id.as_deref(),
+            request.allowed,
+        )
+        .await
+        .map_err(storage)?;
+    state.runtime.reload_after_mutation().await;
+    Ok((StatusCode::CREATED, Json(acl)))
+}
+
+async fn get_server_acl(
+    State(state): State<McpControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<McpServerAcl>> {
+    state
+        .storage
+        .mcp
+        .get_server_acl(&id)
+        .await
+        .map_err(storage)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("MCP server ACL"))
+}
+
+async fn update_server_acl(
+    State(state): State<McpControlState>,
+    Path(id): Path<String>,
+    body: Body,
+) -> ApiResult<Json<McpServerAcl>> {
+    let existing = state
+        .storage
+        .mcp
+        .get_server_acl(&id)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| ApiError::not_found("MCP server ACL"))?;
+    let request: ServerAclUpdate = json_body(&state, body).await?;
+    let allowed = request.allowed.unwrap_or(existing.allowed);
+
+    let acl = state
+        .storage
+        .mcp
+        .upsert_server_acl(
+            &existing.server_id,
+            existing.consumer_id.as_deref(),
+            existing.consumer_group_id.as_deref(),
+            allowed,
+        )
+        .await
+        .map_err(storage)?;
+    state.runtime.reload_after_mutation().await;
+    Ok(Json(acl))
+}
+
+async fn delete_server_acl(
+    State(state): State<McpControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    if state
+        .storage
+        .mcp
+        .delete_server_acl(&id)
+        .await
+        .map_err(storage)?
+    {
+        state.runtime.reload_after_mutation().await;
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("MCP server ACL"))
     }
 }
 

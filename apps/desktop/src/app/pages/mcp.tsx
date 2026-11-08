@@ -250,7 +250,7 @@ export function McpPage() {
       case "server":
         return servers.map((server) => ({
           id: server.id,
-          label: `${server.name} · ${server.id}`,
+          label: `${server.name} · ${server.type} · ${server.id}`,
           entity: server,
         }));
       case "tool":
@@ -553,9 +553,14 @@ export function McpPage() {
                         </div>
                       </TableCell>
                       <TableCell className="h-16">
-                        <span className="font-mono text-[10.5px] text-secondary">
-                          {server.transport}
-                        </span>
+                        <div className="flex flex-col gap-0.5">
+                          <span className="font-mono text-[10.5px] text-secondary">
+                            {server.type}
+                          </span>
+                          <span className="font-mono text-[9.5px] text-muted-foreground">
+                            {server.transport}
+                          </span>
+                        </div>
                       </TableCell>
                       <TableCell className="h-16">
                         <span className="font-mono text-[11.5px] text-secondary">{toolCount}</span>

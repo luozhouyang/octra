@@ -5,6 +5,7 @@
 //! DELETE terminates the gateway session. Every request other than
 //! `initialize` is bound to an `Mcp-Session-Id` created by `initialize`.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use axum::Json;
@@ -18,7 +19,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use futures_util::stream;
 use octra_data_plane::{body_bytes_limited, error_response, new_request_id};
-use octra_mcp_core::domain::{acl_allows_scoped, session_status, status};
+use octra_mcp_core::domain::{
+    MCP_SERVER_MODE_LISTENER, acl_allows_default_then_tool, is_source_server_mode, session_status,
+    status,
+};
 use octra_mcp_core::jsonrpc::{
     JsonRpcError, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, codes,
 };
@@ -278,18 +282,14 @@ async fn tools_list(state: &McpDataState, caller: &Caller) -> Result<Value, Json
         .list_servers()
         .await
         .map_err(storage_error)?;
-    let enabled: std::collections::HashSet<&str> = servers
-        .iter()
-        .filter(|server| server.enabled)
-        .map(|server| server.id.as_str())
-        .collect();
+    let visible = visible_server_ids(&servers);
 
     let mut tools = Vec::new();
     for entry in &catalog {
-        if !entry.tool.enabled || !enabled.contains(entry.tool.server_id.as_str()) {
+        if !entry.tool.enabled || !visible.contains(&entry.tool.server_id) {
             continue;
         }
-        match acl_allows(state, caller, &entry.tool.id).await {
+        match acl_allows(state, caller, &entry.tool).await {
             Ok(true) => tools.push(Tool {
                 name: entry.qualified_name(),
                 title: None,
@@ -405,6 +405,18 @@ async fn resolve_tool(
         return Err(not_found());
     };
 
+    // The aggregate endpoint only routes tools that the listener sources
+    // expose; everything else is unknown from the caller's point of view.
+    let servers = state
+        .storage
+        .mcp
+        .list_servers()
+        .await
+        .map_err(storage_error)?;
+    if !visible_server_ids(&servers).contains(&server.id) {
+        return Err(not_found());
+    }
+
     if !server.enabled || !tool.enabled {
         let error = JsonRpcError::new(
             codes::TOOL_NOT_FOUND,
@@ -414,7 +426,7 @@ async fn resolve_tool(
         return Err(error);
     }
 
-    let allowed = acl_allows(state, caller, &tool.id)
+    let allowed = acl_allows(state, caller, &tool)
         .await
         .map_err(storage_error)?;
     if !allowed {
@@ -429,20 +441,72 @@ async fn resolve_tool(
     Ok((server, tool))
 }
 
-/// Applies the scoped ACL precedence from `acl_allows_scoped`: consumer rules
-/// win, matching group rules deny on any explicit deny, then the tool default
-/// row applies, and a tool without rows follows the open-local default.
+/// Applies the scoped ACL precedence: tool rows (consumer, group, default)
+/// override the server entirely; a tool without rows inherits the server
+/// default rules; a server without rows follows the open-local default.
 async fn acl_allows(
     state: &McpDataState,
     caller: &Caller,
-    tool_id: &str,
+    tool: &McpTool,
 ) -> octra_core::Result<bool> {
-    let rows = state.storage.mcp.list_acls(Some(tool_id)).await?;
-    Ok(acl_allows_scoped(
-        &rows,
+    let tool_rows = state.storage.mcp.list_acls(Some(&tool.id)).await?;
+    let server_rows = if tool_rows.is_empty() {
+        state.storage.mcp.list_server_acls(&tool.server_id).await?
+    } else {
+        Vec::new()
+    };
+    Ok(acl_allows_default_then_tool(
+        &tool_rows,
+        &server_rows,
         caller.consumer_id.as_deref(),
         &caller.consumer_group_ids,
     ))
+}
+
+/// The servers whose tools the aggregate `/mcp` endpoint presents.
+///
+/// Without an enabled `listener` the endpoint keeps the legacy behaviour and
+/// presents every enabled server. A listener narrows the catalog to its
+/// configured sources plus its own tools; a listener with an empty source list
+/// aggregates every enabled `upstream-server` and `passthrough-listener`.
+fn visible_server_ids(servers: &[McpServer]) -> HashSet<String> {
+    let listeners: Vec<&McpServer> = servers
+        .iter()
+        .filter(|server| server.enabled && server.mode == MCP_SERVER_MODE_LISTENER)
+        .collect();
+    if listeners.is_empty() {
+        return servers
+            .iter()
+            .filter(|server| server.enabled)
+            .map(|server| server.id.clone())
+            .collect();
+    }
+
+    let mut visible: HashSet<String> = listeners
+        .iter()
+        .map(|listener| listener.id.clone())
+        .collect();
+    for listener in listeners {
+        if listener.sources.is_empty() {
+            visible.extend(
+                servers
+                    .iter()
+                    .filter(|server| server.enabled && is_source_server_mode(&server.mode))
+                    .map(|server| server.id.clone()),
+            );
+            continue;
+        }
+        for reference in &listener.sources {
+            if let Some(source) = servers.iter().find(|server| {
+                server.enabled
+                    && is_source_server_mode(&server.mode)
+                    && (server.name == *reference || server.id == *reference)
+            }) {
+                visible.insert(source.id.clone());
+            }
+        }
+    }
+    visible
 }
 
 async fn record(

@@ -30,11 +30,67 @@ pub mod session_status {
 /// rows are always governed by those rows either way.
 pub const ACL_DEFAULT_ALLOW: bool = true;
 
+/// Kong-style MCP server modes that Octra implements today.
+///
+/// `passthrough-listener` is the legacy transport-oriented behaviour and the
+/// default for existing rows. `listener` aggregates the tools of its
+/// [`McpServer::sources`]. `upstream-server` is a plain upstream that only
+/// contributes tools to listeners.
+pub const MCP_SERVER_MODES: &[&str] = &["passthrough-listener", "listener", "upstream-server"];
+
+/// Kong recognizes OpenAPI conversion modes; Octra does not implement them yet.
+pub const MCP_UNSUPPORTED_SERVER_MODES: &[&str] = &["conversion-listener", "conversion-only"];
+
+pub const MCP_SERVER_MODE_PASSTHROUGH_LISTENER: &str = "passthrough-listener";
+pub const MCP_SERVER_MODE_LISTENER: &str = "listener";
+pub const MCP_SERVER_MODE_UPSTREAM_SERVER: &str = "upstream-server";
+
+/// Mode assigned to servers created before modes existed and to requests that
+/// omit `type`/`mode`.
+pub fn default_server_mode() -> String {
+    MCP_SERVER_MODE_PASSTHROUGH_LISTENER.to_string()
+}
+
+/// Validates an MCP server mode.
+///
+/// Conversion modes are recognized Kong names but rejected with a dedicated
+/// message so operators can tell "not supported yet" from "typo".
+pub fn validate_server_mode(mode: &str) -> Result<(), String> {
+    if MCP_SERVER_MODES.contains(&mode) {
+        return Ok(());
+    }
+    if MCP_UNSUPPORTED_SERVER_MODES.contains(&mode) {
+        return Err(format!(
+            "MCP server mode '{mode}' is not implemented: OpenAPI conversion modes are out of scope"
+        ));
+    }
+    Err(format!(
+        "invalid MCP server mode '{mode}'; expected one of {}",
+        MCP_SERVER_MODES.join(", ")
+    ))
+}
+
+/// True when a server of this mode may be listed in another server's
+/// `sources`. Listeners never source each other in Octra.
+pub fn is_source_server_mode(mode: &str) -> bool {
+    matches!(
+        mode,
+        MCP_SERVER_MODE_UPSTREAM_SERVER | MCP_SERVER_MODE_PASSTHROUGH_LISTENER
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpServer {
     pub id: String,
     pub name: String,
     pub transport: Transport,
+    /// Kong calls this field `type`; `mode` is accepted as an alias on input.
+    #[serde(rename = "type", alias = "mode", default = "default_server_mode")]
+    pub mode: String,
+    /// Server names this listener aggregates tools from. Empty on a listener
+    /// means every enabled `upstream-server` and `passthrough-listener`.
+    #[serde(default)]
+    pub sources: Vec<String>,
     pub command: Option<String>,
     pub url: Option<String>,
     pub enabled: bool,
@@ -50,6 +106,10 @@ pub struct McpServer {
 pub struct NewMcpServer {
     pub name: String,
     pub transport: Transport,
+    #[serde(rename = "type", alias = "mode", default = "default_server_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub sources: Vec<String>,
     pub command: Option<String>,
     pub url: Option<String>,
     pub enabled: bool,
@@ -65,6 +125,7 @@ impl NewMcpServer {
         crate::protocol::is_valid_server_name(&self.name)
             .then_some(())
             .ok_or_else(|| format!("invalid server name: {}", self.name))?;
+        validate_server_mode(&self.mode)?;
 
         match self.transport {
             Transport::Stdio => {
@@ -169,6 +230,20 @@ pub struct McpToolAcl {
     pub updated_at: String,
 }
 
+/// One ACL rule for a server. Exactly one scope is set: a consumer, a consumer
+/// group, or neither for the server default. A server rule applies to every
+/// tool of the server that has no rows of its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServerAcl {
+    pub id: String,
+    pub server_id: String,
+    pub consumer_id: Option<String>,
+    pub consumer_group_id: Option<String>,
+    pub allowed: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpApiKey {
     pub id: String,
@@ -204,38 +279,49 @@ pub fn acl_decision(rows: impl IntoIterator<Item = bool>, consumer_known: bool) 
     if saw_row { false } else { ACL_DEFAULT_ALLOW }
 }
 
-/// Scoped ACL decision for one tool.
+/// The scope columns shared by tool and server ACL rows.
+struct ScopedAcl<'a> {
+    consumer_id: Option<&'a str>,
+    consumer_group_id: Option<&'a str>,
+    allowed: bool,
+}
+
+impl ScopedAcl<'_> {
+    fn is_default(&self) -> bool {
+        self.consumer_id.is_none() && self.consumer_group_id.is_none()
+    }
+}
+
+/// Scoped ACL decision over a generic row set.
 ///
 /// Precedence, highest first:
-/// 1. No rows for the tool -> the open-local default ([`ACL_DEFAULT_ALLOW`]).
+/// 1. No rows -> the open-local default ([`ACL_DEFAULT_ALLOW`]).
 /// 2. An explicit consumer row -> its `allowed` value.
 /// 3. Group rows matching the caller's groups -> any explicit deny wins;
 ///    otherwise any allow grants.
-/// 4. The tool default row (both scope ids null) -> its `allowed` value.
+/// 4. The default row (both scope ids null) -> its `allowed` value.
 /// 5. Rows exist but none apply -> deny.
 ///
 /// Anonymous callers (`consumer_id` is `None`) only match the default row.
-pub fn acl_allows_scoped(
-    rows: &[McpToolAcl],
+fn acl_allows_rows<'a>(
+    rows: impl IntoIterator<Item = ScopedAcl<'a>>,
     consumer_id: Option<&str>,
     group_ids: &[String],
 ) -> bool {
+    let rows: Vec<ScopedAcl<'a>> = rows.into_iter().collect();
     if rows.is_empty() {
         return ACL_DEFAULT_ALLOW;
     }
 
     if let Some(consumer_id) = consumer_id {
-        if let Some(row) = rows
-            .iter()
-            .find(|row| row.consumer_id.as_deref() == Some(consumer_id))
-        {
+        if let Some(row) = rows.iter().find(|row| row.consumer_id == Some(consumer_id)) {
             return row.allowed;
         }
 
         let mut saw_group = false;
         let mut group_allows = false;
-        for row in rows {
-            let Some(group_id) = row.consumer_group_id.as_deref() else {
+        for row in &rows {
+            let Some(group_id) = row.consumer_group_id else {
                 continue;
             };
             if !group_ids.iter().any(|id| id == group_id) {
@@ -253,8 +339,54 @@ pub fn acl_allows_scoped(
     }
 
     rows.iter()
-        .find(|row| row.consumer_id.is_none() && row.consumer_group_id.is_none())
+        .find(|row| row.is_default())
         .is_some_and(|row| row.allowed)
+}
+
+/// Scoped ACL decision for one tool. See [`acl_allows_rows`] for precedence.
+pub fn acl_allows_scoped(
+    rows: &[McpToolAcl],
+    consumer_id: Option<&str>,
+    group_ids: &[String],
+) -> bool {
+    acl_allows_rows(rows.iter().map(tool_acl_scope), consumer_id, group_ids)
+}
+
+/// Decision for a tool that may inherit its server's default ACL.
+///
+/// Non-empty tool rows override the server rows entirely, even when none of
+/// them match the caller. Otherwise non-empty server rows apply, and when both
+/// row sets are empty the open-local default allows.
+pub fn acl_allows_default_then_tool(
+    tool_rows: &[McpToolAcl],
+    server_rows: &[McpServerAcl],
+    consumer_id: Option<&str>,
+    group_ids: &[String],
+) -> bool {
+    if !tool_rows.is_empty() {
+        return acl_allows_scoped(tool_rows, consumer_id, group_ids);
+    }
+    acl_allows_rows(
+        server_rows.iter().map(server_acl_scope),
+        consumer_id,
+        group_ids,
+    )
+}
+
+fn tool_acl_scope(row: &McpToolAcl) -> ScopedAcl<'_> {
+    ScopedAcl {
+        consumer_id: row.consumer_id.as_deref(),
+        consumer_group_id: row.consumer_group_id.as_deref(),
+        allowed: row.allowed,
+    }
+}
+
+fn server_acl_scope(row: &McpServerAcl) -> ScopedAcl<'_> {
+    ScopedAcl {
+        consumer_id: row.consumer_id.as_deref(),
+        consumer_group_id: row.consumer_group_id.as_deref(),
+        allowed: row.allowed,
+    }
 }
 
 /// Secrets live in references (`env:NAME`, `keyring:NAME`, or `inline:` is
@@ -300,12 +432,54 @@ mod tests {
         NewMcpServer {
             name: name.into(),
             transport: Transport::Stdio,
+            mode: default_server_mode(),
+            sources: Vec::new(),
             command: Some("node".into()),
             url: None,
             enabled: true,
             config: empty_object(),
             headers: Map::new(),
         }
+    }
+
+    #[test]
+    fn validates_supported_server_modes() {
+        for mode in MCP_SERVER_MODES {
+            assert!(
+                validate_server_mode(mode).is_ok(),
+                "supported mode rejected: {mode}"
+            );
+            let mut server = stdio("files");
+            server.mode = (*mode).to_string();
+            assert!(server.validate().is_ok());
+        }
+        assert_eq!(default_server_mode(), "passthrough-listener");
+    }
+
+    #[test]
+    fn rejects_unknown_and_unimplemented_server_modes() {
+        for mode in MCP_UNSUPPORTED_SERVER_MODES {
+            let error = validate_server_mode(mode).unwrap_err();
+            assert!(
+                error.contains("not implemented"),
+                "conversion mode must be reported as not implemented: {error}"
+            );
+        }
+
+        let error = validate_server_mode("proxy").unwrap_err();
+        assert!(error.contains("invalid MCP server mode"), "{error}");
+
+        let mut server = stdio("files");
+        server.mode = "conversion-only".into();
+        assert!(server.validate().is_err());
+    }
+
+    #[test]
+    fn source_eligible_modes_are_upstream_servers_and_passthrough_listeners() {
+        assert!(is_source_server_mode("upstream-server"));
+        assert!(is_source_server_mode("passthrough-listener"));
+        assert!(!is_source_server_mode("listener"));
+        assert!(!is_source_server_mode("conversion-only"));
     }
 
     #[test]
@@ -415,6 +589,87 @@ mod tests {
         let rows = [acl(Some("c2"), None, true), acl(None, Some("g2"), true)];
         assert!(!acl_allows_scoped(&rows, Some("c1"), &["g1".into()]));
         assert!(!acl_allows_scoped(&rows, None, &[]));
+    }
+
+    fn server_acl(
+        consumer_id: Option<&str>,
+        consumer_group_id: Option<&str>,
+        allowed: bool,
+    ) -> McpServerAcl {
+        McpServerAcl {
+            id: format!("server-acl-{consumer_id:?}-{consumer_group_id:?}-{allowed}"),
+            server_id: "server-1".into(),
+            consumer_id: consumer_id.map(str::to_string),
+            consumer_group_id: consumer_group_id.map(str::to_string),
+            allowed,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+        }
+    }
+
+    #[test]
+    fn default_acl_falls_back_from_tool_to_server_to_open() {
+        // Neither scope has rows: open-local default.
+        assert!(acl_allows_default_then_tool(&[], &[], Some("c1"), &[]));
+
+        // Server rows apply when the tool has none.
+        let server_rows = [server_acl(None, None, false)];
+        assert!(!acl_allows_default_then_tool(
+            &[],
+            &server_rows,
+            Some("c1"),
+            &[]
+        ));
+
+        // Non-empty tool rows override server rows, even when they deny.
+        let tool_rows = [acl(Some("c1"), None, true)];
+        let server_rows = [server_acl(None, None, false)];
+        assert!(acl_allows_default_then_tool(
+            &tool_rows,
+            &server_rows,
+            Some("c1"),
+            &[]
+        ));
+
+        // A local deny wins over an open server default.
+        let tool_rows = [acl(None, None, false)];
+        let server_rows = [server_acl(None, None, true)];
+        assert!(!acl_allows_default_then_tool(
+            &tool_rows,
+            &server_rows,
+            Some("c1"),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn server_defaults_follow_the_same_scope_precedence() {
+        let server_rows = [
+            server_acl(None, None, false),
+            server_acl(None, Some("g1"), false),
+            server_acl(Some("c1"), None, true),
+        ];
+        assert!(acl_allows_default_then_tool(
+            &[],
+            &server_rows,
+            Some("c1"),
+            &["g1".into()]
+        ));
+
+        // Anonymous callers only match the default row.
+        assert!(!acl_allows_default_then_tool(&[], &server_rows, None, &[]));
+
+        // A matching group allow grants over the default deny.
+        let server_rows = [
+            server_acl(None, None, false),
+            server_acl(None, Some("g1"), true),
+        ];
+        assert!(acl_allows_default_then_tool(
+            &[],
+            &server_rows,
+            Some("c2"),
+            &["g1".into()]
+        ));
     }
 
     #[test]

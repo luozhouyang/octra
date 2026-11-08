@@ -352,6 +352,8 @@ export interface ConsumerPolicy {
 export interface McpServer {
   id: string;
   name: string;
+  type: string;
+  sources: string[];
   transport: "stdio" | "http";
   command: string | null;
   url: string | null;

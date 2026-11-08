@@ -29,9 +29,11 @@ export function McpTypedForm(props: McpTypedFormProps) {
   }
 }
 
-function ServerForm({ initial, pending, onSave, onCancel, onDelete }: McpTypedFormProps) {
+function ServerForm({ initial, servers, pending, onSave, onCancel, onDelete }: McpTypedFormProps) {
   const source = asRecord(initial);
   const [name, setName] = useState(() => readString(source, "name"));
+  const [mode, setMode] = useState(() => readServerMode(source.type));
+  const [sources, setSources] = useState(() => readSources(source.sources));
   const [transport, setTransport] = useState(() => readTransport(source.transport));
   const [command, setCommand] = useState(() => readString(source, "command"));
   const [url, setUrl] = useState(() => readString(source, "url"));
@@ -41,6 +43,8 @@ function ServerForm({ initial, pending, onSave, onCancel, onDelete }: McpTypedFo
   const stdio = transport === "stdio";
   const body: Record<string, unknown> = {
     name: name.trim(),
+    type: mode,
+    sources: mode === "listener" ? splitSources(sources) : [],
     transport,
     command: stdio && command.trim() !== "" ? command.trim() : null,
     url: !stdio && url.trim() !== "" ? url.trim() : null,
@@ -108,6 +112,28 @@ function ServerForm({ initial, pending, onSave, onCancel, onDelete }: McpTypedFo
             <option value="http">http</option>
           </Select>
         </Field>
+        <Field label="Mode" hint="Kong-shaped server type; conversion modes are not implemented.">
+          <Select value={mode} onChange={setMode}>
+            <option value="passthrough-listener">passthrough-listener</option>
+            <option value="listener">listener</option>
+            <option value="upstream-server">upstream-server</option>
+          </Select>
+        </Field>
+        {mode === "listener" ? (
+          <Field
+            label="Sources"
+            hint={`Comma-separated server names. Empty means all upstream/passthrough servers. Available: ${
+              servers.map((server) => server.name).join(", ") || "none"
+            }`}
+          >
+            <Input
+              value={sources}
+              onChange={(event) => setSources(event.target.value)}
+              placeholder="filesystem, github"
+              className="font-mono text-[11px]"
+            />
+          </Field>
+        ) : null}
         {stdio ? (
           <Field
             label="Command"
@@ -146,7 +172,8 @@ function ServerForm({ initial, pending, onSave, onCancel, onDelete }: McpTypedFo
         </Field>
       </div>
       <p className="text-[9.5px] text-muted-foreground">
-        stdio servers need command; HTTP servers need url.
+        stdio servers need command; HTTP servers need url. Listener sources are matched by server
+        name or id and normalize to names.
       </p>
       <AdvancedJsonField
         state={advanced}
@@ -790,4 +817,28 @@ function readObject(source: Record<string, unknown>, key: string): Record<string
 
 function readTransport(value: unknown): "stdio" | "http" {
   return value === "http" ? "http" : "stdio";
+}
+
+function readServerMode(value: unknown): string {
+  if (value === "listener" || value === "upstream-server") {
+    return value;
+  }
+  return "passthrough-listener";
+}
+
+function readSources(value: unknown): string {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string").join(", ")
+    : "";
+}
+
+function splitSources(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
