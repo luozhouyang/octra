@@ -20,10 +20,15 @@ struct Cli {
 enum Command {
     /// Show daemon health and runtime snapshot
     Status,
-    /// List configured services
-    Services,
-    /// List configured routes
-    Routes,
+    /// Manage API Gateway services
+    #[command(subcommand)]
+    Services(ServicesCommand),
+    /// Manage API Gateway routes
+    #[command(subcommand)]
+    Routes(RoutesCommand),
+    /// Manage API Gateway upstreams and targets
+    #[command(subcommand)]
+    Upstreams(UpstreamsCommand),
     /// Reload the gateway runtime snapshot from SQLite
     Reload,
     /// Print local paths and daemon reachability
@@ -40,6 +45,114 @@ enum Command {
     /// Inspect and activate the AI-native LLM control plane
     #[command(subcommand)]
     Ai(AiCommand),
+}
+
+#[derive(Subcommand)]
+enum ServicesCommand {
+    /// List services
+    List,
+    /// Create a service from a JSON body
+    Create {
+        /// JSON object with the service fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update a service from a JSON body
+    Update {
+        /// Service id
+        id: String,
+        /// JSON object with the service fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete a service
+    Delete {
+        /// Service id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RoutesCommand {
+    /// List routes
+    List,
+    /// Create a route from a JSON body
+    Create {
+        /// JSON object with the route fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update a route from a JSON body
+    Update {
+        /// Route id
+        id: String,
+        /// JSON object with the route fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete a route
+    Delete {
+        /// Route id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpstreamsCommand {
+    /// List upstreams
+    List,
+    /// Create an upstream from a JSON body
+    Create {
+        /// JSON object with the upstream fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update an upstream from a JSON body
+    Update {
+        /// Upstream id
+        id: String,
+        /// JSON object with the upstream fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete an upstream
+    Delete {
+        /// Upstream id
+        id: String,
+    },
+    /// Manage targets for an upstream
+    #[command(subcommand)]
+    Targets(UpstreamTargetsCommand),
+}
+
+#[derive(Subcommand)]
+enum UpstreamTargetsCommand {
+    /// List targets for an upstream
+    List {
+        /// Upstream id
+        upstream: String,
+    },
+    /// Create a target for an upstream from a JSON body
+    Create {
+        /// Upstream id
+        upstream: String,
+        /// JSON object with the target fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update a target from a JSON body
+    Update {
+        /// Target id
+        id: String,
+        /// JSON object with the target fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete a target
+    Delete {
+        /// Target id
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -299,8 +412,9 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Status => print_json(control.get("/api/v1/system/health")?)?,
-        Command::Services => print_json(control.get("/admin/services")?)?,
-        Command::Routes => print_json(control.get("/admin/routes")?)?,
+        Command::Services(command) => services(&control, command)?,
+        Command::Routes(command) => routes(&control, command)?,
+        Command::Upstreams(command) => upstreams(&control, command)?,
         Command::Reload => print_json(control.post("/api/v1/system/reload")?)?,
         Command::Doctor => doctor(&control)?,
         Command::Usage { limit } => {
@@ -311,6 +425,75 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn services(control: &Control, command: ServicesCommand) -> Result<()> {
+    match command {
+        ServicesCommand::List => print_json(control.get("/admin/services")?),
+        ServicesCommand::Create { body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.post_json("/admin/services", &body)?)
+        }
+        ServicesCommand::Update { id, body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.put(&format!("/admin/services/{id}"), &body)?)
+        }
+        ServicesCommand::Delete { id } => {
+            print_json(control.delete(&format!("/admin/services/{id}"))?)
+        }
+    }
+}
+
+fn routes(control: &Control, command: RoutesCommand) -> Result<()> {
+    match command {
+        RoutesCommand::List => print_json(control.get("/admin/routes")?),
+        RoutesCommand::Create { body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.post_json("/admin/routes", &body)?)
+        }
+        RoutesCommand::Update { id, body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.put(&format!("/admin/routes/{id}"), &body)?)
+        }
+        RoutesCommand::Delete { id } => print_json(control.delete(&format!("/admin/routes/{id}"))?),
+    }
+}
+
+fn upstreams(control: &Control, command: UpstreamsCommand) -> Result<()> {
+    match command {
+        UpstreamsCommand::List => print_json(control.get("/admin/upstreams")?),
+        UpstreamsCommand::Create { body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.post_json("/admin/upstreams", &body)?)
+        }
+        UpstreamsCommand::Update { id, body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.put(&format!("/admin/upstreams/{id}"), &body)?)
+        }
+        UpstreamsCommand::Delete { id } => {
+            print_json(control.delete(&format!("/admin/upstreams/{id}"))?)
+        }
+        UpstreamsCommand::Targets(command) => upstream_targets(control, command),
+    }
+}
+
+fn upstream_targets(control: &Control, command: UpstreamTargetsCommand) -> Result<()> {
+    match command {
+        UpstreamTargetsCommand::List { upstream } => {
+            print_json(control.get(&format!("/admin/upstreams/{upstream}/targets"))?)
+        }
+        UpstreamTargetsCommand::Create { upstream, body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.post_json(&format!("/admin/upstreams/{upstream}/targets"), &body)?)
+        }
+        UpstreamTargetsCommand::Update { id, body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.put(&format!("/admin/targets/{id}"), &body)?)
+        }
+        UpstreamTargetsCommand::Delete { id } => {
+            print_json(control.delete(&format!("/admin/targets/{id}"))?)
+        }
+    }
 }
 
 fn keys(control: &Control, command: KeysCommand) -> Result<()> {
