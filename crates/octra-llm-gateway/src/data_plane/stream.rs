@@ -731,6 +731,7 @@ async fn record_stream(
             finish_reason: tracker.record.finish_reason.as_deref(),
             streaming: true,
             error: tracker.record.error.as_deref(),
+            cache_status: None,
         };
         chain.on_log(&request_meta, &event, plugin_state).await;
     }

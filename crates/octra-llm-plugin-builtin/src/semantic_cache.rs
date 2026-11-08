@@ -178,6 +178,13 @@ struct Pending {
     vector: Vec<f32>,
 }
 
+/// How the lookup matched, for structured observability.
+#[derive(Debug, Clone, Copy)]
+enum CacheMatch {
+    Exact,
+    Similarity(f64),
+}
+
 #[derive(Debug)]
 struct CacheState {
     entries: Vec<Entry>,
@@ -200,7 +207,7 @@ impl CacheState {
         entry.response.clone()
     }
 
-    fn best_match(&self, scope: &str, vector: &[f32], threshold: f64) -> Option<usize> {
+    fn best_match(&self, scope: &str, vector: &[f32], threshold: f64) -> Option<(usize, f64)> {
         let mut best: Option<(usize, f64)> = None;
         for (index, entry) in self.entries.iter().enumerate() {
             if entry.scope != scope || entry.vector.len() != vector.len() {
@@ -211,7 +218,7 @@ impl CacheState {
                 best = Some((index, score));
             }
         }
-        best.map(|(index, _)| index)
+        best
     }
 
     fn store(&mut self, pending: Pending, response: ChatResponse, now: i64, max_entries: usize) {
@@ -552,6 +559,12 @@ impl LlmPlugin for SemanticCache {
         // Fast path: the canonical request already exists in this scope, so
         // no similarity work (or embedding call) is needed.
         if let Some(response) = self.exact_hit(&key, &scope, now) {
+            tracing::debug!(
+                cache = "hit",
+                match_kind = "exact",
+                model = %cx.request.model,
+                "semantic cache lookup"
+            );
             *cx.state = Value::Null;
             self.persist();
             cx.headers.insert(CACHE_HEADER, "hit");
@@ -570,20 +583,38 @@ impl LlmPlugin for SemanticCache {
         let hit = {
             let mut cache = self.cache.lock();
             cache.remove_expired(now, self.ttl_secs);
-            let index = cache
+            let matched = cache
                 .entries
                 .iter()
                 .position(|entry| entry.key == key && entry.scope == scope)
+                .map(|index| (index, CacheMatch::Exact))
                 .or_else(|| {
                     if self.similarity_threshold < 1.0 {
-                        cache.best_match(&scope, &vector, self.similarity_threshold)
+                        cache
+                            .best_match(&scope, &vector, self.similarity_threshold)
+                            .map(|(index, score)| (index, CacheMatch::Similarity(score)))
                     } else {
                         None
                     }
                 });
-            index.map(|index| cache.touch(index))
+            matched.map(|(index, matched)| (cache.touch(index), matched))
         };
-        if let Some(response) = hit {
+        if let Some((response, matched)) = hit {
+            match matched {
+                CacheMatch::Exact => tracing::debug!(
+                    cache = "hit",
+                    match_kind = "exact",
+                    model = %cx.request.model,
+                    "semantic cache lookup"
+                ),
+                CacheMatch::Similarity(score) => tracing::debug!(
+                    cache = "hit",
+                    match_kind = "similarity",
+                    score,
+                    model = %cx.request.model,
+                    "semantic cache lookup"
+                ),
+            }
             *cx.state = Value::Null;
             self.persist();
             cx.headers.insert(CACHE_HEADER, "hit");
@@ -593,6 +624,11 @@ impl LlmPlugin for SemanticCache {
         let pending = Pending { key, scope, vector };
         *cx.state = serde_json::to_value(pending).unwrap_or(Value::Null);
         cx.headers.insert(CACHE_HEADER, "miss");
+        tracing::debug!(
+            cache = "miss",
+            model = %cx.request.model,
+            "semantic cache lookup"
+        );
         Ok(LlmAction::Continue)
     }
 

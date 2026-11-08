@@ -18,7 +18,7 @@ const PROVIDER_COLUMNS: &str = "id, name, protocol, base_url, auth_ref, capabili
 
 const ACCOUNT_COLUMNS: &str = "id, provider_id, name, credential_kind, secret_ref, oauth_ref, \
      weight, priority, quota_limit, quota_unit, quota_period, quota_used, cooldown_until, \
-     enabled, config_json, created_at, updated_at";
+     enabled, oauth_status, oauth_expires_at, config_json, created_at, updated_at";
 
 const MODEL_COLUMNS: &str = "id, name, kind, capabilities_json, formats_json, route_paths_json, \
      balancer_json, enabled, created_at, updated_at";
@@ -106,6 +106,8 @@ fn account_from_row(row: &SqliteRow) -> Result<AiProviderAccount> {
         quota_used: row.get("quota_used"),
         cooldown_until: row.get("cooldown_until"),
         enabled: row.get::<i64, _>("enabled") != 0,
+        oauth_status: row.get("oauth_status"),
+        oauth_expires_at: row.get("oauth_expires_at"),
         config: parse_json(
             "ai_provider_accounts.config_json",
             &row.get::<String, _>("config_json"),
@@ -438,8 +440,9 @@ impl AiStore {
             "INSERT INTO ai_provider_accounts
                  (id, provider_id, name, credential_kind, secret_ref, oauth_ref, weight,
                   priority, quota_limit, quota_unit, quota_period, quota_used, cooldown_until,
-                  enabled, config_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                  enabled, oauth_status, oauth_expires_at, config_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                     ?17, ?18, ?19)
              ON CONFLICT(id) DO UPDATE SET
                  provider_id = excluded.provider_id,
                  name = excluded.name,
@@ -471,6 +474,8 @@ impl AiStore {
         .bind(account.quota_used)
         .bind(&account.cooldown_until)
         .bind(i64::from(account.enabled))
+        .bind(&account.oauth_status)
+        .bind(&account.oauth_expires_at)
         .bind(encode_json(
             "ai_provider_accounts.config_json",
             &account.config,
@@ -1149,6 +1154,8 @@ mod tests {
             quota_used: 0,
             cooldown_until: None,
             enabled: true,
+            oauth_status: "none".to_string(),
+            oauth_expires_at: None,
             config: json!({}),
             created_at: 100,
             updated_at: 100,
@@ -1319,6 +1326,53 @@ mod tests {
                 upstream_model: "gpt-4o".to_string(),
                 account_id: Some(account.id.clone()),
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_account_oauth_fields_round_trip_without_upsert_overwrite() {
+        let storage = crate::Storage::connect_in_memory().await.unwrap();
+        let store = &storage.ai;
+
+        store.upsert_provider(&provider()).await.unwrap();
+        let mut account = account();
+        account.credential_kind = "oauth".to_string();
+        account.oauth_status = "authorized".to_string();
+        account.oauth_expires_at = Some("2030-01-01T00:00:00.000Z".to_string());
+        store.upsert_account(&account).await.unwrap();
+
+        let loaded = store.get_account(&account.id).await.unwrap().unwrap();
+        assert_eq!(loaded.oauth_status, "authorized");
+        assert_eq!(
+            loaded.oauth_expires_at.as_deref(),
+            Some("2030-01-01T00:00:00.000Z")
+        );
+        assert_eq!(
+            store.list_accounts(None).await.unwrap(),
+            vec![loaded.clone()]
+        );
+
+        // A regular account update must not clobber OAuth state that the OAuth
+        // methods manage.
+        let mut update = loaded;
+        update.name = "renamed".to_string();
+        update.oauth_status = "none".to_string();
+        update.oauth_expires_at = None;
+        store.upsert_account(&update).await.unwrap();
+
+        let reloaded = store.get_account(&account.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.name, "renamed");
+        assert_eq!(reloaded.oauth_status, "authorized");
+        assert_eq!(
+            reloaded.oauth_expires_at.as_deref(),
+            Some("2030-01-01T00:00:00.000Z")
+        );
+        assert_eq!(
+            store.account_oauth_status(&account.id).await.unwrap(),
+            Some((
+                "authorized".to_string(),
+                Some("2030-01-01T00:00:00.000Z".to_string())
+            ))
         );
     }
 

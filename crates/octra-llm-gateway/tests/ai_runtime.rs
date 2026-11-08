@@ -44,6 +44,8 @@ fn account(id: &str, provider_id: &str, name: &str) -> AiProviderAccount {
         quota_used: 0,
         cooldown_until: None,
         enabled: true,
+        oauth_status: "none".into(),
+        oauth_expires_at: None,
         config: json!({}),
         created_at: 0,
         updated_at: 0,
@@ -206,6 +208,31 @@ async fn bootstrap_serves_ai_native_model() {
 
     let provider = snapshot.provider("provider-1").expect("provider");
     assert_eq!(provider.auth, octra_llm_gateway::config::AuthType::Bearer);
+}
+
+#[tokio::test]
+async fn account_oauth_state_maps_to_the_runtime() {
+    let storage = storage().await;
+    storage
+        .ai
+        .upsert_provider(&provider("provider-1", "Provider One", "openai"))
+        .await
+        .unwrap();
+    let mut oauth_account = account("account-1", "provider-1", "Account One");
+    oauth_account.credential_kind = "oauth".into();
+    oauth_account.oauth_status = "authorized".into();
+    oauth_account.oauth_expires_at = Some("2030-01-01T00:00:00.000Z".into());
+    storage.ai.upsert_account(&oauth_account).await.unwrap();
+
+    let runtime = LlmRuntime::bootstrap(storage, config()).await.unwrap();
+    let snapshot = runtime.snapshot().await;
+    let accounts = snapshot.accounts_for("provider-1");
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].record.oauth_status, "authorized");
+    assert_eq!(
+        accounts[0].record.oauth_expires_at.as_deref(),
+        Some("2030-01-01T00:00:00.000Z")
+    );
 }
 
 #[tokio::test]

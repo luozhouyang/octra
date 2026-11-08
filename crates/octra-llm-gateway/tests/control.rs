@@ -809,7 +809,11 @@ fn oauth_provider_config(token_url: &str) -> String {
 #[tokio::test]
 async fn ai_account_oauth_lifecycle() {
     let harness = Harness::new().await;
-    let router = harness.control_router();
+    let router = harness
+        .control_router()
+        .merge(octra_llm_gateway::ai_control::router(
+            octra_llm_gateway::ai_control::AiControlState::new(harness.storage.clone()),
+        ));
     let tokens = common::mock_token_endpoint().await;
     let provider_id = harness
         .provider_with_config(
@@ -846,6 +850,15 @@ async fn ai_account_oauth_lifecycle() {
     assert_eq!(completed["credential_kind"], "oauth");
     assert!(completed["oauth_expires_at"].is_string());
 
+    let accounts_path = format!("/api/v1/ai/providers/{provider_id}/accounts");
+    let (status, accounts) = call_shared(&router, Method::GET, &accounts_path, None).await;
+    assert_eq!(status, StatusCode::OK, "body: {accounts}");
+    assert_eq!(accounts[0]["oauth_status"], "authorized");
+    assert_eq!(
+        accounts[0]["oauth_expires_at"], completed["oauth_expires_at"],
+        "account list must expose the OAuth expiry"
+    );
+
     let (status, refreshed) =
         call_shared(&router, Method::POST, &format!("{base}/refresh"), None).await;
     assert_eq!(status, StatusCode::OK, "body: {refreshed}");
@@ -858,6 +871,11 @@ async fn ai_account_oauth_lifecycle() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cleared["oauth_status"], "none");
     assert_eq!(cleared["oauth_expires_at"], Value::Null);
+
+    let (status, accounts) = call_shared(&router, Method::GET, &accounts_path, None).await;
+    assert_eq!(status, StatusCode::OK, "body: {accounts}");
+    assert_eq!(accounts[0]["oauth_status"], "none");
+    assert_eq!(accounts[0]["oauth_expires_at"], Value::Null);
 }
 
 #[tokio::test]

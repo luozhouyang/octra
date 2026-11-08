@@ -121,6 +121,7 @@ impl RequestAudit {
             "latency_ms": event.latency_ms,
             "streaming": event.streaming,
             "finish_reason": event.finish_reason,
+            "cache_status": event.cache_status,
         });
         if self.include_client {
             record["client_ip"] = json!(meta.client_ip.map(|ip| ip.to_string()));
@@ -183,6 +184,7 @@ mod tests {
             finish_reason: Some("stop"),
             streaming: true,
             error: Some("upstream hiccup"),
+            cache_status: Some("hit"),
         }
     }
 
@@ -214,6 +216,7 @@ mod tests {
         assert_eq!(record["account_name"], "primary");
         assert_eq!(record["streaming"], true);
         assert_eq!(record["intent"], "coding");
+        assert_eq!(record["cache_status"], "hit");
         assert_eq!(record["usage"]["input_tokens"], 10);
         assert_eq!(record["usage"]["reasoning_tokens"], 5);
         assert_eq!(record["error"], "upstream hiccup");
@@ -238,6 +241,22 @@ mod tests {
         let record = plugin.record(&meta, &event);
         assert!(record.get("usage").is_none());
         assert!(record.get("error").is_none());
+    }
+
+    #[test]
+    fn cache_status_is_null_when_not_served_from_cache() {
+        let plugin = RequestAudit {
+            manifest: manifest("llm-request-audit", ""),
+            include_usage: true,
+            include_error: true,
+            include_client: false,
+        };
+        let usage = Usage::default();
+        let meta = meta();
+        let mut event = event(&usage);
+        event.cache_status = None;
+        let record = plugin.record(&meta, &event);
+        assert_eq!(record["cache_status"], Value::Null);
     }
 
     #[test]

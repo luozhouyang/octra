@@ -742,6 +742,7 @@ mod tests {
             finish_reason: Some("stop"),
             streaming: false,
             error: None,
+            cache_status: None,
         };
         let value = log_json(&event);
         assert_eq!(value["requested_model"], "alias");

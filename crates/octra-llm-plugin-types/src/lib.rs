@@ -306,6 +306,9 @@ pub struct LlmLogEvent<'a> {
     pub finish_reason: Option<&'a str>,
     pub streaming: bool,
     pub error: Option<&'a str>,
+    /// Cache outcome for this request, for example `"hit"`; `None` when the
+    /// request was not served from a cache.
+    pub cache_status: Option<&'a str>,
 }
 
 pub struct LlmLogContext<'a> {

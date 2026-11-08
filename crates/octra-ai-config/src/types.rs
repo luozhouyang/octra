@@ -89,9 +89,19 @@ pub struct AiProviderAccount {
     pub quota_used: i64,
     pub cooldown_until: Option<String>,
     pub enabled: bool,
+    /// Server-managed OAuth state. Clients cannot set it through account CRUD.
+    #[serde(default = "default_oauth_status")]
+    pub oauth_status: String,
+    /// Server-managed OAuth token expiry, if one was issued.
+    #[serde(default)]
+    pub oauth_expires_at: Option<String>,
     pub config: Value,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+fn default_oauth_status() -> String {
+    "none".to_string()
 }
 
 /// How a model chooses among its targets.

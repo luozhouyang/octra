@@ -128,6 +128,21 @@ pub fn rank_targets(
             )
         })
         .collect();
+    if strategy == "semantic" {
+        for (_, target) in &scored {
+            let semantic_score = target
+                .semantic_description
+                .as_deref()
+                .map(|description| cosine_similarity(&lexical_vector(description), &prompt_vector));
+            tracing::debug!(
+                strategy,
+                target = %target.label(),
+                semantic_score = semantic_score.unwrap_or_default(),
+                has_description = semantic_score.is_some(),
+                "semantic routing scores"
+            );
+        }
+    }
     scored.sort_by(|left, right| {
         right
             .0

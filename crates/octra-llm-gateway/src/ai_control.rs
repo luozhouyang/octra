@@ -416,6 +416,9 @@ impl AccountInput {
             quota_used: self.quota_used.unwrap_or(0),
             cooldown_until: self.cooldown_until,
             enabled: self.enabled.unwrap_or(true),
+            // OAuth state is server-managed; account CRUD must not set it.
+            oauth_status: "none".to_string(),
+            oauth_expires_at: None,
             config: self.config.unwrap_or_else(empty_object),
             created_at,
             updated_at,

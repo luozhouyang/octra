@@ -681,6 +681,7 @@ async fn handle(
                             finish_reason: tracker.record.finish_reason.as_deref(),
                             streaming: true,
                             error: None,
+                            cache_status: Some("hit"),
                         };
                         chain.on_log(&meta, &event, &mut request_state).await;
                     }
@@ -721,6 +722,7 @@ async fn handle(
                             finish_reason: tracker.record.finish_reason.as_deref(),
                             streaming: false,
                             error: None,
+                            cache_status: Some("hit"),
                         };
                         chain.on_log(&meta, &event, &mut request_state).await;
                     }
@@ -1096,6 +1098,7 @@ async fn execute(
                                 finish_reason: tracker.record.finish_reason.as_deref(),
                                 streaming: false,
                                 error: None,
+                                cache_status: None,
                             };
                             chain.on_log(meta, &event, request_state).await;
                         }
@@ -1176,6 +1179,7 @@ async fn execute(
             finish_reason: tracker.record.finish_reason.as_deref(),
             streaming: false,
             error: Some(&error.message),
+            cache_status: None,
         };
         chain.on_log(meta, &event, request_state).await;
     }
@@ -1204,6 +1208,7 @@ async fn log_rejection(
         finish_reason: None,
         streaming: false,
         error: Some(&error.message),
+        cache_status: None,
     };
     chain.on_log(meta, &event, state).await;
 }

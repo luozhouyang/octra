@@ -148,6 +148,7 @@ async fn runs_the_reference_component_through_the_host() {
         finish_reason: Some("stop"),
         streaming: false,
         error: None,
+        cache_status: None,
     };
     let mut state = Value::Null;
     plugin

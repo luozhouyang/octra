@@ -452,6 +452,7 @@ mod tests {
             finish_reason: Some("stop"),
             streaming: false,
             error: None,
+            cache_status: None,
         };
         let mut state = json!({ TOKEN_RESERVATION: reserved });
         let mut cx = LlmLogContext {

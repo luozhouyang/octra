@@ -2004,19 +2004,12 @@ async fn ai_oauth_status(
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account", &account_id))?;
-    let (status, expires_at) = state
-        .storage
-        .ai
-        .account_oauth_status(&account.id)
-        .await
-        .map_err(ApiError::internal)?
-        .unwrap_or_else(|| ("none".to_string(), None));
     Ok(extract::Json(json!({
         "account_id": account.id,
         "provider_id": account.provider_id,
         "credential_kind": account.credential_kind,
-        "oauth_status": status,
-        "oauth_expires_at": expires_at,
+        "oauth_status": account.oauth_status,
+        "oauth_expires_at": account.oauth_expires_at,
     })))
 }
 

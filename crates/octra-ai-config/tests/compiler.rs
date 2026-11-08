@@ -38,6 +38,8 @@ fn account(id: &str, provider_id: &str) -> AiProviderAccount {
         quota_used: 0,
         cooldown_until: None,
         enabled: true,
+        oauth_status: "none".to_string(),
+        oauth_expires_at: None,
         config: json!({}),
         created_at: 0,
         updated_at: 0,

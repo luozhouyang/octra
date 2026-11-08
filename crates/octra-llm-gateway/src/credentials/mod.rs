@@ -589,6 +589,8 @@ mod tests {
                 quota_used: 0,
                 cooldown_until: None,
                 enabled: true,
+                oauth_status: "none".into(),
+                oauth_expires_at: None,
                 config: json!({}),
                 created_at: now,
                 updated_at: now,
