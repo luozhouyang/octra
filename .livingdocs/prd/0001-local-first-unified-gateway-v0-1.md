@@ -1,9 +1,9 @@
 ---
 type: PRD
 title: Local-first unified gateway v0.1
-description: Deliver one local daemon that unifies API, LLM, and MCP gateways with safe agent onboarding, SQLite persistence, and an extensible plugin system.
+description: Deliver one local daemon that unifies API, LLM, and MCP gateways with safe agent onboarding, SQLite persistence, an extensible plugin system, and a live desktop console.
 status: Draft
-timestamp: 2026-11-06T16:03:37Z
+timestamp: 2026-11-07T12:40:00Z
 ---
 
 # 0001. Local-first unified gateway v0.1
@@ -14,40 +14,134 @@ Developers who use multiple AI coding agents, HTTP APIs, and MCP servers configu
 
 **Who asked:** the project maintainer and the target users — developers and AI-agent users who want one local control plane instead of a collection of per-tool proxies and config files.
 
+## Reference Models
+
+Octra is a local-first composite of three external models. The full adopt/not-adopt matrix and implementation status live in [`architecture/reference-models.md`](../architecture/reference-models.md).
+
+| Area | Reference | Adopted in v0.1 | Deliberately not adopted |
+|---|---|---|---|
+| API gateway | Kong Gateway | Service/route/upstream/target, route priority, plugin phases and 12-level scopes, round-robin/weighted/consistent hashing, active/passive health checks, Kong-shaped Admin API, consumer groups, key/basic/JWT/ACL auth | Nginx/Lua runtime, PDK, workspaces, RBAC, Dev Portal, full Admin API compatibility, sticky-session cookies, least-connections/latency selection |
+| LLM gateway | yetone/magpie | One local endpoint for OpenAI Chat/Responses, Anthropic, and Gemini; canonical IR; virtual models and routing groups; provider accounts with static/OAuth credentials, quota, cooldown, pacing; virtual-key/consumer policies; usage/cost; opt-in PII masking; agent config adapters | Signed-in subscription discovery, menu-bar app, remote sharing, Docker/NAS mode, Bun/JS plugin runtime, classifier intent routing, `manual`/`weight`/`free`/`fast`/`drain`/`cheap`/`expiring` strategies |
+| MCP gateway | Kong AI MCP Proxy | One `/mcp` endpoint, Streamable HTTP ingress, stdio/HTTP upstreams, sessions, tool aggregation with `<server>__<tool>` names, MCP API keys, per-consumer tool ACLs, invocation audit | OpenAPI conversion modes, tag-based listener, `upstream-server` mode, Kong auth plugins, consumer-group/default/CEL ACLs, server-initiated notifications, session sharing |
+
 ## Goals
 
 - One local daemon serves API, LLM, and MCP traffic through one authenticated control plane and one SQLite persistence layer.
 - Provider, model, routing, and virtual-key governance are centralized; agents receive Octra virtual keys, not provider credentials.
 - A developer can point Claude Code, Codex, or OpenCode at Octra from the desktop app and restore the previous configuration safely.
-- Request logs, audit logs, LLM usage, and metrics make local traffic observable.
+- Request logs, audit logs, LLM usage, MCP invocations, and metrics make local traffic observable.
 - A first-party plugin API and a sandboxed third-party WASM path make the gateway extensible without forking the daemon.
-- The desktop app and CLI manage the same control-plane API.
+- The desktop app and CLI use the same control-plane API, with live data and a token boundary that keeps the control token out of the webview.
+- The reference-model boundaries are explicit, so operators can tell which Kong/magpie concepts are supported and which are not.
 
 ## Non-goals
 
 - A cloud control plane, remote multi-user administration, a distributed gateway cluster, or Kubernetes deployment.
 - PostgreSQL, MySQL, Redis, Elasticsearch, or any required external database, cache, or broker.
-- Complete Kong Lua plugin compatibility or a general-purpose agent runtime.
+- Complete Kong Lua plugin compatibility, Kong PDK compatibility, or a drop-in Kong Admin API replacement.
+- A general-purpose agent runtime, magpie's signed-in subscription discovery, or magpie's remote sharing/menu-bar product surface.
+- OpenAPI-to-MCP conversion modes in v0.1.
 - Unsandboxed third-party native code or Rust dynamic-library plugin loading.
 - OS keychain integration and OAuth-token encryption in v0.1; static secret references and `0600` database permissions are the current boundary.
 - Desktop-side daemon lifecycle supervision, signed installers, and notarized packages in v0.1.
 
 ## Requirements
 
-- **R1 Local runtime.** `pnpm daemon` starts one daemon process with a control listener (`8081` by default) and a data listener (`8080` by default); both bind loopback by default, and every control endpoint requires the Bearer token.
-- **R2 API gateway.** The data plane supports host, path, method, and header routing; round-robin and weighted targets; retries and fallback; request/response streaming; API-key authentication; policy authorization; access logs; JSON and Prometheus metrics.
-- **R3 LLM gateway.** The gateway accepts OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Gemini requests; converts them through the canonical IR; routes `virtual_model_id` through routing groups to provider targets with fallback; and records usage.
-- **R4 MCP gateway.** The gateway supports Streamable HTTP and stdio upstreams, tool discovery and aggregation, the `/mcp` JSON-RPC endpoint with sessions, and per-consumer tool ACLs.
-- **R5 Agent integration.** Claude Code, Codex, and OpenCode adapters detect installations, render a preview, apply changes atomically, restore the original, and run under a sandbox home without touching real configs.
-- **R6 Plugins.** Built-in plugins use the gateway traits; third-party plugins use the WASM component ABI with a manifest, approved capabilities, and a host-owned per-plugin SQLite database; durable events and scheduled jobs are delivered by the daemon.
-- **R7 Persistence.** SQLite is the only persistence engine, with SQLx migrations, WAL, foreign keys, a busy timeout, usage rollups, and a retention worker; no external service is required.
-- **R8 Console and CLI.** Every desktop page reads the live control plane, and the CLI exposes status, services, routes, reload, and doctor commands over the same API.
-- **R9 Security boundary.** Static provider secrets resolve from `env:` or `file:` references at request time; virtual keys are hashed; the control token is admin-only; the database and WAL/SHM sidecars are `0600` on Unix; the control API never returns secret values.
-- **Q1 Atomic agent writes.** A crash or I/O failure during an agent config apply leaves either the old file or the new file, never a partial write.
-- **Q2 Secret containment.** Static provider secret values do not appear in SQLite rows or control-plane responses, verified by storage and control tests.
-- **Q3 Protocol coverage.** Every supported client and provider protocol has conversion fixtures for requests, responses, and streams, and the fixture suite passes.
-- **Q4 Local-only startup.** A clean machine with Rust, Node, and pnpm can start the daemon and pass the gateway tests without a database server or broker.
-- **Q5 Docs gate.** `living-docs check .livingdocs` passes in the project check script.
+### R1 Local runtime
+
+`pnpm daemon` starts one daemon process with a control listener (`8081` by default) and a data listener (`8080` by default). Both bind loopback by default. Every control endpoint requires the Bearer token. The daemon creates `$OCTRA_HOME`, applies every migration, and exposes health, config, overview, and reload under `/api/v1/system/*`.
+
+### R2 API gateway
+
+The API gateway is the catch-all data-plane handler. It supports:
+
+- Kong-style services, routes, upstreams, and targets.
+- Route matching on protocol, host, path (prefix or regex), method, and headers; ordering by `regex_priority`, longest path, then id.
+- Round-robin, weighted round-robin, and consistent hashing; passive and active health checks.
+- Retries for idempotent methods, bounded by service retries and the attempt budget.
+- API-key, basic-auth, JWT, and ACL plugins; consumer groups; trusted-proxy client IP resolution.
+- Kong-style plugin phases (request, upstream request, response, response body, error, log; certificate and rewrite are reserved) and the 12-level scope precedence matrix.
+- Request/response transformation, CORS, rate limiting, circuit breaking, IP restriction, request-size limiting, and request termination.
+- Access logs, JSON metrics, Prometheus metrics, and an `api.request.completed` event.
+
+### R3 LLM gateway
+
+The LLM gateway accepts OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Gemini requests; converts them through the canonical IR; and returns the response in the ingress protocol. It supports:
+
+- Virtual models and routing groups with priority rounds, weighted targets, and fallback.
+- Strategies `priority`, `order`, `rotate`/`round_robin`, `smart`, `usage`, `quota`, `pace`, and `intent`.
+- Provider accounts with static `env:`/`file:` secrets or OAuth tokens, quota, cooldown, pacing, and EWMA health.
+- Consumer policies (`allowed_models`, `allowed_providers`) and virtual-key permissions (`allowed_models`, `allowed_providers`, `allowed_accounts`, hourly/daily/weekly/monthly token or cost limits).
+- Usage, cost, hourly rollups, and retention.
+- Opt-in PII redaction with reversible/irreversible modes and local or loopback engines.
+- Agent configuration adapters for Claude Code, Codex, and OpenCode.
+
+### R4 MCP gateway
+
+The MCP gateway fronts many upstream MCP servers behind `/mcp`. It supports:
+
+- Streamable HTTP ingress (`POST`, `GET` SSE keepalive, `DELETE`).
+- stdio and Streamable HTTP upstreams.
+- `initialize`, `ping`, `tools/list`, and `tools/call`; session binding through `Mcp-Session-Id`.
+- Tool discovery and aggregation with a `<server>__<tool>` namespace.
+- MCP API keys and per-consumer tool ACLs.
+- Invocation audit rows for calls, denials, and unknown tools.
+- A refresh action that re-runs discovery.
+
+### R5 Agent integration
+
+Claude Code, Codex, and OpenCode adapters detect installations, render a preview, apply changes atomically, restore the original, and run under a sandbox home without touching real configs. Apply is backed up first, uses a SHA-256 conflict check, resolves symlinks, and keeps the newest 20 backups per agent.
+
+### R6 Plugins
+
+Built-in plugins use the API and LLM gateway traits. Third-party plugins use the WASM component ABI with a manifest, approved capabilities, signature policy, and a host-owned per-plugin SQLite database. Durable events and scheduled jobs are delivered by the daemon. API plugin contract version is 2; LLM plugin contract version is 5.
+
+### R7 Persistence
+
+SQLite is the only persistence engine, with SQLx migrations, WAL, foreign keys, a busy timeout, usage rollups, and a retention worker. No external service is required. Plugin-owned data lives in separate SQLite files.
+
+### R8 Console and CLI
+
+Every desktop page reads the live control plane. The desktop has eight pages: Overview, API Gateway, LLM Gateway, MCP Gateway, AI Control, Agents, Plugins, and Settings. The Tauri host holds the control token and exposes one path- and method-allow-listed bridge command; the webview never holds the token in packaged mode.
+
+The CLI exposes `status`, `services`, `routes`, `reload`, `doctor`, `accounts`, `keys`, and `usage` over the same API.
+
+### R9 Security boundary
+
+Static provider secrets resolve from `env:` or `file:` references at request time; virtual keys, API keys, and MCP keys are hashed; the control token is admin-only; the database and WAL/SHM sidecars are `0600` on Unix; the control API never returns secret values or backup content. OAuth tokens are the deliberate plaintext-at-rest exception and inherit the database's file permissions.
+
+### R10 Observability and retention
+
+Request logs, audit logs, LLM usage/rollups, MCP invocations, plugin events/jobs, JSON/Prometheus metrics, and plugin stage metrics are recorded. The retention worker bounds every append-only table. Pending events are never pruned.
+
+## Current implementation status
+
+This table is the authoritative progress summary for v0.1. "Implemented" means the code path and at least one test or direct inspection exist; it does not mean the acceptance criteria are all met.
+
+| Requirement | Status | Evidence / remaining gap |
+|---|---|---|
+| R1 Local runtime | Implemented | `crates/octra-daemon/src/main.rs`, health/config/overview/reload routes |
+| R2 API gateway | Implemented core | Matcher, balancer, health checks, plugins, Admin API; `least-connections`/`latency` accepted but fall back to round-robin; no UI/CLI CRUD for API entities |
+| R3 LLM gateway | Implemented core | Four protocols, IR, routing, accounts, OAuth, virtual-key/consumer policies, usage/cost, PII; several magpie strategies are not implemented; the AI-native control plane is the only model source with CRUD/validate/preview/apply/rollback, built-in policy execution for every policy type including PromptGuard, PromptCompress, and SemanticCache, semantic target routing, provider query parameters, streaming cache population/replay, full CRUD CLI with stdin/file bodies, and typed desktop forms; neural semantic routing and new wire protocols are pending |
+| R4 MCP gateway | Implemented core | `/mcp`, stdio/HTTP, sessions, namespace, keys, ACL, audit; no consumer-group/default/CEL ACL, conversion modes, notifications, or unanchored sessions |
+| R5 Agent integration | Implemented | Three adapters, atomic apply/restore, backups; sandbox end-to-end test covers Claude Code only, not Codex/OpenCode |
+| R6 Plugins | Implemented | Native/WASM, capabilities, storage, events, jobs; event bus lacks delivery/retry/job integration tests; no delivery-lag operational view |
+| R7 Persistence | Implemented | 24 migrations, WAL, retention, `0600`; write-contention benchmark not done |
+| R8 Console/CLI | Partial | Eight live pages including AI Control with typed forms for all six AI entity types; API and MCP entity CRUD is still API-only; CLI covers status/lists/keys/usage plus full AI entity CRUD and AI activation actions |
+| R9 Security | Implemented with accepted exceptions | Secret references, hashed keys, control token boundary, `0600`, masked control responses; OAuth tokens are plaintext in the protected database; browser mode stores a token in settings |
+| R10 Observability/retention | Implemented core | Logs, usage, metrics, events, retention; API metrics are in-memory; no OTLP; no delivery-lag metric |
+
+### Verification snapshot
+
+- `cargo fmt --all --check` passes.
+- `cargo clippy --workspace --exclude octra-desktop --all-targets -- -D warnings` passes.
+- `cargo test --workspace --exclude octra-desktop` passes: 886 passed, 0 failed, 17 ignored.
+- WASM integration tests are ignored by default and require `cargo-component`; `scripts/test-wasm.sh` runs them in CI.
+- `pnpm typecheck`, `pnpm test`, and `pnpm build` pass (5 frontend tests across the shared packages).
+
+### Planned evolution (not part of v0.1 acceptance)
+
+ADR 0018 replaced the legacy route/group LLM control plane with AI-native entities: AI Provider, AI Provider Account, AI Model, AI Model Target, AI Policy, AI Policy Attachment, config revisions, and a local compiler. Phase 11 completed the migration without backward compatibility: the `ai_*` tables are the only model/routing/account/policy source, the legacy model tables and `/admin/llm/*` model endpoints are removed, and `legacy`/`shadow`/`on` modes plus import-legacy are gone. The AI-native control plane supports CRUD, validate/preview/apply/revisions/rollback, per-target context/capability/pricing metadata, built-in policy execution for every policy type, semantic target routing, provider query parameters, streaming cache population/replay, full CRUD CLI, and typed desktop forms. Remaining `llm_*` tables are virtual-key, usage, counter, plugin-state, PII-engine, and OAuth-token state. Neural embedding-based semantic routing and new wire-protocol adapters remain future work. See [LLM Control Plane](../architecture/llm-control-plane.md).
 
 ## Acceptance criteria
 
@@ -58,6 +152,18 @@ Developers who use multiple AI coding agents, HTTP APIs, and MCP servers configu
 - A published event with a matching subscriber is delivered and retried, and a scheduled job runs; terminal events are pruned.
 - `cargo fmt --all --check`, `cargo clippy --workspace --exclude octra-desktop --all-targets -- -D warnings`, `cargo test --workspace --exclude octra-desktop`, `pnpm typecheck`, `pnpm test`, and `pnpm build` pass.
 - Control endpoints reject a missing or invalid Bearer token; the storage tests assert `0600` on the database and sidecars; the control API masks secrets.
+- Every desktop page renders live control-plane data; the Tauri bridge rejects paths and methods outside its allow-list.
+- The Kong/magpie/Kong reference boundaries in [`reference-models.md`](../architecture/reference-models.md) have a conformance test or an explicit "not implemented" assertion.
+- `living-docs check .livingdocs` passes in CI and in `scripts/check.sh`; the CLI is pinned and the script does not silently skip when it is missing.
+
+Open acceptance gaps, in priority order:
+
+1. **Agent sandbox matrix.** Claude Code has an end-to-end sandbox apply/restore test; Codex and OpenCode need the same byte-identical round-trip test.
+2. **Event bus integration tests.** The adapter and storage have coverage, but delivery, retry/backoff, scheduled job execution, and the no-subscriber skip path are not tested end to end.
+3. **UI/CLI management.** The console is read-only for the three gateways; the CLI does not provide full CRUD. Either narrow the PRD claim or add the management flows.
+4. **Reference conformance.** The reference matrix is prose; no test asserts that unimplemented Kong/magpie features are rejected or documented.
+5. **Performance budget.** The p95 proxy overhead budget and benchmark remain open.
+6. **Living-docs gate.** `scripts/check.sh` skips when the CLI is missing and CI has no docs job; add a pinned CLI and a failing default to make Q5 real.
 
 ## Success metrics
 
@@ -66,18 +172,25 @@ Developers who use multiple AI coding agents, HTTP APIs, and MCP servers configu
 - All supported protocol conversions and all three agent adapters have passing fixtures or sandbox tests; the suite reports zero failures.
 - A clean-machine startup test needs no external database, cache, or broker process.
 - The reference third-party plugin installs and serves traffic in CI.
+- Every documented reference-model boundary is either implemented and tested or explicitly rejected at configuration time.
 
 ## Open questions
 
 - What p95 proxy-overhead budget should R2 hold, and which benchmark enforces it? Resolve with an ADR before publishing a performance claim.
+- Should the desktop console become a full CRUD console, or remain a live observability console with the Admin API as the management surface? If full CRUD, which entities come first?
+- When do consumer policies get a control-plane CRUD API and desktop editor?
+- Which magpie strategy should be added next: `manual`, `weight`, `fast`, `cheap`, or `expiring`?
+- When should `on` become the default LLM data source, and which AI policy types (rate limit, budget guard, PII, prompt guard) should be executed first?
+- Which Kong MCP capability should be added next: consumer-group ACLs, default/CEL ACLs, conversion modes, or notifications?
 - When do OS keychain storage and OAuth-token encryption land? The current boundary is recorded in ADR 0007.
 - When does desktop-side daemon supervision replace the current operator-started daemon? The current boundary is recorded in ADR 0003.
-- Which protocol adapter or coding agent is next after the current four protocols and three agents?
-- Should this PRD be accepted once the v0.1 acceptance criteria are demonstrated, or amended per capability?
+- Should the v0.1 PRD be accepted once the acceptance criteria are demonstrated, or amended per capability?
 
 ## Related
 
 - Constitution: [/constitution.md](/constitution.md)
 - ADRs: [/adr/index.md](/adr/index.md)
 - Architecture: [/architecture/index.md](/architecture/index.md)
+- Reference models: [/architecture/reference-models.md](/architecture/reference-models.md)
+- LLM control-plane design: [/adr/0018-model-the-llm-control-plane-on-ai-native-entities.md](/adr/0018-model-the-llm-control-plane-on-ai-native-entities.md), [/architecture/llm-control-plane.md](/architecture/llm-control-plane.md)
 - Issues: none yet.

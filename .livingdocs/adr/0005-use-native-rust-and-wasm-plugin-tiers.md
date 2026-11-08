@@ -37,6 +37,7 @@ Rejected alternatives:
 
 **Follow-ups:**
 - Keep the plugin SDK aligned with the WIT contract as new phases are added.
+- Document the API plugin contract version (currently 2, with events and jobs) and the LLM plugin contract version (currently 5) as compatibility boundaries, alongside the WIT version.
 
 ## Verification
 

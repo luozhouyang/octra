@@ -4,7 +4,7 @@ English | [简体中文](./README.zh-CN.md)
 
 **Local-first Unified Gateway** — manage API, LLM, and MCP services in one place, with a cross-platform desktop app.
 
-This repository is the runnable foundation of Octra: a standalone Daemon with a unified data plane (API, LLM, and MCP gateways), an authenticated control plane, SQLite persistence, an admin CLI, a Tauri 2 desktop app, and dual Rust/TypeScript workspaces. The core gateway functionality is implemented; agent integration, WASM plugins, and production hardening are still on the roadmap.
+This repository is the runnable foundation of Octra: a standalone Daemon with a unified data plane (API, LLM, and MCP gateways), an authenticated control plane, SQLite persistence, an admin CLI, a Tauri 2 desktop app, and dual Rust/TypeScript workspaces. The three gateways, plugin runtimes, agent integration, and desktop console are implemented; production hardening, packaging, and full reference-model parity remain on the roadmap.
 
 ## Repository layout
 
@@ -45,6 +45,8 @@ octra/
 ## Engineering decisions
 
 Tracked decisions and architecture views live in [`.livingdocs/`](./.livingdocs/index.md), an OKF bundle maintained with [Living Docs](https://github.com/ejklock/living-docs-skill). Read the in-force view with `living-docs read --docs-dir .livingdocs` and run `living-docs check .livingdocs` after a structural change. Local scratch notes remain in the git-ignored `docs/` directory.
+
+The gateways follow three explicit reference models: the API gateway adopts Kong's service/route/upstream/target model, the LLM gateway adopts yetone/magpie's local routing model (with Kong AI Gateway 2.x as a secondary control-plane reference), and the MCP gateway adopts Kong's AI MCP Proxy fronting model. The adopt/not-adopt matrix and current parity are recorded in [`.livingdocs/architecture/reference-models.md`](./.livingdocs/architecture/reference-models.md).
 
 ## Quick start
 
@@ -116,27 +118,48 @@ shows a sandbox banner, and preview never writes anything.
 ## Implemented today
 
 - Standalone daemon with two listeners and unified graceful shutdown.
-- Authenticated control plane: system health/config/reload plus CRUD for services, routes, upstreams, targets, consumers, credentials, policies, plugins/configs, LLM providers/models/routing groups/routes/virtual keys, and MCP servers/tools/ACLs/keys; request and audit logs are queryable.
+- Authenticated control plane: system health/config/reload plus CRUD for services, routes, upstreams, targets, consumers, consumer groups, credentials, plugins/configs, LLM providers/models/routing groups/routes/virtual keys/accounts, and MCP servers/tools/ACLs/keys; request and audit logs, events, and jobs are queryable. LLM consumer policies are enforced but do not have a control endpoint yet.
 - Constant-time Bearer token authentication; the token is randomly generated and persisted to disk.
-- SQLite + SQLx migrations with WAL / foreign_keys / busy_timeout; runtime snapshots keep the hot path off the database.
-- API Gateway: host/path/method/header routing, longest-prefix matching, round-robin and weighted load balancing with multi-upstream fallback, path stripping, body limits, connect/request timeouts, retries, API-key authentication, policy-based per-consumer route, model, and provider authorization with default deny, streaming proxy, persisted access logs, and JSON and Prometheus metrics.
-- Plugin system: Kong-style phase chain with consumer > route > service > global scope precedence and priority ordering, fail-open/fail-closed policies, and built-in `key-auth`, `basic-auth`, `jwt`, `acl`, `correlation-id`, `request-transformer`, `response-transformer`, `cors`, `rate-limiting`, `header-rewrite`, and `circuit-breaker` plugins configured per scope.
-- LLM Gateway: canonical IR, OpenAI ↔ Anthropic request/response/SSE conversion, virtual models, routing groups with priority/weight fallback, OpenAI-compatible and Anthropic providers (`env:` / `file:` secret references), virtual keys hashed in SQLite, usage records, `count_tokens`, and consumer policies that restrict allowed models and providers.
-- MCP Gateway: Streamable HTTP and stdio upstreams, tool discovery and aggregation, `/mcp` JSON-RPC endpoint with sessions, per-consumer tool ACLs, API keys, and invocation audit rows.
-- Plugins: native and WASM (API and LLM) plugin runtimes, plugin-owned SQLite storage, config schemas, per-instance metrics and latency percentiles, and shared rate-limit/budget counters.
+- SQLite + SQLx migrations with WAL / foreign_keys / busy_timeout; runtime snapshots keep routing and authorization decisions off the database (virtual-key limit checks still read persisted usage).
+- API Gateway: host/path/method/header routing, longest-prefix matching, round-robin, weighted, and consistent-hashing load balancing with active/passive health checks, path stripping, body limits, connect/request timeouts, retries, key/basic/JWT/ACL authentication with consumers and consumer groups, streaming proxy, persisted access logs, and JSON and Prometheus metrics.
+- Plugin system: Kong-style phase chain with the full 12-level consumer/consumer-group/route/service/global scope precedence, priority ordering, fail-open/fail-closed policies, and built-in `key-auth`, `basic-auth`, `jwt`, `acl`, `correlation-id`, `request-transformer`, `response-transformer`, `cors`, `rate-limiting`, `header-rewrite`, `circuit-breaker`, `ip-restriction`, `request-size-limiting`, and `request-termination` plugins configured per scope.
+- LLM Gateway: canonical IR, OpenAI Chat/Responses, Anthropic, and Gemini request/response/SSE conversion, virtual models, routing groups with priority/weight fallback and `order`/`rotate`/`smart`/`usage`/`quota`/`pace`/`intent`/`semantic` strategies, provider accounts with static or OAuth credentials, provider query/header configuration, quota/cooldown/pacing, virtual keys hashed in SQLite, consumer policies that restrict allowed models and providers, usage/cost rollups, `count_tokens`, and opt-in PII redaction.
+- MCP Gateway: Streamable HTTP and stdio upstreams, tool discovery and aggregation with a `<server>__<tool>` namespace, `/mcp` JSON-RPC endpoint with sessions, per-consumer tool ACLs, API keys, and invocation audit rows.
+- Plugins: native and WASM (API and LLM) plugin runtimes, plugin-owned SQLite storage, config schemas, per-instance metrics and latency percentiles, durable plugin events, scheduled jobs, and shared rate-limit/budget counters.
+- AI-native LLM control plane (Phase 11, AI-native only): `ai_*` schema, `octra-ai-config` compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, per-target model metadata (context, capabilities, pricing), built-in policy execution for every policy type (rate limit, budget guard, PII, model map, param override, system prompt, request audit, think tags, PromptGuard, PromptCompress, SemanticCache), `semantic` target routing over AI-native descriptions, provider `config_json.query` parameters, streaming cache population and SSE replay, full CRUD CLI with inline/stdin/file JSON bodies, and a desktop AI Control page with typed forms for providers, accounts, models, targets, policies, and attachments. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed without backward compatibility.
 - Agent integration: detects Claude Code, Codex and OpenCode, previews and applies the Octra provider into their native config files, and restores backups atomically.
-- CLI: `status`, `services`, `routes`, `reload`, `doctor`.
+- CLI: `status`, `services`, `routes`, `reload`, `doctor`, `keys`, `usage`, and `ai` status/actions plus full CRUD for providers, accounts, models, targets, policies, and attachments.
 - Tauri 2 + React desktop app with a shadcn-style component set and Tailwind CSS v4 design tokens for dark and light modes; every console page reads the local control plane.
 - Dual workspace and CI (Rust fmt/clippy/test; frontend typecheck/test/build).
 
 ## Not yet implemented (tracked on the roadmap)
 
+- Full CRUD for API and MCP entities in the desktop console and CLI.
+  The console is a live read-only view for those planes today; most
+  mutations are available through the control API only. LLM entities are
+  fully managed through AI Control and `octra ai`.
+- Event-bus integration tests for delivery, retry/backoff, scheduled jobs, and
+  the no-subscriber skip path; the storage retention path is already tested.
 - Additional vendor-specific protocol adapters beyond OpenAI, Anthropic,
   OpenAI Responses, and Gemini.
 - Agent discovery / config adapter / bridge for agents beyond the three
   supported adapters.
+- Full reference-model parity where justified: magpie strategies such as
+  `manual`/`weight`/`fast`/`cheap`, and Kong MCP consumer-group/default/CEL
+  ACLs or conversion modes.
+- Complete the AI-native LLM control plane (ADR 0018): neural embeddings for
+  semantic routing (the cache already supports an optional embedding endpoint),
+  new wire-protocol adapters beyond OpenAI, Anthropic, OpenAI Responses, and
+  Gemini, and AI-native OAuth controls in the desktop account form. The Phase 11 control API,
+  rollback, full policy execution including PromptGuard, PromptCompress, and
+  SemanticCache, `semantic` target routing, provider query parameters,
+  streaming cache population/SSE replay, AI-native account OAuth endpoints,
+  full CRUD CLI, and desktop typed forms for all AI entities already exist.
+  The legacy model tables, endpoints, modes, and import path are removed;
+  `ai_*` is the only model control plane. Semantic cache/routing use exact
+  keys plus local lexical similarity by default.
 - Desktop-side daemon lifecycle management (start, stop, health supervision).
-- OS Keychain integration for secrets.
+- OS Keychain integration for secrets and OAuth-token encryption.
 - Cross-platform packaging, signing, and notarization.
 
 ## Security boundaries

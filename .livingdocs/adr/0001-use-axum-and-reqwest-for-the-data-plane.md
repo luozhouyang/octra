@@ -15,7 +15,7 @@ The original architecture selected Pingora as the proxy engine. Pingora's TLS an
 
 ## Decision
 
-We will implement the data plane with Tokio, Axum 0.8, hyper, and reqwest using rustls, and keep Pingora out of the runtime. The API gateway owns routing, retries, load balancing, and streaming on this stack; the control plane uses the same Axum server model.
+We will implement the data plane with Tokio, Axum 0.8, hyper, and reqwest using rustls, and keep Pingora out of the runtime. The API, LLM, and MCP gateway routers, the control plane, and the shared data listener all use this stack. The API gateway owns routing, retries, load balancing, and streaming on it; the LLM gateway owns protocol translation and SSE streaming; the MCP gateway owns Streamable HTTP and stdio upstream transports.
 
 Rejected alternatives:
 - **Pingora** — cross-platform TLS and network support was unverified, and it duplicated primitives the rest of the daemon already uses.

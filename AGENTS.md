@@ -13,7 +13,7 @@ English is the default and primary language of this repository.
 
 ## Living docs
 
-- Tracked engineering decisions live in `.livingdocs/` as an OKF bundle: a constitution, ADRs, and living Mermaid architecture views.
+- Tracked engineering decisions live in `.livingdocs/` as an OKF bundle: the constitution, the v0.1 PRD, ADRs, reference-model notes, and living Mermaid architecture views.
 - Read the in-force view with `living-docs read --docs-dir .livingdocs`; do not read `index.md` directly.
 - Before changing a decision, read the relevant record and use `living-docs supersede`; never rewrite an accepted record in place.
 - After a structural change, run `living-docs check .livingdocs` and update the affected ADR or architecture view in the same change.

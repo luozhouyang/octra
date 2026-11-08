@@ -1,5 +1,7 @@
 # ADRs
 
+All records remain **Proposed** until the v0.1 acceptance gaps in the PRD are closed and the maintainer accepts them. The implementation already follows these decisions; see the PRD implementation-status table for evidence and gaps.
+
 ## Active
 
 * [0001 — Use Axum and reqwest for the data plane](0001-use-axum-and-reqwest-for-the-data-plane.md) - Proposed
@@ -12,3 +14,11 @@
 * [0008 — Apply agent configs atomically with backups](0008-apply-agent-configs-atomically-with-backups.md) - Proposed
 * [0009 — Deliver plugin events through a durable outbox](0009-deliver-plugin-events-through-a-durable-outbox.md) - Proposed
 * [0010 — Keep the Rust and TypeScript workspaces in one repository](0010-keep-the-rust-and-typescript-workspaces-in-one-repository.md) - Proposed
+* [0011 — Model the API gateway on Kong](0011-model-the-api-gateway-on-kong.md) - Proposed
+* [0012 — Use Kong-style plugin phases and scopes](0012-use-kong-style-plugin-phases-and-scopes.md) - Proposed
+* [0013 — Model the LLM gateway on magpie](0013-model-the-llm-gateway-on-magpie.md) - Proposed
+* [0014 — Model the MCP gateway as a Kong-style aggregator](0014-model-the-mcp-gateway-as-a-kong-style-aggregator.md) - Proposed
+* [0015 — Bridge the desktop through an allow-listed control command](0015-bridge-the-desktop-through-an-allow-listed-control-command.md) - Proposed
+* [0016 — Redact PII before provider egress](0016-redact-pii-before-provider-egress.md) - Proposed
+* [0017 — Compile runtime snapshots off the hot path](0017-compile-runtime-snapshots-off-the-hot-path.md) - Proposed
+* [0018 — Model the LLM control plane on AI-native entities](0018-model-the-llm-control-plane-on-ai-native-entities.md) - Proposed

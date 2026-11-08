@@ -38,10 +38,11 @@ Rejected alternatives:
 
 **Follow-ups:**
 - Add adapters only when an agent exposes a stable configuration contract; avoid inferring one.
+- Extend the daemon sandbox integration test to Codex and OpenCode; today it exercises Claude Code end to end while the other two adapters rely on unit render/read tests.
 
 ## Verification
 
-**Implementation impact:** `crates/octra-agent-core/`, `crates/octra-storage/src/agents.rs`, `crates/octra-agent-core/src/control.rs`, `apps/desktop/src/pages/agents.tsx`.
+**Implementation impact:** `crates/octra-agent-core/`, `crates/octra-storage/src/agents.rs`, `crates/octra-agent-core/src/control.rs`, `apps/desktop/src/app/pages/agents.tsx`.
 
 **Verification criteria:**
 - Preview writes nothing; apply is atomic and restore returns byte-identical original content.

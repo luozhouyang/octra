@@ -35,6 +35,7 @@ Rejected alternatives:
 - Delivery is eventually consistent rather than immediate.
 
 **Follow-ups:**
+- Add integration tests for delivery, retry/backoff, scheduled job execution, and the no-subscriber skip path; the storage layer has retention tests, but the event bus currently has no crate integration test.
 - Expose delivery lag and retry counts in the plugin operational view as the event surface grows.
 
 ## Verification
