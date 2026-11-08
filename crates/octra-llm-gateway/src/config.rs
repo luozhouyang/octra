@@ -139,6 +139,84 @@ impl OAuthProfile {
     }
 }
 
+/// AWS Signature Version 4 settings from `config_json.sigv4`.
+///
+/// Credentials are references, not values: `env:VAR`, `file:/path`, or
+/// `$VAR`. Signing resolves them immediately before the request; parsing
+/// only validates the reference shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigV4Config {
+    pub region: String,
+    pub service: String,
+    pub access_key_ref: String,
+    pub secret_key_ref: String,
+    pub session_token_ref: Option<String>,
+}
+
+impl SigV4Config {
+    pub fn from_value(value: &Value) -> Result<Self, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "`sigv4` must be an object".to_string())?;
+        for key in object.keys() {
+            if !matches!(
+                key.as_str(),
+                "region" | "service" | "access_key_ref" | "secret_key_ref" | "session_token_ref"
+            ) {
+                return Err(format!("`sigv4` contains unknown key '{key}'"));
+            }
+        }
+        let region = required_sigv4_string(object, "region")?;
+        let service = match object.get("service") {
+            None => "bedrock".to_string(),
+            Some(Value::String(value)) if !value.trim().is_empty() => value.trim().to_string(),
+            Some(_) => return Err("`sigv4.service` must be a non-empty string".to_string()),
+        };
+        let access_key_ref = required_sigv4_string(object, "access_key_ref")?;
+        validate_sigv4_ref("access_key_ref", &access_key_ref)?;
+        let secret_key_ref = required_sigv4_string(object, "secret_key_ref")?;
+        validate_sigv4_ref("secret_key_ref", &secret_key_ref)?;
+        let session_token_ref = match object.get("session_token_ref") {
+            None => None,
+            Some(Value::String(value)) if !value.trim().is_empty() => {
+                let reference = value.trim().to_string();
+                validate_sigv4_ref("session_token_ref", &reference)?;
+                Some(reference)
+            }
+            Some(_) => {
+                return Err("`sigv4.session_token_ref` must be a non-empty string".to_string());
+            }
+        };
+        Ok(Self {
+            region,
+            service,
+            access_key_ref,
+            secret_key_ref,
+            session_token_ref,
+        })
+    }
+}
+
+fn required_sigv4_string(object: &Map<String, Value>, key: &str) -> Result<String, String> {
+    match object.get(key) {
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(value.trim().to_string()),
+        Some(_) => Err(format!("`sigv4.{key}` must be a non-empty string")),
+        None => Err(format!("`sigv4.{key}` is required")),
+    }
+}
+
+fn validate_sigv4_ref(key: &str, reference: &str) -> Result<(), String> {
+    let rest = reference
+        .strip_prefix("env:")
+        .or_else(|| reference.strip_prefix("file:"))
+        .or_else(|| reference.strip_prefix('$'))
+        .ok_or_else(|| format!("`sigv4.{key}` must use env:VAR, file:/path, or $VAR form"))?;
+    if rest.trim().is_empty() {
+        return Err(format!("`sigv4.{key}` has an empty reference"));
+    }
+    Ok(())
+}
+
 /// Fully resolved provider settings used by the request path.
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
@@ -157,6 +235,9 @@ pub struct ProviderConfig {
     pub query: Vec<(String, String)>,
     pub anthropic_version: String,
     pub oauth: Option<OAuthProfile>,
+    /// Static AWS credential signing. When set, it replaces every other auth
+    /// mode and `auth` is forced to [`AuthType::None`].
+    pub sigv4: Option<SigV4Config>,
     /// Set when the provider is reached by spawning a local CLI instead of
     /// making an HTTP request.
     pub cli: Option<CliConfig>,
@@ -237,6 +318,26 @@ impl ProviderConfig {
             None => None,
         };
 
+        let sigv4 = match config.get("sigv4") {
+            Some(value) => Some(SigV4Config::from_value(value).map_err(|message| {
+                ProviderConfigError::Invalid(format!("provider {}: {message}", record.name))
+            })?),
+            None => None,
+        };
+        if sigv4.is_some() {
+            if auth_header.is_some() {
+                return Err(ProviderConfigError::Invalid(format!(
+                    "provider {}: config_json.sigv4 cannot be combined with auth_header; \
+                     SigV4 supplies its own authorization header",
+                    record.name
+                )));
+            }
+            // SigV4 signs the request itself, so no bearer or custom auth
+            // header may be added by the adapter.
+            auth = AuthType::None;
+            auth_header = None;
+        }
+
         let cli = match config.get("cli") {
             Some(value) => Some(CliConfig::from_value(value).map_err(|message| {
                 ProviderConfigError::Invalid(format!("provider {}: {message}", record.name))
@@ -274,6 +375,7 @@ impl ProviderConfig {
                 .unwrap_or(ANTHROPIC_VERSION)
                 .to_string(),
             oauth,
+            sigv4,
             cli,
         })
     }
@@ -662,6 +764,106 @@ mod tests {
         assert_eq!(bedrock.protocol, Protocol::Bedrock);
         assert_eq!(bedrock.base_url, "https://bedrock-proxy.test");
         assert_eq!(bedrock.auth, AuthType::Bearer);
+    }
+
+    #[test]
+    fn parses_sigv4_defaults_and_forces_no_auth() {
+        let mut input = record(
+            "bedrock",
+            "bearer",
+            None,
+            r#"{"sigv4":{"region":"us-east-1","access_key_ref":"env:AWS_ACCESS_KEY_ID","secret_key_ref":"file:/tmp/aws-secret"}}"#,
+        );
+        input.secret_ref = Some("env:UNUSED_BEDROCK_KEY".to_string());
+        let config = ProviderConfig::from_record(&input).unwrap();
+
+        assert_eq!(config.auth, AuthType::None);
+        assert_eq!(config.auth_header, None);
+        // The record secret is kept for other auth modes but unused here.
+        assert_eq!(config.secret_ref.as_deref(), Some("env:UNUSED_BEDROCK_KEY"));
+        assert_eq!(
+            config.sigv4,
+            Some(SigV4Config {
+                region: "us-east-1".to_string(),
+                service: "bedrock".to_string(),
+                access_key_ref: "env:AWS_ACCESS_KEY_ID".to_string(),
+                secret_key_ref: "file:/tmp/aws-secret".to_string(),
+                session_token_ref: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_sigv4_custom_service_and_session_token() {
+        let config = ProviderConfig::from_record(&record(
+            "bedrock",
+            "bearer",
+            None,
+            r#"{"sigv4":{"region":"us-west-2","service":"bedrock-runtime","access_key_ref":"$AWS_ACCESS_KEY_ID","secret_key_ref":"env:AWS_SECRET_ACCESS_KEY","session_token_ref":"env:AWS_SESSION_TOKEN"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(config.auth, AuthType::None);
+        let sigv4 = config.sigv4.expect("sigv4 config");
+        assert_eq!(sigv4.region, "us-west-2");
+        assert_eq!(sigv4.service, "bedrock-runtime");
+        assert_eq!(sigv4.access_key_ref, "$AWS_ACCESS_KEY_ID");
+        assert_eq!(
+            sigv4.session_token_ref.as_deref(),
+            Some("env:AWS_SESSION_TOKEN")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_sigv4_config() {
+        for (config, expected) in [
+            (
+                r#"{"sigv4":{"access_key_ref":"env:A","secret_key_ref":"env:S"}}"#,
+                "`sigv4.region` is required",
+            ),
+            (
+                r#"{"sigv4":{"region":"","access_key_ref":"env:A","secret_key_ref":"env:S"}}"#,
+                "`sigv4.region` must be a non-empty string",
+            ),
+            (
+                r#"{"sigv4":{"region":"us-east-1","access_key_ref":"plain","secret_key_ref":"env:S"}}"#,
+                "`sigv4.access_key_ref` must use",
+            ),
+            (
+                r#"{"sigv4":{"region":"us-east-1","access_key_ref":"env:","secret_key_ref":"env:S"}}"#,
+                "`sigv4.access_key_ref` has an empty reference",
+            ),
+            (
+                r#"{"sigv4":{"region":"us-east-1","access_key_ref":"env:A","secret_key_ref":"/tmp/key"}}"#,
+                "`sigv4.secret_key_ref` must use",
+            ),
+            (
+                r#"{"sigv4":{"region":"us-east-1","access_key_ref":"env:A","secret_key_ref":"env:S","session_token_ref":"token"}}"#,
+                "`sigv4.session_token_ref` must use",
+            ),
+            (
+                r#"{"sigv4":{"region":"us-east-1","access_key_ref":"env:A","secret_key_ref":"env:S","service":""}}"#,
+                "`sigv4.service` must be a non-empty string",
+            ),
+            (
+                r#"{"sigv4":{"region":"us-east-1","access_key_ref":"env:A","secret_key_ref":"env:S","servce":"bedrock"}}"#,
+                "`sigv4` contains unknown key 'servce'",
+            ),
+            (r#"{"sigv4":"us-east-1"}"#, "`sigv4` must be an object"),
+            (r#"{"sigv4":null}"#, "`sigv4` must be an object"),
+            (
+                r#"{"auth_header":"x-api-key","sigv4":{"region":"us-east-1","access_key_ref":"env:A","secret_key_ref":"env:S"}}"#,
+                "cannot be combined with auth_header",
+            ),
+            (r#"{"sigv4":["us-east-1"]}"#, "`sigv4` must be an object"),
+        ] {
+            let error = ProviderConfig::from_record(&record("bedrock", "bearer", None, config))
+                .unwrap_err();
+            let ProviderConfigError::Invalid(message) = error;
+            assert!(
+                message.contains(expected),
+                "expected {expected:?} in {message:?} for {config}"
+            );
+        }
     }
 
     #[test]

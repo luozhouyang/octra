@@ -84,6 +84,11 @@ impl Upstream {
         provider: &ProviderConfig,
         account_secret_ref: Option<&str>,
     ) -> Result<Option<String>, GatewayError> {
+        // SigV4 obtains its own static credentials from `config_json.sigv4`
+        // and never sends a bearer or account token.
+        if provider.sigv4.is_some() {
+            return Ok(None);
+        }
         if let Some(key) = &self.test_api_key_env {
             return Ok(Some(key.clone()));
         }
@@ -161,6 +166,9 @@ impl Upstream {
         provider: &ProviderConfig,
         account: Option<&AccountRuntime>,
     ) -> Result<Option<String>, GatewayError> {
+        if provider.sigv4.is_some() {
+            return Ok(None);
+        }
         if let Some(key) = &self.test_api_key_env {
             return Ok(Some(key.clone()));
         }
@@ -202,6 +210,10 @@ impl Upstream {
         stream: bool,
         key: Option<String>,
     ) -> Result<RequestBuilder, GatewayError> {
+        // Serialize once so the exact bytes that are sent are also signed.
+        let body_bytes = serde_json::to_vec(body).map_err(|error| {
+            GatewayError::internal(format!("cannot serialize upstream request body: {error}"))
+        })?;
         let mut builder = self
             .client
             .post(url)
@@ -215,7 +227,7 @@ impl Upstream {
                 octra_data_plane::HEADER_REQUEST_ID,
                 octra_data_plane::new_request_id(),
             )
-            .json(body);
+            .body(body_bytes.clone());
 
         if stream {
             builder = builder.header(header::ACCEPT, "text/event-stream");
@@ -225,10 +237,30 @@ impl Upstream {
         for (name, value) in adapter.extra_headers(provider) {
             builder = builder.header(name, value);
         }
-        for (name, value) in adapter.auth_headers(provider, key.as_deref())? {
-            builder = builder.header(name, value);
+        if let Some(config) = &provider.sigv4 {
+            let parsed_url = reqwest::Url::parse(url).map_err(|error| {
+                GatewayError::config(format!(
+                    "provider {}: invalid upstream URL '{url}': {error}",
+                    provider.name
+                ))
+            })?;
+            let headers = crate::sigv4::sign_request(
+                config,
+                "POST",
+                &parsed_url,
+                &body_bytes,
+                chrono::Utc::now(),
+            )?;
+            for (name, value) in headers {
+                builder = builder.header(name, value);
+            }
+        } else {
+            for (name, value) in adapter.auth_headers(provider, key.as_deref())? {
+                builder = builder.header(name, value);
+            }
         }
 
+        // Operator headers win over generated ones, including `authorization`.
         for (name, value) in &provider.headers {
             if let (Ok(name), Ok(value)) = (
                 header::HeaderName::from_bytes(name.as_bytes()),
@@ -658,6 +690,82 @@ mod tests {
     fn masks_secrets() {
         assert_eq!(mask_secret("short"), "****");
         assert_eq!(mask_secret("sk-1234567890"), "****7890");
+    }
+
+    #[test]
+    fn sigv4_provider_signs_request_without_bearer_auth() {
+        let dir =
+            std::env::temp_dir().join(format!("octra-sigv4-upstream-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let access = dir.join("access_key");
+        let secret = dir.join("secret_key");
+        std::fs::write(&access, "AKIDEXAMPLE\n").unwrap();
+        std::fs::write(&secret, "test-secret-value\n").unwrap();
+
+        let config = serde_json::json!({
+            "sigv4": {
+                "region": "us-east-1",
+                "service": "bedrock",
+                "access_key_ref": format!("file:{}", access.display()),
+                "secret_key_ref": format!("file:{}", secret.display()),
+            },
+            "headers": {"x-extra": "kept"},
+        })
+        .to_string();
+        let provider = provider_with_config(
+            "bedrock",
+            "bearer",
+            Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+            &config,
+        );
+        assert_eq!(provider.auth, AuthType::None);
+
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": [{"text": "hello"}]}]
+        });
+        let upstream = Upstream::new(&OctraConfig::default());
+        let request = upstream
+            .build_json(
+                &provider,
+                "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/converse",
+                &body,
+                false,
+                Some("unused-bearer-key".to_string()),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let headers = request.headers();
+        let authorization = headers
+            .get(header::AUTHORIZATION)
+            .expect("authorization header")
+            .to_str()
+            .unwrap();
+        assert!(
+            authorization.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/"),
+            "{authorization}"
+        );
+        assert!(!authorization.contains("Bearer"));
+        assert!(
+            authorization
+                .contains("SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date,")
+        );
+        assert!(headers.contains_key("x-amz-date"));
+        assert!(headers.contains_key("x-amz-content-sha256"));
+        assert_eq!(headers.get("x-extra").unwrap(), "kept");
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+
+        let expected_body = serde_json::to_vec(&body).unwrap();
+        assert_eq!(
+            request.body().and_then(reqwest::Body::as_bytes),
+            Some(expected_body.as_slice())
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

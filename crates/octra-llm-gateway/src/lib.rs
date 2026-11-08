@@ -27,6 +27,7 @@ pub mod keys;
 pub mod pii;
 pub mod routing;
 pub mod runtime;
+pub mod sigv4;
 pub mod similarity;
 pub mod upstream;
 pub mod usage;

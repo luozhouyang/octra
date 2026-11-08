@@ -12,6 +12,7 @@ bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 hex.workspace = true
+hmac.workspace = true
 http.workspace = true
 octra-ai-config.workspace = true
 octra-api-core.workspace = true
