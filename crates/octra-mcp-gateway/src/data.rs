@@ -21,8 +21,8 @@ use cel_interpreter::{Context as CelContext, Program, Value as CelValue};
 use futures_util::stream;
 use octra_data_plane::{body_bytes_limited, error_response, new_request_id};
 use octra_mcp_core::domain::{
-    MCP_SERVER_MODE_LISTENER, acl_allows_default_then_tool, acl_allows_scoped,
-    is_source_server_mode, route_path_key, session_status, status,
+    MCP_SERVER_MODE_CONVERSION_ONLY, MCP_SERVER_MODE_LISTENER, acl_allows_default_then_tool,
+    acl_allows_scoped, is_source_server_mode, route_path_key, session_status, status,
 };
 use octra_mcp_core::jsonrpc::{
     JsonRpcError, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, codes,
@@ -35,8 +35,9 @@ use octra_storage::mcp::InvocationRecord;
 use serde_json::{Map, Value, json};
 
 use crate::McpDataState;
-use crate::auth::{AuthError, Caller, authenticate};
+use crate::auth::{AuthError, Caller, authenticate, resolve_strategy};
 use crate::client::McpError;
+use crate::conversion;
 
 pub const SESSION_HEADER: HeaderName = HeaderName::from_static("mcp-session-id");
 const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
@@ -90,6 +91,21 @@ async fn resolve_scope(state: &McpDataState, rest: &str) -> Result<RouteScope, R
         .cloned()
         .ok_or_else(|| route_not_found(rest))?;
 
+    // A conversion-only server exists only as a source for listeners. It has
+    // no incoming MCP endpoint of its own.
+    if server.mode == MCP_SERVER_MODE_CONVERSION_ONLY {
+        return Err(json_error_status(
+            StatusCode::NOT_FOUND,
+            JsonRpcError::new(
+                codes::TOOL_NOT_FOUND,
+                format!(
+                    "MCP server '{}' is conversion-only and cannot be served directly",
+                    server.name
+                ),
+            ),
+        ));
+    }
+
     let visible_server_ids = scoped_visible_server_ids(&servers, &server);
     Ok(RouteScope {
         server,
@@ -138,7 +154,7 @@ async fn handle_post_inner(
     scope: Option<RouteScope>,
     path: String,
 ) -> Response {
-    let caller = match authenticate(&state.storage, &headers).await {
+    let caller = match authenticate_request(&state, &headers, scope.as_ref()).await {
         Ok(caller) => caller,
         Err(err) => return auth_failure(err),
     };
@@ -350,7 +366,7 @@ async fn create_session(
                 .map_err(storage_error)?;
             servers
                 .iter()
-                .find(|server| server.enabled)
+                .find(|server| server.enabled && server.mode != MCP_SERVER_MODE_CONVERSION_ONLY)
                 .or_else(|| servers.first())
                 .map(|server| server.id.clone())
                 .ok_or_else(|| {
@@ -441,21 +457,53 @@ async fn tools_call(
     let started = Instant::now();
     let (server, tool) = resolve_tool(state, caller, &params.name, scope, path).await?;
 
-    let result = state
-        .runtime
-        .servers()
-        .call(
+    let result = if tool.is_http() {
+        conversion::execute_http_tool(
+            state.runtime.http(),
             &server,
-            &tool.name,
+            &tool,
             params.arguments,
             state.runtime.tool_call_timeout(),
-            state.runtime.http(),
         )
-        .await;
+        .await
+        .and_then(|result| {
+            serde_json::to_value(result)
+                .map_err(|err| McpError::Internal(format!("cannot encode tool result: {err}")))
+        })
+    } else {
+        state
+            .runtime
+            .servers()
+            .call(
+                &server,
+                &tool.name,
+                params.arguments,
+                state.runtime.tool_call_timeout(),
+                state.runtime.http(),
+            )
+            .await
+    };
 
     match result {
         Ok(value) => {
-            record(state, &server, &tool, caller, status::OK, started, None).await;
+            let is_error = value
+                .get("isError")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if is_error {
+                record(
+                    state,
+                    &server,
+                    &tool,
+                    caller,
+                    status::ERROR,
+                    started,
+                    Some("tool returned isError=true"),
+                )
+                .await;
+            } else {
+                record(state, &server, &tool, caller, status::OK, started, None).await;
+            }
             Ok(value)
         }
         Err(err) => {
@@ -772,9 +820,10 @@ fn sample_cel_context() -> Result<CelContext<'static>, String> {
 /// The servers whose tools the aggregate `/mcp` endpoint presents.
 ///
 /// Without an enabled `listener` the endpoint keeps the legacy behaviour and
-/// presents every enabled server. A listener narrows the catalog to its
-/// configured sources plus its own tools; a listener with an empty source list
-/// aggregates every enabled `upstream-server` and `passthrough-listener`.
+/// presents every enabled server except `conversion-only` sources. A listener
+/// narrows the catalog to its configured sources plus its own tools; a
+/// listener with an empty source list aggregates every enabled server that may
+/// be a source, including `conversion-only` servers.
 fn visible_server_ids(servers: &[McpServer]) -> HashSet<String> {
     let listeners: Vec<&McpServer> = servers
         .iter()
@@ -783,7 +832,7 @@ fn visible_server_ids(servers: &[McpServer]) -> HashSet<String> {
     if listeners.is_empty() {
         return servers
             .iter()
-            .filter(|server| server.enabled)
+            .filter(|server| server.enabled && server.mode != MCP_SERVER_MODE_CONVERSION_ONLY)
             .map(|server| server.id.clone())
             .collect();
     }
@@ -909,7 +958,7 @@ async fn record_decision(
 // ----- GET / DELETE ------------------------------------------------------
 
 async fn handle_get(State(state): State<McpDataState>, headers: HeaderMap) -> Response {
-    handle_get_inner(state, headers).await
+    handle_get_inner(state, headers, None).await
 }
 
 async fn handle_get_scoped(
@@ -917,14 +966,19 @@ async fn handle_get_scoped(
     Path(rest): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = resolve_scope(&state, &rest).await {
-        return response;
-    }
-    handle_get_inner(state, headers).await
+    let scope = match resolve_scope(&state, &rest).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    handle_get_inner(state, headers, Some(&scope)).await
 }
 
-async fn handle_get_inner(state: McpDataState, headers: HeaderMap) -> Response {
-    if let Err(err) = authenticate(&state.storage, &headers).await {
+async fn handle_get_inner(
+    state: McpDataState,
+    headers: HeaderMap,
+    scope: Option<&RouteScope>,
+) -> Response {
+    if let Err(err) = authenticate_request(&state, &headers, scope).await {
         return auth_failure(err);
     }
     if let Err(error) = require_session(&state, &headers).await {
@@ -945,7 +999,7 @@ async fn handle_get_inner(state: McpDataState, headers: HeaderMap) -> Response {
 }
 
 async fn handle_delete(State(state): State<McpDataState>, headers: HeaderMap) -> Response {
-    handle_delete_inner(state, headers).await
+    handle_delete_inner(state, headers, None).await
 }
 
 async fn handle_delete_scoped(
@@ -953,14 +1007,19 @@ async fn handle_delete_scoped(
     Path(rest): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = resolve_scope(&state, &rest).await {
-        return response;
-    }
-    handle_delete_inner(state, headers).await
+    let scope = match resolve_scope(&state, &rest).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    handle_delete_inner(state, headers, Some(&scope)).await
 }
 
-async fn handle_delete_inner(state: McpDataState, headers: HeaderMap) -> Response {
-    if let Err(err) = authenticate(&state.storage, &headers).await {
+async fn handle_delete_inner(
+    state: McpDataState,
+    headers: HeaderMap,
+    scope: Option<&RouteScope>,
+) -> Response {
+    if let Err(err) = authenticate_request(&state, &headers, scope).await {
         return auth_failure(err);
     }
     let Some(session_id) = header_str(&headers, &SESSION_HEADER) else {
@@ -1019,29 +1078,57 @@ fn json_error_status(status: StatusCode, error: JsonRpcError) -> Response {
     with_session((status, Json(body)).into_response(), None)
 }
 
+/// Selects the request's auth strategy and authenticates the caller.
+async fn authenticate_request(
+    state: &McpDataState,
+    headers: &HeaderMap,
+    scope: Option<&RouteScope>,
+) -> Result<Caller, AuthError> {
+    let strategy = resolve_strategy(&state.storage, scope.map(|scope| &scope.server)).await?;
+    authenticate(
+        &state.storage,
+        Some(state.runtime.http()),
+        headers,
+        strategy.as_ref(),
+    )
+    .await
+}
+
 fn auth_failure(err: AuthError) -> Response {
     match err {
-        AuthError::Missing | AuthError::Inactive => {
-            let mut response = error_response(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "an MCP API key is required",
-            );
-            response.headers_mut().insert(
-                header::WWW_AUTHENTICATE,
-                HeaderValue::from_static("Bearer realm=\"octra-mcp\""),
-            );
-            response
+        AuthError::Missing | AuthError::MissingBearer | AuthError::Inactive => {
+            unauthorized("an MCP API key or bearer token is required")
         }
-        AuthError::Invalid => error_response(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "invalid or inactive MCP API key",
+        AuthError::Invalid => unauthorized("invalid or inactive MCP API key"),
+        AuthError::InvalidToken(message) => {
+            unauthorized(&format!("invalid bearer token: {message}"))
+        }
+        AuthError::InsufficientScope(scope) => error_response(
+            StatusCode::FORBIDDEN,
+            "insufficient_scope",
+            &format!("bearer token is missing required scope: {scope}"),
         ),
+        AuthError::Jwks(message) => {
+            tracing::warn!(error = %message, "MCP JWKS validation is unavailable");
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "jwks_unavailable",
+                &message,
+            )
+        }
         AuthError::Storage(message) => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "storage_error", &message)
         }
     }
+}
+
+fn unauthorized(message: &str) -> Response {
+    let mut response = error_response(StatusCode::UNAUTHORIZED, "unauthorized", message);
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Bearer realm=\"octra-mcp\""),
+    );
+    response
 }
 
 fn storage_error(err: octra_core::Error) -> JsonRpcError {

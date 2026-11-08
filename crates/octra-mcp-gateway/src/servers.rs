@@ -156,11 +156,11 @@ impl ServerConnections {
             tools: tools
                 .into_iter()
                 .filter_map(|tool| match octra_mcp_core::protocol::validate_tool_name(&tool.name) {
-                    Ok(()) => Some(DiscoveredTool {
-                        name: tool.name,
-                        description: tool.description.unwrap_or_default(),
-                        schema: tool.input_schema,
-                    }),
+                    Ok(()) => Some(DiscoveredTool::mcp(
+                        tool.name,
+                        tool.description.unwrap_or_default(),
+                        tool.input_schema,
+                    )),
                     Err(err) => {
                         tracing::warn!(server = %server.name, %err, "skipping an unusable tool name");
                         None

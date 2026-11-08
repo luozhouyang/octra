@@ -7,7 +7,8 @@ use octra_mcp_core::domain::default_server_mode;
 use octra_mcp_core::{NewMcpServer, Transport};
 use serde_json::json;
 use support::{
-    Gateway, UpstreamMode, create_consumer_group, create_key, create_keyed_consumer, start_upstream,
+    Gateway, UpstreamMode, create_consumer_group, create_key, create_keyed_consumer,
+    sign_test_token, start_api_mock, start_jwks, start_upstream, test_jwks,
 };
 
 fn tool_names(body: &serde_json::Value) -> Vec<String> {
@@ -953,10 +954,10 @@ async fn server_mode_and_source_validation_is_kong_shaped() {
         body["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("expected 'upstream-server' or 'passthrough-listener'")
+            .contains("expected 'upstream-server'")
     );
 
-    // Conversion modes are recognized Kong names but unimplemented here.
+    // Conversion modes require an OpenAPI document; other modes reject one.
     let (status, body) = gateway
         .control(
             "POST",
@@ -973,7 +974,26 @@ async fn server_mode_and_source_validation_is_kong_shaped() {
         body["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("conversion modes are out of scope")
+            .contains("requires config.openapi")
+    );
+
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "plain-with-openapi",
+                "url": "http://127.0.0.1:9/mcp",
+                "config": {"openapi": {"document": "{}"}},
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("only supported for conversion")
     );
 
     let (status, body) = gateway
@@ -2013,6 +2033,7 @@ async fn cel_evaluation_failures_fail_closed() {
         route_path: None,
         acl_allow_when: vec!["unknown_variable".into()],
         acl_deny_when: Vec::new(),
+        auth_strategy_id: None,
         command: None,
         url: Some(upstream.url()),
         enabled: true,
@@ -2048,4 +2069,1331 @@ async fn cel_evaluation_failures_fail_closed() {
         .await;
     assert_eq!(body["error"]["code"], -32005);
     assert!(upstream.state.calls.lock().unwrap().is_empty());
+}
+
+// ----- OIDC auth strategies ---------------------------------------------
+
+const OIDC_ISSUER: &str = "https://issuer.example.test";
+const OIDC_AUDIENCE: &str = "octra-mcp";
+
+fn oidc_config(jwks_uri: &str, audience: Option<&str>) -> serde_json::Value {
+    let mut config = json!({
+        "issuer": OIDC_ISSUER,
+        "jwks_uri": jwks_uri,
+        "required_scopes": ["tools:call"],
+        "algorithms": ["RS256"],
+        "jwks_cache_secs": 300,
+    });
+    if let Some(audience) = audience {
+        config["audience"] = json!(audience);
+    }
+    config
+}
+
+async fn post_oidc_strategy(
+    gateway: &Gateway,
+    name: &str,
+    jwks_uri: &str,
+    audience: Option<&str>,
+    is_default: bool,
+    enabled: bool,
+) -> (StatusCode, serde_json::Value) {
+    gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/auth-strategies",
+            json!({
+                "name": name,
+                "kind": "oidc",
+                "config": oidc_config(jwks_uri, audience),
+                "enabled": enabled,
+                "is_default": is_default,
+            }),
+        )
+        .await
+}
+
+fn epoch_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mint_token(
+    kid: &str,
+    issuer: &str,
+    audience: Option<&str>,
+    sub: &str,
+    groups: serde_json::Value,
+    scope: &str,
+    expires_at: u64,
+    not_before: u64,
+) -> String {
+    let mut claims = json!({
+        "iss": issuer,
+        "sub": sub,
+        "preferred_username": "OIDC User",
+        "email": "oidc.user@example.test",
+        "groups": groups,
+        "scope": scope,
+        "exp": expires_at,
+        "nbf": not_before,
+    });
+    if let Some(audience) = audience {
+        claims["aud"] = json!(audience);
+    }
+    sign_test_token(kid, claims)
+}
+
+fn valid_token() -> String {
+    let now = epoch_now();
+    mint_token(
+        "test-kid",
+        OIDC_ISSUER,
+        Some(OIDC_AUDIENCE),
+        "oidc-user",
+        json!(["team"]),
+        "tools:call tools:list",
+        now + 3600,
+        now - 10,
+    )
+}
+
+#[tokio::test]
+async fn auth_strategy_control_plane_crud_validates_and_keeps_one_default() {
+    let gateway = Gateway::new().await;
+    let jwks = start_jwks(test_jwks("test-kid")).await;
+
+    let (status, list) = gateway
+        .control("GET", "/api/v1/mcp/auth-strategies", json!(null))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list, json!([]));
+
+    let invalid = [
+        (
+            json!({
+                "name": "bad-url",
+                "kind": "oidc",
+                "config": {"issuer": OIDC_ISSUER, "jwks_uri": "not-a-url"},
+            }),
+            "absolute http(s) URL",
+        ),
+        (
+            json!({
+                "name": "bad-alg",
+                "kind": "oidc",
+                "config": {
+                    "issuer": OIDC_ISSUER,
+                    "jwks_uri": jwks.url(),
+                    "algorithms": ["HS256"],
+                },
+            }),
+            "unsupported OIDC algorithm",
+        ),
+        (
+            json!({
+                "name": "bad-claim",
+                "kind": "oidc",
+                "config": {
+                    "issuer": OIDC_ISSUER,
+                    "jwks_uri": jwks.url(),
+                    "consumer_claim": " ",
+                },
+            }),
+            "consumer_claim",
+        ),
+        (
+            json!({
+                "name": "bad-kind",
+                "kind": "jwt",
+                "config": oidc_config(&jwks.url(), None),
+            }),
+            "invalid auth strategy kind",
+        ),
+        (
+            json!({"name": "", "kind": "oidc", "config": oidc_config(&jwks.url(), None)}),
+            "name must not be empty",
+        ),
+    ];
+    for (body, expected) in invalid {
+        let (status, response) = gateway
+            .control("POST", "/api/v1/mcp/auth-strategies", body)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(expected),
+            "expected '{expected}' in {response}"
+        );
+    }
+
+    let (status, first) =
+        post_oidc_strategy(&gateway, "first", &jwks.url(), None, true, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    assert_eq!(first["is_default"], true);
+    assert_eq!(first["kind"], "oidc");
+    let first_id = first["id"].as_str().unwrap().to_string();
+
+    // A second default atomically replaces the first.
+    let (status, second) =
+        post_oidc_strategy(&gateway, "second", &jwks.url(), None, true, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    let second_id = second["id"].as_str().unwrap().to_string();
+    let (_, listed) = gateway
+        .control("GET", "/api/v1/mcp/auth-strategies", json!(null))
+        .await;
+    let defaults: Vec<&serde_json::Value> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|strategy| strategy["is_default"] == true)
+        .collect();
+    assert_eq!(defaults.len(), 1, "{listed}");
+    assert_eq!(defaults[0]["id"], second_id);
+
+    // Duplicate names conflict.
+    let (status, duplicate) =
+        post_oidc_strategy(&gateway, "first", &jwks.url(), None, false, true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
+
+    let (status, fetched) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/auth-strategies/{first_id}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    assert_eq!(fetched["config"]["issuer"], OIDC_ISSUER);
+
+    // Partial updates preserve omitted fields and can move the default.
+    let (status, promoted) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/auth-strategies/{first_id}"),
+            json!({"config": oidc_config(&jwks.url(), Some("updated-audience")), "is_default": true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{promoted}");
+    assert_eq!(promoted["name"], "first");
+    assert_eq!(promoted["is_default"], true);
+    assert_eq!(promoted["config"]["audience"], "updated-audience");
+    let (_, listed) = gateway
+        .control("GET", "/api/v1/mcp/auth-strategies", json!(null))
+        .await;
+    let defaults: Vec<&serde_json::Value> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|strategy| strategy["is_default"] == true)
+        .collect();
+    assert_eq!(defaults.len(), 1, "{listed}");
+    assert_eq!(defaults[0]["id"], first_id);
+
+    // Invalid updates are rejected before writing.
+    let (status, body) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/auth-strategies/{first_id}"),
+            json!({"config": {"issuer": OIDC_ISSUER, "jwks_uri": "relative"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    assert_eq!(
+        gateway
+            .control_delete(&format!("/api/v1/mcp/auth-strategies/{second_id}"))
+            .await,
+        StatusCode::NO_CONTENT
+    );
+    let (status, _) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/auth-strategies/{second_id}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        gateway
+            .control_delete(&format!("/api/v1/mcp/auth-strategies/{second_id}"))
+            .await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn server_auth_strategy_references_are_validated_and_round_trip() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let jwks = start_jwks(test_jwks("test-kid")).await;
+    let (status, strategy) =
+        post_oidc_strategy(&gateway, "server-sso", &jwks.url(), None, false, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+    let strategy_id = strategy["id"].as_str().unwrap().to_string();
+
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "remote",
+                "transport": "http",
+                "url": upstream.url(),
+                "auth_strategy_id": "missing-strategy",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown auth_strategy_id")
+    );
+
+    let (status, server) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "remote",
+                "transport": "http",
+                "url": upstream.url(),
+                "auth_strategy_id": strategy_id,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{server}");
+    assert_eq!(server["auth_strategy_id"], strategy_id);
+    let server_id = server["id"].as_str().unwrap().to_string();
+
+    let (status, body) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{server_id}"),
+            json!({
+                "name": "remote",
+                "transport": "http",
+                "url": upstream.url(),
+                "auth_strategy_id": "missing-strategy",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // An explicit null clears the reference while other fields stay intact.
+    let (status, cleared) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{server_id}"),
+            json!({
+                "name": "remote",
+                "transport": "http",
+                "url": upstream.url(),
+                "auth_strategy_id": null,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert!(cleared["auth_strategy_id"].is_null());
+
+    let (status, updated) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{server_id}"),
+            json!({
+                "name": "remote",
+                "transport": "http",
+                "url": upstream.url(),
+                "auth_strategy_id": strategy_id,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["auth_strategy_id"], strategy_id);
+
+    // Deleting the strategy clears the server's foreign key reference.
+    assert_eq!(
+        gateway
+            .control_delete(&format!("/api/v1/mcp/auth-strategies/{strategy_id}"))
+            .await,
+        StatusCode::NO_CONTENT
+    );
+    let (status, server) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/servers/{server_id}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{server}");
+    assert!(server["auth_strategy_id"].is_null());
+}
+
+#[tokio::test]
+async fn oidc_tokens_authenticate_and_group_claims_drive_acls() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let jwks = start_jwks(test_jwks("test-kid")).await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+    let team_id = create_consumer_group(&gateway, "team", &[]).await;
+
+    let (status, strategy) = post_oidc_strategy(
+        &gateway,
+        "default-sso",
+        &jwks.url(),
+        Some(OIDC_AUDIENCE),
+        true,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+
+    let token = valid_token();
+    let session = gateway.open_session(Some(&token)).await;
+
+    // The group claim resolves to the existing consumer group id.
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(2),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "oidc"}}),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["content"][0]["text"], "oidc");
+
+    let invocations = gateway.storage.mcp.list_invocations(5, None).await.unwrap();
+    let call = invocations
+        .iter()
+        .find(|row| row.status == "ok")
+        .expect("call is recorded");
+    assert_eq!(call.consumer_id.as_deref(), Some("oidc-user"));
+
+    // A group ACL grants the token's mapped group over a default deny.
+    let echo_id = find_tool_id(&gateway, &server_id, "echo").await;
+    let (status, _) = set_acl(&gateway, json!({"tool_id": echo_id, "allowed": false})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = set_acl(
+        &gateway,
+        json!({"tool_id": echo_id, "consumer_group_id": team_id, "allowed": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "group"}}),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "group");
+
+    // A token without the mapped group does not match the group ACL.
+    let now = epoch_now();
+    let outsider = mint_token(
+        "test-kid",
+        OIDC_ISSUER,
+        Some(OIDC_AUDIENCE),
+        "oidc-user",
+        json!(["other"]),
+        "tools:call",
+        now + 3600,
+        now - 10,
+    );
+    let session = gateway.open_session(Some(&outsider)).await;
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(4),
+            "tools/call",
+            json!({"name": "remote__echo"}),
+            Some(&outsider),
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+}
+
+#[tokio::test]
+async fn oidc_rejects_invalid_tokens_and_reports_auth_errors() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let jwks = start_jwks(test_jwks("test-kid")).await;
+    gateway.add_http_server("remote", &upstream).await;
+    let (status, strategy) = post_oidc_strategy(
+        &gateway,
+        "default-sso",
+        &jwks.url(),
+        Some(OIDC_AUDIENCE),
+        true,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+
+    // Missing bearer returns 401 with a challenge.
+    let (status, headers, _) = gateway
+        .post_mcp(
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        headers
+            .get("www-authenticate")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("Bearer"))
+    );
+
+    let now = epoch_now();
+    let cases = [
+        (
+            mint_token(
+                "test-kid",
+                OIDC_ISSUER,
+                Some(OIDC_AUDIENCE),
+                "oidc-user",
+                json!(["team"]),
+                "tools:call",
+                now - 3600,
+                now - 3700,
+            ),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            mint_token(
+                "test-kid",
+                "https://other-issuer.example.test",
+                Some(OIDC_AUDIENCE),
+                "oidc-user",
+                json!(["team"]),
+                "tools:call",
+                now + 3600,
+                now - 10,
+            ),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            mint_token(
+                "test-kid",
+                OIDC_ISSUER,
+                Some("other-audience"),
+                "oidc-user",
+                json!(["team"]),
+                "tools:call",
+                now + 3600,
+                now - 10,
+            ),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            mint_token(
+                "other-kid",
+                OIDC_ISSUER,
+                Some(OIDC_AUDIENCE),
+                "oidc-user",
+                json!(["team"]),
+                "tools:call",
+                now + 3600,
+                now - 10,
+            ),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            mint_token(
+                "test-kid",
+                OIDC_ISSUER,
+                Some(OIDC_AUDIENCE),
+                "oidc-user",
+                json!(["team"]),
+                "tools:list",
+                now + 3600,
+                now - 10,
+            ),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            mint_token(
+                "test-kid",
+                OIDC_ISSUER,
+                Some(OIDC_AUDIENCE),
+                "oidc-user",
+                json!(["team"]),
+                "tools:call",
+                now + 3600,
+                now + 600,
+            ),
+            StatusCode::UNAUTHORIZED,
+        ),
+    ];
+
+    for (token, expected) in cases {
+        let (status, _, body) = gateway
+            .post_mcp(
+                json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}),
+                Some(&token),
+                None,
+            )
+            .await;
+        assert_eq!(status, expected, "{body}");
+    }
+
+    // The unknown kid forced a cache refresh before being rejected.
+    assert!(
+        jwks.state.requests() >= 2,
+        "unknown kid should refresh the JWKS once"
+    );
+
+    // The valid token still works after the rejected attempts.
+    let token = valid_token();
+    let session = gateway.open_session(Some(&token)).await;
+    let (status, body) = gateway
+        .rpc(&session, json!(2), "tools/list", json!({}), Some(&token))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn default_strategy_applies_globally_and_per_server_strategy_overrides_it() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let jwks = start_jwks(test_jwks("test-kid")).await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+
+    let (status, default) = post_oidc_strategy(
+        &gateway,
+        "default-sso",
+        &jwks.url(),
+        Some("default-aud"),
+        true,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{default}");
+    let (status, per_server) = post_oidc_strategy(
+        &gateway,
+        "server-sso",
+        &jwks.url(),
+        Some("server-aud"),
+        false,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{per_server}");
+    let per_server_id = per_server["id"].as_str().unwrap();
+
+    let (status, updated) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{server_id}"),
+            json!({
+                "name": "remote",
+                "transport": "http",
+                "url": upstream.url(),
+                "auth_strategy_id": per_server_id,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["auth_strategy_id"], per_server_id);
+
+    let now = epoch_now();
+    let default_token = mint_token(
+        "test-kid",
+        OIDC_ISSUER,
+        Some("default-aud"),
+        "default-user",
+        json!(["team"]),
+        "tools:call",
+        now + 3600,
+        now - 10,
+    );
+    let server_token = mint_token(
+        "test-kid",
+        OIDC_ISSUER,
+        Some("server-aud"),
+        "server-user",
+        json!(["team"]),
+        "tools:call",
+        now + 3600,
+        now - 10,
+    );
+
+    // Global `/mcp` uses the default strategy.
+    let session = gateway.open_session(Some(&default_token)).await;
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(2),
+            "tools/list",
+            json!({}),
+            Some(&default_token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, _) = gateway.initialize_at("/mcp", Some(&server_token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // The scoped endpoint overrides it with the server strategy.
+    let session = gateway
+        .open_session_at("/mcp/remote", Some(&server_token))
+        .await;
+    let (status, body) = gateway
+        .rpc_at(
+            "/mcp/remote",
+            &session,
+            json!(3),
+            "tools/list",
+            json!({}),
+            Some(&server_token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, _) = gateway
+        .initialize_at("/mcp/remote", Some(&default_token))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn disabled_strategy_falls_back_to_api_keys() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let jwks = start_jwks(test_jwks("test-kid")).await;
+    gateway.add_http_server("remote", &upstream).await;
+
+    let (status, strategy) = post_oidc_strategy(
+        &gateway,
+        "disabled-sso",
+        &jwks.url(),
+        Some(OIDC_AUDIENCE),
+        true,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+    assert_eq!(strategy["enabled"], false);
+
+    let key = create_key(&gateway, "api-key-fallback").await;
+    let token = valid_token();
+
+    // The disabled strategy is ignored, so a JWT is treated as an API key.
+    let (status, _, _) = gateway
+        .post_mcp(
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // API keys still authenticate the endpoint.
+    let session = gateway.open_session(Some(&key)).await;
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(2),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "key"}}),
+            Some(&key),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["content"][0]["text"], "key");
+}
+
+#[tokio::test]
+async fn oidc_jwks_failures_return_service_unavailable() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+
+    let (status, strategy) = post_oidc_strategy(
+        &gateway,
+        "unreachable-sso",
+        "http://127.0.0.1:9/.well-known/jwks.json",
+        Some(OIDC_AUDIENCE),
+        false,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+    let strategy_id = strategy["id"].as_str().unwrap();
+
+    let (status, updated) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{server_id}"),
+            json!({
+                "name": "remote",
+                "transport": "http",
+                "url": upstream.url(),
+                "auth_strategy_id": strategy_id,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+
+    let (status, _, body) = gateway
+        .initialize_at("/mcp/remote", Some(&valid_token()))
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"]["code"], "jwks_unavailable");
+    assert!(body["error"]["message"].as_str().unwrap().contains("JWKS"));
+}
+
+// ----- OpenAPI conversion modes -----------------------------------------
+
+fn conversion_openapi_document(server_url: &str) -> String {
+    json!({
+        "openapi": "3.0.3",
+        "info": {"title": "Pets", "version": "1.0.0"},
+        "servers": [{"url": server_url}],
+        "paths": {
+            "/pets/{petId}": {
+                "get": {
+                    "operationId": "getPet",
+                    "summary": "Get a pet",
+                    "parameters": [
+                        {
+                            "name": "petId",
+                            "in": "path",
+                            "required": true,
+                            "schema": {"type": "string"}
+                        },
+                        {
+                            "name": "tag",
+                            "in": "query",
+                            "schema": {"type": "array", "items": {"type": "string"}}
+                        },
+                        {
+                            "name": "X-Tenant",
+                            "in": "header",
+                            "required": true,
+                            "schema": {"type": "string"}
+                        }
+                    ],
+                    "responses": {"200": {"description": "ok"}}
+                }
+            },
+            "/pets": {
+                "post": {
+                    "operationId": "createPet",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"name": {"type": "string"}}
+                                }
+                            }
+                        }
+                    },
+                    "responses": {"201": {"description": "created"}}
+                }
+            },
+            "/text": {
+                "get": {
+                    "operationId": "getText",
+                    "responses": {"200": {"description": "ok"}}
+                }
+            },
+            "/fail": {
+                "get": {
+                    "operationId": "fail",
+                    "responses": {"500": {"description": "failed"}}
+                }
+            }
+        }
+    })
+    .to_string()
+}
+
+fn single_operation_document(server_url: &str, operation_id: &str, path: &str) -> String {
+    let mut paths = serde_json::Map::new();
+    paths.insert(
+        path.to_string(),
+        json!({
+            "get": {
+                "operationId": operation_id,
+                "responses": {"200": {"description": "ok"}}
+            }
+        }),
+    );
+    json!({
+        "openapi": "3.0.3",
+        "info": {"title": "Single", "version": "1.0.0"},
+        "servers": [{"url": server_url}],
+        "paths": paths
+    })
+    .to_string()
+}
+
+async fn create_conversion_server(
+    gateway: &Gateway,
+    name: &str,
+    mode: &str,
+    document: String,
+    auth: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut openapi = json!({"document": document});
+    if let Some(auth) = auth {
+        openapi["auth"] = auth;
+    }
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": name,
+                "type": mode,
+                "config": {"openapi": openapi},
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    body
+}
+
+async fn conversion_tool_names(gateway: &Gateway, server_id: &str) -> Vec<String> {
+    let (status, body) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/tools?server_id={server_id}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body.as_array()
+        .expect("tool list")
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn conversion_listener_generates_lists_and_executes_http_tools() {
+    let api = start_api_mock().await;
+    let gateway = Gateway::new().await;
+    let document = conversion_openapi_document(&format!("{}/api", api.url()));
+    let server =
+        create_conversion_server(&gateway, "pets", "conversion-listener", document, None).await;
+    assert_eq!(server["type"], "conversion-listener");
+    assert_eq!(server["tool_count"], 4, "{server}");
+    let server_id = server["id"].as_str().unwrap();
+
+    let (status, tools) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/tools?server_id={server_id}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{tools}");
+    let get = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "getPet")
+        .expect("getPet tool");
+    assert_eq!(get["kind"], "http");
+    assert_eq!(get["http_method"], "GET");
+    assert_eq!(get["http_path"], "/pets/{petId}");
+    assert_eq!(get["schema"]["properties"]["path_petId"]["type"], "string");
+    assert_eq!(
+        get["schema"]["properties"]["header_X-Tenant"]["type"],
+        "string"
+    );
+
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(&session, json!(2), "tools/list", json!({}), None)
+        .await;
+    let names = tool_names(&body);
+    for expected in [
+        "pets__createPet",
+        "pets__fail",
+        "pets__getPet",
+        "pets__getText",
+    ] {
+        assert!(names.contains(&expected.to_string()), "{names:?}");
+    }
+
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({
+                "name": "pets__getPet",
+                "arguments": {
+                    "path_petId": "a b",
+                    "query_tag": ["one", "two"],
+                    "header_X-Tenant": "team-a"
+                }
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let structured = &body["result"]["structuredContent"];
+    assert_eq!(structured["method"], "GET");
+    assert_eq!(structured["path"], "/api/pets/a%20b");
+    assert!(structured["query"].as_str().unwrap().contains("tag=one"));
+    assert!(structured["query"].as_str().unwrap().contains("tag=two"));
+    assert_eq!(structured["x_tenant"], "team-a");
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(text, serde_json::to_string(structured).unwrap());
+
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(4),
+            "tools/call",
+            json!({
+                "name": "pets__createPet",
+                "arguments": {"body": {"name": "Fido"}}
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["structuredContent"]["method"], "POST");
+    assert_eq!(body["result"]["structuredContent"]["path"], "/api/pets");
+    assert_eq!(body["result"]["structuredContent"]["body"]["name"], "Fido");
+
+    let requests = api.state.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[1].body["name"], "Fido");
+}
+
+#[tokio::test]
+async fn conversion_auth_non_2xx_and_text_responses_are_mapped() {
+    let api = start_api_mock().await;
+    let gateway = Gateway::new().await;
+    let secret_path = std::env::temp_dir().join(format!(
+        "octra-openapi-it-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&secret_path, "openapi-secret-token\n").unwrap();
+    let secret_ref = format!("file:{}", secret_path.display());
+    let document = conversion_openapi_document(&api.url());
+
+    let server = create_conversion_server(
+        &gateway,
+        "secured",
+        "conversion-listener",
+        document.clone(),
+        Some(json!({"type": "bearer", "secret_ref": secret_ref})),
+    )
+    .await;
+    assert_eq!(server["tool_count"], 4, "{server}");
+    let rendered = server.to_string();
+    assert!(!rendered.contains("openapi-secret-token"), "{rendered}");
+    assert!(!rendered.contains("secret_ref"), "{rendered}");
+
+    let server_id = server["id"].as_str().unwrap();
+    let (_, tools) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/tools?server_id={server_id}"),
+            json!(null),
+        )
+        .await;
+    assert!(!tools.to_string().contains("secret_ref"), "{tools}");
+
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(2),
+            "tools/call",
+            json!({
+                "name": "secured__getPet",
+                "arguments": {
+                    "path_petId": "1",
+                    "header_X-Tenant": "team-a"
+                }
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(
+        body["result"]["structuredContent"]["authorization"],
+        "Bearer openapi-secret-token"
+    );
+
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({"name": "secured__fail"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["isError"], true, "{body}");
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("HTTP 500"), "{text}");
+    assert!(text.contains("upstream failed"), "{text}");
+
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(4),
+            "tools/call",
+            json!({"name": "secured__getText"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "plain body");
+    assert!(body["result"].get("structuredContent").is_none(), "{body}");
+
+    let query_server = create_conversion_server(
+        &gateway,
+        "query-auth",
+        "conversion-listener",
+        document,
+        Some(json!({
+            "type": "query",
+            "secret_ref": secret_ref,
+            "param": "token"
+        })),
+    )
+    .await;
+    assert_eq!(query_server["tool_count"], 4);
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(5),
+            "tools/call",
+            json!({
+                "name": "query-auth__getPet",
+                "arguments": {"path_petId": "2", "header_X-Tenant": "team-b"}
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["structuredContent"]["method"], "GET");
+    let requests = api.state.requests.lock().unwrap().clone();
+    assert!(
+        requests
+            .last()
+            .unwrap()
+            .query
+            .contains("token=openapi-secret-token")
+    );
+
+    let _ = std::fs::remove_file(secret_path);
+}
+
+#[tokio::test]
+async fn conversion_only_tools_are_sourced_by_listeners_only() {
+    let api = start_api_mock().await;
+    let gateway = Gateway::new().await;
+    let server = create_conversion_server(
+        &gateway,
+        "openapi-source",
+        "conversion-only",
+        conversion_openapi_document(&api.url()),
+        None,
+    )
+    .await;
+    let server_id = server["id"].as_str().unwrap().to_string();
+
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(&session, json!(2), "tools/list", json!({}), None)
+        .await;
+    assert!(
+        tool_names(&body).is_empty(),
+        "conversion-only tools must not appear without a listener: {body}"
+    );
+
+    let (status, _, body) = gateway.initialize_at("/mcp/openapi-source", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("conversion-only")
+    );
+
+    gateway.add_listener("front", &["openapi-source"]).await;
+    let (_, body) = gateway
+        .rpc(&session, json!(3), "tools/list", json!({}), None)
+        .await;
+    assert!(
+        tool_names(&body).contains(&"openapi-source__getPet".to_string()),
+        "{body}"
+    );
+
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(4),
+            "tools/call",
+            json!({
+                "name": "openapi-source__getPet",
+                "arguments": {
+                    "path_petId": "77",
+                    "header_X-Tenant": "team-c"
+                }
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["structuredContent"]["path"], "/pets/77");
+    assert_eq!(
+        gateway
+            .storage
+            .mcp
+            .list_tools(&server_id)
+            .await
+            .unwrap()
+            .len(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn conversion_refresh_replaces_tools_and_manual_mutation_is_rejected() {
+    let api = start_api_mock().await;
+    let gateway = Gateway::new().await;
+    let document = single_operation_document(&api.url(), "first", "/one");
+    let server = create_conversion_server(
+        &gateway,
+        "refreshable",
+        "conversion-listener",
+        document,
+        None,
+    )
+    .await;
+    let server_id = server["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        conversion_tool_names(&gateway, &server_id).await,
+        vec!["first"]
+    );
+
+    let updated_document = single_operation_document(&api.url(), "second", "/two");
+    let (status, updated) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{server_id}"),
+            json!({
+                "name": "refreshable",
+                "config": {"openapi": {"document": updated_document}}
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(
+        conversion_tool_names(&gateway, &server_id).await,
+        vec!["second"]
+    );
+
+    // Omitting config keeps the stored document, and refresh re-parses it.
+    let (status, kept) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{server_id}"),
+            json!({"name": "refreshable"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    assert_eq!(kept["tool_count"], 1, "{kept}");
+    let (status, stats) = gateway
+        .control(
+            "POST",
+            &format!("/api/v1/mcp/servers/{server_id}/refresh"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{stats}");
+    assert_eq!(stats["tools"], 1, "{stats}");
+    assert_eq!(
+        conversion_tool_names(&gateway, &server_id).await,
+        vec!["second"]
+    );
+
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/tools",
+            json!({
+                "server_id": server_id,
+                "name": "manual",
+                "description": "manual",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("generated from config.openapi")
+    );
+
+    let tool_id = gateway
+        .storage
+        .mcp
+        .list_tools(&server_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .id;
+    let status = gateway
+        .control_delete(&format!("/api/v1/mcp/tools/{tool_id}"))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        conversion_tool_names(&gateway, &server_id).await,
+        vec!["second"]
+    );
+}
+
+#[tokio::test]
+async fn conversion_document_url_is_fetched_at_create_time() {
+    let api = start_api_mock().await;
+    let gateway = Gateway::new().await;
+    let (status, server) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "fetched",
+                "type": "conversion-only",
+                "config": {
+                    "openapi": {"document_url": format!("{}/openapi.json", api.url())}
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{server}");
+    assert_eq!(server["tool_count"], 1, "{server}");
+    let server_id = server["id"].as_str().unwrap();
+    assert_eq!(
+        conversion_tool_names(&gateway, server_id).await,
+        vec!["fetchedTool"]
+    );
+    assert_eq!(api.state.requests.lock().unwrap().len(), 1);
 }

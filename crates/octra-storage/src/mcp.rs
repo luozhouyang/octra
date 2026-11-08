@@ -2,19 +2,25 @@
 //! invocation records.
 
 use octra_core::{Error, Result};
-use octra_mcp_core::domain::{McpServerAcl, McpTool};
+use octra_mcp_core::domain::{
+    MCP_TOOL_KIND_MCP, McpAuthStrategy, McpServerAcl, McpTool, NewMcpAuthStrategy,
+};
 use octra_mcp_core::{
     McpApiKey, McpInvocation, McpServer, McpSession, McpToolAcl, NewMcpServer, Transport,
 };
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 
 const SERVER_COLUMNS: &str = "id, name, transport, mode, sources_json, route_path, \
-     acl_allow_when_json, acl_deny_when_json, command, url, enabled, config_json, headers_json, \
-     protocol_version, last_seen_at, created_at, updated_at";
+     acl_allow_when_json, acl_deny_when_json, auth_strategy_id, command, url, enabled, \
+     config_json, headers_json, protocol_version, last_seen_at, created_at, updated_at";
 
-const TOOL_COLUMNS: &str = "id, server_id, name, description, schema, enabled, created_at";
+const AUTH_STRATEGY_COLUMNS: &str =
+    "id, name, kind, config_json, enabled, is_default, created_at, updated_at";
+
+const TOOL_COLUMNS: &str = "id, server_id, name, description, schema, kind, http_method, \
+     http_path, http_config_json, enabled, created_at";
 
 const SESSION_COLUMNS: &str = "id, server_id, status, created_at, updated_at";
 
@@ -29,12 +35,65 @@ const SERVER_ACL_COLUMNS: &str =
 
 const KEY_COLUMNS: &str = "id, name, key_prefix, consumer_id, enabled, expires_at, created_at";
 
-/// A tool discovered on an upstream server, ready to be upserted.
+/// A tool discovered on an upstream server or generated from an OpenAPI
+/// document, ready to be upserted.
+///
+/// Regular MCP discoveries leave the HTTP fields at their defaults.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiscoveredTool {
     pub name: String,
     pub description: String,
     pub schema: Value,
+    pub kind: String,
+    pub http_method: Option<String>,
+    pub http_path: Option<String>,
+    pub http_config: Value,
+}
+
+impl Default for DiscoveredTool {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            schema: json!({"type": "object"}),
+            kind: MCP_TOOL_KIND_MCP.to_string(),
+            http_method: None,
+            http_path: None,
+            http_config: json!({}),
+        }
+    }
+}
+
+impl DiscoveredTool {
+    /// A regular tool discovered from an MCP server.
+    pub fn mcp(name: impl Into<String>, description: impl Into<String>, schema: Value) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            schema,
+            ..Self::default()
+        }
+    }
+
+    /// An HTTP tool generated from an OpenAPI operation.
+    pub fn http(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        schema: Value,
+        method: impl Into<String>,
+        path: impl Into<String>,
+        config: Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            schema,
+            kind: octra_mcp_core::domain::MCP_TOOL_KIND_HTTP.to_string(),
+            http_method: Some(method.into()),
+            http_path: Some(path.into()),
+            http_config: config,
+        }
+    }
 }
 
 /// A completed invocation row written in one step.
@@ -73,6 +132,20 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
     err.as_database_error()
         .and_then(|db| db.code())
         .is_some_and(|code| code == "1555" || code == "2067")
+}
+
+/// Clears the single default flag inside an open transaction.
+async fn clear_default_auth_strategy(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<()> {
+    sqlx::query(
+        "UPDATE mcp_auth_strategies
+            SET is_default = 0,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          WHERE is_default = 1",
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|err| storage_error("cannot clear default mcp auth strategy", err))?;
+    Ok(())
 }
 
 fn decode_json(value: Option<String>) -> Map<String, Value> {
@@ -116,6 +189,154 @@ impl McpStore {
         &self.pool
     }
 
+    // ----- auth strategies ----------------------------------------------
+
+    /// Creates a strategy. Setting `is_default` clears the previous default in
+    /// the same transaction.
+    pub async fn insert_auth_strategy(
+        &self,
+        strategy: &NewMcpAuthStrategy,
+    ) -> Result<McpAuthStrategy> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut tx = self
+            .mcp_pool()
+            .begin()
+            .await
+            .map_err(|err| storage_error("cannot begin auth strategy insert", err))?;
+
+        if strategy.is_default {
+            clear_default_auth_strategy(&mut tx).await?;
+        }
+
+        sqlx::query(
+            "INSERT INTO mcp_auth_strategies
+                 (id, name, kind, config_json, enabled, is_default)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(&id)
+        .bind(&strategy.name)
+        .bind(&strategy.kind)
+        .bind(strategy.config.to_string())
+        .bind(i64::from(strategy.enabled))
+        .bind(i64::from(strategy.is_default))
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| storage_error("cannot insert mcp auth strategy", err))?;
+
+        tx.commit()
+            .await
+            .map_err(|err| storage_error("cannot commit auth strategy insert", err))?;
+
+        self.get_auth_strategy(&id)
+            .await?
+            .ok_or_else(|| Error::Storage("mcp auth strategy vanished after insert".to_string()))
+    }
+
+    /// Full update of a strategy. Returns `None` when the id is unknown.
+    pub async fn update_auth_strategy(
+        &self,
+        id: &str,
+        strategy: &NewMcpAuthStrategy,
+    ) -> Result<Option<McpAuthStrategy>> {
+        let mut tx = self
+            .mcp_pool()
+            .begin()
+            .await
+            .map_err(|err| storage_error("cannot begin auth strategy update", err))?;
+
+        if strategy.is_default {
+            clear_default_auth_strategy(&mut tx).await?;
+        }
+
+        let result = sqlx::query(
+            "UPDATE mcp_auth_strategies
+                SET name = ?2,
+                    kind = ?3,
+                    config_json = ?4,
+                    enabled = ?5,
+                    is_default = ?6,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(&strategy.name)
+        .bind(&strategy.kind)
+        .bind(strategy.config.to_string())
+        .bind(i64::from(strategy.enabled))
+        .bind(i64::from(strategy.is_default))
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| storage_error("cannot update mcp auth strategy", err))?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback()
+                .await
+                .map_err(|err| storage_error("cannot roll back auth strategy update", err))?;
+            return Ok(None);
+        }
+
+        tx.commit()
+            .await
+            .map_err(|err| storage_error("cannot commit auth strategy update", err))?;
+        self.get_auth_strategy(id).await
+    }
+
+    pub async fn get_auth_strategy(&self, id: &str) -> Result<Option<McpAuthStrategy>> {
+        let row = sqlx::query(&format!(
+            "SELECT {AUTH_STRATEGY_COLUMNS} FROM mcp_auth_strategies WHERE id = ?1"
+        ))
+        .bind(id)
+        .fetch_optional(self.mcp_pool())
+        .await
+        .map_err(|err| storage_error("cannot load mcp auth strategy", err))?;
+        Ok(row.as_ref().map(decode_auth_strategy))
+    }
+
+    pub async fn get_auth_strategy_by_name(&self, name: &str) -> Result<Option<McpAuthStrategy>> {
+        let row = sqlx::query(&format!(
+            "SELECT {AUTH_STRATEGY_COLUMNS} FROM mcp_auth_strategies WHERE name = ?1"
+        ))
+        .bind(name)
+        .fetch_optional(self.mcp_pool())
+        .await
+        .map_err(|err| storage_error("cannot load mcp auth strategy", err))?;
+        Ok(row.as_ref().map(decode_auth_strategy))
+    }
+
+    pub async fn list_auth_strategies(&self) -> Result<Vec<McpAuthStrategy>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {AUTH_STRATEGY_COLUMNS} FROM mcp_auth_strategies ORDER BY name ASC"
+        ))
+        .fetch_all(self.mcp_pool())
+        .await
+        .map_err(|err| storage_error("cannot list mcp auth strategies", err))?;
+        Ok(rows.iter().map(decode_auth_strategy).collect())
+    }
+
+    /// The enabled default strategy, if one is configured.
+    pub async fn get_default_auth_strategy(&self) -> Result<Option<McpAuthStrategy>> {
+        let row = sqlx::query(&format!(
+            "SELECT {AUTH_STRATEGY_COLUMNS} FROM mcp_auth_strategies
+              WHERE is_default = 1 AND enabled = 1
+              LIMIT 1"
+        ))
+        .fetch_optional(self.mcp_pool())
+        .await
+        .map_err(|err| storage_error("cannot load default mcp auth strategy", err))?;
+        Ok(row.as_ref().map(decode_auth_strategy))
+    }
+
+    /// Deletes a strategy. Server references become NULL through the foreign
+    /// key, so those servers follow the default strategy again.
+    pub async fn delete_auth_strategy(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM mcp_auth_strategies WHERE id = ?1")
+            .bind(id)
+            .execute(self.mcp_pool())
+            .await
+            .map_err(|err| storage_error("cannot delete mcp auth strategy", err))?;
+        Ok(result.rows_affected() > 0)
+    }
+
     // ----- servers -------------------------------------------------------
 
     pub async fn insert_server(&self, server: &NewMcpServer) -> Result<McpServer> {
@@ -133,9 +354,9 @@ impl McpStore {
         sqlx::query(
             "INSERT INTO mcp_servers
                  (id, name, transport, mode, sources_json, route_path,
-                  acl_allow_when_json, acl_deny_when_json, command, url, enabled,
-                  config_json, headers_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                  acl_allow_when_json, acl_deny_when_json, auth_strategy_id, command, url,
+                  enabled, config_json, headers_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )
         .bind(&id)
         .bind(&server.name)
@@ -145,6 +366,7 @@ impl McpStore {
         .bind(server.route_path.as_deref())
         .bind(allow_when)
         .bind(deny_when)
+        .bind(server.auth_strategy_id.as_deref())
         .bind(server.command.as_deref())
         .bind(server.url.as_deref())
         .bind(i64::from(server.enabled))
@@ -174,6 +396,7 @@ impl McpStore {
                 SET name = ?2, transport = ?3, mode = ?4, sources_json = ?5, command = ?6,
                     url = ?7, enabled = ?8, config_json = ?9, headers_json = ?10,
                     route_path = ?11, acl_allow_when_json = ?12, acl_deny_when_json = ?13,
+                    auth_strategy_id = ?14,
                     protocol_version = NULL, last_seen_at = NULL,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
               WHERE id = ?1",
@@ -191,6 +414,7 @@ impl McpStore {
         .bind(server.route_path.as_deref())
         .bind(allow_when)
         .bind(deny_when)
+        .bind(server.auth_strategy_id.as_deref())
         .execute(self.mcp_pool())
         .await
         .map_err(|err| storage_error("cannot update mcp server", err))?;
@@ -275,17 +499,27 @@ impl McpStore {
 
         for tool in discovered {
             sqlx::query(
-                "INSERT INTO mcp_tools (id, server_id, name, description, schema)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO mcp_tools
+                     (id, server_id, name, description, schema, kind, http_method,
+                      http_path, http_config_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT (server_id, name) DO UPDATE
                     SET description = excluded.description,
-                        schema = excluded.schema",
+                        schema = excluded.schema,
+                        kind = excluded.kind,
+                        http_method = excluded.http_method,
+                        http_path = excluded.http_path,
+                        http_config_json = excluded.http_config_json",
             )
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(server_id)
             .bind(&tool.name)
             .bind(&tool.description)
             .bind(tool.schema.to_string())
+            .bind(&tool.kind)
+            .bind(tool.http_method.as_deref())
+            .bind(tool.http_path.as_deref())
+            .bind(tool.http_config.to_string())
             .execute(&mut *tx)
             .await
             .map_err(|err| storage_error("cannot upsert mcp tool", err))?;
@@ -321,7 +555,9 @@ impl McpStore {
     /// server then tool for a stable catalog.
     pub async fn list_catalog(&self) -> Result<Vec<CatalogTool>> {
         let rows = sqlx::query(
-            "SELECT t.id, t.server_id, t.name, t.description, t.schema, t.enabled, t.created_at, s.name AS server_name
+            "SELECT t.id, t.server_id, t.name, t.description, t.schema, t.kind,
+                    t.http_method, t.http_path, t.http_config_json, t.enabled,
+                    t.created_at, s.name AS server_name
                FROM mcp_tools t
                JOIN mcp_servers s ON s.id = t.server_id
               ORDER BY s.name ASC, t.name ASC",
@@ -911,6 +1147,7 @@ fn decode_server(row: &SqliteRow) -> McpServer {
         route_path: row.get("route_path"),
         acl_allow_when: decode_string_list(row.get("acl_allow_when_json")),
         acl_deny_when: decode_string_list(row.get("acl_deny_when_json")),
+        auth_strategy_id: row.get("auth_strategy_id"),
         command: row.get("command"),
         url: row.get("url"),
         enabled: row.get::<i64, _>("enabled") != 0,
@@ -923,15 +1160,41 @@ fn decode_server(row: &SqliteRow) -> McpServer {
     }
 }
 
+fn decode_auth_strategy(row: &SqliteRow) -> McpAuthStrategy {
+    McpAuthStrategy {
+        id: row.get("id"),
+        name: row.get("name"),
+        kind: row.get("kind"),
+        config: decode_json(row.get("config_json")).into(),
+        enabled: row.get::<i64, _>("enabled") != 0,
+        is_default: row.get::<i64, _>("is_default") != 0,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
 fn decode_tool(row: &SqliteRow) -> McpTool {
     let raw_schema: String = row.get("schema");
     let schema = serde_json::from_str(&raw_schema).unwrap_or(Value::Object(Map::new()));
+    let kind = row
+        .try_get::<String, _>("kind")
+        .unwrap_or_else(|_| MCP_TOOL_KIND_MCP.to_string());
+    let http_config = row
+        .try_get::<Option<String>, _>("http_config_json")
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| json!({}));
     McpTool {
         id: row.get("id"),
         server_id: row.get("server_id"),
         name: row.get("name"),
         description: row.get("description"),
         schema,
+        kind,
+        http_method: row.try_get("http_method").ok().flatten(),
+        http_path: row.try_get("http_path").ok().flatten(),
+        http_config,
         enabled: row.get::<i64, _>("enabled") != 0,
         created_at: row.get("created_at"),
     }
@@ -1016,6 +1279,7 @@ mod tests {
             route_path: None,
             acl_allow_when: Vec::new(),
             acl_deny_when: Vec::new(),
+            auth_strategy_id: None,
             command: None,
             url: Some("https://example.test/mcp".into()),
             enabled: true,
@@ -1025,11 +1289,187 @@ mod tests {
     }
 
     fn discovered(name: &str) -> DiscoveredTool {
-        DiscoveredTool {
+        DiscoveredTool::mcp(
+            name,
+            format!("{name} tool"),
+            serde_json::json!({"type": "object"}),
+        )
+    }
+
+    fn discovered_http(name: &str) -> DiscoveredTool {
+        DiscoveredTool::http(
+            name,
+            format!("{name} http tool"),
+            serde_json::json!({
+                "type": "object",
+                "properties": {"path_id": {"type": "string"}},
+            }),
+            "get",
+            "/pets/{id}",
+            serde_json::json!({
+                "base_url": "https://api.example.test",
+                "parameters": [{"arg": "path_id", "name": "id", "in": "path"}],
+            }),
+        )
+    }
+
+    fn oidc_strategy(name: &str, is_default: bool) -> NewMcpAuthStrategy {
+        NewMcpAuthStrategy {
             name: name.into(),
-            description: format!("{name} tool"),
-            schema: serde_json::json!({"type": "object"}),
+            kind: "oidc".into(),
+            config: serde_json::json!({
+                "issuer": "https://issuer.example.test",
+                "jwks_uri": "https://issuer.example.test/jwks",
+            }),
+            enabled: true,
+            is_default,
         }
+    }
+
+    #[tokio::test]
+    async fn auth_strategy_crud_keeps_a_single_default() {
+        let storage = storage().await;
+
+        let first = storage
+            .mcp
+            .insert_auth_strategy(&oidc_strategy("first", true))
+            .await
+            .unwrap();
+        assert!(first.is_default);
+        assert_eq!(first.kind, "oidc");
+        assert_eq!(first.config["issuer"], "https://issuer.example.test");
+        assert_eq!(
+            storage
+                .mcp
+                .get_default_auth_strategy()
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            first.id
+        );
+
+        let second = storage
+            .mcp
+            .insert_auth_strategy(&oidc_strategy("second", false))
+            .await
+            .unwrap();
+        assert!(!second.is_default);
+        assert_eq!(
+            storage
+                .mcp
+                .get_default_auth_strategy()
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            first.id
+        );
+
+        // Promoting the second clears the first in the same transaction.
+        let promoted = storage
+            .mcp
+            .update_auth_strategy(&second.id, &oidc_strategy("second", true))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(promoted.is_default);
+        assert!(
+            !storage
+                .mcp
+                .get_auth_strategy(&first.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_default
+        );
+        assert_eq!(
+            storage
+                .mcp
+                .list_auth_strategies()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|strategy| strategy.is_default)
+                .count(),
+            1
+        );
+
+        let by_name = storage
+            .mcp
+            .get_auth_strategy_by_name("first")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_name.id, first.id);
+
+        assert!(storage.mcp.delete_auth_strategy(&second.id).await.unwrap());
+        assert!(
+            storage
+                .mcp
+                .get_default_auth_strategy()
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!storage.mcp.delete_auth_strategy(&second.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn server_auth_strategy_reference_round_trips_and_clears_on_delete() {
+        let storage = storage().await;
+        let strategy = storage
+            .mcp
+            .insert_auth_strategy(&oidc_strategy("sso", false))
+            .await
+            .unwrap();
+
+        let mut server = http_server("remote");
+        server.auth_strategy_id = Some(strategy.id.clone());
+        let created = storage.mcp.insert_server(&server).await.unwrap();
+        assert_eq!(
+            created.auth_strategy_id.as_deref(),
+            Some(strategy.id.as_str())
+        );
+
+        let loaded = storage.mcp.get_server(&created.id).await.unwrap().unwrap();
+        assert_eq!(
+            loaded.auth_strategy_id.as_deref(),
+            Some(strategy.id.as_str())
+        );
+
+        // An update can clear the reference.
+        let update = http_server("remote");
+        let updated = storage
+            .mcp
+            .update_server(&created.id, &update)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(updated.auth_strategy_id.is_none());
+
+        // And re-attach it before deletion.
+        let mut update = http_server("remote");
+        update.auth_strategy_id = Some(strategy.id.clone());
+        storage
+            .mcp
+            .update_server(&created.id, &update)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            storage
+                .mcp
+                .delete_auth_strategy(&strategy.id)
+                .await
+                .unwrap()
+        );
+        let loaded = storage.mcp.get_server(&created.id).await.unwrap().unwrap();
+        assert!(
+            loaded.auth_strategy_id.is_none(),
+            "deleting a strategy clears server references"
+        );
     }
 
     #[tokio::test]
@@ -1340,6 +1780,49 @@ mod tests {
         assert_eq!(catalog.len(), 2);
         assert!(catalog.iter().all(|entry| entry.server_name == "files"));
         assert_eq!(catalog[0].qualified_name(), "files__list");
+    }
+
+    #[tokio::test]
+    async fn http_tool_columns_round_trip_and_refresh_replaces_them() {
+        let storage = storage().await;
+        let server = storage
+            .mcp
+            .insert_server(&http_server("converted"))
+            .await
+            .unwrap();
+
+        let tools = storage
+            .mcp
+            .replace_tools(
+                &server.id,
+                &[discovered("plain"), discovered_http("get_pet")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(tools.len(), 2);
+        let plain = tools.iter().find(|tool| tool.name == "plain").unwrap();
+        assert_eq!(plain.kind, octra_mcp_core::domain::MCP_TOOL_KIND_MCP);
+        assert!(plain.http_method.is_none());
+        assert_eq!(plain.http_config, serde_json::json!({}));
+
+        let http = tools.iter().find(|tool| tool.name == "get_pet").unwrap();
+        assert_eq!(http.kind, octra_mcp_core::domain::MCP_TOOL_KIND_HTTP);
+        assert_eq!(http.http_method.as_deref(), Some("get"));
+        assert_eq!(http.http_path.as_deref(), Some("/pets/{id}"));
+        assert_eq!(
+            http.http_config["parameters"][0]["arg"],
+            serde_json::json!("path_id")
+        );
+
+        // Refresh rewrites the generated set and keeps ids for surviving names.
+        let tools = storage
+            .mcp
+            .replace_tools(&server.id, &[discovered_http("list_pets")])
+            .await
+            .unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "list_pets");
+        assert!(tools[0].is_http());
     }
 
     #[tokio::test]

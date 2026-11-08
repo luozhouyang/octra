@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod client;
 pub mod control;
+pub mod conversion;
 pub mod data;
 pub mod http;
 pub mod servers;

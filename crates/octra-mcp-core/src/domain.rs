@@ -35,15 +35,22 @@ pub const ACL_DEFAULT_ALLOW: bool = true;
 /// `passthrough-listener` is the legacy transport-oriented behaviour and the
 /// default for existing rows. `listener` aggregates the tools of its
 /// [`McpServer::sources`]. `upstream-server` is a plain upstream that only
-/// contributes tools to listeners.
-pub const MCP_SERVER_MODES: &[&str] = &["passthrough-listener", "listener", "upstream-server"];
-
-/// Kong recognizes OpenAPI conversion modes; Octra does not implement them yet.
-pub const MCP_UNSUPPORTED_SERVER_MODES: &[&str] = &["conversion-listener", "conversion-only"];
+/// contributes tools to listeners. The OpenAPI conversion modes generate HTTP
+/// tools from a document: `conversion-listener` serves them directly while
+/// `conversion-only` only contributes them to listeners.
+pub const MCP_SERVER_MODES: &[&str] = &[
+    "passthrough-listener",
+    "listener",
+    "upstream-server",
+    "conversion-listener",
+    "conversion-only",
+];
 
 pub const MCP_SERVER_MODE_PASSTHROUGH_LISTENER: &str = "passthrough-listener";
 pub const MCP_SERVER_MODE_LISTENER: &str = "listener";
 pub const MCP_SERVER_MODE_UPSTREAM_SERVER: &str = "upstream-server";
+pub const MCP_SERVER_MODE_CONVERSION_LISTENER: &str = "conversion-listener";
+pub const MCP_SERVER_MODE_CONVERSION_ONLY: &str = "conversion-only";
 
 /// Mode assigned to servers created before modes existed and to requests that
 /// omit `type`/`mode`.
@@ -51,18 +58,18 @@ pub fn default_server_mode() -> String {
     MCP_SERVER_MODE_PASSTHROUGH_LISTENER.to_string()
 }
 
+/// True for the modes that generate tools from an OpenAPI document.
+pub fn is_conversion_server_mode(mode: &str) -> bool {
+    matches!(
+        mode,
+        MCP_SERVER_MODE_CONVERSION_LISTENER | MCP_SERVER_MODE_CONVERSION_ONLY
+    )
+}
+
 /// Validates an MCP server mode.
-///
-/// Conversion modes are recognized Kong names but rejected with a dedicated
-/// message so operators can tell "not supported yet" from "typo".
 pub fn validate_server_mode(mode: &str) -> Result<(), String> {
     if MCP_SERVER_MODES.contains(&mode) {
         return Ok(());
-    }
-    if MCP_UNSUPPORTED_SERVER_MODES.contains(&mode) {
-        return Err(format!(
-            "MCP server mode '{mode}' is not implemented: OpenAPI conversion modes are out of scope"
-        ));
     }
     Err(format!(
         "invalid MCP server mode '{mode}'; expected one of {}",
@@ -71,11 +78,14 @@ pub fn validate_server_mode(mode: &str) -> Result<(), String> {
 }
 
 /// True when a server of this mode may be listed in another server's
-/// `sources`. Listeners never source each other in Octra.
+/// `sources`. Listeners never source each other in Octra. A `conversion-only`
+/// server is a valid source but has no directly routable endpoint.
 pub fn is_source_server_mode(mode: &str) -> bool {
     matches!(
         mode,
-        MCP_SERVER_MODE_UPSTREAM_SERVER | MCP_SERVER_MODE_PASSTHROUGH_LISTENER
+        MCP_SERVER_MODE_UPSTREAM_SERVER
+            | MCP_SERVER_MODE_PASSTHROUGH_LISTENER
+            | MCP_SERVER_MODE_CONVERSION_ONLY
     )
 }
 
@@ -99,6 +109,10 @@ pub struct McpServer {
     /// CEL expressions that deny access when any evaluates to true.
     #[serde(default)]
     pub acl_deny_when: Vec<String>,
+    /// Per-server auth strategy. `None` uses the default strategy, then MCP
+    /// API keys.
+    #[serde(default)]
+    pub auth_strategy_id: Option<String>,
     pub command: Option<String>,
     pub url: Option<String>,
     pub enabled: bool,
@@ -124,6 +138,8 @@ pub struct NewMcpServer {
     pub acl_allow_when: Vec<String>,
     #[serde(default)]
     pub acl_deny_when: Vec<String>,
+    #[serde(default)]
+    pub auth_strategy_id: Option<String>,
     pub command: Option<String>,
     pub url: Option<String>,
     pub enabled: bool,
@@ -141,37 +157,55 @@ impl NewMcpServer {
             .ok_or_else(|| format!("invalid server name: {}", self.name))?;
         validate_server_mode(&self.mode)?;
 
-        match self.transport {
-            Transport::Stdio => {
-                let command = self.command.as_deref().unwrap_or_default().trim();
-                if command.is_empty() {
-                    return Err("stdio servers require a command".into());
+        // Conversion servers call the HTTP API described by their OpenAPI
+        // document, so they need neither an MCP command nor an MCP url.
+        if !is_conversion_server_mode(&self.mode) {
+            match self.transport {
+                Transport::Stdio => {
+                    let command = self.command.as_deref().unwrap_or_default().trim();
+                    if command.is_empty() {
+                        return Err("stdio servers require a command".into());
+                    }
+                    if self
+                        .url
+                        .as_deref()
+                        .is_some_and(|url| !url.trim().is_empty())
+                    {
+                        return Err("stdio servers must not set a url".into());
+                    }
                 }
-                if self
-                    .url
-                    .as_deref()
-                    .is_some_and(|url| !url.trim().is_empty())
-                {
-                    return Err("stdio servers must not set a url".into());
-                }
-            }
-            Transport::Http => {
-                let url = self.url.as_deref().unwrap_or_default().trim();
-                if !is_http_url(url) {
-                    return Err(format!("http servers require an http(s) url, got: {url}"));
-                }
-                if self
-                    .command
-                    .as_deref()
-                    .is_some_and(|c| !c.trim().is_empty())
-                {
-                    return Err("http servers must not set a command".into());
+                Transport::Http => {
+                    let url = self.url.as_deref().unwrap_or_default().trim();
+                    if !is_http_url(url) {
+                        return Err(format!("http servers require an http(s) url, got: {url}"));
+                    }
+                    if self
+                        .command
+                        .as_deref()
+                        .is_some_and(|c| !c.trim().is_empty())
+                    {
+                        return Err("http servers must not set a command".into());
+                    }
                 }
             }
         }
 
         if !self.config.is_object() {
             return Err("config must be a JSON object".into());
+        }
+
+        let has_openapi = self.config.get("openapi").is_some();
+        if is_conversion_server_mode(&self.mode) && !has_openapi {
+            return Err(format!(
+                "MCP server mode '{}' requires config.openapi",
+                self.mode
+            ));
+        }
+        if !is_conversion_server_mode(&self.mode) && has_openapi {
+            return Err(format!(
+                "config.openapi is only supported for conversion modes, not '{}'",
+                self.mode
+            ));
         }
         for (name, value) in &self.headers {
             if name.trim().is_empty() {
@@ -183,6 +217,204 @@ impl NewMcpServer {
         }
         Ok(())
     }
+}
+
+/// Auth strategy kinds Octra implements today.
+pub const MCP_AUTH_STRATEGY_KINDS: &[&str] = &["oidc"];
+pub const MCP_AUTH_STRATEGY_KIND_OIDC: &str = "oidc";
+
+/// Signature algorithms accepted for OIDC strategies.
+pub const MCP_OIDC_ALGORITHMS: &[&str] = &["RS256", "RS384", "RS512", "ES256", "ES384"];
+
+/// A persisted data-plane authentication strategy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpAuthStrategy {
+    pub id: String,
+    pub name: String,
+    /// `oidc` is the only implemented kind.
+    pub kind: String,
+    pub config: Value,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Input for creating or replacing an auth strategy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewMcpAuthStrategy {
+    pub name: String,
+    pub kind: String,
+    pub config: Value,
+    pub enabled: bool,
+    pub is_default: bool,
+}
+
+impl NewMcpAuthStrategy {
+    /// Validates the kind and the kind-specific configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("auth strategy name must not be empty".into());
+        }
+        if !MCP_AUTH_STRATEGY_KINDS.contains(&self.kind.as_str()) {
+            return Err(format!(
+                "invalid auth strategy kind '{}'; expected one of {}",
+                self.kind,
+                MCP_AUTH_STRATEGY_KINDS.join(", ")
+            ));
+        }
+        self.oidc_config().map(|_| ())
+    }
+
+    /// The OIDC configuration of this strategy.
+    pub fn oidc_config(&self) -> Result<McpOidcConfig, String> {
+        McpOidcConfig::from_value(&self.config)
+    }
+}
+
+impl McpAuthStrategy {
+    /// The OIDC configuration of a stored strategy.
+    pub fn oidc_config(&self) -> Result<McpOidcConfig, String> {
+        McpOidcConfig::from_value(&self.config)
+    }
+}
+
+/// OIDC/JWKS settings stored in `mcp_auth_strategies.config_json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpOidcConfig {
+    /// Expected `iss` claim and the identity provider identifier.
+    pub issuer: String,
+    /// Absolute URL of the JWKS document with signing keys.
+    pub jwks_uri: String,
+    /// Expected `aud` claim; when unset, audiences are not validated.
+    #[serde(default)]
+    pub audience: Option<String>,
+    /// Every scope must be present in `scope` or `scp`.
+    #[serde(default)]
+    pub required_scopes: Vec<String>,
+    /// Claim that identifies the consumer. Defaults to `sub`.
+    #[serde(default = "default_consumer_claim")]
+    pub consumer_claim: String,
+    /// Preferred display-name claim; falls back to `preferred_username`,
+    /// `email`, then the consumer id.
+    #[serde(default)]
+    pub username_claim: Option<String>,
+    /// Claim with group names. Defaults to `groups` when unset.
+    #[serde(default = "default_groups_claim")]
+    pub groups_claim: Option<String>,
+    /// JWT algorithms allowed for this strategy.
+    #[serde(default = "default_oidc_algorithms")]
+    pub algorithms: Vec<String>,
+    /// In-process JWKS cache lifetime in seconds.
+    #[serde(default = "default_jwks_cache_secs")]
+    pub jwks_cache_secs: u64,
+}
+
+impl Default for McpOidcConfig {
+    fn default() -> Self {
+        Self {
+            issuer: String::new(),
+            jwks_uri: String::new(),
+            audience: None,
+            required_scopes: Vec::new(),
+            consumer_claim: default_consumer_claim(),
+            username_claim: None,
+            groups_claim: default_groups_claim(),
+            algorithms: default_oidc_algorithms(),
+            jwks_cache_secs: default_jwks_cache_secs(),
+        }
+    }
+}
+
+fn default_consumer_claim() -> String {
+    "sub".to_string()
+}
+
+fn default_groups_claim() -> Option<String> {
+    Some("groups".to_string())
+}
+
+fn default_oidc_algorithms() -> Vec<String> {
+    vec!["RS256".to_string(), "ES256".to_string()]
+}
+
+fn default_jwks_cache_secs() -> u64 {
+    300
+}
+
+impl McpOidcConfig {
+    /// Parses and validates a strategy config object.
+    pub fn from_value(value: &Value) -> Result<Self, String> {
+        let config: Self = serde_json::from_value(value.clone())
+            .map_err(|err| format!("invalid OIDC config: {err}"))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validates URLs, claim names, algorithms, scopes, and cache lifetime.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_absolute_http_url("issuer", &self.issuer)?;
+        validate_absolute_http_url("jwks_uri", &self.jwks_uri)?;
+        if let Some(audience) = self.audience.as_deref()
+            && audience.trim().is_empty()
+        {
+            return Err("audience must not be empty when set".into());
+        }
+        validate_claim_name("consumer_claim", &self.consumer_claim)?;
+        if let Some(claim) = self.username_claim.as_deref() {
+            validate_claim_name("username_claim", claim)?;
+        }
+        if let Some(claim) = self.groups_claim.as_deref() {
+            validate_claim_name("groups_claim", claim)?;
+        }
+        if self.algorithms.is_empty() {
+            return Err("algorithms must contain at least one algorithm".into());
+        }
+        for algorithm in &self.algorithms {
+            if !MCP_OIDC_ALGORITHMS.contains(&algorithm.as_str()) {
+                return Err(format!(
+                    "unsupported OIDC algorithm '{algorithm}'; expected one of {}",
+                    MCP_OIDC_ALGORITHMS.join(", ")
+                ));
+            }
+        }
+        for scope in &self.required_scopes {
+            if scope.trim().is_empty() {
+                return Err("required_scopes entries must be non-empty strings".into());
+            }
+        }
+        if !(1..=86_400).contains(&self.jwks_cache_secs) {
+            return Err(format!(
+                "jwks_cache_secs must be between 1 and 86400, got {}",
+                self.jwks_cache_secs
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_claim_name(field: &str, claim: &str) -> Result<(), String> {
+    if claim.trim().is_empty() {
+        return Err(format!("{field} must be a non-empty claim name"));
+    }
+    Ok(())
+}
+
+/// Accepts only absolute `http://` or `https://` URLs with a non-empty host.
+fn validate_absolute_http_url(field: &str, value: &str) -> Result<(), String> {
+    if value.trim() != value || value.chars().any(char::is_whitespace) {
+        return Err(format!("{field} must be an absolute http(s) URL"));
+    }
+    let lower = value.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+        .ok_or_else(|| format!("{field} must be an absolute http(s) URL"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() {
+        return Err(format!("{field} must include a host"));
+    }
+    Ok(())
 }
 
 fn is_http_url(url: &str) -> bool {
@@ -239,15 +471,41 @@ impl McpServer {
     }
 }
 
+/// Regular tool discovered from an MCP server.
+pub const MCP_TOOL_KIND_MCP: &str = "mcp";
+/// Tool generated from an OpenAPI operation and executed over HTTP.
+pub const MCP_TOOL_KIND_HTTP: &str = "http";
+
+fn default_tool_kind() -> String {
+    MCP_TOOL_KIND_MCP.to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpTool {
     pub id: String,
     pub server_id: String,
     pub name: String,
     pub description: String,
+    /// The MCP `inputSchema` for both regular and generated HTTP tools.
     pub schema: Value,
+    #[serde(default = "default_tool_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub http_method: Option<String>,
+    #[serde(default)]
+    pub http_path: Option<String>,
+    #[serde(default = "empty_object")]
+    pub http_config: Value,
     pub enabled: bool,
     pub created_at: String,
+}
+
+impl McpTool {
+    /// True when this tool is executed as an HTTP request instead of an MCP
+    /// `tools/call` forwarded to an upstream server.
+    pub fn is_http(&self) -> bool {
+        self.kind == MCP_TOOL_KIND_HTTP
+    }
 }
 
 impl McpTool {
@@ -500,6 +758,7 @@ mod tests {
             route_path: None,
             acl_allow_when: Vec::new(),
             acl_deny_when: Vec::new(),
+            auth_strategy_id: None,
             command: Some("node".into()),
             url: None,
             enabled: true,
@@ -517,35 +776,40 @@ mod tests {
             );
             let mut server = stdio("files");
             server.mode = (*mode).to_string();
-            assert!(server.validate().is_ok());
+            if is_conversion_server_mode(mode) {
+                server.config = json!({"openapi": {"document": "{}"}});
+            }
+            assert!(server.validate().is_ok(), "mode rejected: {mode}");
         }
         assert_eq!(default_server_mode(), "passthrough-listener");
     }
 
     #[test]
-    fn rejects_unknown_and_unimplemented_server_modes() {
-        for mode in MCP_UNSUPPORTED_SERVER_MODES {
-            let error = validate_server_mode(mode).unwrap_err();
-            assert!(
-                error.contains("not implemented"),
-                "conversion mode must be reported as not implemented: {error}"
-            );
-        }
-
+    fn conversion_modes_require_openapi_and_other_modes_reject_it() {
         let error = validate_server_mode("proxy").unwrap_err();
         assert!(error.contains("invalid MCP server mode"), "{error}");
 
         let mut server = stdio("files");
         server.mode = "conversion-only".into();
-        assert!(server.validate().is_err());
+        let error = server.validate().unwrap_err();
+        assert!(error.contains("requires config.openapi"), "{error}");
+
+        server.config = json!({"openapi": {"document": "{}"}});
+        assert!(server.validate().is_ok());
+
+        let mut plain = stdio("files");
+        plain.config = json!({"openapi": {"document": "{}"}});
+        let error = plain.validate().unwrap_err();
+        assert!(error.contains("only supported for conversion"), "{error}");
     }
 
     #[test]
-    fn source_eligible_modes_are_upstream_servers_and_passthrough_listeners() {
+    fn source_eligible_modes_include_conversion_only() {
         assert!(is_source_server_mode("upstream-server"));
         assert!(is_source_server_mode("passthrough-listener"));
+        assert!(is_source_server_mode("conversion-only"));
         assert!(!is_source_server_mode("listener"));
-        assert!(!is_source_server_mode("conversion-only"));
+        assert!(!is_source_server_mode("conversion-listener"));
     }
 
     #[test]
@@ -785,5 +1049,62 @@ mod tests {
                 "route path should be rejected: {path}"
             );
         }
+    }
+
+    #[test]
+    fn oidc_config_defaults_and_validates_its_fields() {
+        let config = McpOidcConfig::from_value(&json!({
+            "issuer": "https://issuer.example.test",
+            "jwks_uri": "https://issuer.example.test/.well-known/jwks.json",
+        }))
+        .unwrap();
+        assert_eq!(config.consumer_claim, "sub");
+        assert_eq!(config.groups_claim.as_deref(), Some("groups"));
+        assert_eq!(config.algorithms, vec!["RS256", "ES256"]);
+        assert_eq!(config.jwks_cache_secs, 300);
+
+        for bad in [
+            json!({"issuer": "issuer.example.test", "jwks_uri": "https://example.test/jwks"}),
+            json!({"issuer": "https://example.test", "jwks_uri": "http://"}),
+            json!({
+                "issuer": "https://example.test",
+                "jwks_uri": "https://example.test/jwks",
+                "consumer_claim": " ",
+            }),
+            json!({
+                "issuer": "https://example.test",
+                "jwks_uri": "https://example.test/jwks",
+                "algorithms": ["HS256"],
+            }),
+            json!({
+                "issuer": "https://example.test",
+                "jwks_uri": "https://example.test/jwks",
+                "required_scopes": [""],
+            }),
+            json!({
+                "issuer": "https://example.test",
+                "jwks_uri": "https://example.test/jwks",
+                "jwks_cache_secs": 0,
+            }),
+            json!({
+                "issuer": "https://example.test",
+                "jwks_uri": "https://example.test/jwks",
+                "jwks_cache_secs": 86_401,
+            }),
+        ] {
+            assert!(
+                McpOidcConfig::from_value(&bad).is_err(),
+                "config should be rejected: {bad}"
+            );
+        }
+
+        let strategy = NewMcpAuthStrategy {
+            name: "sso".into(),
+            kind: "jwt".into(),
+            config: json!({}),
+            enabled: true,
+            is_default: false,
+        };
+        assert!(strategy.validate().is_err());
     }
 }

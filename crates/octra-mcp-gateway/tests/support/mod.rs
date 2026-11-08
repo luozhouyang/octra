@@ -6,12 +6,13 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use axum::Json;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{any, get, post};
 use http_body_util::BodyExt;
 use octra_config::OctraConfig;
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
@@ -33,6 +34,251 @@ impl Drop for Upstream {
     fn drop(&mut self) {
         self.handle.abort();
     }
+}
+
+/// Test-only RSA private key. Never used outside the integration tests.
+pub const TEST_RSA_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDAtPuHYRsTQLaD
+SeytfF+eplTZTyQ9GPf8RPu/TWpOXyDJnM66G2aXGL8o8ok3Mr/i+MUEG7fYc9+P
+vFv3SBNG7BBkxvi8cB7trJie66vOVwNBB41FvkJtIQyxhkjy93DH5UvpxmmmXwAG
+wz4EIxTEjLWMfG4yqeB2RjURgO46skTrLTzh/pwKztERrNEz3QOyfzCFIOoC3w5E
+xnVKTXX48v0rkFb+lCKSMRf2tAKH+rXg35EQeLa35F+UFQWL2NCtqWPOqTsMXypm
+3p6fVEeliTKGgOCJlQFLIal7SQbcNRl2IfqY/X+2SxrBOw88xGnYmYa6Jab82/Cp
+EcvUsUl3AgMBAAECggEASNWeo8Jd+17gHKsaG1AAy/PN6fxxk+4V/HEOPXXDEi/+
+MnVj5Q9qLP2bcpyIpCY4RE8GF9FqIRNakfb9Q28oagva/lv9syslZWtwm9AzNV/J
+yRBTouKQNLLjG03H0J0ZMVRG5uqpD8qkNeohTGr99HPCQoDdHaT7Q3ixohX69I+3
+aGKebqZH60L6n8gwgomC43KVaF6SMWwtj4O9fJKnZoodkX65txAe1pkR/ViGtrvj
+W1ubZ1Ho7hzVjViEcRx+W1mp4BLaeUFO43s3b5bQvTpVQN0f9diekor/TM8aUElG
+RyhcnlbdS3dO4tftVp2Az30x/QuNO3j7h1pHg07BcQKBgQD4q9ss2tEpY5GeHfKT
+Ar3vWaJTRpxwhP3Q9fdyKHrAqaXUD9SKFp4OQQHjkYWBuX6NLY+kUfuGS+wYUxGK
+FUxDl/FnzFG2NmPxtD0eANG8z1ndLalmxvgFK0kkUpc/xg83/fl1BW0ur39kvPqB
+wXGo9I5WGvo+IAc7YT3iHPdVHQKBgQDGYuTFX/1njuFc17YF8NuOVSB8+TChbTH3
+jJlXllGU/W6P/N64cd/RkNQqzMu9kFghRFhEhU1AoH7DC7Rb7Jt7AAPKN6nSY6Lg
+LhJvSgyNuuOiX1QGiOAeAu7DS6S+bpmQ2evrTsddbNvZy4ulPy9fQV6UKrKsHN1m
+YQwgeir4owKBgQCvnk9v4imNnXAdxvClum4BN8BYJ6ocHRBUHyHeUZA/uJAQsA1e
+aJK/ZlG7Me6jqykg82hamDuWoM/gbeoZJulxY0FuGPIsSUVUUgJHyjRVr+q7NaBJ
+oYNPwz4olNuUgoAE/yzJ5EczjWXe80fHk6J9vBk53luUvHHfEdHuep6CUQKBgC9P
+dDkxrA/fPhVTCACgsOtfl7DWCGfmz4y2hfciTPBYA97osgCQf4zNmhte3ZOmca31
+S4uDsqmf3LsM9oUZhvatSToXTjNzOWt28USDBz1hfVnCnBo22COwFVqTloUngQ3P
+OnjSP68i/8cPyIyu5dA0maaCDDwJYi9BI5A3Mjo7AoGBAM9um0t5aDwYvJ8JBflW
+WjA/1Kq+IUil1bML2RwPVVySuop+ZD3aEncK39C3LvJypHO6iUaQXjXU+CKQPZMn
+s6HbVNMw5q1ZVAYk8M3KOFdNhV71zRHn2EH99QGRPADEraQL5F5jD0kyaKvpJ5h2
+vrwktYc+KINIvEK4b4lN9EKh
+-----END PRIVATE KEY-----";
+
+/// The public half of [`TEST_RSA_PRIVATE_KEY`] as a JWKS document.
+pub fn test_jwks(kid: &str) -> Value {
+    json!({
+        "keys": [{
+            "kty": "RSA",
+            "kid": kid,
+            "use": "sig",
+            "alg": "RS256",
+            "n": "wLT7h2EbE0C2g0nsrXxfnqZU2U8kPRj3_ET7v01qTl8gyZzOuhtmlxi_KPKJNzK_4vjFBBu32HPfj7xb90gTRuwQZMb4vHAe7ayYnuurzlcDQQeNRb5CbSEMsYZI8vdwx-VL6cZppl8ABsM-BCMUxIy1jHxuMqngdkY1EYDuOrJE6y084f6cCs7REazRM90Dsn8whSDqAt8ORMZ1Sk11-PL9K5BW_pQikjEX9rQCh_q14N-REHi2t-RflBUFi9jQraljzqk7DF8qZt6en1RHpYkyhoDgiZUBSyGpe0kG3DUZdiH6mP1_tksawTsPPMRp2JmGuiWm_NvwqRHL1LFJdw",
+            "e": "AQAB"
+        }]
+    })
+}
+
+/// Signs a test JWT with [`TEST_RSA_PRIVATE_KEY`] and `RS256`.
+pub fn sign_test_token(kid: &str, claims: Value) -> String {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+
+    let header = Header {
+        alg: Algorithm::RS256,
+        kid: Some(kid.to_string()),
+        ..Default::default()
+    };
+    let key = EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY.as_bytes())
+        .expect("test RSA private key is valid");
+    encode(&header, &claims, &key).expect("test token is encodable")
+}
+
+#[derive(Clone)]
+pub struct JwksMockState {
+    jwks: Arc<Mutex<Value>>,
+    requests: Arc<AtomicU64>,
+}
+
+impl JwksMockState {
+    pub fn set(&self, jwks: Value) {
+        *self.jwks.lock().unwrap() = jwks;
+    }
+
+    pub fn requests(&self) -> u64 {
+        self.requests.load(Ordering::Relaxed)
+    }
+}
+
+/// A local JWKS endpoint used instead of an external identity provider.
+pub struct JwksMock {
+    pub addr: SocketAddr,
+    pub state: JwksMockState,
+    pub handle: tokio::task::JoinHandle<()>,
+}
+
+impl JwksMock {
+    pub fn url(&self) -> String {
+        format!("http://{}/.well-known/jwks.json", self.addr)
+    }
+}
+
+impl Drop for JwksMock {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+/// Starts a JWKS mock on `127.0.0.1:0`.
+pub async fn start_jwks(jwks: Value) -> JwksMock {
+    let state = JwksMockState {
+        jwks: Arc::new(Mutex::new(jwks)),
+        requests: Arc::new(AtomicU64::new(0)),
+    };
+    let app = Router::new()
+        .route("/.well-known/jwks.json", get(serve_jwks))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    JwksMock {
+        addr,
+        state,
+        handle,
+    }
+}
+
+async fn serve_jwks(State(state): State<JwksMockState>) -> Json<Value> {
+    state.requests.fetch_add(1, Ordering::Relaxed);
+    Json(state.jwks.lock().unwrap().clone())
+}
+
+/// One request observed by the OpenAPI mock API.
+#[derive(Clone, Debug)]
+pub struct ApiRequest {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: HeaderMap,
+    pub body: Value,
+}
+
+#[derive(Clone)]
+pub struct ApiMockState {
+    pub requests: Arc<Mutex<Vec<ApiRequest>>>,
+}
+
+/// A minimal HTTP API used by OpenAPI conversion tests.
+pub struct ApiMock {
+    pub addr: SocketAddr,
+    pub state: ApiMockState,
+    pub handle: tokio::task::JoinHandle<()>,
+}
+
+impl ApiMock {
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+}
+
+impl Drop for ApiMock {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+/// Starts a mock HTTP API on `127.0.0.1:0`.
+///
+/// Every request is recorded. `/text` returns plain text, `/fail` returns a
+/// 500 with a body, and every other path echoes the request as JSON.
+pub async fn start_api_mock() -> ApiMock {
+    let state = ApiMockState {
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let app = Router::new()
+        .route("/{*rest}", any(handle_api))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    ApiMock {
+        addr,
+        state,
+        handle,
+    }
+}
+
+async fn handle_api(
+    State(state): State<ApiMockState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let bytes = body.collect().await.unwrap().to_bytes();
+    let body_value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+    };
+    state.requests.lock().unwrap().push(ApiRequest {
+        method: method.as_str().to_string(),
+        path: uri.path().to_string(),
+        query: uri.query().unwrap_or_default().to_string(),
+        headers: headers.clone(),
+        body: body_value.clone(),
+    });
+
+    match uri.path() {
+        "/openapi.json" => Json(json!({
+            "openapi": "3.0.3",
+            "info": {"title": "Fetched", "version": "1.0.0"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/fetched": {
+                    "get": {
+                        "operationId": "fetchedTool",
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }))
+        .into_response(),
+        "/text" => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain")],
+            "plain body",
+        )
+            .into_response(),
+        "/fail" => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain")],
+            "upstream failed",
+        )
+            .into_response(),
+        _ => Json(json!({
+            "method": method.as_str(),
+            "path": uri.path(),
+            "query": uri.query().unwrap_or_default(),
+            "authorization": header_string(&headers, header::AUTHORIZATION.as_str()),
+            "x_api_key": header_string(&headers, "x-api-key"),
+            "x_tenant": header_string(&headers, "x-tenant"),
+            "body": body_value,
+        }))
+        .into_response(),
+    }
+}
+
+fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

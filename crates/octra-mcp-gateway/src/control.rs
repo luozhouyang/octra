@@ -14,16 +14,18 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use octra_data_plane::body_bytes_limited;
 use octra_mcp_core::domain::{
-    MCP_SERVER_MODE_LISTENER, McpServer, McpServerAcl, McpTool, NewMcpServer, default_server_mode,
-    effective_route_path, is_source_server_mode, route_path_key, status, validate_route_path,
-    validate_secret_reference, validate_server_mode,
+    MCP_AUTH_STRATEGY_KIND_OIDC, MCP_SERVER_MODE_LISTENER, McpAuthStrategy, McpServer,
+    McpServerAcl, McpTool, NewMcpAuthStrategy, NewMcpServer, default_server_mode,
+    effective_route_path, is_conversion_server_mode, is_source_server_mode, route_path_key, status,
+    validate_route_path, validate_secret_reference, validate_server_mode,
 };
 use octra_mcp_core::{Transport, domain::McpApiKey};
 use octra_storage::mcp::DiscoveredTool;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::auth::{display_prefix, generate_key, hash_key};
+use crate::conversion::{self, ConvertedTool, OpenApiConfig};
 use crate::data::validate_acl_expressions;
 use crate::{DiscoveryStats, McpControlState};
 
@@ -61,6 +63,16 @@ pub fn router(state: McpControlState) -> Router {
         .route("/api/v1/mcp/invocations/{id}", get(get_invocation))
         .route("/api/v1/mcp/keys", get(list_keys).post(create_key))
         .route("/api/v1/mcp/keys/{id}", get(get_key).delete(delete_key))
+        .route(
+            "/api/v1/mcp/auth-strategies",
+            get(list_auth_strategies).post(create_auth_strategy),
+        )
+        .route(
+            "/api/v1/mcp/auth-strategies/{id}",
+            get(get_auth_strategy)
+                .put(update_auth_strategy)
+                .delete(delete_auth_strategy),
+        )
         .route("/api/v1/mcp/acls", get(list_acls).post(create_acl))
         .route(
             "/api/v1/mcp/acls/{id}",
@@ -159,6 +171,16 @@ async fn json_body<T: serde::de::DeserializeOwned>(
 
 // ----- servers -----------------------------------------------------------
 
+/// Distinguishes an omitted `auth_strategy_id` (keeps the stored value) from
+/// an explicit `null` (clears it) by mapping null to an empty string.
+fn deserialize_present_optional_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(Some(value.unwrap_or_default()))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct ServerRequest {
@@ -171,6 +193,10 @@ pub struct ServerRequest {
     pub route_path: Option<String>,
     pub acl_allow_when: Option<Vec<String>>,
     pub acl_deny_when: Option<Vec<String>>,
+    /// Missing keeps the stored reference on update; an explicit null or an
+    /// empty string clears it.
+    #[serde(default, deserialize_with = "deserialize_present_optional_id")]
+    pub auth_strategy_id: Option<String>,
     pub command: Option<String>,
     pub url: Option<String>,
     pub enabled: bool,
@@ -188,6 +214,7 @@ impl Default for ServerRequest {
             route_path: None,
             acl_allow_when: None,
             acl_deny_when: None,
+            auth_strategy_id: None,
             command: None,
             url: None,
             enabled: true,
@@ -204,11 +231,17 @@ impl ServerRequest {
     /// `passthrough-listener` default; callers that update an existing server
     /// restore its stored mode and sources before validating.
     pub fn into_new_server(self) -> ApiResult<NewMcpServer> {
+        let mode = self.mode.unwrap_or_else(default_server_mode);
+        validate_server_mode(&mode).map_err(ApiError::bad_request)?;
+
+        // Conversion servers talk to an HTTP API rather than an MCP upstream,
+        // so they default to the HTTP transport without requiring a URL.
         let transport = self.transport.unwrap_or_else(|| {
-            if self
-                .url
-                .as_deref()
-                .is_some_and(|url| !url.trim().is_empty())
+            if is_conversion_server_mode(&mode)
+                || self
+                    .url
+                    .as_deref()
+                    .is_some_and(|url| !url.trim().is_empty())
             {
                 Transport::Http
             } else {
@@ -232,8 +265,10 @@ impl ServerRequest {
             headers.insert(name, Value::String(value));
         }
 
-        let mode = self.mode.unwrap_or_else(default_server_mode);
-        validate_server_mode(&mode).map_err(ApiError::bad_request)?;
+        let auth_strategy_id = self
+            .auth_strategy_id
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty());
 
         let server = NewMcpServer {
             name: self.name.trim().to_string(),
@@ -243,15 +278,36 @@ impl ServerRequest {
             route_path: self.route_path.map(|path| path.trim().to_string()),
             acl_allow_when: self.acl_allow_when.unwrap_or_default(),
             acl_deny_when: self.acl_deny_when.unwrap_or_default(),
+            auth_strategy_id,
             command: self.command,
             url: self.url,
             enabled: self.enabled,
             config: self.config.unwrap_or_else(|| json!({})),
             headers,
         };
-        server.validate().map_err(ApiError::bad_request)?;
         Ok(server)
     }
+}
+
+/// Rejects references to auth strategies that do not exist.
+async fn validate_auth_strategy_reference(
+    state: &McpControlState,
+    auth_strategy_id: Option<&str>,
+) -> ApiResult<()> {
+    if let Some(id) = auth_strategy_id
+        && state
+            .storage
+            .mcp
+            .get_auth_strategy(id)
+            .await
+            .map_err(storage)?
+            .is_none()
+    {
+        return Err(ApiError::bad_request(format!(
+            "unknown auth_strategy_id: {id}"
+        )));
+    }
+    Ok(())
 }
 
 /// Validates route path syntax and rejects a path already used by another
@@ -292,6 +348,83 @@ async fn validate_server_route(
 fn validate_server_acl_expressions(server: &NewMcpServer) -> ApiResult<()> {
     validate_acl_expressions(&server.acl_allow_when, &server.acl_deny_when)
         .map_err(ApiError::bad_request)
+}
+
+/// Validates the mode/OpenAPI combination and returns the parsed config for
+/// conversion servers.
+fn openapi_config(server: &NewMcpServer) -> ApiResult<Option<OpenApiConfig>> {
+    let config = OpenApiConfig::from_config(&server.config).map_err(ApiError::bad_request)?;
+    match (is_conversion_server_mode(&server.mode), config) {
+        (true, Some(config)) => Ok(Some(config)),
+        (true, None) => Err(ApiError::bad_request(format!(
+            "MCP server mode '{}' requires config.openapi",
+            server.mode
+        ))),
+        (false, Some(_)) => Err(ApiError::bad_request(format!(
+            "config.openapi is only supported for conversion modes, not '{}'",
+            server.mode
+        ))),
+        (false, None) => Ok(None),
+    }
+}
+
+/// Parses/fetches the document and returns the generated tool definitions.
+/// This runs before a server insert/update so an invalid document never
+/// persists.
+async fn generate_conversion_tools(
+    state: &McpControlState,
+    config: &OpenApiConfig,
+) -> ApiResult<Vec<ConvertedTool>> {
+    conversion::generate_tools(state.runtime.http(), config)
+        .await
+        .map_err(ApiError::bad_request)
+}
+
+/// Transactionally replaces the generated tool set of a conversion server.
+async fn replace_conversion_tools(
+    state: &McpControlState,
+    server_id: &str,
+    tools: Vec<ConvertedTool>,
+) -> ApiResult<usize> {
+    let count = tools.len();
+    let discovered: Vec<DiscoveredTool> = tools
+        .into_iter()
+        .map(ConvertedTool::into_discovered)
+        .collect();
+    state
+        .storage
+        .mcp
+        .replace_tools(server_id, &discovered)
+        .await
+        .map_err(storage)?;
+    Ok(count)
+}
+
+/// Removes generated or discovered tools when a server leaves a mode that
+/// owns its catalog.
+async fn clear_tools(state: &McpControlState, server_id: &str) -> ApiResult<()> {
+    state
+        .storage
+        .mcp
+        .replace_tools(server_id, &[])
+        .await
+        .map_err(storage)?;
+    Ok(())
+}
+
+/// Strips inline documents and resolved-secret references from API responses.
+fn summarize_config(config: &Value) -> Value {
+    let mut summary = config.clone();
+    let Some(openapi) = summary.get_mut("openapi").and_then(Value::as_object_mut) else {
+        return summary;
+    };
+    if openapi.remove("document").is_some() {
+        openapi.insert("document_inline".into(), json!(true));
+    }
+    if let Some(auth) = openapi.get_mut("auth").and_then(Value::as_object_mut) {
+        auth.remove("secret_ref");
+    }
+    summary
 }
 
 /// Resolves `sources` references (server ids or names) to canonical server
@@ -343,8 +476,8 @@ async fn resolve_sources(
         };
         if !is_source_server_mode(&target.mode) {
             return Err(ApiError::bad_request(format!(
-                "MCP source server '{reference}' has type '{}'; expected 'upstream-server' or \
-                 'passthrough-listener'",
+                "MCP source server '{reference}' has type '{}'; expected 'upstream-server', \
+                 'passthrough-listener', or 'conversion-only'",
                 target.mode
             )));
         }
@@ -375,6 +508,8 @@ async fn server_response(
         .len();
     // Responses always expose the effective path, even when the column is null.
     server.route_path = Some(server.effective_route_path());
+    // Never echo inline documents or secret references back to callers.
+    server.config = summarize_config(&server.config);
     Ok(ServerResponse { server, tool_count })
 }
 
@@ -391,9 +526,16 @@ async fn list_servers(
 async fn create_server(State(state): State<McpControlState>, body: Body) -> ApiResult<Response> {
     let request: ServerRequest = json_body(&state, body).await?;
     let mut new_server = request.into_new_server()?;
+    new_server.validate().map_err(ApiError::bad_request)?;
     new_server.sources = resolve_sources(&state, &new_server.mode, &new_server.sources).await?;
+    validate_auth_strategy_reference(&state, new_server.auth_strategy_id.as_deref()).await?;
     validate_server_route(&state, &new_server, None).await?;
     validate_server_acl_expressions(&new_server)?;
+    let openapi = openapi_config(&new_server)?;
+    let generated = match &openapi {
+        Some(config) => Some(generate_conversion_tools(&state, config).await?),
+        None => None,
+    };
     let display_name = new_server.name.clone();
 
     let server = state
@@ -403,11 +545,19 @@ async fn create_server(State(state): State<McpControlState>, body: Body) -> ApiR
         .await
         .map_err(|err| conflict_on_unique(err, &format!("MCP server '{display_name}'")))?;
 
-    // Discovery failures must not fail the create: the server is registered
-    // and can be refreshed later from the control plane.
-    match state.runtime.refresh_server(&server.id).await {
-        Ok(_) => {}
-        Err(err) => tracing::warn!(server = %server.name, %err, "initial MCP discovery failed"),
+    if let Some(tools) = generated {
+        if let Err(err) = replace_conversion_tools(&state, &server.id, tools).await {
+            let _ = state.storage.mcp.delete_server(&server.id).await;
+            return Err(err);
+        }
+        state.runtime.reload_after_mutation().await;
+    } else {
+        // Discovery failures must not fail the create: the server is registered
+        // and can be refreshed later from the control plane.
+        match state.runtime.refresh_server(&server.id).await {
+            Ok(_) => {}
+            Err(err) => tracing::warn!(server = %server.name, %err, "initial MCP discovery failed"),
+        }
     }
 
     match state
@@ -455,10 +605,13 @@ async fn update_server(
 
     let request: ServerRequest = json_body(&state, body).await?;
     let mode_given = request.mode.is_some();
+    let transport_given = request.transport.is_some();
     let sources_given = request.sources.is_some();
     let route_path_given = request.route_path.is_some();
     let allow_when_given = request.acl_allow_when.is_some();
     let deny_when_given = request.acl_deny_when.is_some();
+    let auth_strategy_given = request.auth_strategy_id.is_some();
+    let config_given = request.config.is_some();
     let mut candidate = request.into_new_server()?;
     if candidate.name.trim().is_empty() {
         candidate.name = existing.name.clone();
@@ -468,6 +621,9 @@ async fn update_server(
     // `type: listener`.
     if !mode_given {
         candidate.mode = existing.mode.clone();
+    }
+    if !transport_given {
+        candidate.transport = existing.transport;
     }
     if !sources_given {
         candidate.sources = existing.sources.clone();
@@ -481,9 +637,28 @@ async fn update_server(
     if !deny_when_given {
         candidate.acl_deny_when = existing.acl_deny_when.clone();
     }
+    if !auth_strategy_given {
+        candidate.auth_strategy_id = existing.auth_strategy_id.clone();
+    }
+    if !config_given {
+        candidate.config = existing.config.clone();
+        if is_conversion_server_mode(&existing.mode)
+            && !is_conversion_server_mode(&candidate.mode)
+            && let Some(config) = candidate.config.as_object_mut()
+        {
+            config.remove("openapi");
+        }
+    }
+    candidate.validate().map_err(ApiError::bad_request)?;
     candidate.sources = resolve_sources(&state, &candidate.mode, &candidate.sources).await?;
+    validate_auth_strategy_reference(&state, candidate.auth_strategy_id.as_deref()).await?;
     validate_server_route(&state, &candidate, Some(&id)).await?;
     validate_server_acl_expressions(&candidate)?;
+    let openapi = openapi_config(&candidate)?;
+    let generated = match &openapi {
+        Some(config) => Some(generate_conversion_tools(&state, config).await?),
+        None => None,
+    };
 
     let display_name = candidate.name.clone();
     let updated = state
@@ -495,11 +670,20 @@ async fn update_server(
         .ok_or_else(|| ApiError::not_found("MCP server"))?;
 
     let definition_changed = definition_changed(&existing, &updated);
-    state.runtime.reload_after_mutation().await;
-    if definition_changed {
-        match state.runtime.refresh_server(&id).await {
-            Ok(_) => {}
-            Err(err) => tracing::warn!(server = %updated.name, %err, "MCP re-discovery failed"),
+    if let Some(tools) = generated {
+        replace_conversion_tools(&state, &updated.id, tools).await?;
+        state.runtime.reload_after_mutation().await;
+    } else {
+        // A server leaving a conversion mode no longer owns its catalog.
+        if is_conversion_server_mode(&existing.mode) {
+            clear_tools(&state, &updated.id).await?;
+        }
+        state.runtime.reload_after_mutation().await;
+        if definition_changed {
+            match state.runtime.refresh_server(&id).await {
+                Ok(_) => {}
+                Err(err) => tracing::warn!(server = %updated.name, %err, "MCP re-discovery failed"),
+            }
         }
     }
 
@@ -543,6 +727,34 @@ async fn refresh_server(
     State(state): State<McpControlState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<DiscoveryStats>> {
+    let server = state
+        .storage
+        .mcp
+        .get_server(&id)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| ApiError::not_found("MCP server"))?;
+
+    if is_conversion_server_mode(&server.mode) {
+        let config = OpenApiConfig::from_config(&server.config)
+            .map_err(ApiError::bad_request)?
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "MCP server mode '{}' requires config.openapi",
+                    server.mode
+                ))
+            })?;
+        let tools = generate_conversion_tools(&state, &config).await?;
+        let count = replace_conversion_tools(&state, &server.id, tools).await?;
+        state.runtime.reload_after_mutation().await;
+        return Ok(Json(DiscoveryStats {
+            server_id: server.id,
+            protocol_version: "openapi".to_string(),
+            upstream_name: server.name,
+            tools: count,
+        }));
+    }
+
     let stats = state
         .runtime
         .refresh_server(&id)
@@ -602,7 +814,16 @@ pub struct ToolResponse {
     pub qualified_name: String,
 }
 
-fn tool_response(tool: McpTool, server_name: &str) -> ToolResponse {
+fn tool_response(mut tool: McpTool, server_name: &str) -> ToolResponse {
+    // HTTP tool configs hold a secret reference, not the value, but operator
+    // responses never need it.
+    if let Some(auth) = tool
+        .http_config
+        .get_mut("auth")
+        .and_then(Value::as_object_mut)
+    {
+        auth.remove("secret_ref");
+    }
     ToolResponse {
         qualified_name: tool.qualified_name(server_name),
         server_name: server_name.to_string(),
@@ -673,12 +894,24 @@ async fn find_tool(state: &McpControlState, id: &str) -> ApiResult<(McpTool, Mcp
     Ok((tool, server))
 }
 
+fn reject_generated_tool_mutation(server: &McpServer) -> ApiResult<()> {
+    if is_conversion_server_mode(&server.mode) {
+        return Err(ApiError::bad_request(format!(
+            "tools on conversion server '{}' are generated from config.openapi; \
+             update the document and refresh instead",
+            server.name
+        )));
+    }
+    Ok(())
+}
+
 async fn create_tool(
     State(state): State<McpControlState>,
     body: Body,
 ) -> ApiResult<(StatusCode, Json<ToolResponse>)> {
     let request: ToolRequest = json_body(&state, body).await?;
     let server = resolve_server(&state, &request.server_id).await?;
+    reject_generated_tool_mutation(&server)?;
     let name = request.name.trim().to_string();
     octra_mcp_core::protocol::validate_tool_name(&name)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
@@ -696,11 +929,11 @@ async fn create_tool(
             server.name
         )));
     }
-    tools.push(DiscoveredTool {
-        name: name.clone(),
-        description: request.description,
+    tools.push(DiscoveredTool::mcp(
+        name.clone(),
+        request.description,
         schema,
-    });
+    ));
 
     replace_tool_set(&state, &server.id, &tools).await?;
     let tool = find_tool_by_name(&state, &server.id, &name).await?;
@@ -736,11 +969,7 @@ async fn current_tool_set(
         .await
         .map_err(storage)?
         .into_iter()
-        .map(|tool| DiscoveredTool {
-            name: tool.name,
-            description: tool.description,
-            schema: tool.schema,
-        })
+        .map(|tool| DiscoveredTool::mcp(tool.name, tool.description, tool.schema))
         .collect())
 }
 
@@ -790,6 +1019,7 @@ async fn update_tool(
     body: Body,
 ) -> ApiResult<Json<ToolResponse>> {
     let (tool, server) = find_tool(&state, &id).await?;
+    reject_generated_tool_mutation(&server)?;
     let request: ToolUpdate = json_body(&state, body).await?;
     if request
         .schema
@@ -830,6 +1060,7 @@ async fn delete_tool(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let (tool, server) = find_tool(&state, &id).await?;
+    reject_generated_tool_mutation(&server)?;
     let tools: Vec<DiscoveredTool> = current_tool_set(&state, &server.id)
         .await?
         .into_iter()
@@ -1053,6 +1284,142 @@ async fn delete_key(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("MCP API key"))
+    }
+}
+
+// ----- auth strategies ---------------------------------------------------
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct AuthStrategyRequest {
+    pub name: Option<String>,
+    pub kind: Option<String>,
+    pub config: Option<Value>,
+    pub enabled: Option<bool>,
+    pub is_default: Option<bool>,
+}
+
+fn new_auth_strategy_from_request(
+    request: AuthStrategyRequest,
+    existing: Option<&McpAuthStrategy>,
+) -> ApiResult<NewMcpAuthStrategy> {
+    let name = request
+        .name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .or_else(|| existing.map(|strategy| strategy.name.clone()))
+        .ok_or_else(|| ApiError::bad_request("auth strategy name must not be empty"))?;
+    let kind = match request.kind {
+        Some(kind) => kind,
+        None => existing
+            .map(|strategy| strategy.kind.clone())
+            .unwrap_or_else(|| MCP_AUTH_STRATEGY_KIND_OIDC.to_string()),
+    };
+    let config = request.config.unwrap_or_else(|| {
+        existing
+            .map(|strategy| strategy.config.clone())
+            .unwrap_or(json!({}))
+    });
+    let enabled = request
+        .enabled
+        .unwrap_or_else(|| existing.is_none_or(|strategy| strategy.enabled));
+    let is_default = request
+        .is_default
+        .unwrap_or_else(|| existing.is_some_and(|strategy| strategy.is_default));
+
+    let strategy = NewMcpAuthStrategy {
+        name,
+        kind,
+        config,
+        enabled,
+        is_default,
+    };
+    strategy.validate().map_err(ApiError::bad_request)?;
+    Ok(strategy)
+}
+
+async fn list_auth_strategies(
+    State(state): State<McpControlState>,
+) -> ApiResult<Json<Vec<McpAuthStrategy>>> {
+    Ok(Json(
+        state
+            .storage
+            .mcp
+            .list_auth_strategies()
+            .await
+            .map_err(storage)?,
+    ))
+}
+
+async fn create_auth_strategy(
+    State(state): State<McpControlState>,
+    body: Body,
+) -> ApiResult<(StatusCode, Json<McpAuthStrategy>)> {
+    let request: AuthStrategyRequest = json_body(&state, body).await?;
+    let strategy = new_auth_strategy_from_request(request, None)?;
+    let created = state
+        .storage
+        .mcp
+        .insert_auth_strategy(&strategy)
+        .await
+        .map_err(|err| {
+            conflict_on_unique(err, &format!("MCP auth strategy '{}'", strategy.name))
+        })?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+async fn get_auth_strategy(
+    State(state): State<McpControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<McpAuthStrategy>> {
+    state
+        .storage
+        .mcp
+        .get_auth_strategy(&id)
+        .await
+        .map_err(storage)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("MCP auth strategy"))
+}
+
+async fn update_auth_strategy(
+    State(state): State<McpControlState>,
+    Path(id): Path<String>,
+    body: Body,
+) -> ApiResult<Json<McpAuthStrategy>> {
+    let existing = state
+        .storage
+        .mcp
+        .get_auth_strategy(&id)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| ApiError::not_found("MCP auth strategy"))?;
+    let request: AuthStrategyRequest = json_body(&state, body).await?;
+    let strategy = new_auth_strategy_from_request(request, Some(&existing))?;
+    let updated = state
+        .storage
+        .mcp
+        .update_auth_strategy(&id, &strategy)
+        .await
+        .map_err(|err| conflict_on_unique(err, &format!("MCP auth strategy '{}'", strategy.name)))?
+        .ok_or_else(|| ApiError::not_found("MCP auth strategy"))?;
+    Ok(Json(updated))
+}
+
+async fn delete_auth_strategy(
+    State(state): State<McpControlState>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    if state
+        .storage
+        .mcp
+        .delete_auth_strategy(&id)
+        .await
+        .map_err(storage)?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("MCP auth strategy"))
     }
 }
 
