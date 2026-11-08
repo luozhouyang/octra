@@ -123,17 +123,17 @@ sandbox_path = "/tmp/octra-agent-bin"
 - 插件：Native 与 WASM（API / LLM）运行时、插件自有 SQLite 存储、配置 Schema、按实例的指标与延迟分位数、持久化事件与定时任务，以及共享的限流/预算计数器。
 - AI 原生 LLM 控制面（Phase 15，仅 AI-native）：`ai_*` schema、`octra-ai-config` 编译器、`AiStore`、`/api/v1/ai/*` CRUD、validate/preview/apply/revisions/rollback、revision snapshot、事务化 replace、target 级模型元数据（context、capabilities、pricing）、所有 policy 类型的内置执行（rate limit、budget guard、PII、model map、param override、system prompt、request audit、think tags、PromptGuard、PromptCompress、SemanticCache）、基于 AI 原生 description 的 `semantic` target routing（可选 OpenAI-compatible embedding，失败回退本地词法）、Provider `config_json.query` 参数与 protocol presets（Ollama、vLLM、LM Studio、Groq、OpenRouter、DeepSeek、Together、Fireworks、Claude、Google、OpenAI-compatible）、streaming cache 写入与 SSE 回放、AI-native account OAuth 状态与桌面控制、request audit `cache_status` 与 cache/routing 日志、支持 inline/stdin/file JSON body 的完整 CRUD CLI，以及 providers/accounts/models/targets/policies/attachments 全部使用 typed forms 的桌面端 AI Control 页面。legacy 模型表、`/admin/llm/*` 模型端点、`legacy`/`shadow`/`on` 模式和 import-legacy 路径已移除，不考虑向后兼容。
 - Agent 集成：探测 Claude Code、Codex、OpenCode，预览并把 Octra Provider 写入其原生配置，支持原子写入与备份恢复。
-- CLI：`status`、`services`、`routes`、`reload`、`doctor`、`keys`、`usage`，以及 `ai` status/actions 与 providers/accounts/models/targets/policies/attachments 的完整 CRUD。
+- CLI：`status`、API Gateway `services`/`routes`/`upstreams`/`targets` CRUD、`reload`、`doctor`、`keys`、`usage`，以及 `ai` status/actions 与 providers/accounts/models/targets/policies/attachments 的完整 CRUD。
 - Tauri 2 + React 桌面端，使用统一设计 Token，所有页面直接读取本地控制面；三个 Gateway 页面目前以只读观测为主。
 - 双 Workspace、CI（Rust fmt/clippy/test；前端 typecheck/test/build）。
 
 ## 尚未实现（按路线图推进）
 
-- 桌面端与 CLI 对 API、MCP 实体的完整 CRUD；这些页面目前是实时只读视图，大部分变更仍需走控制面 API。LLM 实体已经通过 AI Control 和 `octra ai` 完整管理。
+- 桌面端对 API、MCP 实体的完整 CRUD，以及 CLI 对 MCP 实体的 CRUD；API Gateway 的 services/routes/upstreams/targets 已支持 CLI CRUD，桌面端仍以只读观测为主。LLM 实体已经通过 AI Control 和 `octra ai` 完整管理。
 - 事件总线的投递、重试/退避、定时任务与无订阅者跳过路径的集成测试；存储层保留策略已有测试。
 - 更多协议适配器与更多 Agent 适配器/Agent Bridge。
 - 有明确产品价值的参考模型补齐：magpie 的 `free`/`drain`/`expiring` 等策略，以及 Kong MCP 的 Consumer Group/默认/CEL ACL 或转换模式。
-- 完善 AI 原生 LLM 控制面（ADR 0018）：OpenAI/Anthropic/OpenAI Responses/Gemini 之外的新 wire protocol adapter，以及桌面 webview 中更完善的 OAuth callback 处理。Phase 14 的控制 API、rollback、含 PromptGuard/PromptCompress/SemanticCache 的完整 policy 执行、带可选 embedding 的 `semantic` target routing、Provider query 参数、streaming cache 写入/SSE 回放、AI-native account OAuth 端点与桌面控制、cache/routing 可观测性、完整 CRUD CLI 与全部 AI 实体的桌面 typed forms 已经存在。legacy 模型表、端点、模式和 import 路径已移除；`ai_*` 是唯一的模型控制面。SemanticCache/Routing 默认使用精确 key 加本地词法相似度。
+- 完善 AI 原生 LLM 控制面（ADR 0018）：OpenAI/Anthropic/OpenAI Responses/Gemini 之外的新 wire protocol adapter，以及桌面 webview 中更完善的 OAuth callback 处理。Phase 15 的控制 API、rollback、含 PromptGuard/PromptCompress/SemanticCache 的完整 policy 执行、带可选 embedding 的 `semantic` target routing、Provider query 参数与 protocol presets、streaming cache 写入/SSE 回放、AI-native account OAuth 端点与桌面控制、cache/routing 可观测性、完整 CRUD CLI 与全部 AI 实体的桌面 typed forms 已经存在。legacy 模型表、端点、模式和 import 路径已移除；`ai_*` 是唯一的模型控制面。SemanticCache/Routing 默认使用精确 key 加本地词法相似度。
 - OS Keychain Secrets 集成与 OAuth Token 加密。
 - 桌面端 Daemon 生命周期管理（启动、停止、健康监督）。
 - 跨平台打包、签名与公证。

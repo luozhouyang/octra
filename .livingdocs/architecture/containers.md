@@ -61,7 +61,7 @@ flowchart TB
 
 **Desktop app.** Tauri 2 host + React console. The host holds the control token and exposes one path- and method-allow-listed `daemon_request` command; the webview uses the shared `ControlApiClient`. Browser-only mode uses the same client with a local settings token.
 
-**CLI.** A Rust client over the control API: `status`, `services`, `routes`, `reload`, `doctor`, `keys`, `usage`, and `ai` status/actions plus full CRUD for providers, accounts, models, targets, policies, and attachments. AI bodies accept inline JSON, `-` for stdin, or `@path` for a file. It prints JSON and reads the control token from `OCTRA_CONTROL_TOKEN` or `$OCTRA_HOME/control.token`.
+**CLI.** A Rust client over the control API: `status`, `services`/`routes`/`upstreams`/`targets` CRUD, `reload`, `doctor`, `keys`, `usage`, and `ai` status/actions plus full CRUD for providers, accounts, models, targets, policies, and attachments. Bodies accept inline JSON, `-` for stdin, or `@path` for a file. It prints JSON and reads the control token from `OCTRA_CONTROL_TOKEN` or `$OCTRA_HOME/control.token`.
 
 **Control plane (`:8081`).** Shared Bearer auth, CORS, and audit middleware in front of:
 - `/api/v1/system/*` (health, config, overview, reload),
