@@ -51,7 +51,7 @@ flowchart TB
 | Plugins | `/plugins` | LLM plugins and stage metrics | enable/disable |
 | Settings | `/settings` | control connection, local PII model, local data | PII model on/off/download/cancel/remove/score |
 
-The UI is therefore a **live console plus targeted editors**. AI Control has typed forms for all six AI entity types plus activation/rollback, the API Gateway page has JSON-editor CRUD for services/routes/upstreams/targets, and the MCP page has JSON-editor CRUD for servers/tools/keys/ACLs; consumer policies remain read-only in the desktop app. The Kong-shaped Admin API, the `/api/v1/ai/*` control API, and the CLI cover part of that gap; the CLI exposes `status`, API Gateway services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, `reload`, `doctor`, `keys`, `usage`, and full AI entity CRUD plus activation actions.
+The UI is therefore a **live console plus targeted editors**. AI Control has typed forms for all six AI entity types plus activation/rollback, the API Gateway page has JSON-editor CRUD for services/routes/upstreams/targets, the MCP page has JSON-editor CRUD for servers/tools/keys/ACLs, and the LLM page has JSON-editor consumer-policy CRUD. The Kong-shaped Admin API, the `/api/v1/ai/*` control API, and the CLI cover part of that gap; the CLI exposes `status`, API Gateway services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, consumer-policy CRUD, `reload`, `doctor`, `keys`, `usage`, and full AI entity CRUD plus activation actions.
 
 ## AI control plane
 

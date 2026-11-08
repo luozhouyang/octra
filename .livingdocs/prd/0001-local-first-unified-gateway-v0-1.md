@@ -104,7 +104,7 @@ SQLite is the only persistence engine, with SQLx migrations, WAL, foreign keys, 
 
 Every desktop page reads the live control plane. The desktop has eight pages: Overview, API Gateway, LLM Gateway, MCP Gateway, AI Control, Agents, Plugins, and Settings. The Tauri host holds the control token and exposes one path- and method-allow-listed bridge command; the webview never holds the token in packaged mode.
 
-The CLI exposes `status`, API Gateway services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, `reload`, `doctor`, `keys`, `usage`, and `ai` control-plane commands over the same API.
+The CLI exposes `status`, API Gateway services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, consumer-policy CRUD, `reload`, `doctor`, `keys`, `usage`, and `ai` control-plane commands over the same API.
 
 ### R9 Security boundary
 
@@ -127,7 +127,7 @@ This table is the authoritative progress summary for v0.1. "Implemented" means t
 | R5 Agent integration | Implemented | Three adapters, atomic apply/restore, backups; sandbox end-to-end test covers Claude Code only, not Codex/OpenCode |
 | R6 Plugins | Implemented | Native/WASM, capabilities, storage, events, jobs; event bus lacks delivery/retry/job integration tests; no delivery-lag operational view |
 | R7 Persistence | Implemented | 24 migrations, WAL, retention, `0600`; write-contention benchmark not done |
-| R8 Console/CLI | Partial | Eight live pages: AI Control has typed forms for all six AI entity types, API Gateway and MCP have JSON-editor CRUD for their core entities; consumer policies remain desktop/CLI read-only; CLI covers status, API services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, keys/usage, full AI entity CRUD, and AI activation actions |
+| R8 Console/CLI | Partial | Eight live pages: AI Control has typed forms for all six AI entity types, API Gateway and MCP have JSON-editor CRUD for their core entities, the LLM page has consumer-policy JSON-editor CRUD; CLI covers status, API services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, consumer-policy CRUD, keys/usage, full AI entity CRUD, and AI activation actions |
 | R9 Security | Implemented with accepted exceptions | Secret references, hashed keys, control token boundary, `0600`, masked control responses; OAuth tokens are plaintext in the protected database; browser mode stores a token in settings |
 | R10 Observability/retention | Implemented core | Logs, usage, metrics, events, retention; API metrics are in-memory; no OTLP; no delivery-lag metric |
 
@@ -135,7 +135,7 @@ This table is the authoritative progress summary for v0.1. "Implemented" means t
 
 - `cargo fmt --all --check` passes.
 - `cargo clippy --workspace --exclude octra-desktop --all-targets -- -D warnings` passes.
-- `cargo test --workspace --exclude octra-desktop` passes: 907 passed, 0 failed, 17 ignored.
+- `cargo test --workspace --exclude octra-desktop` passes: 914 passed, 0 failed, 17 ignored.
 - WASM integration tests are ignored by default and require `cargo-component`; `scripts/test-wasm.sh` runs them in CI.
 - `pnpm typecheck`, `pnpm test`, and `pnpm build` pass (5 frontend tests across the shared packages).
 

@@ -128,16 +128,16 @@ shows a sandbox banner, and preview never writes anything.
 - Plugins: native and WASM (API and LLM) plugin runtimes, plugin-owned SQLite storage, config schemas, per-instance metrics and latency percentiles, durable plugin events, scheduled jobs, and shared rate-limit/budget counters.
 - AI-native LLM control plane (Phase 15, AI-native only): `ai_*` schema, `octra-ai-config` compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, per-target model metadata (context, capabilities, pricing), built-in policy execution for every policy type (rate limit, budget guard, PII, model map, param override, system prompt, request audit, think tags, PromptGuard, PromptCompress, SemanticCache), `semantic` target routing over AI-native descriptions with optional OpenAI-compatible embeddings and lexical fallback, provider `config_json.query` parameters and protocol presets (Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Claude, Google, OpenAI-compatible), streaming cache population and SSE replay, AI-native account OAuth with exposed status and desktop controls, request-audit `cache_status` and cache/routing logs, full CRUD CLI with inline/stdin/file JSON bodies, and a desktop AI Control page with typed forms for providers, accounts, models, targets, policies, and attachments. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed without backward compatibility.
 - Agent integration: detects Claude Code, Codex and OpenCode, previews and applies the Octra provider into their native config files, and restores backups atomically.
-- CLI: `status`, `services`/`routes`/`upstreams`/`targets` CRUD, `mcp` servers/tools/keys/ACLs CRUD, `reload`, `doctor`, `keys`, `usage`, and `ai` status/actions plus full CRUD for providers, accounts, models, targets, policies, and attachments.
+- CLI: `status`, `services`/`routes`/`upstreams`/`targets` CRUD, `mcp` servers/tools/keys/ACLs CRUD, `policies` consumer-policy CRUD, `reload`, `doctor`, `keys`, `usage`, and `ai` status/actions plus full CRUD for providers, accounts, models, targets, policies, and attachments.
 - Tauri 2 + React desktop app with a shadcn-style component set and Tailwind CSS v4 design tokens for dark and light modes; AI Control uses typed forms, API Gateway and MCP use JSON-editor CRUD, and every console page reads the local control plane.
 - Dual workspace and CI (Rust fmt/clippy/test; frontend typecheck/test/build).
 
 ## Not yet implemented (tracked on the roadmap)
 
-- Consumer-policy CRUD in the desktop console and CLI. API Gateway
-  services/routes/upstreams/targets and MCP servers/tools/keys/ACLs are
-  editable in the console and CLI; LLM entities are fully managed through AI
-  Control and `octra ai`.
+- Typed forms for API Gateway and MCP entities. JSON-editor CRUD and the CLI
+  already cover services/routes/upstreams/targets, MCP servers/tools/keys/ACLs,
+  and consumer policies; AI Control already uses typed forms for all LLM
+  entities.
 - Event-bus integration tests for delivery, retry/backoff, scheduled jobs, and
   the no-subscriber skip path; the storage retention path is already tested.
 - Additional vendor-specific protocol adapters beyond OpenAI, Anthropic,
