@@ -26,12 +26,15 @@ import type {
   ApiPluginStats,
   ControlConfig,
   CreatedLlmVirtualKey,
+  CreatedMcpApiKey,
   HealthResponse,
   ListResponse,
   LlmPlugin,
   LlmPluginMetrics,
   LlmUsage,
   LlmVirtualKey,
+  McpAcl,
+  McpApiKey,
   McpInvocation,
   McpServer,
   McpSession,
@@ -259,10 +262,40 @@ export class ControlApiClient {
     return this.request<McpServer[]>("/api/v1/mcp/servers", { signal });
   }
 
+  mcpCreateServer(body: unknown): Promise<McpServer> {
+    return this.postJson<McpServer>("/api/v1/mcp/servers", body);
+  }
+
+  mcpUpdateServer(id: string, body: unknown): Promise<McpServer> {
+    return this.putJson<McpServer>(`/api/v1/mcp/servers/${encodeURIComponent(id)}`, body);
+  }
+
+  mcpDeleteServer(id: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/mcp/servers/${encodeURIComponent(id)}`);
+  }
+
+  mcpRefreshServer(id: string): Promise<unknown> {
+    return this.request<unknown>(`/api/v1/mcp/servers/${encodeURIComponent(id)}/refresh`, {
+      method: "POST",
+    });
+  }
+
   mcpTools(serverId?: string, signal?: AbortSignal): Promise<McpTool[]> {
     return this.request<McpTool[]>(`/api/v1/mcp/tools${query({ server_id: serverId })}`, {
       signal,
     });
+  }
+
+  mcpCreateTool(body: unknown): Promise<McpTool> {
+    return this.postJson<McpTool>("/api/v1/mcp/tools", body);
+  }
+
+  mcpUpdateTool(id: string, body: unknown): Promise<McpTool> {
+    return this.putJson<McpTool>(`/api/v1/mcp/tools/${encodeURIComponent(id)}`, body);
+  }
+
+  mcpDeleteTool(id: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/mcp/tools/${encodeURIComponent(id)}`);
   }
 
   mcpInvocations(limit = 100, serverId?: string, signal?: AbortSignal): Promise<McpInvocation[]> {
@@ -274,6 +307,34 @@ export class ControlApiClient {
 
   mcpSessions(signal?: AbortSignal): Promise<McpSession[]> {
     return this.request<McpSession[]>("/api/v1/mcp/sessions", { signal });
+  }
+
+  mcpKeys(signal?: AbortSignal): Promise<McpApiKey[]> {
+    return this.request<McpApiKey[]>("/api/v1/mcp/keys", { signal });
+  }
+
+  mcpCreateKey(body: unknown): Promise<CreatedMcpApiKey> {
+    return this.postJson<CreatedMcpApiKey>("/api/v1/mcp/keys", body);
+  }
+
+  mcpDeleteKey(id: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/mcp/keys/${encodeURIComponent(id)}`);
+  }
+
+  mcpAcls(toolId?: string, signal?: AbortSignal): Promise<McpAcl[]> {
+    return this.request<McpAcl[]>(`/api/v1/mcp/acls${query({ tool_id: toolId })}`, { signal });
+  }
+
+  mcpCreateAcl(body: unknown): Promise<McpAcl> {
+    return this.postJson<McpAcl>("/api/v1/mcp/acls", body);
+  }
+
+  mcpUpdateAcl(id: string, body: unknown): Promise<McpAcl> {
+    return this.putJson<McpAcl>(`/api/v1/mcp/acls/${encodeURIComponent(id)}`, body);
+  }
+
+  mcpDeleteAcl(id: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/mcp/acls/${encodeURIComponent(id)}`);
   }
 
   // ----- Local agents ----------------------------------------------------

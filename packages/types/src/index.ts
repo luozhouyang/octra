@@ -374,6 +374,29 @@ export interface McpInvocation {
   error: string | null;
 }
 
+export interface McpApiKey {
+  id: string;
+  name: string;
+  key_prefix: string;
+  consumer_id: string | null;
+  enabled: boolean;
+  expires_at: string | null;
+  created_at: string;
+}
+
+export interface CreatedMcpApiKey extends McpApiKey {
+  key_value: string;
+}
+
+export interface McpAcl {
+  id: string;
+  tool_id: string;
+  consumer_id: string;
+  allowed: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 // ---------------------------------------------------------------------------
 // Cross-gateway overview
 
