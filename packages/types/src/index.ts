@@ -404,7 +404,8 @@ export interface CreatedMcpApiKey extends McpApiKey {
 export interface McpAcl {
   id: string;
   tool_id: string;
-  consumer_id: string;
+  consumer_id: string | null;
+  consumer_group_id: string | null;
   allowed: boolean;
   created_at: string;
   updated_at: string;

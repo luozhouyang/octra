@@ -374,18 +374,37 @@ function KeyForm({ initial, pending, onSave, onCancel, onDelete }: McpTypedFormP
   );
 }
 
+type AclScope = "consumer" | "group" | "default";
+
 function AclForm({ initial, pending, onSave, onCancel, onDelete, tools }: McpTypedFormProps) {
   const source = asRecord(initial);
   const [toolId, setToolId] = useState(() => readString(source, "tool_id"));
+  const [scope, setScope] = useState<AclScope>(() => {
+    if (readString(source, "consumer_id") !== "") {
+      return "consumer";
+    }
+    if (readString(source, "consumer_group_id") !== "") {
+      return "group";
+    }
+    return "default";
+  });
   const [consumerId, setConsumerId] = useState(() => readString(source, "consumer_id"));
+  const [consumerGroupId, setConsumerGroupId] = useState(() =>
+    readString(source, "consumer_group_id"),
+  );
   const [allowed, setAllowed] = useState(() => readBoolean(source, "allowed", true));
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const editing = readString(source, "id") !== "";
 
   const body: Record<string, unknown> = {
     tool_id: toolId.trim(),
-    consumer_id: consumerId.trim(),
     allowed,
   };
+  if (scope === "consumer") {
+    body.consumer_id = consumerId.trim();
+  } else if (scope === "group") {
+    body.consumer_group_id = consumerGroupId.trim();
+  }
   const advanced = useAdvancedJson(body);
 
   function submit() {
@@ -403,8 +422,11 @@ function AclForm({ initial, pending, onSave, onCancel, onDelete, tools }: McpTyp
     if (toolId.trim() === "") {
       nextErrors.tool_id = "Tool is required.";
     }
-    if (consumerId.trim() === "") {
-      nextErrors.consumer_id = "Consumer id is required.";
+    if (scope === "consumer" && consumerId.trim() === "") {
+      nextErrors.consumer_id = "Consumer id is required for consumer scope.";
+    }
+    if (scope === "group" && consumerGroupId.trim() === "") {
+      nextErrors.consumer_group_id = "Consumer group id is required for group scope.";
     }
     if (Object.keys(nextErrors).length > 0) {
       setErrors(nextErrors);
@@ -436,15 +458,42 @@ function AclForm({ initial, pending, onSave, onCancel, onDelete, tools }: McpTyp
             ))}
           </Select>
         </Field>
-        <Field label="Consumer id" required error={errors.consumer_id}>
-          <Input
-            value={consumerId}
-            onChange={(event) => setConsumerId(event.target.value)}
-            placeholder="consumer-…"
-            className="font-mono text-[11px]"
-            aria-invalid={Boolean(errors.consumer_id)}
-          />
+        <Field
+          label="Scope"
+          hint={editing ? "Scope is fixed after creation; only allowed can change." : undefined}
+        >
+          <Select
+            value={scope}
+            onChange={(value) => setScope(value as AclScope)}
+            disabled={editing}
+          >
+            <option value="consumer">Consumer</option>
+            <option value="group">Consumer group</option>
+            <option value="default">Tool default</option>
+          </Select>
         </Field>
+        {scope === "consumer" ? (
+          <Field label="Consumer id" required error={errors.consumer_id}>
+            <Input
+              value={consumerId}
+              onChange={(event) => setConsumerId(event.target.value)}
+              placeholder="consumer-…"
+              className="font-mono text-[11px]"
+              aria-invalid={Boolean(errors.consumer_id)}
+            />
+          </Field>
+        ) : null}
+        {scope === "group" ? (
+          <Field label="Consumer group id" required error={errors.consumer_group_id}>
+            <Input
+              value={consumerGroupId}
+              onChange={(event) => setConsumerGroupId(event.target.value)}
+              placeholder="group-…"
+              className="font-mono text-[11px]"
+              aria-invalid={Boolean(errors.consumer_group_id)}
+            />
+          </Field>
+        ) : null}
         <Field label="Allowed">
           <div className="flex h-9 items-center gap-2">
             <input
@@ -454,7 +503,7 @@ function AclForm({ initial, pending, onSave, onCancel, onDelete, tools }: McpTyp
               className="h-4 w-4 rounded border-border accent-primary"
             />
             <span className="text-[11px] text-secondary">
-              {allowed ? "Allow this consumer" : "Deny this consumer"}
+              {allowed ? "Allow this scope" : "Deny this scope"}
             </span>
           </div>
         </Field>

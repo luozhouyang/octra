@@ -20,6 +20,8 @@ import {
 import { Info, Pencil, Plus, RefreshCw, Server, Trash2 } from "lucide-react";
 import { useState } from "react";
 
+import type { McpAcl } from "@octra/types";
+
 import { PageHeader } from "../../components/page-header";
 import { StatStrip } from "../../components/stat-strip";
 import { controlClient } from "../../lib/control-api";
@@ -227,6 +229,16 @@ export function McpPage() {
     return tools.find((tool) => tool.id === toolId)?.qualified_name ?? toolId;
   }
 
+  function aclScopeLabel(acl: McpAcl): string {
+    if (acl.consumer_id) {
+      return `consumer ${acl.consumer_id}`;
+    }
+    if (acl.consumer_group_id) {
+      return `group ${acl.consumer_group_id}`;
+    }
+    return "default";
+  }
+
   function entityChoices(kind: McpEntityKind): EntityChoice[] {
     switch (kind) {
       case "server":
@@ -250,7 +262,7 @@ export function McpPage() {
       case "acl":
         return acls.map((acl) => ({
           id: acl.id,
-          label: `${toolLabel(acl.tool_id)} · ${acl.consumer_id} · ${
+          label: `${toolLabel(acl.tool_id)} · ${aclScopeLabel(acl)} · ${
             acl.allowed ? "allow" : "deny"
           } · ${acl.id}`,
           entity: acl,
@@ -764,7 +776,7 @@ function editorHint(kind: McpEntityKind): string {
     case "key":
       return "Keys return plaintext once. Pass consumer_id or consumer_name, not both; expires_at is YYYY-MM-DD.";
     case "acl":
-      return "ACLs need tool_id, consumer_id and allowed. Updates only change allowed.";
+      return "ACLs need tool_id and allowed, plus exactly one of consumer_id or consumer_group_id; omit both for the tool default. Updates only change allowed.";
   }
 }
 
