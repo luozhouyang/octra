@@ -18,13 +18,14 @@ import {
   cn,
 } from "@octra/ui";
 import { Info, Pencil, Plus, RefreshCw, Server, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
 import { StatStrip } from "../../components/stat-strip";
 import { controlClient } from "../../lib/control-api";
 import { formatNumber, formatRelativeTime } from "../../lib/format";
 import { toneBar, toneDot, type Tone } from "../../lib/tone";
+import { McpTypedForm } from "./mcp-forms";
 
 type TransportFilter = "all" | "stdio" | "http";
 type McpEntityKind = "server" | "tool" | "key" | "acl";
@@ -33,6 +34,7 @@ interface McpEditorState {
   kind: McpEntityKind;
   id: string | null;
   title: string;
+  initial: unknown;
 }
 
 interface Notice {
@@ -74,7 +76,7 @@ export function McpPage() {
   const queryClient = useQueryClient();
   const [transport, setTransport] = useState<TransportFilter>("all");
   const [editor, setEditor] = useState<McpEditorState>(() => newEditor("server"));
-  const [text, setText] = useState("{}");
+  const [formNonce, setFormNonce] = useState(0);
   const [notice, setNotice] = useState<Notice | null>(null);
 
   const serversQuery = useQuery({
@@ -158,12 +160,15 @@ export function McpPage() {
       ? serversQuery.error.message
       : "Unable to load MCP servers.";
 
-  const parsed = useMemo(() => parseBody(text), [text]);
-
   function invalidateMcp() {
     for (const key of ["mcp-servers", "mcp-tools", "mcp-keys", "mcp-acls", "mcp-invocations"]) {
       void queryClient.invalidateQueries({ queryKey: [key] });
     }
+  }
+
+  function resetEditor(kind: McpEntityKind) {
+    setEditor(newEditor(kind));
+    setFormNonce((value) => value + 1);
   }
 
   const save = useMutation({
@@ -187,8 +192,7 @@ export function McpPage() {
           error: false,
         });
       }
-      setEditor(newEditor(variables.target.kind));
-      setText("{}");
+      resetEditor(variables.target.kind);
       invalidateMcp();
     },
     onError: (error) => setNotice({ text: errorMessage(error), error: true }),
@@ -199,8 +203,7 @@ export function McpPage() {
     onSuccess: (_result, variables) => {
       setNotice({ text: `${kindLabel(variables.kind)} deleted.`, error: false });
       if (editor.kind === variables.kind && editor.id === variables.id) {
-        setEditor(newEditor(variables.kind));
-        setText("{}");
+        resetEditor(variables.kind);
       }
       invalidateMcp();
     },
@@ -256,8 +259,7 @@ export function McpPage() {
   }
 
   function openCreate(kind: McpEntityKind) {
-    setEditor(newEditor(kind));
-    setText("{}");
+    resetEditor(kind);
     setNotice(null);
     focusEditor();
   }
@@ -271,15 +273,15 @@ export function McpPage() {
       kind,
       id: choice.id,
       title: `Edit ${kindNoun(kind)} ${choice.id}`,
+      initial: choice.entity,
     });
-    setText(JSON.stringify(choice.entity, null, 2));
+    setFormNonce((value) => value + 1);
     setNotice(null);
     focusEditor();
   }
 
   function changeKind(kind: McpEntityKind) {
-    setEditor(newEditor(kind));
-    setText("{}");
+    resetEditor(kind);
     setNotice(null);
   }
 
@@ -289,13 +291,6 @@ export function McpPage() {
       return;
     }
     openEdit(editor.kind, value);
-  }
-
-  function submitEditor() {
-    if (!parsed.body) {
-      return;
-    }
-    save.mutate({ target: editor, body: parsed.body });
   }
 
   function deleteWithConfirm(kind: McpEntityKind, id: string, label: string) {
@@ -317,8 +312,6 @@ export function McpPage() {
       refresh.mutate(editor.id);
     }
   }
-
-  const keyLocked = editor.kind === "key" && editor.id !== null;
 
   const stats = [
     {
@@ -362,7 +355,7 @@ export function McpPage() {
           <div className="flex flex-col gap-1">
             <CardTitle>Manage entity</CardTitle>
             <CardDescription>
-              Create or edit MCP servers, tools, API keys and ACLs as JSON.
+              Create or edit MCP servers, tools, API keys and ACLs with typed forms.
             </CardDescription>
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
@@ -421,35 +414,8 @@ export function McpPage() {
             </p>
           </div>
           <div className="flex min-w-0 flex-col gap-2">
-            <label className="flex flex-col gap-1">
-              <span className="text-[10.5px] text-muted-foreground">{editor.title} (JSON)</span>
-              <textarea
-                value={text}
-                onChange={(event) => setText(event.target.value)}
-                spellCheck={false}
-                rows={10}
-                aria-invalid={parsed.error !== null}
-                className="min-h-[180px] w-full resize-y rounded-lg border border-border bg-surface p-3 font-mono text-[10.5px] leading-relaxed text-secondary outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/40 focus:ring-2 focus:ring-primary/15"
-              />
-            </label>
-            {parsed.error ? <span className="text-[10px] text-danger">{parsed.error}</span> : null}
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                onClick={() => submitEditor()}
-                disabled={busy || parsed.error !== null || keyLocked}
-                title={keyLocked ? "API keys cannot be updated; delete and create a new key." : ""}
-              >
-                {save.isPending ? "Saving…" : "Save"}
-              </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => openCreate(editor.kind)}
-                disabled={busy}
-              >
-                Cancel
-              </Button>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[11px] font-medium text-foreground">{editor.title}</span>
               {editor.kind === "server" && editor.id ? (
                 <Button
                   size="sm"
@@ -461,22 +427,18 @@ export function McpPage() {
                   {refresh.isPending ? "Refreshing…" : "Refresh"}
                 </Button>
               ) : null}
-              <Button
-                size="sm"
-                variant="danger"
-                className="ml-auto"
-                onClick={() => deleteCurrent()}
-                disabled={busy || editor.id === null}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                {remove.isPending ? "Deleting…" : "Delete"}
-              </Button>
             </div>
-            {keyLocked ? (
-              <span className="text-[10px] text-muted-foreground">
-                Keys are immutable. Delete this key and create a new one to rotate it.
-              </span>
-            ) : null}
+            <McpTypedForm
+              key={`${editor.kind}-${editor.id ?? "new"}-${formNonce}`}
+              kind={editor.kind}
+              initial={editor.initial}
+              servers={servers}
+              tools={tools}
+              pending={busy}
+              onSave={(body) => save.mutate({ target: editor, body })}
+              onCancel={() => openCreate(editor.kind)}
+              onDelete={editor.id ? () => deleteCurrent() : undefined}
+            />
             {notice ? (
               <span
                 className={cn(
@@ -759,6 +721,7 @@ function newEditor(kind: McpEntityKind): McpEditorState {
     kind,
     id: null,
     title: `New ${kindNoun(kind)}`,
+    initial: {},
   };
 }
 
@@ -831,26 +794,6 @@ function deleteMcpEntity(kind: McpEntityKind, id: string): Promise<void> {
     case "acl":
       return client.mcpDeleteAcl(id);
   }
-}
-
-function parseBody(text: string): { body: Record<string, unknown> | null; error: string | null } {
-  const trimmed = text.trim();
-  if (trimmed === "") {
-    return { body: null, error: "Body is required." };
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(trimmed);
-  } catch (error) {
-    return {
-      body: null,
-      error: `Invalid JSON: ${error instanceof Error ? error.message : "unable to parse"}`,
-    };
-  }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return { body: null, error: "Body must be a JSON object." };
-  }
-  return { body: value as Record<string, unknown>, error: null };
 }
 
 function createdKeyValue(result: unknown): string | null {

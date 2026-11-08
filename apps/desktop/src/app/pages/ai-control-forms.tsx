@@ -12,9 +12,10 @@ import type {
   AiProviderInput,
 } from "@octra/types";
 import { Badge, Button, Input, Switch } from "@octra/ui";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { useRef, useState, type FormEvent, type ReactNode } from "react";
 
-import { controlClient } from "../../lib/control-api";
+import { controlClient, isTauri } from "../../lib/control-api";
 
 const MODEL_KINDS: ReadonlyArray<{ value: AiModelKind; label: string }> = [
   { value: "model", label: "Model" },
@@ -425,6 +426,10 @@ export function AccountForm({
   const [oauthCode, setOauthCode] = useState("");
   const [oauthAction, setOauthAction] = useState<string | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
+  const [oauthNotice, setOauthNotice] = useState<string | null>(null);
+  const [oauthWaiting, setOauthWaiting] = useState(false);
+  const oauthListenerId = useRef(0);
+  const oauthCompleting = useRef(false);
   const oauthBusy = oauthAction !== null;
   const showOAuth = accountId !== "";
 
@@ -466,6 +471,57 @@ export function AccountForm({
     setOauthExpiresAt(next.oauth_expires_at);
   }
 
+  function resetOAuthFlowState() {
+    oauthListenerId.current += 1;
+    oauthCompleting.current = false;
+    setOauthFlow(null);
+    setOauthCode("");
+    setOauthWaiting(false);
+    setOauthNotice(null);
+  }
+
+  async function waitForOAuthCallback(targetAccountId: string, flow: AiOAuthFlow) {
+    oauthListenerId.current += 1;
+    const listenerId = oauthListenerId.current;
+    setOauthWaiting(true);
+    setOauthNotice(null);
+    try {
+      const callback = await invoke<{ code: string; state: string }>("oauth_wait_callback", {
+        redirectUri: flow.redirect_uri,
+        state: flow.state,
+        timeoutSecs: 180,
+      });
+      if (oauthListenerId.current !== listenerId || oauthCompleting.current) {
+        return;
+      }
+      oauthCompleting.current = true;
+      const next = await controlClient().aiAccountOAuthComplete(targetAccountId, {
+        code: callback.code,
+        state: callback.state,
+      });
+      if (oauthListenerId.current !== listenerId) {
+        return;
+      }
+      applyOAuthStatus(next);
+      resetOAuthFlowState();
+      onOAuthChanged?.();
+    } catch (error) {
+      if (oauthListenerId.current !== listenerId) {
+        return;
+      }
+      if (oauthCompleting.current) {
+        oauthCompleting.current = false;
+        setOauthError(oauthErrorMessage(error));
+      } else {
+        setOauthNotice(oauthCallbackNotice(error));
+      }
+    } finally {
+      if (oauthListenerId.current === listenerId) {
+        setOauthWaiting(false);
+      }
+    }
+  }
+
   async function startOAuth() {
     if (!accountId || oauthBusy) {
       return;
@@ -474,12 +530,19 @@ export function AccountForm({
     setOauthError(null);
     try {
       const flow = await controlClient().aiAccountOAuthStart(accountId);
+      oauthListenerId.current += 1;
+      oauthCompleting.current = false;
       setOauthFlow(flow);
       setOauthCode("");
+      setOauthNotice(null);
+      setOauthWaiting(false);
       try {
         window.open(flow.authorize_url, "_blank", "noopener,noreferrer");
       } catch {
         // The authorize URL stays visible for manual copy when the popup is blocked.
+      }
+      if (isTauri() && isLoopbackRedirect(flow.redirect_uri)) {
+        void waitForOAuthCallback(accountId, flow);
       }
     } catch (error) {
       setOauthError(oauthErrorMessage(error));
@@ -497,6 +560,10 @@ export function AccountForm({
       setOauthError("Authorization code is required.");
       return;
     }
+    if (oauthCompleting.current) {
+      return;
+    }
+    oauthCompleting.current = true;
     setOauthAction("complete");
     setOauthError(null);
     try {
@@ -505,10 +572,10 @@ export function AccountForm({
         state: oauthFlow.state,
       });
       applyOAuthStatus(next);
-      setOauthFlow(null);
-      setOauthCode("");
+      resetOAuthFlowState();
       onOAuthChanged?.();
     } catch (error) {
+      oauthCompleting.current = false;
       setOauthError(oauthErrorMessage(error));
     } finally {
       setOauthAction(null);
@@ -542,8 +609,7 @@ export function AccountForm({
       await controlClient().aiAccountOAuthClear(accountId);
       setOauthStatus("none");
       setOauthExpiresAt(null);
-      setOauthFlow(null);
-      setOauthCode("");
+      resetOAuthFlowState();
       onOAuthChanged?.();
     } catch (error) {
       setOauthError(oauthErrorMessage(error));
@@ -703,6 +769,15 @@ export function AccountForm({
               </Button>
             </div>
           </div>
+          {oauthWaiting ? (
+            <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              <span
+                className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary"
+                aria-hidden="true"
+              />
+              Waiting for authorization…
+            </span>
+          ) : null}
           {oauthFlow ? (
             <div className="flex flex-col gap-2">
               <span className="text-[10px] text-muted-foreground">
@@ -716,7 +791,14 @@ export function AccountForm({
               />
               <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
                 <div className="min-w-0 flex-1">
-                  <Field label="Authorization code">
+                  <Field
+                    label="Authorization code"
+                    hint={
+                      oauthWaiting
+                        ? "Automatic callback is listening; you can still paste the code manually."
+                        : undefined
+                    }
+                  >
                     <Input
                       value={oauthCode}
                       onChange={(event) => setOauthCode(event.target.value)}
@@ -737,6 +819,9 @@ export function AccountForm({
             </div>
           ) : null}
           {oauthError ? <span className="text-[10px] text-danger">{oauthError}</span> : null}
+          {oauthNotice ? (
+            <span className="text-[10px] text-muted-foreground">{oauthNotice}</span>
+          ) : null}
         </div>
       ) : null}
     </TypedFormShell>
@@ -1387,6 +1472,30 @@ function oauthStatusLabel(status: string): string {
 
 function oauthErrorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : "OAuth request failed.";
+}
+
+function oauthCallbackNotice(error: unknown): string {
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error.trim() : "";
+  const detail = message === "" ? "" : ` (${message})`;
+  return `Automatic callback unavailable${detail}. Paste the authorization code manually.`;
+}
+
+function isLoopbackRedirect(redirectUri: string): boolean {
+  try {
+    const url = new URL(redirectUri);
+    if (url.protocol !== "http:" || url.port === "") {
+      return false;
+    }
+    return (
+      url.hostname === "127.0.0.1" ||
+      url.hostname === "localhost" ||
+      url.hostname === "[::1]" ||
+      url.hostname === "::1"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function parseJsonText(text: string, field: string, errors: Record<string, string>): unknown {

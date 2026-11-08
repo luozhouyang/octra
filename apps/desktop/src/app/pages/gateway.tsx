@@ -19,22 +19,23 @@ import {
   cn,
 } from "@octra/ui";
 import { Pencil, Plus, Search, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
 import { StatStrip, type StatItem } from "../../components/stat-strip";
 import { controlClient } from "../../lib/control-api";
 import { formatNumber } from "../../lib/format";
 import { toneDot, toneText } from "../../lib/tone";
+import { GatewayTypedForm, type GatewayEntityKind } from "./gateway-forms";
 
 type StatusFilter = "all" | "enabled" | "disabled";
-type GatewayEntityKind = "service" | "route" | "upstream" | "target";
 
 interface GatewayEditorState {
   kind: GatewayEntityKind;
   id: string | null;
   title: string;
   initial: unknown;
+  revision: number;
 }
 
 interface Notice {
@@ -60,7 +61,6 @@ export function GatewayPage() {
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [query, setQuery] = useState("");
   const [editor, setEditor] = useState<GatewayEditorState>(() => newEditor("service"));
-  const [text, setText] = useState("{}");
   const [notice, setNotice] = useState<Notice | null>(null);
 
   const servicesQuery = useQuery({
@@ -147,8 +147,6 @@ export function GatewayPage() {
     return matchesStatus && matchesQuery;
   });
 
-  const parsed = useMemo(() => parseBody(text), [text]);
-
   function invalidateGateway() {
     for (const key of [
       "api-services",
@@ -169,8 +167,7 @@ export function GatewayPage() {
         text: `${kindLabel(variables.target.kind)} ${variables.target.id ? "updated" : "created"}.`,
         error: false,
       });
-      setEditor(newEditor(variables.target.kind));
-      setText("{}");
+      setEditor((current) => newEditor(variables.target.kind, current.revision + 1));
       invalidateGateway();
     },
     onError: (error) => setNotice({ text: errorMessage(error), error: true }),
@@ -182,8 +179,7 @@ export function GatewayPage() {
     onSuccess: (_result, variables) => {
       setNotice({ text: `${kindLabel(variables.kind)} deleted.`, error: false });
       if (editor.kind === variables.kind && editor.id === variables.id) {
-        setEditor(newEditor(variables.kind));
-        setText("{}");
+        setEditor((current) => newEditor(variables.kind, current.revision + 1));
       }
       invalidateGateway();
     },
@@ -224,8 +220,7 @@ export function GatewayPage() {
   }
 
   function openCreate(kind: GatewayEntityKind) {
-    setEditor(newEditor(kind));
-    setText("{}");
+    setEditor((current) => newEditor(kind, current.revision + 1));
     setNotice(null);
     focusEditor();
   }
@@ -236,20 +231,19 @@ export function GatewayPage() {
       return;
     }
     const initial = editableEntity(kind, choice.entity);
-    setEditor({
+    setEditor((current) => ({
       kind,
       id: choice.id,
       title: `Edit ${kindLabel(kind).toLowerCase()} ${choice.id}`,
       initial,
-    });
-    setText(JSON.stringify(initial, null, 2));
+      revision: current.revision + 1,
+    }));
     setNotice(null);
     focusEditor();
   }
 
   function changeKind(kind: GatewayEntityKind) {
-    setEditor(newEditor(kind));
-    setText("{}");
+    setEditor((current) => newEditor(kind, current.revision + 1));
     setNotice(null);
   }
 
@@ -259,13 +253,6 @@ export function GatewayPage() {
       return;
     }
     openEdit(editor.kind, value);
-  }
-
-  function submitEditor() {
-    if (!parsed.body) {
-      return;
-    }
-    save.mutate({ target: editor, body: parsed.body });
   }
 
   function deleteWithConfirm(kind: GatewayEntityKind, id: string, label: string) {
@@ -299,8 +286,8 @@ export function GatewayPage() {
           <div className="flex flex-col gap-1">
             <CardTitle>Manage entity</CardTitle>
             <CardDescription>
-              Create or edit services, routes, upstreams and targets as JSON. Writes reload the data
-              plane.
+              Create or edit services, routes, upstreams and targets with typed forms. Writes reload
+              the data plane.
             </CardDescription>
           </div>
           <Badge variant={editor.id ? "accent" : "neutral"}>{editor.id ? "editing" : "new"}</Badge>
@@ -342,50 +329,23 @@ export function GatewayPage() {
             </label>
             <p className="text-[9.5px] leading-relaxed text-muted-foreground">
               {editor.kind === "target"
-                ? "Editing prefills the API entity, including upstream_id. New targets must supply upstream_id in the JSON body."
-                : "Saving sends the JSON body to the Admin API and reloads the data plane."}
+                ? "Editing prefills the API entity, including upstream_id. New targets must select an upstream in the form."
+                : "Saving sends the typed entity to the Admin API and reloads the data plane. Headers and health checks stay under Advanced JSON."}
             </p>
           </div>
           <div className="flex min-w-0 flex-col gap-2">
-            <label className="flex flex-col gap-1">
-              <span className="text-[10.5px] text-muted-foreground">{editor.title} (JSON)</span>
-              <textarea
-                value={text}
-                onChange={(event) => setText(event.target.value)}
-                spellCheck={false}
-                rows={10}
-                aria-invalid={parsed.error !== null}
-                className="min-h-[180px] w-full resize-y rounded-lg border border-border bg-surface p-3 font-mono text-[10.5px] leading-relaxed text-secondary outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/40 focus:ring-2 focus:ring-primary/15"
-              />
-            </label>
-            {parsed.error ? <span className="text-[10px] text-danger">{parsed.error}</span> : null}
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                onClick={() => submitEditor()}
-                disabled={busy || parsed.error !== null}
-              >
-                {save.isPending ? "Saving…" : "Save"}
-              </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => openCreate(editor.kind)}
-                disabled={busy}
-              >
-                Cancel
-              </Button>
-              <Button
-                size="sm"
-                variant="danger"
-                className="ml-auto"
-                onClick={() => deleteCurrent()}
-                disabled={busy || editor.id === null}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                {remove.isPending ? "Deleting…" : "Delete"}
-              </Button>
-            </div>
+            <span className="text-[10.5px] text-muted-foreground">{editor.title}</span>
+            <GatewayTypedForm
+              key={`${editor.kind}:${editor.id ?? "new"}:${editor.revision}`}
+              kind={editor.kind}
+              initial={editor.initial}
+              services={services}
+              upstreams={upstreams}
+              pending={busy}
+              onSave={(body) => save.mutate({ target: editor, body })}
+              onCancel={() => openCreate(editor.kind)}
+              onDelete={editor.id ? deleteCurrent : undefined}
+            />
             {notice ? (
               <span
                 className={cn("text-[10.5px]", notice.error ? "text-danger" : "text-secondary")}
@@ -639,12 +599,13 @@ export function GatewayPage() {
   );
 }
 
-function newEditor(kind: GatewayEntityKind): GatewayEditorState {
+function newEditor(kind: GatewayEntityKind, revision = 0): GatewayEditorState {
   return {
     kind,
     id: null,
     title: `New ${kindLabel(kind).toLowerCase()}`,
     initial: {},
+    revision,
   };
 }
 
@@ -719,26 +680,6 @@ function deleteGatewayEntity(kind: GatewayEntityKind, id: string): Promise<void>
     case "target":
       return client.apiDeleteTarget(id);
   }
-}
-
-function parseBody(text: string): { body: Record<string, unknown> | null; error: string | null } {
-  const trimmed = text.trim();
-  if (trimmed === "") {
-    return { body: null, error: "Body is required." };
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(trimmed);
-  } catch (error) {
-    return {
-      body: null,
-      error: `Invalid JSON: ${error instanceof Error ? error.message : "unable to parse"}`,
-    };
-  }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return { body: null, error: "Body must be a JSON object." };
-  }
-  return { body: value as Record<string, unknown>, error: null };
 }
 
 function focusEditor() {
