@@ -383,3 +383,443 @@ fn retry_delay(attempts: i64) -> i64 {
     let exponent = u32::try_from(attempts.clamp(1, 10)).unwrap_or(10);
     (5i64.saturating_mul(1i64 << exponent)).min(3600)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use octra_api_plugin_types::{EventSubscriber, PluginError};
+
+    use super::*;
+
+    struct FakeSource {
+        subscribers: Vec<Arc<dyn EventSubscriber>>,
+        jobs: Vec<Arc<dyn ScheduledJob>>,
+    }
+
+    impl PluginServiceSource for FakeSource {
+        fn subscribers(&self) -> Vec<Arc<dyn EventSubscriber>> {
+            self.subscribers.clone()
+        }
+
+        fn jobs(&self) -> Vec<Arc<dyn ScheduledJob>> {
+            self.jobs.clone()
+        }
+    }
+
+    struct FakeSubscriber {
+        id: String,
+        plugin_name: String,
+        instance_id: String,
+        topics: Vec<String>,
+        remaining_failures: AtomicUsize,
+        calls: AtomicUsize,
+        seen: Mutex<Vec<GatewayEvent>>,
+    }
+
+    impl FakeSubscriber {
+        fn new(id: &str, topics: &[&str], failures: usize) -> Self {
+            Self {
+                id: id.to_string(),
+                plugin_name: "test-plugin".to_string(),
+                instance_id: "test-instance".to_string(),
+                topics: topics.iter().map(|topic| (*topic).to_string()).collect(),
+                remaining_failures: AtomicUsize::new(failures),
+                calls: AtomicUsize::new(0),
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn seen(&self) -> Vec<GatewayEvent> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl EventSubscriber for FakeSubscriber {
+        fn subscriber_id(&self) -> &str {
+            &self.id
+        }
+
+        fn plugin_name(&self) -> &str {
+            &self.plugin_name
+        }
+
+        fn instance_id(&self) -> &str {
+            &self.instance_id
+        }
+
+        fn topics(&self) -> &[String] {
+            &self.topics
+        }
+
+        async fn deliver(&self, event: &GatewayEvent) -> std::result::Result<(), PluginError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen.lock().unwrap().push(event.clone());
+            let failed = self
+                .remaining_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok();
+            if failed {
+                return Err(PluginError::fail_open("subscriber delivery failed"));
+            }
+            Ok(())
+        }
+    }
+
+    enum JobBehavior {
+        Succeed,
+        Fail,
+        Sleep(Duration),
+    }
+
+    struct FakeJob {
+        id: String,
+        plugin_name: String,
+        instance_id: String,
+        job_name: String,
+        schedule: String,
+        timeout: Duration,
+        behavior: JobBehavior,
+        runs: AtomicUsize,
+    }
+
+    impl FakeJob {
+        fn new(id: &str, schedule: &str, timeout: Duration, behavior: JobBehavior) -> Self {
+            Self {
+                id: id.to_string(),
+                plugin_name: "test-plugin".to_string(),
+                instance_id: "test-instance".to_string(),
+                job_name: "test-job".to_string(),
+                schedule: schedule.to_string(),
+                timeout,
+                behavior,
+                runs: AtomicUsize::new(0),
+            }
+        }
+
+        fn runs(&self) -> usize {
+            self.runs.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ScheduledJob for FakeJob {
+        fn job_id(&self) -> &str {
+            &self.id
+        }
+
+        fn plugin_name(&self) -> &str {
+            &self.plugin_name
+        }
+
+        fn instance_id(&self) -> &str {
+            &self.instance_id
+        }
+
+        fn job_name(&self) -> &str {
+            &self.job_name
+        }
+
+        fn schedule(&self) -> &str {
+            &self.schedule
+        }
+
+        fn timeout(&self) -> Duration {
+            self.timeout
+        }
+
+        async fn run(&self, _job: &JobInvocation) -> std::result::Result<(), PluginError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            match self.behavior {
+                JobBehavior::Succeed => Ok(()),
+                JobBehavior::Fail => Err(PluginError::fail_open("boom")),
+                JobBehavior::Sleep(duration) => {
+                    tokio::time::sleep(duration).await;
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    async fn in_memory_storage() -> Arc<Storage> {
+        Arc::new(Storage::connect_in_memory().await.unwrap())
+    }
+
+    fn test_bus(
+        storage: &Arc<Storage>,
+        subscribers: Vec<Arc<dyn EventSubscriber>>,
+        jobs: Vec<Arc<dyn ScheduledJob>>,
+    ) -> EventBus {
+        EventBus::new(storage.clone(), Arc::new(FakeSource { subscribers, jobs }))
+    }
+
+    #[tokio::test]
+    async fn delivers_events_to_matching_subscribers() {
+        let storage = in_memory_storage().await;
+        let subscriber = Arc::new(FakeSubscriber::new("sub-1", &["gateway.*"], 0));
+        let bus = test_bus(
+            &storage,
+            vec![subscriber.clone() as Arc<dyn EventSubscriber>],
+            Vec::new(),
+        );
+
+        let event = bus
+            .publish_now(
+                "gateway.request",
+                "test",
+                serde_json::json!({"request_id": "req-1"}),
+            )
+            .await
+            .unwrap();
+        bus.dispatch_events().await;
+
+        let seen = subscriber.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].id, event.id);
+        assert_eq!(seen[0].topic, "gateway.request");
+
+        let stored = storage.get_event(&event.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "completed");
+
+        let deliveries = storage.list_event_deliveries(&event.id).await.unwrap();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].status, "delivered");
+        assert_eq!(deliveries[0].attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn skips_unsubscribed_topics_at_publish_time() {
+        let storage = in_memory_storage().await;
+        let subscriber = Arc::new(FakeSubscriber::new("sub-1", &["gateway.*"], 0));
+        let bus = test_bus(
+            &storage,
+            vec![subscriber.clone() as Arc<dyn EventSubscriber>],
+            Vec::new(),
+        );
+
+        bus.publish("other.topic", "test", serde_json::json!({}));
+        assert!(storage.list_events(10, None).await.unwrap().is_empty());
+
+        let event = bus
+            .publish_now("other.topic", "test", serde_json::json!({}))
+            .await
+            .unwrap();
+        bus.dispatch_events().await;
+
+        let stored = storage.get_event(&event.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "completed");
+        assert!(
+            storage
+                .list_event_deliveries(&event.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(subscriber.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn retries_with_backoff_then_succeeds() {
+        let storage = in_memory_storage().await;
+        let subscriber = Arc::new(FakeSubscriber::new("sub-1", &["gateway.*"], 1));
+        let bus = test_bus(
+            &storage,
+            vec![subscriber.clone() as Arc<dyn EventSubscriber>],
+            Vec::new(),
+        );
+        let event = bus
+            .publish_now("gateway.request", "test", serde_json::json!({}))
+            .await
+            .unwrap();
+        let now = Utc::now().timestamp();
+
+        bus.dispatch_one(&event, now).await.unwrap();
+
+        let pending = storage.get_event(&event.id).await.unwrap().unwrap();
+        assert_eq!(pending.status, "pending");
+        assert!(pending.next_attempt_at > now);
+        let deliveries = storage.list_event_deliveries(&event.id).await.unwrap();
+        assert_eq!(deliveries[0].status, "pending");
+        assert_eq!(deliveries[0].attempts, 1);
+        assert!(deliveries[0].last_error.is_some());
+        assert_eq!(subscriber.calls(), 1);
+
+        bus.dispatch_one(&pending, now + 60).await.unwrap();
+
+        let completed = storage.get_event(&event.id).await.unwrap().unwrap();
+        assert_eq!(completed.status, "completed");
+        let deliveries = storage.list_event_deliveries(&event.id).await.unwrap();
+        assert_eq!(deliveries[0].status, "delivered");
+        assert_eq!(deliveries[0].attempts, 2);
+        assert_eq!(subscriber.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn fails_after_max_attempts() {
+        let storage = in_memory_storage().await;
+        let subscriber = Arc::new(FakeSubscriber::new("sub-1", &["gateway.*"], usize::MAX));
+        let bus = test_bus(
+            &storage,
+            vec![subscriber.clone() as Arc<dyn EventSubscriber>],
+            Vec::new(),
+        );
+        let event = bus
+            .publish_now("gateway.request", "test", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(event.max_attempts, 5);
+
+        let mut now = Utc::now().timestamp();
+        for attempt in 1..=event.max_attempts {
+            let current = storage.get_event(&event.id).await.unwrap().unwrap();
+            bus.dispatch_one(&current, now).await.unwrap();
+
+            let deliveries = storage.list_event_deliveries(&event.id).await.unwrap();
+            assert_eq!(deliveries[0].attempts, attempt);
+            now += 1_000;
+        }
+
+        let failed = storage.get_event(&event.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, "failed");
+        assert!(
+            failed
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("subscriber delivery failed"))
+        );
+
+        let deliveries = storage.list_event_deliveries(&event.id).await.unwrap();
+        assert_eq!(deliveries[0].status, "failed");
+        assert_eq!(deliveries[0].attempts, event.max_attempts);
+        assert!(deliveries[0].last_error.is_some());
+        assert_eq!(subscriber.calls(), event.max_attempts as usize);
+    }
+
+    #[tokio::test]
+    async fn runs_a_scheduled_job_after_trigger() {
+        let storage = in_memory_storage().await;
+        let job = Arc::new(FakeJob::new(
+            "plugin#instance#job",
+            "* * * * * *",
+            Duration::from_secs(30),
+            JobBehavior::Succeed,
+        ));
+        let bus = test_bus(
+            &storage,
+            Vec::new(),
+            vec![job.clone() as Arc<dyn ScheduledJob>],
+        );
+
+        bus.sync_and_run_jobs().await;
+        assert_eq!(job.runs(), 0);
+
+        assert!(bus.trigger_job("plugin#instance#job").await.unwrap());
+        bus.sync_and_run_jobs().await;
+        assert_eq!(job.runs(), 1);
+
+        let record = storage
+            .get_job("plugin#instance#job")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.last_status.as_deref(), Some("success"));
+        assert_eq!(record.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn records_job_error() {
+        let storage = in_memory_storage().await;
+        let job = Arc::new(FakeJob::new(
+            "plugin#instance#failing",
+            "* * * * * *",
+            Duration::from_secs(30),
+            JobBehavior::Fail,
+        ));
+        let bus = test_bus(
+            &storage,
+            Vec::new(),
+            vec![job.clone() as Arc<dyn ScheduledJob>],
+        );
+
+        bus.sync_and_run_jobs().await;
+        assert!(bus.trigger_job("plugin#instance#failing").await.unwrap());
+        bus.sync_and_run_jobs().await;
+
+        let record = storage
+            .get_job("plugin#instance#failing")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.last_status.as_deref(), Some("error"));
+        assert!(
+            record
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("boom"))
+        );
+        assert_eq!(job.runs(), 1);
+    }
+
+    #[tokio::test]
+    async fn records_job_timeout() {
+        let storage = in_memory_storage().await;
+        let job = Arc::new(FakeJob::new(
+            "plugin#instance#slow",
+            "* * * * * *",
+            Duration::from_millis(50),
+            JobBehavior::Sleep(Duration::from_millis(200)),
+        ));
+        let bus = test_bus(
+            &storage,
+            Vec::new(),
+            vec![job.clone() as Arc<dyn ScheduledJob>],
+        );
+
+        bus.sync_and_run_jobs().await;
+        assert!(bus.trigger_job("plugin#instance#slow").await.unwrap());
+        bus.sync_and_run_jobs().await;
+
+        let record = storage
+            .get_job("plugin#instance#slow")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.last_status.as_deref(), Some("timeout"));
+        assert!(
+            record
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("timed out"))
+        );
+        assert_eq!(job.runs(), 1);
+    }
+
+    #[test]
+    fn retry_delay_is_exponential_and_capped() {
+        let mut previous = 0;
+        for attempts in 1..=10 {
+            let delay = retry_delay(attempts);
+            assert!(
+                delay >= previous,
+                "retry delay decreased at attempt {attempts}"
+            );
+            assert!(
+                delay <= 3600,
+                "retry delay exceeded cap at attempt {attempts}"
+            );
+            previous = delay;
+        }
+        assert_eq!(retry_delay(1), 10);
+        assert_eq!(retry_delay(9), 2560);
+        assert_eq!(retry_delay(10), 3600);
+        assert_eq!(retry_delay(20), 3600);
+    }
+}
