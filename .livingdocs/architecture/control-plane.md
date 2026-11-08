@@ -43,7 +43,7 @@ flowchart TB
 | Page | Route | Data | Mutations |
 |---|---|---|---|
 | Overview | `/` | health, overview range, config, traffic chart | reload snapshot |
-| API Gateway | `/gateway` | services, routes, upstreams, targets, metrics | none |
+| API Gateway | `/gateway` | services, routes, upstreams, targets, metrics | JSON-editor CRUD for services/routes/upstreams/targets |
 | LLM Gateway | `/llm` | usage, providers | none |
 | AI Control | `/ai-control` | AI status, providers, accounts, models, targets, policies, attachments, revisions | typed forms for all six entity types, OAuth start/complete/refresh/clear, validate, apply, rollback |
 | Agents | `/agents` | agents, mode, profiles, routes, virtual keys, backups | create/update/delete profile, preview, apply, restore |
@@ -51,7 +51,7 @@ flowchart TB
 | Plugins | `/plugins` | LLM plugins and stage metrics | enable/disable |
 | Settings | `/settings` | control connection, local PII model, local data | PII model on/off/download/cancel/remove/score |
 
-The UI is therefore a **live console**. AI Control has typed forms for all six AI entity types plus activation/rollback; the API and MCP entities and consumer policies remain read-only in the desktop app. The Kong-shaped Admin API, the `/api/v1/ai/*` control API, and the CLI cover part of that gap; the CLI exposes `status`, API Gateway services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, `reload`, `doctor`, `keys`, `usage`, and full AI entity CRUD plus activation actions.
+The UI is therefore a **live console plus targeted editors**. AI Control has typed forms for all six AI entity types plus activation/rollback, and the API Gateway page has JSON-editor CRUD for services/routes/upstreams/targets; MCP entities and consumer policies remain read-only in the desktop app. The Kong-shaped Admin API, the `/api/v1/ai/*` control API, and the CLI cover part of that gap; the CLI exposes `status`, API Gateway services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, `reload`, `doctor`, `keys`, `usage`, and full AI entity CRUD plus activation actions.
 
 ## AI control plane
 
