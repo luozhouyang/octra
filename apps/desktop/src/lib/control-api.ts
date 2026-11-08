@@ -70,6 +70,9 @@ export interface DaemonLifecycleStatus {
   control_url: string;
   healthy: boolean;
   error: string | null;
+  version: string | null;
+  expected_version: string;
+  version_compatible: boolean;
 }
 
 export function fetchDaemonStatus(): Promise<DaemonLifecycleStatus> {

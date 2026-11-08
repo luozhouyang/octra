@@ -425,6 +425,9 @@ export function SettingsPage() {
                         ? "Unhealthy"
                         : "No health"}
                   </Badge>
+                  {daemonStatus && !daemonStatus.version_compatible ? (
+                    <Badge variant="warning">Version mismatch</Badge>
+                  ) : null}
                 </div>
               ) : (
                 <Badge variant="neutral">Browser</Badge>
@@ -441,11 +444,21 @@ export function SettingsPage() {
                   <DaemonField label="Binary" value={daemonStatus?.binary ?? "Not found"} />
                   <DaemonField label="Control URL" value={daemonControlUrl} />
                   <DaemonField label="Log" value="$OCTRA_HOME/daemon.log" />
+                  <DaemonField
+                    label="Daemon version"
+                    value={daemonStatus?.version ?? "Not reported"}
+                  />
+                  <DaemonField
+                    label="Desktop version"
+                    value={daemonStatus?.expected_version ?? "Not reported"}
+                  />
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <Button
                     size="sm"
-                    disabled={daemonBusy || daemonStatus?.running}
+                    disabled={
+                      daemonBusy || (daemonStatus?.running && daemonStatus.version_compatible)
+                    }
                     onClick={() => daemonAction.mutate("start")}
                   >
                     <Play className="h-3 w-3" />

@@ -21,6 +21,9 @@ const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const START_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const LOG_TAIL_BYTES: u64 = 4 * 1024;
+const MAX_HEALTH_RESPONSE_BYTES: usize = 64 * 1024;
+const MISSING_VERSION_NOTE: &str =
+    "the daemon did not report its version in the health response; treating it as compatible";
 
 /// Resolved state of the daemon from the desktop host's point of view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -31,6 +34,21 @@ pub struct DaemonStatus {
     pub control_url: String,
     pub healthy: bool,
     pub error: Option<String>,
+    /// Daemon-reported version from /api/v1/system/health, when reachable.
+    pub version: Option<String>,
+    /// Desktop/host expected version.
+    pub expected_version: String,
+    /// Same major.minor, or no daemon version available.
+    pub version_compatible: bool,
+}
+
+/// Health probe result including the optional version reported by the daemon.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct HealthProbe {
+    healthy: bool,
+    version: Option<String>,
+    /// Non-fatal note about the probe, such as a missing version field.
+    note: Option<String>,
 }
 
 /// Owns the daemon child process and knows where its local files live.
@@ -38,6 +56,7 @@ pub struct DaemonManager {
     home: PathBuf,
     control_bind: String,
     binary: Option<PathBuf>,
+    expected_version: String,
     child: Option<Child>,
 }
 
@@ -51,6 +70,7 @@ impl DaemonManager {
             home,
             control_bind,
             binary: discover_binary(),
+            expected_version: env!("CARGO_PKG_VERSION").to_string(),
             child: None,
         }
     }
@@ -64,22 +84,42 @@ impl DaemonManager {
             home,
             control_bind,
             binary: Some(binary),
+            expected_version: env!("CARGO_PKG_VERSION").to_string(),
             child: None,
         }
+    }
+
+    /// Overrides the desktop version used for compatibility checks in tests.
+    pub fn with_expected_version(mut self, expected_version: impl Into<String>) -> Self {
+        self.expected_version = expected_version.into();
+        self
     }
 
     /// Reports the current child state and performs one short health probe.
     pub fn status(&mut self) -> DaemonStatus {
         let error = self.reap_child();
-        let healthy = self.probe_health();
-        self.snapshot(healthy, error)
+        let probe = self.probe_health();
+        self.snapshot(probe, error)
     }
 
     /// Starts a daemon child unless an instance is already healthy.
     pub async fn start(&mut self) -> Result<DaemonStatus, String> {
         let _ = self.reap_child();
-        if self.probe_health_async().await {
-            return Ok(self.snapshot(true, None));
+        let probe = self.probe_health_async().await;
+        if probe.healthy {
+            if let Some(error) = self.version_mismatch(&probe) {
+                if self.child.is_some() {
+                    self.terminate_owned_child().await?;
+                    return Err(format!(
+                        "{error}; the incompatible daemon child was stopped"
+                    ));
+                }
+                return Err(format!(
+                    "{error}; the daemon at {} was started outside this app, stop it before starting a compatible one",
+                    self.control_url()
+                ));
+            }
+            return Ok(self.snapshot(probe, None));
         }
         if self.child.is_some() {
             return self.wait_for_health().await;
@@ -130,18 +170,19 @@ impl DaemonManager {
     pub async fn stop(&mut self) -> Result<DaemonStatus, String> {
         if self.child.is_some() {
             self.terminate_owned_child().await?;
-            let healthy = self.probe_health_async().await;
-            return Ok(self.snapshot(healthy, None));
+            let probe = self.probe_health_async().await;
+            return Ok(self.snapshot(probe, None));
         }
 
-        if self.probe_health_async().await {
+        let probe = self.probe_health_async().await;
+        if probe.healthy {
             return Err(format!(
                 "the Octra daemon at {} was started outside this app; stop it from the process that launched it",
                 self.control_url()
             ));
         }
 
-        Ok(self.snapshot(false, None))
+        Ok(self.snapshot(probe, None))
     }
 
     /// Stops the owned child and starts it again.
@@ -158,8 +199,15 @@ impl DaemonManager {
                 let tail = read_log_tail(&self.log_path());
                 return Err(with_log_tail(error, &tail));
             }
-            if self.probe_health_async().await {
-                return Ok(self.snapshot(true, None));
+            let probe = self.probe_health_async().await;
+            if probe.healthy {
+                if let Some(error) = self.version_mismatch(&probe) {
+                    self.terminate_owned_child().await?;
+                    return Err(format!(
+                        "{error}; the incompatible daemon child was stopped"
+                    ));
+                }
+                return Ok(self.snapshot(probe, None));
             }
             if Instant::now() >= deadline {
                 self.terminate_owned_child().await?;
@@ -172,6 +220,12 @@ impl DaemonManager {
             }
             tokio::time::sleep(START_POLL_INTERVAL).await;
         }
+    }
+
+    fn version_mismatch(&self, probe: &HealthProbe) -> Option<String> {
+        let (compatible, error) =
+            version_compatibility(probe.version.as_deref(), &self.expected_version);
+        if compatible { None } else { error }
     }
 
     async fn terminate_owned_child(&mut self) -> Result<(), String> {
@@ -228,15 +282,20 @@ impl DaemonManager {
         }
     }
 
-    fn snapshot(&self, healthy: bool, error: Option<String>) -> DaemonStatus {
+    fn snapshot(&self, probe: HealthProbe, error: Option<String>) -> DaemonStatus {
         let pid = self.child.as_ref().map(Child::id);
+        let (version_compatible, version_error) =
+            version_compatibility(probe.version.as_deref(), &self.expected_version);
         DaemonStatus {
-            running: self.child.is_some() || healthy,
+            running: self.child.is_some() || probe.healthy,
             pid,
             binary: self.binary.as_ref().map(|path| path.display().to_string()),
             control_url: self.control_url(),
-            healthy,
-            error,
+            healthy: probe.healthy,
+            error: merge_notes([error, probe.note, version_error]),
+            version: probe.version,
+            expected_version: self.expected_version.clone(),
+            version_compatible,
         }
     }
 
@@ -261,11 +320,11 @@ impl DaemonManager {
         self.home.join("daemon.log")
     }
 
-    fn probe_health(&self) -> bool {
+    fn probe_health(&self) -> HealthProbe {
         probe_health(&self.control_bind, &self.home, HEALTH_PROBE_TIMEOUT)
     }
 
-    async fn probe_health_async(&self) -> bool {
+    async fn probe_health_async(&self) -> HealthProbe {
         probe_health_async(&self.control_bind, &self.home, HEALTH_PROBE_TIMEOUT).await
     }
 }
@@ -352,15 +411,15 @@ fn start_timeout() -> Duration {
         .unwrap_or(Duration::from_secs(10))
 }
 
-fn probe_health(control_bind: &str, home: &Path, timeout: Duration) -> bool {
+fn probe_health(control_bind: &str, home: &Path, timeout: Duration) -> HealthProbe {
     let Some(address) = resolve_address(control_bind) else {
-        return false;
+        return HealthProbe::default();
     };
     let Some(token) = control_token(home) else {
-        return false;
+        return HealthProbe::default();
     };
     let Ok(mut stream) = TcpStream::connect_timeout(&address, timeout) else {
-        return false;
+        return HealthProbe::default();
     };
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
@@ -369,41 +428,27 @@ fn probe_health(control_bind: &str, home: &Path, timeout: Duration) -> bool {
         "GET {HEALTH_PATH} HTTP/1.1\r\nHost: {control_bind}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
     );
     if stream.write_all(request.as_bytes()).is_err() {
-        return false;
+        return HealthProbe::default();
     }
 
-    let mut buffer = [0_u8; 128];
-    let mut read = 0;
-    while read < buffer.len() {
-        match stream.read(&mut buffer[read..]) {
-            Ok(0) => break,
-            Ok(count) => {
-                read += count;
-                if buffer[..read].windows(2).any(|window| window == b"\r\n") {
-                    break;
-                }
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return false,
-        }
-    }
-
-    let status_line = String::from_utf8_lossy(&buffer[..read]);
-    status_line.starts_with("HTTP/1.1 2") || status_line.starts_with("HTTP/1.0 2")
+    let Some(response) = read_response(&mut stream) else {
+        return HealthProbe::default();
+    };
+    parse_health_response(&response)
 }
 
 fn resolve_address(control_bind: &str) -> Option<SocketAddr> {
     control_bind.to_socket_addrs().ok()?.next()
 }
 
-async fn probe_health_async(control_bind: &str, home: &Path, timeout: Duration) -> bool {
+async fn probe_health_async(control_bind: &str, home: &Path, timeout: Duration) -> HealthProbe {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let Some(address) = resolve_address(control_bind) else {
-        return false;
+        return HealthProbe::default();
     };
     let Some(token) = control_token(home) else {
-        return false;
+        return HealthProbe::default();
     };
     let request = format!(
         "GET {HEALTH_PATH} HTTP/1.1\r\nHost: {control_bind}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
@@ -412,27 +457,156 @@ async fn probe_health_async(control_bind: &str, home: &Path, timeout: Duration) 
     let probe = async {
         let mut stream = tokio::net::TcpStream::connect(address).await.ok()?;
         stream.write_all(request.as_bytes()).await.ok()?;
-        let mut buffer = [0_u8; 128];
-        let mut read = 0;
-        while read < buffer.len() {
-            let count = stream.read(&mut buffer[read..]).await.ok()?;
+        let mut response = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let count = stream.read(&mut buffer).await.ok()?;
             if count == 0 {
-                break;
+                return Some(parse_health_response(&response));
             }
-            read += count;
-            if buffer[..read].windows(2).any(|window| window == b"\r\n") {
-                break;
+            response.extend_from_slice(&buffer[..count]);
+            if response_complete(&response) || response.len() >= MAX_HEALTH_RESPONSE_BYTES {
+                return Some(parse_health_response(&response));
             }
         }
-        let status_line = String::from_utf8_lossy(&buffer[..read]);
-        Some(status_line.starts_with("HTTP/1.1 2") || status_line.starts_with("HTTP/1.0 2"))
     };
 
     tokio::time::timeout(timeout, probe)
         .await
         .ok()
         .flatten()
-        .unwrap_or(false)
+        .unwrap_or_default()
+}
+
+fn read_response(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => return Some(response),
+            Ok(count) => {
+                response.extend_from_slice(&buffer[..count]);
+                if response_complete(&response) || response.len() >= MAX_HEALTH_RESPONSE_BYTES {
+                    return Some(response);
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Some(response);
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+fn response_complete(response: &[u8]) -> bool {
+    let Some(header_end) = find_header_end(response) else {
+        return false;
+    };
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    for line in headers.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            return value
+                .trim()
+                .parse::<usize>()
+                .map(|length| response.len().saturating_sub(header_end) >= length)
+                .unwrap_or(true);
+        }
+    }
+    true
+}
+
+fn find_header_end(response: &[u8]) -> Option<usize> {
+    response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+}
+
+fn parse_health_response(response: &[u8]) -> HealthProbe {
+    let Some(header_end) = find_header_end(response) else {
+        return HealthProbe::default();
+    };
+    let head = String::from_utf8_lossy(&response[..header_end]);
+    let healthy = head.starts_with("HTTP/1.1 2") || head.starts_with("HTTP/1.0 2");
+    let version = serde_json::from_slice::<serde_json::Value>(&response[header_end..])
+        .ok()
+        .and_then(|body| {
+            body.get("version")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .filter(|version| !version.trim().is_empty());
+    let note = if healthy && version.is_none() {
+        Some(MISSING_VERSION_NOTE.to_string())
+    } else {
+        None
+    };
+    HealthProbe {
+        healthy,
+        version,
+        note,
+    }
+}
+
+/// Compares major.minor version pairs, ignoring patch differences.
+fn version_compatibility(daemon: Option<&str>, expected: &str) -> (bool, Option<String>) {
+    let Some(raw) = daemon else {
+        return (true, None);
+    };
+    let Some(reported) = parse_major_minor(raw) else {
+        return (
+            false,
+            Some(format!(
+                "the daemon reported the invalid version `{raw}`; this app expects {expected}"
+            )),
+        );
+    };
+    let Some(expected_pair) = parse_major_minor(expected) else {
+        return (
+            false,
+            Some(format!(
+                "this app's expected version `{expected}` is invalid and cannot be compared with the daemon version {raw}"
+            )),
+        );
+    };
+    if reported == expected_pair {
+        (true, None)
+    } else {
+        (
+            false,
+            Some(format!(
+                "the daemon version {raw} is incompatible with the desktop version {expected}; both must share the same major.minor version (daemon {}.{}, desktop {}.{})",
+                reported.0, reported.1, expected_pair.0, expected_pair.1
+            )),
+        )
+    }
+}
+
+fn parse_major_minor(version: &str) -> Option<(u64, u64)> {
+    let core = version.trim();
+    let core = core.strip_prefix('v').unwrap_or(core);
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    Some((major, minor))
+}
+
+fn merge_notes(notes: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    let notes: Vec<String> = notes.into_iter().flatten().collect();
+    if notes.is_empty() {
+        None
+    } else {
+        Some(notes.join("; "))
+    }
 }
 
 fn control_token(home: &Path) -> Option<String> {
@@ -506,11 +680,20 @@ mod tests {
         healthy_after: Duration,
         started: Instant,
         available: Arc<AtomicBool>,
+        version: Option<String>,
     }
 
     async fn mock_health_server_after(
         token: &str,
         healthy_after: Duration,
+    ) -> (String, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
+        mock_health_server_with_version(token, healthy_after, None).await
+    }
+
+    async fn mock_health_server_with_version(
+        token: &str,
+        healthy_after: Duration,
+        version: Option<&str>,
     ) -> (String, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -520,6 +703,7 @@ mod tests {
             healthy_after,
             started: Instant::now(),
             available: available.clone(),
+            version: version.map(str::to_string),
         };
         let app = Router::new()
             .route(
@@ -544,7 +728,11 @@ mod tests {
                                 Json(json!({ "status": "starting" })),
                             );
                         }
-                        (StatusCode::OK, Json(json!({ "status": "ok" })))
+                        let mut body = json!({ "status": "ok" });
+                        if let Some(version) = &state.version {
+                            body["version"] = json!(version);
+                        }
+                        (StatusCode::OK, Json(body))
                     },
                 ),
             )
@@ -629,6 +817,39 @@ mod tests {
     }
 
     #[test]
+    fn version_compatibility_accepts_patch_differences() {
+        assert_eq!(version_compatibility(Some("1.2.9"), "1.2.3"), (true, None));
+        assert_eq!(version_compatibility(Some("1.2"), "1.2.0"), (true, None));
+        assert_eq!(version_compatibility(Some("v1.2.7"), "1.2.3"), (true, None));
+    }
+
+    #[test]
+    fn version_compatibility_rejects_major_minor_mismatch() {
+        let (compatible, error) = version_compatibility(Some("1.3.0"), "1.2.3");
+        assert!(!compatible);
+        let error = error.unwrap();
+        assert!(error.contains("1.3.0"), "{error}");
+        assert!(error.contains("1.2.3"), "{error}");
+
+        assert!(!version_compatibility(Some("2.2.3"), "1.2.3").0);
+        assert!(!version_compatibility(Some("1.2.3"), "2.2.3").0);
+    }
+
+    #[test]
+    fn missing_daemon_version_is_compatible() {
+        assert_eq!(version_compatibility(None, "1.2.3"), (true, None));
+    }
+
+    #[test]
+    fn invalid_daemon_version_is_incompatible() {
+        let (compatible, error) = version_compatibility(Some("not-a-version"), "1.2.3");
+        assert!(!compatible);
+        let error = error.unwrap();
+        assert!(error.contains("not-a-version"), "{error}");
+        assert!(error.contains("invalid"), "{error}");
+    }
+
+    #[test]
     fn status_probes_an_external_daemon() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -709,9 +930,140 @@ mod tests {
         assert!(started.running);
         assert!(started.healthy);
         assert_eq!(started.pid, None);
+        assert_eq!(started.version, None);
+        assert!(started.version_compatible);
+        assert_eq!(started.expected_version, env!("CARGO_PKG_VERSION"));
+        assert!(
+            started
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("did not report")
+        );
 
         let error = manager.stop().await.unwrap_err();
         assert!(error.contains("started outside this app"), "{error}");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn start_accepts_a_compatible_external_daemon_and_reports_versions() {
+        let home = TempDir::new().unwrap();
+        write_token(home.path(), "test-token");
+        let (bind, _available, server) =
+            mock_health_server_with_version("test-token", Duration::ZERO, Some("1.2.99")).await;
+        let missing = home.path().join("missing-daemon");
+        let mut manager = DaemonManager::with_binary(home.path().to_path_buf(), bind, missing)
+            .with_expected_version("1.2.3");
+
+        let started = manager.start().await.unwrap();
+        assert!(started.healthy);
+        assert_eq!(started.version.as_deref(), Some("1.2.99"));
+        assert_eq!(started.expected_version, "1.2.3");
+        assert!(started.version_compatible);
+        assert!(started.error.is_none());
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_refuses_an_incompatible_external_daemon() {
+        let home = TempDir::new().unwrap();
+        write_token(home.path(), "test-token");
+        let (bind, _available, server) =
+            mock_health_server_with_version("test-token", Duration::ZERO, Some("9.9.9")).await;
+        let missing = home.path().join("missing-daemon");
+        let mut manager = DaemonManager::with_binary(home.path().to_path_buf(), bind, missing)
+            .with_expected_version("1.2.3");
+
+        let error = manager.start().await.unwrap_err();
+        assert!(error.contains("incompatible"), "{error}");
+        assert!(error.contains("9.9.9"), "{error}");
+        assert!(error.contains("1.2.3"), "{error}");
+
+        let status = manager.status();
+        assert!(status.healthy);
+        assert_eq!(status.version.as_deref(), Some("9.9.9"));
+        assert_eq!(status.expected_version, "1.2.3");
+        assert!(!status.version_compatible);
+
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_stops_an_owned_child_with_an_incompatible_version() {
+        let home = TempDir::new().unwrap();
+        let script_dir = TempDir::new().unwrap();
+        let script = script_dir.path().join("fake-daemon");
+        write_script(&script, "sleep 30");
+        write_token(home.path(), "test-token");
+
+        let (bind, _available, server) = mock_health_server_with_version(
+            "test-token",
+            Duration::from_millis(200),
+            Some("9.9.9"),
+        )
+        .await;
+        let mut manager = DaemonManager::with_binary(home.path().to_path_buf(), bind, script)
+            .with_expected_version("1.2.3");
+
+        let error = manager.start().await.unwrap_err();
+        assert!(error.contains("incompatible"), "{error}");
+        assert!(error.contains("stopped"), "{error}");
+        assert_eq!(manager.status().pid, None);
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_reports_a_missing_version_as_compatible() {
+        let home = TempDir::new().unwrap();
+        write_token(home.path(), "test-token");
+        let (bind, _available, server) =
+            mock_health_server_after("test-token", Duration::ZERO).await;
+        let mut manager = DaemonManager::with_binary(
+            home.path().to_path_buf(),
+            bind,
+            home.path().join("missing-daemon"),
+        )
+        .with_expected_version("1.2.3");
+
+        let status = manager.status();
+        assert!(status.healthy);
+        assert_eq!(status.version, None);
+        assert!(status.version_compatible);
+        assert!(
+            status
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("did not report")
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_reports_an_invalid_version_as_incompatible() {
+        let home = TempDir::new().unwrap();
+        write_token(home.path(), "test-token");
+        let (bind, _available, server) =
+            mock_health_server_with_version("test-token", Duration::ZERO, Some("not-a-version"))
+                .await;
+        let mut manager = DaemonManager::with_binary(
+            home.path().to_path_buf(),
+            bind,
+            home.path().join("missing-daemon"),
+        )
+        .with_expected_version("1.2.3");
+
+        let status = manager.status();
+        assert!(status.healthy);
+        assert_eq!(status.version.as_deref(), Some("not-a-version"));
+        assert!(!status.version_compatible);
+        assert!(status.error.as_deref().unwrap_or("").contains("invalid"));
 
         server.abort();
     }
