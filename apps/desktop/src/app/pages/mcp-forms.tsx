@@ -1,4 +1,4 @@
-import type { McpServer, McpTool } from "@octra/types";
+import type { ConsumerGroup, McpServer, McpTool } from "@octra/types";
 import { Button, Input, Switch } from "@octra/ui";
 import { useState, type FormEvent, type ReactNode } from "react";
 
@@ -9,6 +9,7 @@ export interface McpTypedFormProps {
   initial: unknown;
   servers: McpServer[];
   tools: McpTool[];
+  consumerGroups: ConsumerGroup[];
   pending: boolean;
   onSave: (body: Record<string, unknown>) => void;
   onCancel: () => void;
@@ -376,7 +377,15 @@ function KeyForm({ initial, pending, onSave, onCancel, onDelete }: McpTypedFormP
 
 type AclScope = "consumer" | "group" | "default";
 
-function AclForm({ initial, pending, onSave, onCancel, onDelete, tools }: McpTypedFormProps) {
+function AclForm({
+  initial,
+  pending,
+  onSave,
+  onCancel,
+  onDelete,
+  tools,
+  consumerGroups,
+}: McpTypedFormProps) {
   const source = asRecord(initial);
   const [toolId, setToolId] = useState(() => readString(source, "tool_id"));
   const [scope, setScope] = useState<AclScope>(() => {
@@ -484,14 +493,38 @@ function AclForm({ initial, pending, onSave, onCancel, onDelete, tools }: McpTyp
           </Field>
         ) : null}
         {scope === "group" ? (
-          <Field label="Consumer group id" required error={errors.consumer_group_id}>
-            <Input
-              value={consumerGroupId}
-              onChange={(event) => setConsumerGroupId(event.target.value)}
-              placeholder="group-…"
-              className="font-mono text-[11px]"
-              aria-invalid={Boolean(errors.consumer_group_id)}
-            />
+          <Field
+            label="Consumer group"
+            required
+            error={errors.consumer_group_id}
+            hint={
+              consumerGroups.length === 0
+                ? "Group list unavailable; enter a consumer group id."
+                : undefined
+            }
+          >
+            {consumerGroups.length > 0 ? (
+              <Select value={consumerGroupId} onChange={setConsumerGroupId}>
+                <option value="">Select group…</option>
+                {consumerGroupId !== "" &&
+                !consumerGroups.some((group) => group.id === consumerGroupId) ? (
+                  <option value={consumerGroupId}>{consumerGroupId} (missing)</option>
+                ) : null}
+                {consumerGroups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name} · {group.id}
+                  </option>
+                ))}
+              </Select>
+            ) : (
+              <Input
+                value={consumerGroupId}
+                onChange={(event) => setConsumerGroupId(event.target.value)}
+                placeholder="group-…"
+                className="font-mono text-[11px]"
+                aria-invalid={Boolean(errors.consumer_group_id)}
+              />
+            )}
           </Field>
         ) : null}
         <Field label="Allowed">

@@ -24,6 +24,7 @@ import type {
   AiStatus,
   ApiMetricsSnapshot,
   ApiPluginStats,
+  ConsumerGroup,
   ConsumerPolicy,
   ControlConfig,
   CreatedLlmVirtualKey,
@@ -255,6 +256,19 @@ export class ControlApiClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
     });
+  }
+
+  // ----- Consumer groups -------------------------------------------------
+
+  async consumerGroups(signal?: AbortSignal): Promise<ConsumerGroup[]> {
+    const response = await this.request<ConsumerGroup[] | { data: ConsumerGroup[] }>(
+      `/admin/consumer_groups${query({ size: 1000 })}`,
+      { signal },
+    );
+    if (Array.isArray(response)) {
+      return response;
+    }
+    return Array.isArray(response?.data) ? response.data : [];
   }
 
   // ----- Consumer policies -----------------------------------------------

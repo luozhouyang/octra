@@ -111,6 +111,11 @@ export function McpPage() {
     queryFn: () => controlClient().mcpAcls(),
     retry: 1,
   });
+  const consumerGroupsQuery = useQuery({
+    queryKey: ["consumer-groups"],
+    queryFn: () => controlClient().consumerGroups(),
+    retry: 1,
+  });
 
   const servers = serversQuery.data ?? [];
   const tools = toolsQuery.data ?? [];
@@ -118,6 +123,7 @@ export function McpPage() {
   const sessions = sessionsQuery.data ?? [];
   const keys = keysQuery.data ?? [];
   const acls = aclsQuery.data ?? [];
+  const consumerGroups = consumerGroupsQuery.data ?? [];
 
   const visibleServers =
     transport === "all" ? servers : servers.filter((server) => server.transport === transport);
@@ -446,6 +452,7 @@ export function McpPage() {
               initial={editor.initial}
               servers={servers}
               tools={tools}
+              consumerGroups={consumerGroups}
               pending={busy}
               onSave={(body) => save.mutate({ target: editor, body })}
               onCancel={() => openCreate(editor.kind)}

@@ -323,6 +323,17 @@ export interface LlmPluginMetrics {
 }
 
 // ---------------------------------------------------------------------------
+// Consumer groups
+
+export interface ConsumerGroup {
+  id: string;
+  name: string;
+  tags: string[];
+  created_at: number;
+  updated_at: number;
+}
+
+// ---------------------------------------------------------------------------
 // Consumer policies
 
 export interface ConsumerPolicy {
