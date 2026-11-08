@@ -21,7 +21,8 @@ pub mod balancer;
 pub mod matcher;
 
 pub use balancer::{
-    Endpoint, HashConfig, HashInput, HealthConfig, HealthStore, TargetPool, algorithm_from_str,
+    Endpoint, HashConfig, HashInput, HealthConfig, HealthStore, RequestGuard, TargetPool,
+    algorithm_from_str,
 };
 pub use matcher::{
     CompiledRoute, CompiledService, MatchInput, RouteMatch, RouteMatcher, ServiceLimits,

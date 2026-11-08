@@ -1,9 +1,11 @@
 //! Load balancing over upstream targets.
 //!
-//! Supports round-robin, weighted round-robin, and Kong-style consistent
-//! hashing (with `hash_on` / `hash_fallback`), plus passive and active health
-//! checking driven by the upstream `healthchecks` configuration.
+//! Supports round-robin, weighted round-robin, least-connections, latency
+//! EWMA, and Kong-style consistent hashing (with `hash_on` / `hash_fallback`),
+//! plus passive and active health checking driven by the upstream
+//! `healthchecks` configuration.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -14,7 +16,7 @@ use http::HeaderMap;
 use octra_api_core::{LoadBalanceAlgorithm, Target, Upstream};
 use serde_json::Value;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Endpoint {
     pub id: String,
     pub url: String,
@@ -23,6 +25,8 @@ pub struct Endpoint {
     slot_weight: u32,
     health: Option<Arc<TargetHealth>>,
     passive: PassiveConfig,
+    in_flight: AtomicU32,
+    latency_ewma_ms: AtomicU64,
 }
 
 impl Endpoint {
@@ -35,7 +39,44 @@ impl Endpoint {
             slot_weight: 1,
             health: None,
             passive: PassiveConfig::default(),
+            in_flight: AtomicU32::new(0),
+            latency_ewma_ms: AtomicU64::new(0),
         })
+    }
+
+    /// Marks one request as in flight. The returned guard decrements the
+    /// counter exactly once when dropped.
+    pub fn begin_request(self: &Arc<Self>) -> RequestGuard {
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        RequestGuard {
+            endpoint: Arc::clone(self),
+        }
+    }
+
+    /// Folds one latency sample into the endpoint's EWMA. The first sample is
+    /// stored as-is; later samples use an integer EWMA with a 1/8 weight so the
+    /// value converges without floating point work on the hot path.
+    pub fn report_latency(&self, latency: Duration) {
+        let sample = u64::try_from(latency.as_millis()).unwrap_or(u64::MAX);
+        let _ =
+            self.latency_ewma_ms
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |previous| {
+                    Some(if previous == 0 {
+                        sample
+                    } else {
+                        previous.saturating_mul(7).saturating_add(sample) / 8
+                    })
+                });
+    }
+
+    /// Number of requests currently in flight against this endpoint.
+    pub fn in_flight(&self) -> u32 {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+
+    /// Observed latency EWMA in milliseconds; `0` means "not measured yet".
+    pub fn latency_ewma_ms(&self) -> u64 {
+        self.latency_ewma_ms.load(Ordering::Relaxed)
     }
 
     pub fn is_healthy(&self) -> bool {
@@ -60,6 +101,24 @@ impl Endpoint {
         if let Some(health) = &self.health {
             health.report_tcp_failure(&self.passive);
         }
+    }
+}
+
+/// Tracks one in-flight request against an endpoint.
+#[derive(Debug)]
+pub struct RequestGuard {
+    endpoint: Arc<Endpoint>,
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        // A CAS loop keeps the counter from underflowing if a guard is ever
+        // dropped without a matching increment.
+        let _ = self.endpoint.in_flight.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+            |in_flight| in_flight.checked_sub(1),
+        );
     }
 }
 
@@ -558,6 +617,8 @@ impl TargetPool {
                     slot_weight: weight.max(1),
                     health: Some(health_store.get(&target.id)),
                     passive: health.passive.clone(),
+                    in_flight: AtomicU32::new(0),
+                    latency_ewma_ms: AtomicU64::new(0),
                 })
             })
             .collect();
@@ -633,9 +694,17 @@ impl TargetPool {
             }
         };
 
-        (0..len)
-            .map(|step| Arc::clone(eligible[(start + step) % len]))
-            .collect()
+        match self.algorithm {
+            LoadBalanceAlgorithm::LeastConnections => {
+                ordered_by_metric(&eligible, start, |endpoint| u64::from(endpoint.in_flight()))
+            }
+            LoadBalanceAlgorithm::Latency => {
+                ordered_by_metric(&eligible, start, Endpoint::latency_ewma_ms)
+            }
+            _ => (0..len)
+                .map(|step| Arc::clone(eligible[(start + step) % len]))
+                .collect(),
+        }
     }
 
     fn hashing_index(
@@ -718,6 +787,40 @@ fn weighted_start(eligible: &[&Arc<Endpoint>], start: u64) -> Option<usize> {
     Some(0)
 }
 
+/// Position of an endpoint relative to the rotation cursor. Sorting by this
+/// value after the primary metric keeps equal-score ties fair across calls.
+fn rotation_tie(index: usize, len: usize, start: usize) -> usize {
+    (index + len - start) % len
+}
+
+/// Orders every eligible endpoint by `metric`, breaking ties by weight
+/// (descending) and then by the rotation cursor.
+fn ordered_by_metric(
+    eligible: &[&Arc<Endpoint>],
+    start: usize,
+    metric: impl Fn(&Endpoint) -> u64,
+) -> Vec<Arc<Endpoint>> {
+    let len = eligible.len();
+    let mut ordered: Vec<(u64, Reverse<u32>, usize, &Arc<Endpoint>)> = eligible
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, endpoint)| {
+            (
+                metric(endpoint),
+                Reverse(endpoint.weight),
+                rotation_tie(index, len, start),
+                endpoint,
+            )
+        })
+        .collect();
+    ordered.sort_by_key(|(metric, weight, tie, _)| (*metric, *weight, *tie));
+    ordered
+        .into_iter()
+        .map(|(_, _, _, endpoint)| Arc::clone(endpoint))
+        .collect()
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -771,9 +874,8 @@ fn active_client() -> &'static reqwest::Client {
     })
 }
 
-/// Maps a stored algorithm name to the local implementation. Only round-robin,
-/// weighted-round-robin, and consistent-hashing are implemented; other
-/// strategies fall back to round-robin.
+/// Maps a stored algorithm name to the local implementation. Unknown names
+/// fall back to round-robin.
 pub fn algorithm_from_str(value: &str) -> LoadBalanceAlgorithm {
     LoadBalanceAlgorithm::parse(value).unwrap_or(LoadBalanceAlgorithm::RoundRobin)
 }
@@ -913,6 +1015,135 @@ mod tests {
                 .iter()
                 .all(|endpoint| endpoint.id != first.id)
         );
+    }
+
+    #[test]
+    fn least_connections_prefers_lower_in_flight() {
+        let targets = vec![target("a", 1), target("b", 1)];
+        let pool = pool(LoadBalanceAlgorithm::LeastConnections, &targets);
+        let a = pool
+            .eligible()
+            .into_iter()
+            .find(|endpoint| endpoint.id == "a")
+            .unwrap();
+
+        let guard = a.begin_request();
+        assert_eq!(a.in_flight(), 1);
+        assert_eq!(pool.select().unwrap().id, "b");
+
+        drop(guard);
+        assert_eq!(a.in_flight(), 0);
+        let picks: Vec<String> = (0..2).map(|_| pool.select().unwrap().id.clone()).collect();
+        assert!(
+            picks.iter().any(|id| id == "a"),
+            "endpoint a should be selectable after its guard is dropped: {picks:?}"
+        );
+    }
+
+    #[test]
+    fn latency_prefers_lower_ewma() {
+        let targets = vec![target("a", 1), target("b", 1)];
+        let pool = pool(LoadBalanceAlgorithm::Latency, &targets);
+        let endpoints = pool.eligible();
+        let a = endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == "a")
+            .unwrap();
+        let b = endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == "b")
+            .unwrap();
+
+        a.report_latency(Duration::from_millis(500));
+        b.report_latency(Duration::from_millis(50));
+
+        assert_eq!(pool.select().unwrap().id, "b");
+    }
+
+    #[test]
+    fn least_connections_returns_all_eligible_in_metric_order() {
+        let targets = vec![target("a", 1), target("b", 1), target("c", 1)];
+        let pool = pool(LoadBalanceAlgorithm::LeastConnections, &targets);
+        let endpoints = pool.eligible();
+        let endpoint = |id: &str| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == id)
+                .unwrap()
+                .clone()
+        };
+
+        let _a_guard_one = endpoint("a").begin_request();
+        let _a_guard_two = endpoint("a").begin_request();
+        let _b_guard = endpoint("b").begin_request();
+
+        let ordered: Vec<String> = pool
+            .ordered_attempts(None)
+            .into_iter()
+            .map(|endpoint| endpoint.id.clone())
+            .collect();
+        assert_eq!(ordered, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn latency_returns_all_eligible_in_metric_order() {
+        let targets = vec![target("a", 1), target("b", 1), target("c", 1)];
+        let pool = pool(LoadBalanceAlgorithm::Latency, &targets);
+        let endpoints = pool.eligible();
+        let endpoint = |id: &str| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == id)
+                .unwrap()
+                .clone()
+        };
+
+        endpoint("a").report_latency(Duration::from_millis(300));
+        endpoint("c").report_latency(Duration::from_millis(100));
+
+        // "b" has no sample yet, which sorts as the fastest endpoint.
+        let ordered: Vec<String> = pool
+            .ordered_attempts(None)
+            .into_iter()
+            .map(|endpoint| endpoint.id.clone())
+            .collect();
+        assert_eq!(ordered, vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn request_guard_decrements_on_drop() {
+        let endpoint = Endpoint::direct("only", "http://only.test:80");
+        assert_eq!(endpoint.in_flight(), 0);
+
+        let first = endpoint.begin_request();
+        let second = endpoint.begin_request();
+        assert_eq!(endpoint.in_flight(), 2);
+
+        drop(first);
+        assert_eq!(endpoint.in_flight(), 1);
+
+        drop(second);
+        assert_eq!(endpoint.in_flight(), 0);
+    }
+
+    #[test]
+    fn latency_ewma_converges() {
+        let endpoint = Endpoint::direct("only", "http://only.test:80");
+        assert_eq!(endpoint.latency_ewma_ms(), 0);
+
+        endpoint.report_latency(Duration::from_millis(1000));
+        assert_eq!(endpoint.latency_ewma_ms(), 1000);
+
+        let previous = endpoint.latency_ewma_ms();
+        endpoint.report_latency(Duration::from_millis(100));
+        let next = endpoint.latency_ewma_ms();
+        assert!(next < previous, "EWMA should move toward the new sample");
+        assert_eq!(next, (previous * 7 + 100) / 8);
+
+        for _ in 0..200 {
+            endpoint.report_latency(Duration::from_millis(100));
+        }
+        assert_eq!(endpoint.latency_ewma_ms(), 100);
     }
 
     #[test]

@@ -1251,8 +1251,15 @@ async fn forward(
             .headers(forward_headers)
             .body(upstream_body);
 
+        let attempt_started = Instant::now();
+        // The guard covers connect plus wait-for-headers. For streaming
+        // responses the body keeps flowing after the guard is dropped, so the
+        // in-flight count is an approximation of upstream load.
+        let _in_flight = endpoint.begin_request();
+
         match builder.send().await {
             Ok(response) => {
+                endpoint.report_latency(attempt_started.elapsed());
                 let status = response.status();
                 endpoint.report_status(status.as_u16());
                 let mut response_headers = response.headers().clone();
@@ -1268,6 +1275,7 @@ async fn forward(
                 return Ok(out);
             }
             Err(err) => {
+                endpoint.report_latency(attempt_started.elapsed());
                 tracing::debug!(
                     target = %endpoint.url,
                     attempt = index + 1,
