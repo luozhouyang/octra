@@ -24,7 +24,7 @@ octra/
 │   ├── octra-runtime/      # API runtime snapshot, matcher, balancer
 │   ├── octra-types/        # Shared control plane (health, auth, CORS)
 │   ├── octra-llm-core/     # Canonical LLM IR
-│   ├── octra-llm-protocol/ # OpenAI/Anthropic protocol adapters
+│   ├── octra-llm-protocol/ # OpenAI/Anthropic/Gemini/Vertex/Bedrock protocol adapters
 │   ├── octra-llm-gateway/  # LLM routing, providers, data plane, control plane
 │   ├── octra-mcp-core/     # MCP JSON-RPC types
 │   ├── octra-mcp-gateway/  # MCP stdio/HTTP clients, /mcp endpoint, control plane
@@ -118,46 +118,42 @@ shows a sandbox banner, and preview never writes anything.
 ## Implemented today
 
 - Standalone daemon with two listeners and unified graceful shutdown.
-- Authenticated control plane: system health/config/reload plus CRUD for services, routes, upstreams, targets, consumers, consumer groups, credentials, plugins/configs, LLM providers/models/routing groups/routes/virtual keys/accounts, and MCP servers/tools/ACLs/keys; request and audit logs, events, and jobs are queryable. LLM consumer policies are enforced but do not have a control endpoint yet.
+- Authenticated control plane: system health/config/reload plus CRUD for services, routes, upstreams, targets, consumers, consumer groups, credentials, plugins/configs, LLM providers/models/routing groups/routes/virtual keys/accounts, LLM consumer policies, and MCP servers/tools/ACLs/keys; request and audit logs, events, and jobs are queryable.
 - Constant-time Bearer token authentication; the token is randomly generated and persisted to disk.
 - SQLite + SQLx migrations with WAL / foreign_keys / busy_timeout; runtime snapshots keep routing and authorization decisions off the database (virtual-key limit checks still read persisted usage).
 - API Gateway: host/path/method/header routing, longest-prefix matching, round-robin, weighted, and consistent-hashing load balancing with active/passive health checks, path stripping, body limits, connect/request timeouts, retries, key/basic/JWT/ACL authentication with consumers and consumer groups, streaming proxy, persisted access logs, and JSON and Prometheus metrics.
 - Plugin system: Kong-style phase chain with the full 12-level consumer/consumer-group/route/service/global scope precedence, priority ordering, fail-open/fail-closed policies, and built-in `key-auth`, `basic-auth`, `jwt`, `acl`, `correlation-id`, `request-transformer`, `response-transformer`, `cors`, `rate-limiting`, `header-rewrite`, `circuit-breaker`, `ip-restriction`, `request-size-limiting`, and `request-termination` plugins configured per scope.
-- LLM Gateway: canonical IR, OpenAI Chat/Responses, Anthropic, and Gemini request/response/SSE conversion, virtual models, routing groups with priority/weight fallback and `order`/`rotate`/`smart`/`usage`/`quota`/`pace`/`intent`/`semantic` strategies, provider accounts with static or OAuth credentials, provider query/header configuration, quota/cooldown/pacing, virtual keys hashed in SQLite, consumer policies that restrict allowed models and providers, usage/cost rollups, `count_tokens`, and opt-in PII redaction.
+- LLM Gateway: canonical IR, OpenAI Chat/Responses, Anthropic, Gemini, Vertex, and Bedrock Converse request/response/SSE conversion (Bedrock uses its binary event stream upstream), virtual models, routing groups with priority/weight fallback and `order`/`manual`/`weight`/`rotate`/`fast`/`cheap`/`free`/`drain`/`expiring`/`smart`/`usage`/`quota`/`pace`/`intent`/`semantic` strategies, provider accounts with static or OAuth credentials, provider query/header configuration, quota/cooldown/pacing, virtual keys hashed in SQLite, consumer policies that restrict allowed models and providers, usage/cost rollups, `count_tokens`, and opt-in PII redaction.
 - MCP Gateway: Streamable HTTP and stdio upstreams, tool discovery and aggregation with a `<server>__<tool>` namespace, `/mcp` JSON-RPC endpoint with sessions, per-consumer tool ACLs, API keys, and invocation audit rows.
 - Plugins: native and WASM (API and LLM) plugin runtimes, plugin-owned SQLite storage, config schemas, per-instance metrics and latency percentiles, durable plugin events, scheduled jobs, and shared rate-limit/budget counters.
-- AI-native LLM control plane (Phase 15, AI-native only): `ai_*` schema, `octra-ai-config` compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, per-target model metadata (context, capabilities, pricing), built-in policy execution for every policy type (rate limit, budget guard, PII, model map, param override, system prompt, request audit, think tags, PromptGuard, PromptCompress, SemanticCache), `semantic` target routing over AI-native descriptions with optional OpenAI-compatible embeddings and lexical fallback, provider `config_json.query` parameters and protocol presets (Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Claude, Google, OpenAI-compatible), streaming cache population and SSE replay, AI-native account OAuth with exposed status and desktop controls, request-audit `cache_status` and cache/routing logs, full CRUD CLI with inline/stdin/file JSON bodies, and a desktop AI Control page with typed forms for providers, accounts, models, targets, policies, and attachments. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed without backward compatibility.
+- AI-native LLM control plane (Phase 26, AI-native only): `ai_*` schema, `octra-ai-config` compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, per-target model metadata (context, capabilities, pricing), built-in policy execution for every policy type (rate limit, budget guard, PII, model map, param override, system prompt, request audit, think tags, PromptGuard, PromptCompress, SemanticCache), `semantic` target routing over AI-native descriptions with optional OpenAI-compatible embeddings and lexical fallback, provider `config_json.query` parameters and protocol presets (Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Claude, Google, Vertex, Bedrock, OpenAI-compatible), streaming cache population and SSE replay, AI-native account OAuth with exposed status, desktop controls, and a loopback callback listener, request-audit `cache_status` and cache/routing logs, full CRUD CLI with inline/stdin/file JSON bodies, and a desktop AI Control page with typed forms for providers, accounts, models, targets, policies, and attachments. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed without backward compatibility.
 - Agent integration: detects Claude Code, Codex and OpenCode, previews and applies the Octra provider into their native config files, and restores backups atomically.
 - CLI: `status`, `services`/`routes`/`upstreams`/`targets` CRUD, `mcp` servers/tools/keys/ACLs CRUD, `policies` consumer-policy CRUD, `reload`, `doctor`, `keys`, `usage`, and `ai` status/actions plus full CRUD for providers, accounts, models, targets, policies, and attachments.
-- Tauri 2 + React desktop app with a shadcn-style component set and Tailwind CSS v4 design tokens for dark and light modes; AI Control uses typed forms, API Gateway and MCP use JSON-editor CRUD, and every console page reads the local control plane.
+- Tauri 2 + React desktop app with a shadcn-style component set and Tailwind CSS v4 design tokens for dark and light modes; AI Control, API Gateway, and MCP use typed forms, the LLM page uses a JSON editor for consumer policies, and every console page reads the local control plane.
 - Dual workspace and CI (Rust fmt/clippy/test; frontend typecheck/test/build).
 
 ## Not yet implemented (tracked on the roadmap)
 
-- Typed forms for API Gateway and MCP entities. JSON-editor CRUD and the CLI
-  already cover services/routes/upstreams/targets, MCP servers/tools/keys/ACLs,
-  and consumer policies; AI Control already uses typed forms for all LLM
-  entities.
+- Bedrock SigV4 authentication and additional vendor-specific protocol adapters
+  beyond OpenAI, Anthropic, OpenAI Responses, Gemini, Vertex, and Bedrock
+  Converse. Bedrock currently authenticates with a Bedrock API key.
 - Event-bus integration tests for delivery, retry/backoff, scheduled jobs, and
   the no-subscriber skip path; the storage retention path is already tested.
-- Additional vendor-specific protocol adapters beyond OpenAI, Anthropic,
-  OpenAI Responses, and Gemini.
 - Agent discovery / config adapter / bridge for agents beyond the three
   supported adapters.
-- Full reference-model parity where justified: magpie strategies such as
-  `free`/`drain`/`expiring`, and Kong MCP consumer-group/default/CEL
-  ACLs or conversion modes.
-- Complete the AI-native LLM control plane (ADR 0018): new wire-protocol
-  adapters beyond OpenAI, Anthropic, OpenAI Responses, and Gemini, and improved
-  OAuth callback handling in the desktop webview. The Phase 14 control API,
-  rollback, full policy execution including PromptGuard, PromptCompress, and
-  SemanticCache, `semantic` target routing with optional embeddings, provider
-  query parameters, streaming cache population/SSE replay, AI-native account
-  OAuth endpoints and desktop controls, cache/routing observability, full CRUD
-  CLI, and desktop typed forms for all AI entities already exist. The legacy
-  model tables, endpoints, modes, and import path are removed; `ai_*` is the
-  only model control plane. Semantic cache/routing use exact keys plus local
-  lexical similarity by default.
+- Full reference-model parity where justified: Kong MCP consumer-group/default/
+  CEL ACLs or conversion modes.
+- Remaining hardening: OS Keychain secret storage, OAuth-token encryption,
+  desktop daemon lifecycle management, and cross-platform packaging/signing.
+  The Phase 26 control API, rollback, full policy execution including
+  PromptGuard, PromptCompress, and SemanticCache, `semantic` target routing
+  with optional embeddings, provider query parameters and presets, streaming
+  cache population/SSE replay, Vertex/Bedrock adapters, AI-native account OAuth
+  with desktop controls and loopback callbacks, cache/routing observability,
+  full CRUD CLI, and desktop typed forms for all AI/API/MCP entities already
+  exist. The legacy model tables, endpoints, modes, and import path are
+  removed; `ai_*` is the only model control plane. Semantic cache/routing use
+  exact keys plus local lexical similarity by default.
 - Desktop-side daemon lifecycle management (start, stop, health supervision).
 - OS Keychain integration for secrets and OAuth-token encryption.
 - Cross-platform packaging, signing, and notarization.

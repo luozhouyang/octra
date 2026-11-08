@@ -8,7 +8,7 @@ timestamp: 2026-11-08T01:19:43Z
 
 # LLM Control Plane
 
-> **Status: Phase 14 landed; AI-native only. Protocol breadth pending.** The `ai_*` schema, compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, the AI-native runtime mapping, built-in policy execution for every policy type (including PromptGuard, PromptCompress, and SemanticCache), semantic target routing with optional embedding vectors and lexical fallback, provider query parameters, streaming cache population and SSE replay, AI-native account OAuth with exposed status/expiry and desktop controls, cache/routing observability, full CRUD CLI with stdin/file bodies, and typed desktop forms for every AI entity exist and are tested. The legacy `llm_*` model control plane, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, `auto_import_legacy`, and import-legacy compatibility path have been removed without backward compatibility. Remaining `llm_*` tables are auth, usage, counters, plugin state, PII-engine, and OAuth-token state, not model control plane. New wire-protocol adapters remain future work.
+> **Status: Phase 26 landed; AI-native only. Optional hardening pending.** The `ai_*` schema, compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, the AI-native runtime mapping, built-in policy execution for every policy type (including PromptGuard, PromptCompress, and SemanticCache), semantic target routing with optional embedding vectors and lexical fallback, Vertex and Bedrock Converse adapters, provider query parameters, streaming cache population and SSE replay, AI-native account OAuth with exposed status/expiry, desktop controls and loopback callbacks, cache/routing observability, full CRUD CLI with stdin/file bodies, and typed desktop forms for AI, API Gateway, and MCP entities exist and are tested. The legacy `llm_*` model control plane, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, `auto_import_legacy`, and import-legacy compatibility path have been removed without backward compatibility. Remaining `llm_*` tables are auth, usage, counters, plugin state, PII-engine, and OAuth-token state, not model control plane. Bedrock SigV4 and production hardening remain future work.
 
 The LLM control plane separates three concerns that are currently mixed:
 
@@ -125,8 +125,7 @@ The control API supports `validate`, `preview`, `apply`, and `rollback`. A faile
 | Provider presets / custom provider | `ai_providers` + `ai_provider_accounts` |
 | Subscription accounts | `ai_provider_accounts.credential_kind=oauth`; tokens in `ai_provider_oauth_tokens` |
 | Routing groups | `ai_models.kind=group` + `ai_model_targets.target_model_id` |
-| smart/order/rotate/usage/pace/manual/weight/fast/cheap | `ai_models.balancer_json.strategy` |
-| free/drain/expiring | not implemented; rejected by the AI-native control API |
+| smart/order/rotate/usage/pace/manual/weight/fast/cheap/free/drain/expiring | `ai_models.balancer_json.strategy` |
 | Account failover / quota / cooldown | account pool + target selection |
 | Session affinity | session header + `ai_sessions` or account affinity state |
 | Privacy masking | `pii-redaction` policy |
@@ -161,16 +160,16 @@ Remaining `llm_*` tables are deliberately outside the model control plane: `llm_
 | Prompt policy execution | PromptGuard blocks or masks matching prompts; PromptCompress normalizes whitespace, deduplicates adjacent text, and truncates under a character budget |
 | Semantic response cache | Exact canonical keys plus local lexical similarity, optional OpenAI-compatible embeddings with fallback, TTL/LRU bounds, consumer/virtual-key scoping, non-streaming JSON and streaming SSE cache hits, stream reconstruction through `on_final_response`, `X-Octra-Cache` headers, request-audit `cache_status`, and `llm_plugin_state` persistence |
 | Semantic target routing | `semantic` balancer ranks targets by OpenAI-compatible embedding cosine when `llm.semantic_embedding` is configured, with cached vectors, a failure cooldown, and local lexical fallback; nested groups inherit descriptions and targets without vectors score by health |
-| Provider configuration breadth | `config_json` supports `wire`, `headers`, `auth_header`, `query`, OAuth, and CLI providers; protocol presets cover Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Claude, Google, and OpenAI-compatible endpoints; query pairs are appended to every upstream endpoint |
+| Provider configuration breadth | `config_json` supports `wire`, `headers`, `auth_header`, `query`, OAuth, and CLI providers; protocol presets cover Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Claude, Google, Vertex, Bedrock, and OpenAI-compatible endpoints; query pairs are appended to every upstream endpoint |
 | Config compiler + revisions | Compiler, revision snapshots, apply, rollback, and transactional replace implemented |
 | Nested groups / cycle validation | Compiler and runtime mapping expand nested models; cycles/depth overflow are rejected |
 | Policy scope precedence | Compiler helper implements the target order; executable policies compile into the existing LLM plugin chains |
 | Daemon integration | AI-native only; startup compiles `ai_*`, and apply/rollback reload the runtime and plugin chains. No legacy/shadow/on mode, no auto-import |
 | CLI / Desktop | Full CRUD for providers/accounts/models/targets/policies/attachments; `octra ai` accepts inline, stdin, and file JSON bodies; typed desktop forms for all six AI entity types; no legacy model commands or import-legacy |
-| magpie routing strategies | `order`/`manual`/`weight`/`rotate`/`fast`/`cheap`/`usage`/`quota`/`pace`/`smart`/`intent` plus an Octra-native `semantic` strategy; `free`/`drain`/`expiring` remain unimplemented; see ADR 0013 |
+| magpie routing strategies | `order`/`manual`/`weight`/`rotate`/`fast`/`cheap`/`free`/`drain`/`expiring`/`usage`/`quota`/`pace`/`smart`/`intent` plus an Octra-native `semantic` strategy; see ADR 0013 |
 | Coding-agent integration | Implemented separately from the LLM control plane; keep separate |
 
-Phase 11 evidence:
+Phase 26 evidence:
 
 - `migrations/0023_ai_control_plane.sql` creates the seven `ai_*` tables; `0024_ai_revision_snapshot.sql` adds revision snapshots; `0025_ai_target_model_metadata.sql` adds target context/capability/pricing metadata; `0026_drop_legacy_llm_models.sql` creates `ai_provider_oauth_tokens` and drops the legacy model tables.
 - `crates/octra-ai-config/` contains the entity types, compiler, and validation tests.
@@ -188,12 +187,15 @@ Phase 11 evidence:
 - `crates/octra-llm-gateway/src/embedding.rs` implements optional OpenAI-compatible semantic-routing embeddings with secret resolution, a TTL/LRU cache, and a 30-second failure cooldown.
 - `crates/octra-llm-gateway/src/similarity.rs` provides deterministic local lexical vectors and request-text extraction for semantic routing.
 - `crates/octra-llm-gateway/src/routing.rs` implements the `semantic` strategy and reads `LlmRuntimeData::target_semantic_descriptions`; `ai_runtime.rs` maps AI-native target descriptions, including nested inheritance.
-- `crates/octra-llm-gateway/src/config.rs` and `upstream.rs` parse `config_json.query` and append validated query pairs to upstream endpoints.
+- `crates/octra-llm-gateway/src/config.rs` and `upstream.rs` parse `config_json.query` and append validated query pairs to upstream endpoints; `adapter.rs` adds Vertex publisher paths and Bedrock Converse endpoints.
+- `crates/octra-llm-protocol/src/bedrock/` implements the Converse request/response/stream codec plus a CRC-validating AWS event-stream framer; `data_plane/stream.rs` selects SSE or Bedrock framing per upstream protocol.
+- `apps/desktop/src/app/pages/gateway-forms.tsx` and `mcp-forms.tsx` provide typed forms for API Gateway and MCP entities, with advanced JSON for free-form fields.
+- `apps/desktop/src-tauri/src/lib.rs` implements the loopback OAuth callback listener; `ai-control-forms.tsx` auto-completes the flow and keeps manual entry as a fallback.
 - `crates/octra-config` has no LLM control-plane mode or auto-import setting; the AI-native control plane is the only source.
 - `crates/octra-daemon/src/main.rs` compiles `ai_*` at startup and reloads it after activation endpoints.
 - `crates/octra-cli` exposes `ai` status/actions plus full CRUD, with `--body '<json>'`, `--body -`, and `--body @path`; legacy `accounts` and `ai import-legacy` commands are removed.
 - `apps/desktop/src/app/pages/ai-control.tsx` exposes live status, entity lists, typed forms for providers, accounts, models, targets, policies, and attachments, compile reports, apply, and revision rollback; LLM/Agents pages read AI providers/models.
-- `cargo test --workspace --exclude octra-desktop` reports 914 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass.
+- `cargo test --workspace --exclude octra-desktop` reports 946 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass. The Tauri host crate needs GTK/WebKit/DBus development packages that this environment lacks; the callback helper is covered by scratch-crate tests.
 
 ## Drift instrument
 

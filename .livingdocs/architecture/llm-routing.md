@@ -51,12 +51,15 @@ flowchart TB
 | `weight` | Priority rounds with the existing weighted cycle behavior |
 | `fast` | Lowest latency EWMA, then failures and usage |
 | `cheap` | Lowest input price per million, then latency and failures |
+| `free` | Zero-price capacity first, then most remaining quota, then health |
+| `drain` | Least remaining quota first, so nearly exhausted accounts are used before fresh ones |
+| `expiring` | Soonest quota reset or credential expiry first |
 | `rotate` / `round_robin` | Rotate the flat list by the group tick |
 | `priority` / default | Priority rounds and weighted cycles |
 
 Semantic descriptions come from `ai_model_targets.semantic_description` and are carried into the runtime only in AI-native mode; nested model targets pass a description down to their leaves unless a leaf overrides it. When `llm.semantic_embedding` is configured, routing uses OpenAI-compatible embeddings with caches and a failure cooldown; otherwise it uses the local lexical vector. Targets without a description/vector receive the health score only. Targets are never removed by the strategy, and the fallback stays last.
 
-`free`, `drain`, and `expiring` are not implemented; an unrecognized strategy is rejected by the AI-native control API. This is a deliberate v0.1 boundary, not full magpie parity.
+All implemented strategy names are accepted by the AI-native control API; an unrecognized name is rejected instead of silently falling through to priority rounds.
 
 ## Account selection
 

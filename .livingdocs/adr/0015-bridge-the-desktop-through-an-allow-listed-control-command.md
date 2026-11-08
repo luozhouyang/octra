@@ -19,18 +19,19 @@ Putting the token in the webview (localStorage, a global, or a fetched config) w
 
 We will keep the control token in the Tauri host and bridge the console through one allow-listed command:
 
-- The Tauri host reads `OCTRA_CONTROL_TOKEN` or `$OCTRA_HOME/control.token`, resolves the control base URL from `$OCTRA_HOME/config.toml` (`daemon.control_bind`, default `127.0.0.1:8081`), and exposes one `daemon_request(method, path, body)` command.
+- The Tauri host reads `OCTRA_CONTROL_TOKEN` or `$OCTRA_HOME/control.token`, resolves the control base URL from `$OCTRA_HOME/config.toml` (`daemon.control_bind`, default `127.0.0.1:8081`), and exposes one generic `daemon_request(method, path, body)` command.
 - `daemon_request` accepts only paths starting with `/api/v1/` or `/admin/` and only the methods `GET`, `POST`, `PUT`, and `DELETE`. It attaches the Bearer token and returns the status and parsed JSON body.
 - The webview never receives the token in Tauri mode. It uses the shared `ControlApiClient` with a `desktopFetch` adapter that calls `invoke("daemon_request", ...)`.
+- The host also exposes one narrow `oauth_wait_callback(redirect_uri, state, timeout_secs)` command. It accepts only loopback `http` redirect URIs with an explicit port, binds that port, accepts one request, validates the returned `state`, returns the authorization code to the webview, and writes a self-contained success/failure page. It does not expose a general socket or IPC surface.
 - In browser-only mode, the console reads the base URL and token from the local settings store and uses the same `ControlApiClient` with the browser `fetch`.
-- The React app is a thin read-mostly console over the live control plane: Overview, API Gateway, LLM Gateway, MCP Gateway, Agents, Plugins, and Settings. Mutations are currently limited to agents (preview/apply/restore/profiles), LLM plugin enable/disable, and PII model actions. Services, routes, upstreams, targets, LLM providers/models/routes, MCP servers/tools/ACLs, and policies are read-only in the UI.
-- The Tauri host contains no gateway logic. It is a token-holding, path-filtering adapter.
+- The React app is a live console with targeted editors over the control plane: Overview, API Gateway, LLM Gateway, MCP Gateway, Agents, Plugins, and Settings. AI Control, API Gateway, and MCP expose typed-form CRUD; the LLM page edits consumer policies; agents, LLM plugin enable/disable, and PII model actions retain their existing mutation surfaces.
+- The Tauri host contains no gateway logic. It is a token-holding, path-filtering adapter plus the loopback OAuth callback listener.
 
 **Not adopted:**
 
 - Token injection into the webview, a token in `localStorage`, or direct `fetch` from the Tauri webview to the control plane.
 - Embedding the daemon in the Tauri process.
-- An IPC surface that mirrors every control endpoint one-for-one. The single generic bridge is smaller and easier to audit.
+- An IPC surface that mirrors every control endpoint one-for-one. The single generic bridge is smaller and easier to audit; the loopback OAuth listener is the only additional, narrowly scoped command.
 - Desktop-side daemon lifecycle supervision in v0.1; the operator starts the daemon separately (ADR 0003).
 
 ## Rejected alternatives

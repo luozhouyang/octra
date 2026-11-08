@@ -47,6 +47,8 @@ The data listener routes these paths to the LLM gateway:
 | `GET /v1beta/models` | Gemini | Model list |
 | `POST /v1beta/models/{model}:{action}` | Gemini | `generateContent`, `streamGenerateContent`, `countTokens` |
 
+Vertex and Bedrock are upstream-only adapters; clients keep using the four ingress protocols above.
+
 ## Steps
 
 1. **Authenticate.** A virtual key is read from `Authorization: Bearer` or `X-API-Key`. No key is allowed on a loopback-local installation; a presented invalid or expired key is rejected. A successful key updates `last_used_at` asynchronously.
@@ -88,7 +90,7 @@ Provider `config_json` supports `wire`, `headers`, `auth_header`, `query`, `oaut
 
 with a deployment-scoped `base_url`.
 
-Provider protocol presets map to the four wire protocols and fill a default base URL when the record leaves it empty:
+Provider protocol presets map to the six wire protocols and fill a default base URL when the record leaves it empty:
 
 | Preset | Wire protocol | Default base URL |
 |---|---|---|
@@ -103,9 +105,11 @@ Provider protocol presets map to the four wire protocols and fill a default base
 | `openai-compatible` | OpenAI | OpenAI default; set `base_url` |
 | `claude` | Anthropic | Anthropic default |
 | `google` | Gemini | Gemini default |
+| `vertex` / `google-vertex` / `vertex-ai` | Vertex | `https://aiplatform.googleapis.com/v1` |
+| `bedrock` / `aws-bedrock` / `bedrock-runtime` | Bedrock Converse | `https://bedrock-runtime.us-east-1.amazonaws.com` |
 | `responses` | OpenAI Responses | OpenAI default |
 
-`config_json.wire` can override the recorded protocol, including the aliases above. New wire protocols (Bedrock, Vertex event streams) still require dedicated adapters.
+`config_json.wire` can override the recorded protocol, including the aliases above. Vertex reuses the Gemini payload with publisher paths; Bedrock uses the Converse API and a bearer Bedrock API key. SigV4 and other vendor-specific event streams still require dedicated work.
 
 ## Response cache
 
