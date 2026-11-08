@@ -10,8 +10,9 @@ use serde_json::{Map, Value};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 
-const SERVER_COLUMNS: &str = "id, name, transport, mode, sources_json, command, url, enabled, \
-     config_json, headers_json, protocol_version, last_seen_at, created_at, updated_at";
+const SERVER_COLUMNS: &str = "id, name, transport, mode, sources_json, route_path, \
+     acl_allow_when_json, acl_deny_when_json, command, url, enabled, config_json, headers_json, \
+     protocol_version, last_seen_at, created_at, updated_at";
 
 const TOOL_COLUMNS: &str = "id, server_id, name, description, schema, enabled, created_at";
 
@@ -126,18 +127,24 @@ impl McpStore {
         };
         let headers = Value::Object(server.headers.clone()).to_string();
         let sources = encode_string_list(&server.sources);
+        let allow_when = encode_string_list(&server.acl_allow_when);
+        let deny_when = encode_string_list(&server.acl_deny_when);
 
         sqlx::query(
             "INSERT INTO mcp_servers
-                 (id, name, transport, mode, sources_json, command, url, enabled,
+                 (id, name, transport, mode, sources_json, route_path,
+                  acl_allow_when_json, acl_deny_when_json, command, url, enabled,
                   config_json, headers_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .bind(&id)
         .bind(&server.name)
         .bind(server.transport.as_str())
         .bind(&server.mode)
         .bind(sources)
+        .bind(server.route_path.as_deref())
+        .bind(allow_when)
+        .bind(deny_when)
         .bind(server.command.as_deref())
         .bind(server.url.as_deref())
         .bind(i64::from(server.enabled))
@@ -160,10 +167,13 @@ impl McpStore {
     ) -> Result<Option<McpServer>> {
         let headers = Value::Object(server.headers.clone()).to_string();
         let sources = encode_string_list(&server.sources);
+        let allow_when = encode_string_list(&server.acl_allow_when);
+        let deny_when = encode_string_list(&server.acl_deny_when);
         let result = sqlx::query(
             "UPDATE mcp_servers
                 SET name = ?2, transport = ?3, mode = ?4, sources_json = ?5, command = ?6,
                     url = ?7, enabled = ?8, config_json = ?9, headers_json = ?10,
+                    route_path = ?11, acl_allow_when_json = ?12, acl_deny_when_json = ?13,
                     protocol_version = NULL, last_seen_at = NULL,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
               WHERE id = ?1",
@@ -178,6 +188,9 @@ impl McpStore {
         .bind(i64::from(server.enabled))
         .bind(server.config.to_string())
         .bind(headers)
+        .bind(server.route_path.as_deref())
+        .bind(allow_when)
+        .bind(deny_when)
         .execute(self.mcp_pool())
         .await
         .map_err(|err| storage_error("cannot update mcp server", err))?;
@@ -895,6 +908,9 @@ fn decode_server(row: &SqliteRow) -> McpServer {
         transport: parse_transport(&row.get::<String, _>("transport")),
         mode: row.get("mode"),
         sources: decode_string_list(row.get("sources_json")),
+        route_path: row.get("route_path"),
+        acl_allow_when: decode_string_list(row.get("acl_allow_when_json")),
+        acl_deny_when: decode_string_list(row.get("acl_deny_when_json")),
         command: row.get("command"),
         url: row.get("url"),
         enabled: row.get::<i64, _>("enabled") != 0,
@@ -997,6 +1013,9 @@ mod tests {
             transport: Transport::Http,
             mode: octra_mcp_core::domain::default_server_mode(),
             sources: Vec::new(),
+            route_path: None,
+            acl_allow_when: Vec::new(),
+            acl_deny_when: Vec::new(),
             command: None,
             url: Some("https://example.test/mcp".into()),
             enabled: true,
@@ -1106,6 +1125,58 @@ mod tests {
             .unwrap();
         let loaded = storage.mcp.get_server(&listener.id).await.unwrap().unwrap();
         assert!(loaded.sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_route_path_and_cel_expressions_round_trip() {
+        let storage = storage().await;
+
+        // Unset means the gateway computes `/mcp/<name>`; the column stays null.
+        let created = storage
+            .mcp
+            .insert_server(&http_server("plain"))
+            .await
+            .unwrap();
+        assert!(created.route_path.is_none());
+        assert!(created.acl_allow_when.is_empty());
+        assert!(created.acl_deny_when.is_empty());
+
+        let mut custom = http_server("custom");
+        custom.route_path = Some("/mcp/team/custom".into());
+        custom.acl_allow_when = vec!["consumer_group.names.contains(\"team\")".into()];
+        custom.acl_deny_when = vec!["consumer.id == \"blocked\"".into()];
+        let custom = storage.mcp.insert_server(&custom).await.unwrap();
+        assert_eq!(custom.route_path.as_deref(), Some("/mcp/team/custom"));
+        assert_eq!(custom.acl_allow_when.len(), 1);
+        assert_eq!(custom.acl_deny_when.len(), 1);
+
+        // Explicit route paths are unique when not null.
+        let mut duplicate = http_server("duplicate");
+        duplicate.route_path = Some("/mcp/team/custom".into());
+        let error = storage.mcp.insert_server(&duplicate).await.unwrap_err();
+        assert!(error.to_string().contains("duplicate value"), "{error}");
+
+        // Updates replace the expressions wholesale and can clear the path.
+        let mut update = http_server("custom");
+        update.acl_deny_when = vec!["request.method == \"DELETE\"".into()];
+        let updated = storage
+            .mcp
+            .update_server(&custom.id, &update)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(updated.route_path.is_none());
+        assert!(updated.acl_allow_when.is_empty());
+        assert_eq!(updated.acl_deny_when.len(), 1);
+
+        // A malformed expression column degrades to an empty list.
+        sqlx::query("UPDATE mcp_servers SET acl_allow_when_json = 'not-json' WHERE id = ?1")
+            .bind(&custom.id)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let loaded = storage.mcp.get_server(&custom.id).await.unwrap().unwrap();
+        assert!(loaded.acl_allow_when.is_empty());
     }
 
     #[tokio::test]

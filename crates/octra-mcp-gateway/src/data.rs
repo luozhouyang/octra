@@ -11,17 +11,18 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::header::{self, HeaderName, HeaderValue};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use cel_interpreter::{Context as CelContext, Program, Value as CelValue};
 use futures_util::stream;
 use octra_data_plane::{body_bytes_limited, error_response, new_request_id};
 use octra_mcp_core::domain::{
-    MCP_SERVER_MODE_LISTENER, acl_allows_default_then_tool, is_source_server_mode, session_status,
-    status,
+    MCP_SERVER_MODE_LISTENER, acl_allows_default_then_tool, acl_allows_scoped,
+    is_source_server_mode, route_path_key, session_status, status,
 };
 use octra_mcp_core::jsonrpc::{
     JsonRpcError, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, codes,
@@ -50,7 +51,60 @@ pub fn router(state: McpDataState) -> Router {
             "/mcp/",
             post(handle_post).get(handle_get).delete(handle_delete),
         )
+        .route(
+            "/mcp/{*rest}",
+            post(handle_post_scoped)
+                .get(handle_get_scoped)
+                .delete(handle_delete_scoped),
+        )
         .with_state(state)
+}
+
+/// A resolved per-server endpoint: the anchor server plus the servers whose
+/// tools this endpoint exposes.
+#[derive(Clone)]
+struct RouteScope {
+    server: McpServer,
+    visible_server_ids: HashSet<String>,
+}
+
+/// Resolves `/mcp/{*rest}` by server name, server id, or explicit route path.
+async fn resolve_scope(state: &McpDataState, rest: &str) -> Result<RouteScope, Response> {
+    let servers =
+        state.storage.mcp.list_servers().await.map_err(|err| {
+            json_error_status(StatusCode::INTERNAL_SERVER_ERROR, storage_error(err))
+        })?;
+
+    let server = servers
+        .iter()
+        .find(|server| server.name == rest || server.id == rest)
+        .or_else(|| {
+            let requested = rest.trim_matches('/');
+            servers.iter().find(|server| {
+                server
+                    .route_path
+                    .as_deref()
+                    .is_some_and(|path| route_path_key(path) == requested)
+            })
+        })
+        .cloned()
+        .ok_or_else(|| route_not_found(rest))?;
+
+    let visible_server_ids = scoped_visible_server_ids(&servers, &server);
+    Ok(RouteScope {
+        server,
+        visible_server_ids,
+    })
+}
+
+fn route_not_found(rest: &str) -> Response {
+    json_error_status(
+        StatusCode::NOT_FOUND,
+        JsonRpcError::new(
+            codes::TOOL_NOT_FOUND,
+            format!("unknown MCP route: /mcp/{rest}"),
+        ),
+    )
 }
 
 // ----- POST --------------------------------------------------------------
@@ -59,6 +113,30 @@ async fn handle_post(
     State(state): State<McpDataState>,
     headers: HeaderMap,
     body: Body,
+) -> Response {
+    handle_post_inner(state, headers, body, None, "/mcp".to_string()).await
+}
+
+async fn handle_post_scoped(
+    State(state): State<McpDataState>,
+    Path(rest): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let path = format!("/mcp/{rest}");
+    let scope = match resolve_scope(&state, &rest).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    handle_post_inner(state, headers, body, Some(scope), path).await
+}
+
+async fn handle_post_inner(
+    state: McpDataState,
+    headers: HeaderMap,
+    body: Body,
+    scope: Option<RouteScope>,
+    path: String,
 ) -> Response {
     let caller = match authenticate(&state.storage, &headers).await {
         Ok(caller) => caller,
@@ -101,8 +179,16 @@ async fn handle_post(
     for item in items {
         match JsonRpcMessage::classify(item) {
             Ok(JsonRpcMessage::Request(request)) => {
-                if let Some(reply) =
-                    handle_request(&state, &caller, &headers, request, &mut session).await
+                if let Some(reply) = handle_request(
+                    &state,
+                    &caller,
+                    &headers,
+                    request,
+                    &mut session,
+                    scope.as_ref(),
+                    &path,
+                )
+                .await
                 {
                     replies.push(reply);
                 }
@@ -146,6 +232,8 @@ async fn handle_request(
     headers: &HeaderMap,
     request: JsonRpcRequest,
     session: &mut Option<String>,
+    scope: Option<&RouteScope>,
+    path: &str,
 ) -> Option<JsonRpcResponse> {
     let Some(id) = request.id.clone() else {
         handle_notification(state, headers, &request.method).await;
@@ -153,17 +241,17 @@ async fn handle_request(
     };
 
     let outcome = match request.method.as_str() {
-        methods::INITIALIZE => initialize(state, request.params, session).await,
+        methods::INITIALIZE => initialize(state, request.params, session, scope).await,
         methods::PING => match require_session(state, headers).await {
             Ok(_) => Ok(Map::new().into()),
             Err(error) => Err(error),
         },
         methods::TOOLS_LIST => match require_session(state, headers).await {
-            Ok(_) => tools_list(state, caller).await,
+            Ok(_) => tools_list(state, caller, scope, path).await,
             Err(error) => Err(error),
         },
         methods::TOOLS_CALL => match require_session(state, headers).await {
-            Ok(_) => tools_call(state, caller, request.params).await,
+            Ok(_) => tools_call(state, caller, request.params, scope, path).await,
             Err(error) => Err(error),
         },
         other => Err(JsonRpcError::method_not_found(other)),
@@ -189,6 +277,7 @@ async fn initialize(
     state: &McpDataState,
     params: Option<Value>,
     session: &mut Option<String>,
+    scope: Option<&RouteScope>,
 ) -> Result<Value, JsonRpcError> {
     let params =
         params.ok_or_else(|| JsonRpcError::invalid_params("initialize requires params"))?;
@@ -203,7 +292,7 @@ async fn initialize(
     }
 
     let version = octra_mcp_core::protocol::negotiate_protocol_version(requested.as_deref(), None);
-    let session_id = create_session(state).await?;
+    let session_id = create_session(state, scope).await?;
     *session = Some(session_id);
 
     let result = InitializeResult {
@@ -243,33 +332,49 @@ async fn require_session(
 
 /// Creates a gateway session that answers a later DELETE.
 ///
-/// `mcp_sessions.server_id` references `mcp_servers` while a gateway session
-/// spans every server, so the first registered server anchors it. With no
-/// server registered there is nothing to route tools to anyway.
-async fn create_session(state: &McpDataState) -> Result<String, JsonRpcError> {
-    let servers = state
-        .storage
-        .mcp
-        .list_servers()
-        .await
-        .map_err(storage_error)?;
-    let anchor = servers
-        .iter()
-        .find(|server| server.enabled)
-        .or_else(|| servers.first())
-        .ok_or_else(|| JsonRpcError::new(codes::INTERNAL_ERROR, "no MCP server is registered"))?;
+/// A scoped endpoint anchors the session to its selected server. The global
+/// `/mcp` endpoint spans every server, so the first enabled server anchors it.
+/// With no server registered there is nothing to route tools to anyway.
+async fn create_session(
+    state: &McpDataState,
+    scope: Option<&RouteScope>,
+) -> Result<String, JsonRpcError> {
+    let anchor_id = match scope {
+        Some(scope) => scope.server.id.clone(),
+        None => {
+            let servers = state
+                .storage
+                .mcp
+                .list_servers()
+                .await
+                .map_err(storage_error)?;
+            servers
+                .iter()
+                .find(|server| server.enabled)
+                .or_else(|| servers.first())
+                .map(|server| server.id.clone())
+                .ok_or_else(|| {
+                    JsonRpcError::new(codes::INTERNAL_ERROR, "no MCP server is registered")
+                })?
+        }
+    };
 
     let id = new_request_id();
     state
         .storage
         .mcp
-        .insert_session(&id, &anchor.id)
+        .insert_session(&id, &anchor_id)
         .await
         .map_err(storage_error)?;
     Ok(id)
 }
 
-async fn tools_list(state: &McpDataState, caller: &Caller) -> Result<Value, JsonRpcError> {
+async fn tools_list(
+    state: &McpDataState,
+    caller: &Caller,
+    scope: Option<&RouteScope>,
+    path: &str,
+) -> Result<Value, JsonRpcError> {
     let catalog = state
         .storage
         .mcp
@@ -282,14 +387,23 @@ async fn tools_list(state: &McpDataState, caller: &Caller) -> Result<Value, Json
         .list_servers()
         .await
         .map_err(storage_error)?;
-    let visible = visible_server_ids(&servers);
+    let visible = match scope {
+        Some(scope) => scope.visible_server_ids.clone(),
+        None => visible_server_ids(&servers),
+    };
 
     let mut tools = Vec::new();
     for entry in &catalog {
         if !entry.tool.enabled || !visible.contains(&entry.tool.server_id) {
             continue;
         }
-        match acl_allows(state, caller, &entry.tool).await {
+        let Some(server) = servers
+            .iter()
+            .find(|server| server.id == entry.tool.server_id)
+        else {
+            continue;
+        };
+        match acl_allows(state, caller, server, &entry.tool, "POST", path).await {
             Ok(true) => tools.push(Tool {
                 name: entry.qualified_name(),
                 title: None,
@@ -316,6 +430,8 @@ async fn tools_call(
     state: &McpDataState,
     caller: &Caller,
     params: Option<Value>,
+    scope: Option<&RouteScope>,
+    path: &str,
 ) -> Result<Value, JsonRpcError> {
     let params: CallToolParams = serde_json::from_value(
         params.ok_or_else(|| JsonRpcError::invalid_params("tools/call requires params"))?,
@@ -323,7 +439,7 @@ async fn tools_call(
     .map_err(|err| JsonRpcError::invalid_params(format!("invalid tools/call params: {err}")))?;
 
     let started = Instant::now();
-    let (server, tool) = resolve_tool(state, caller, &params.name).await?;
+    let (server, tool) = resolve_tool(state, caller, &params.name, scope, path).await?;
 
     let result = state
         .runtime
@@ -373,6 +489,8 @@ async fn resolve_tool(
     state: &McpDataState,
     caller: &Caller,
     qualified: &str,
+    scope: Option<&RouteScope>,
+    path: &str,
 ) -> Result<(McpServer, McpTool), JsonRpcError> {
     let not_found = || {
         JsonRpcError::new(
@@ -405,15 +523,21 @@ async fn resolve_tool(
         return Err(not_found());
     };
 
-    // The aggregate endpoint only routes tools that the listener sources
-    // expose; everything else is unknown from the caller's point of view.
-    let servers = state
-        .storage
-        .mcp
-        .list_servers()
-        .await
-        .map_err(storage_error)?;
-    if !visible_server_ids(&servers).contains(&server.id) {
+    // The global aggregate only routes tools its listeners expose; a scoped
+    // endpoint only routes tools of its selected server (and sources).
+    let visible = match scope {
+        Some(scope) => scope.visible_server_ids.clone(),
+        None => {
+            let servers = state
+                .storage
+                .mcp
+                .list_servers()
+                .await
+                .map_err(storage_error)?;
+            visible_server_ids(&servers)
+        }
+    };
+    if !visible.contains(&server.id) {
         return Err(not_found());
     }
 
@@ -426,7 +550,7 @@ async fn resolve_tool(
         return Err(error);
     }
 
-    let allowed = acl_allows(state, caller, &tool)
+    let allowed = acl_allows(state, caller, &server, &tool, "POST", path)
         .await
         .map_err(storage_error)?;
     if !allowed {
@@ -441,26 +565,208 @@ async fn resolve_tool(
     Ok((server, tool))
 }
 
-/// Applies the scoped ACL precedence: tool rows (consumer, group, default)
-/// override the server entirely; a tool without rows inherits the server
-/// default rules; a server without rows follows the open-local default.
+/// Applies the scoped ACL precedence.
+///
+/// Tool rows (consumer, group, default) override the server entirely. A tool
+/// without rows is governed by the server's CEL expressions when any exist;
+/// otherwise server rows apply, and a server without rows follows the
+/// open-local default.
 async fn acl_allows(
     state: &McpDataState,
     caller: &Caller,
+    server: &McpServer,
     tool: &McpTool,
+    method: &str,
+    path: &str,
 ) -> octra_core::Result<bool> {
     let tool_rows = state.storage.mcp.list_acls(Some(&tool.id)).await?;
-    let server_rows = if tool_rows.is_empty() {
-        state.storage.mcp.list_server_acls(&tool.server_id).await?
-    } else {
-        Vec::new()
-    };
+    if !tool_rows.is_empty() {
+        return Ok(acl_allows_scoped(
+            &tool_rows,
+            caller.consumer_id.as_deref(),
+            &caller.consumer_group_ids,
+        ));
+    }
+
+    if !server.acl_allow_when.is_empty() || !server.acl_deny_when.is_empty() {
+        return Ok(match cel_allows(server, caller, tool, method, path) {
+            Ok(allowed) => allowed,
+            Err(err) => {
+                // Evaluation failures fail closed for both listing and calls.
+                tracing::warn!(
+                    server = %server.name,
+                    tool = %tool.name,
+                    consumer = ?caller.consumer_id,
+                    error = %err,
+                    "MCP CEL ACL evaluation failed; denying"
+                );
+                false
+            }
+        });
+    }
+
+    let server_rows = state.storage.mcp.list_server_acls(&server.id).await?;
     Ok(acl_allows_default_then_tool(
-        &tool_rows,
+        &[],
         &server_rows,
         caller.consumer_id.as_deref(),
         &caller.consumer_group_ids,
     ))
+}
+
+/// Validates every CEL expression configured on a server.
+pub(crate) fn validate_acl_expressions(allow: &[String], deny: &[String]) -> Result<(), String> {
+    for (field, expressions) in [("acl_allow_when", allow), ("acl_deny_when", deny)] {
+        for (index, expression) in expressions.iter().enumerate() {
+            validate_cel_expression(expression)
+                .map_err(|err| format!("{field}[{index}]: {err}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_cel_expression(source: &str) -> Result<(), String> {
+    let length = source.chars().count();
+    if source.trim().is_empty() {
+        return Err("CEL expression must not be empty".to_string());
+    }
+    if length > 1024 {
+        return Err(format!(
+            "CEL expression must be at most 1024 characters, got {length}"
+        ));
+    }
+
+    let program =
+        Program::compile(source).map_err(|err| format!("invalid CEL expression: {err}"))?;
+    let context = sample_cel_context()?;
+    match program.execute(&context) {
+        Ok(CelValue::Bool(_)) => Ok(()),
+        Ok(value) => Err(format!(
+            "CEL expression must evaluate to a boolean, got {}",
+            value.type_of()
+        )),
+        Err(err) => Err(format!("CEL expression cannot be evaluated: {err}")),
+    }
+}
+
+/// Kong-style deny-wins decision over the server expressions.
+fn cel_allows(
+    server: &McpServer,
+    caller: &Caller,
+    tool: &McpTool,
+    method: &str,
+    path: &str,
+) -> Result<bool, String> {
+    let context = cel_context(caller, server, tool, method, path)?;
+
+    for expression in &server.acl_deny_when {
+        if eval_cel_bool(expression, &context)? {
+            return Ok(false);
+        }
+    }
+
+    if server.acl_allow_when.is_empty() {
+        return Ok(true);
+    }
+    for expression in &server.acl_allow_when {
+        if eval_cel_bool(expression, &context)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn eval_cel_bool(source: &str, context: &CelContext<'_>) -> Result<bool, String> {
+    let program =
+        Program::compile(source).map_err(|err| format!("invalid CEL expression: {err}"))?;
+    match program.execute(context) {
+        Ok(CelValue::Bool(value)) => Ok(value),
+        Ok(value) => Err(format!(
+            "CEL expression must evaluate to a boolean, got {}",
+            value.type_of()
+        )),
+        Err(err) => Err(format!("CEL evaluation failed: {err}")),
+    }
+}
+
+fn cel_context(
+    caller: &Caller,
+    server: &McpServer,
+    tool: &McpTool,
+    method: &str,
+    path: &str,
+) -> Result<CelContext<'static>, String> {
+    let mut context = CelContext::default();
+    context
+        .add_variable(
+            "consumer",
+            json!({
+                "id": caller.consumer_id.as_deref(),
+                "username": caller.consumer_name.as_deref(),
+            }),
+        )
+        .map_err(|err| err.to_string())?;
+    context
+        .add_variable(
+            "consumer_group",
+            json!({ "names": caller.consumer_group_names }),
+        )
+        .map_err(|err| err.to_string())?;
+    context
+        .add_variable(
+            "tool",
+            json!({
+                "name": tool.name,
+                "server": server.name,
+                "qualified_name": tool.qualified_name(&server.name),
+            }),
+        )
+        .map_err(|err| err.to_string())?;
+    context
+        .add_variable(
+            "request",
+            json!({
+                "method": method,
+                "path": path,
+                "server": server.name,
+            }),
+        )
+        .map_err(|err| err.to_string())?;
+    Ok(context)
+}
+
+fn sample_cel_context() -> Result<CelContext<'static>, String> {
+    let mut context = CelContext::default();
+    context
+        .add_variable(
+            "consumer",
+            json!({"id": "sample-consumer", "username": "sample-user"}),
+        )
+        .map_err(|err| err.to_string())?;
+    context
+        .add_variable("consumer_group", json!({ "names": ["sample-group"] }))
+        .map_err(|err| err.to_string())?;
+    context
+        .add_variable(
+            "tool",
+            json!({
+                "name": "sample-tool",
+                "server": "sample-server",
+                "qualified_name": "sample-server__sample-tool",
+            }),
+        )
+        .map_err(|err| err.to_string())?;
+    context
+        .add_variable(
+            "request",
+            json!({
+                "method": "POST",
+                "path": "/mcp/sample-server",
+                "server": "sample-server",
+            }),
+        )
+        .map_err(|err| err.to_string())?;
+    Ok(context)
 }
 
 /// The servers whose tools the aggregate `/mcp` endpoint presents.
@@ -504,6 +810,41 @@ fn visible_server_ids(servers: &[McpServer]) -> HashSet<String> {
             }) {
                 visible.insert(source.id.clone());
             }
+        }
+    }
+    visible
+}
+
+/// The servers a scoped `/mcp/{rest}` endpoint exposes.
+///
+/// A listener aggregates its own tools plus its `sources` (every enabled
+/// upstream when the list is empty). Every other mode exposes only itself.
+/// Disabled servers expose nothing.
+fn scoped_visible_server_ids(servers: &[McpServer], scope: &McpServer) -> HashSet<String> {
+    if !scope.enabled {
+        return HashSet::new();
+    }
+    if scope.mode != MCP_SERVER_MODE_LISTENER {
+        return HashSet::from([scope.id.clone()]);
+    }
+
+    let mut visible = HashSet::from([scope.id.clone()]);
+    if scope.sources.is_empty() {
+        visible.extend(
+            servers
+                .iter()
+                .filter(|server| server.enabled && is_source_server_mode(&server.mode))
+                .map(|server| server.id.clone()),
+        );
+        return visible;
+    }
+    for reference in &scope.sources {
+        if let Some(source) = servers.iter().find(|server| {
+            server.enabled
+                && is_source_server_mode(&server.mode)
+                && (server.name == *reference || server.id == *reference)
+        }) {
+            visible.insert(source.id.clone());
         }
     }
     visible
@@ -568,6 +909,21 @@ async fn record_decision(
 // ----- GET / DELETE ------------------------------------------------------
 
 async fn handle_get(State(state): State<McpDataState>, headers: HeaderMap) -> Response {
+    handle_get_inner(state, headers).await
+}
+
+async fn handle_get_scoped(
+    State(state): State<McpDataState>,
+    Path(rest): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = resolve_scope(&state, &rest).await {
+        return response;
+    }
+    handle_get_inner(state, headers).await
+}
+
+async fn handle_get_inner(state: McpDataState, headers: HeaderMap) -> Response {
     if let Err(err) = authenticate(&state.storage, &headers).await {
         return auth_failure(err);
     }
@@ -589,6 +945,21 @@ async fn handle_get(State(state): State<McpDataState>, headers: HeaderMap) -> Re
 }
 
 async fn handle_delete(State(state): State<McpDataState>, headers: HeaderMap) -> Response {
+    handle_delete_inner(state, headers).await
+}
+
+async fn handle_delete_scoped(
+    State(state): State<McpDataState>,
+    Path(rest): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = resolve_scope(&state, &rest).await {
+        return response;
+    }
+    handle_delete_inner(state, headers).await
+}
+
+async fn handle_delete_inner(state: McpDataState, headers: HeaderMap) -> Response {
     if let Err(err) = authenticate(&state.storage, &headers).await {
         return auth_failure(err);
     }

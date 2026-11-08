@@ -3,6 +3,8 @@
 mod support;
 
 use axum::http::StatusCode;
+use octra_mcp_core::domain::default_server_mode;
+use octra_mcp_core::{NewMcpServer, Transport};
 use serde_json::json;
 use support::{
     Gateway, UpstreamMode, create_consumer_group, create_key, create_keyed_consumer, start_upstream,
@@ -1449,4 +1451,601 @@ async fn refresh_rediscovers_tools_and_unknown_servers_fail() {
         .control("POST", "/api/v1/mcp/servers/missing/refresh", json!(null))
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn per_server_routes_scope_catalogs_calls_and_sessions() {
+    let first = start_upstream(UpstreamMode::Json).await;
+    let second = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let first_id = gateway.add_http_server("first", &first).await;
+    let second_id = gateway.add_http_server("second", &second).await;
+
+    // Name and id both resolve to the same scoped endpoint.
+    let session = gateway.open_session_at("/mcp/second", None).await;
+    let stored = gateway
+        .storage
+        .mcp
+        .get_session(&session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.server_id, second_id,
+        "scoped sessions anchor to the selected server"
+    );
+
+    let (status, body) = gateway
+        .rpc_at(
+            "/mcp/second",
+            &session,
+            json!(2),
+            "tools/list",
+            json!({}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(tool_names(&body), vec!["second__boom", "second__echo"]);
+
+    let id_path = format!("/mcp/{first_id}");
+    let id_session = gateway.open_session_at(&id_path, None).await;
+    let (_, body) = gateway
+        .rpc_at(
+            &id_path,
+            &id_session,
+            json!(3),
+            "tools/list",
+            json!({}),
+            None,
+        )
+        .await;
+    assert_eq!(tool_names(&body), vec!["first__boom", "first__echo"]);
+
+    // Calls are scoped too: a valid source tool routes, a foreign one is unknown.
+    let (_, body) = gateway
+        .rpc_at(
+            &id_path,
+            &id_session,
+            json!(4),
+            "tools/call",
+            json!({"name": "first__echo", "arguments": {"message": "scoped"}}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "scoped");
+    let (_, body) = gateway
+        .rpc_at(
+            &id_path,
+            &id_session,
+            json!(5),
+            "tools/call",
+            json!({"name": "second__echo"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32002);
+
+    // Unknown routes are 404 for both POST and GET.
+    let (status, _, body) = gateway.initialize_at("/mcp/ghost", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"]["code"], -32002);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown MCP route")
+    );
+    let request = axum::http::Request::builder()
+        .method("GET")
+        .uri("/mcp/ghost")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = tower::ServiceExt::oneshot(gateway.data_router(), request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // The global endpoint keeps aggregating every enabled server.
+    let global = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(&global, json!(6), "tools/list", json!({}), None)
+        .await;
+    assert_eq!(
+        tool_names(&body),
+        vec!["first__boom", "first__echo", "second__boom", "second__echo",]
+    );
+}
+
+#[tokio::test]
+async fn listener_route_exposes_only_its_sources() {
+    let first = start_upstream(UpstreamMode::Json).await;
+    let second = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("first", &first).await;
+    gateway.add_http_server("second", &second).await;
+    gateway.add_listener("front", &["first"]).await;
+
+    let session = gateway.open_session_at("/mcp/front", None).await;
+    let (status, body) = gateway
+        .rpc_at(
+            "/mcp/front",
+            &session,
+            json!(2),
+            "tools/list",
+            json!({}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(tool_names(&body), vec!["first__boom", "first__echo"]);
+
+    let (_, body) = gateway
+        .rpc_at(
+            "/mcp/front",
+            &session,
+            json!(3),
+            "tools/call",
+            json!({"name": "first__echo", "arguments": {"message": "listener"}}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "listener");
+
+    let (_, body) = gateway
+        .rpc_at(
+            "/mcp/front",
+            &session,
+            json!(4),
+            "tools/call",
+            json!({"name": "second__echo"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32002);
+    assert!(second.state.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn custom_route_paths_resolve_and_are_validated() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+
+    let (status, created) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "custom",
+                "transport": "http",
+                "url": upstream.url(),
+                "route_path": "/mcp/team/custom",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["route_path"], "/mcp/team/custom");
+    let custom_id = created["id"].as_str().unwrap().to_string();
+
+    let session = gateway.open_session_at("/mcp/team/custom", None).await;
+    let stored = gateway
+        .storage
+        .mcp
+        .get_session(&session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.server_id, custom_id);
+    let (_, body) = gateway
+        .rpc_at(
+            "/mcp/team/custom",
+            &session,
+            json!(2),
+            "tools/list",
+            json!({}),
+            None,
+        )
+        .await;
+    assert_eq!(tool_names(&body), vec!["custom__boom", "custom__echo"]);
+
+    // Responses expose the name-derived default even when the column is null.
+    let default_id = gateway.add_http_server("default", &upstream).await;
+    let (status, default) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/servers/{default_id}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{default}");
+    assert_eq!(default["route_path"], "/mcp/default");
+
+    // Route path syntax and uniqueness are validated with field-specific errors.
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "bad-path",
+                "transport": "http",
+                "url": upstream.url(),
+                "route_path": "mcp/no-slash",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("route_path")
+    );
+
+    for path in ["/mcp", "/mcp/", "/mcp/bad?query=1"] {
+        let (status, body) = gateway
+            .control(
+                "POST",
+                "/api/v1/mcp/servers",
+                json!({
+                    "name": "bad-path",
+                    "transport": "http",
+                    "url": upstream.url(),
+                    "route_path": path,
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "rival",
+                "transport": "http",
+                "url": upstream.url(),
+                "route_path": "/mcp/team/custom",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already used")
+    );
+
+    // Updates accept a new path and keep it in responses.
+    let (status, updated) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{custom_id}"),
+            json!({
+                "name": "custom",
+                "transport": "http",
+                "url": upstream.url(),
+                "route_path": "/mcp/team/renamed",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["route_path"], "/mcp/team/renamed");
+    let session = gateway.open_session_at("/mcp/team/renamed", None).await;
+    let (_, body) = gateway
+        .rpc_at(
+            "/mcp/team/renamed",
+            &session,
+            json!(3),
+            "tools/list",
+            json!({}),
+            None,
+        )
+        .await;
+    assert_eq!(tool_names(&body), vec!["custom__boom", "custom__echo"]);
+}
+
+#[tokio::test]
+async fn cel_allow_when_matches_consumer_groups_and_denies_outsiders() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let (member_key, member_id) = create_keyed_consumer(&gateway, "team-member").await;
+    let (outsider_key, _) = create_keyed_consumer(&gateway, "outsider").await;
+    create_consumer_group(&gateway, "team", &[&member_id]).await;
+
+    let (status, server) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "guarded",
+                "transport": "http",
+                "url": upstream.url(),
+                "acl_allow_when": ["consumer_group.names.contains(\"team\")"],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{server}");
+    assert_eq!(
+        server["acl_allow_when"],
+        json!(["consumer_group.names.contains(\"team\")"])
+    );
+
+    let member_session = gateway.open_session(Some(&member_key)).await;
+    let (_, body) = gateway
+        .rpc(
+            &member_session,
+            json!(2),
+            "tools/list",
+            json!({}),
+            Some(&member_key),
+        )
+        .await;
+    assert_eq!(tool_names(&body), vec!["guarded__boom", "guarded__echo"]);
+    let (_, body) = gateway
+        .rpc(
+            &member_session,
+            json!(3),
+            "tools/call",
+            json!({"name": "guarded__echo", "arguments": {"message": "group"}}),
+            Some(&member_key),
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "group");
+
+    // A consumer outside the group does not satisfy the allow expression.
+    let outsider_session = gateway.open_session(Some(&outsider_key)).await;
+    let (_, body) = gateway
+        .rpc(
+            &outsider_session,
+            json!(4),
+            "tools/list",
+            json!({}),
+            Some(&outsider_key),
+        )
+        .await;
+    assert!(tool_names(&body).is_empty(), "{body}");
+    let (_, body) = gateway
+        .rpc(
+            &outsider_session,
+            json!(5),
+            "tools/call",
+            json!({"name": "guarded__echo"}),
+            Some(&outsider_key),
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+}
+
+#[tokio::test]
+async fn cel_deny_when_wins_over_allow_when() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let (blocked_key, blocked_id) = create_keyed_consumer(&gateway, "blocked").await;
+    let (allowed_key, _) = create_keyed_consumer(&gateway, "allowed").await;
+
+    let (status, server) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "guarded",
+                "transport": "http",
+                "url": upstream.url(),
+                "acl_allow_when": ["true"],
+                "acl_deny_when": [format!("consumer.id == \"{blocked_id}\"")],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{server}");
+
+    let blocked_session = gateway.open_session(Some(&blocked_key)).await;
+    let (_, body) = gateway
+        .rpc(
+            &blocked_session,
+            json!(2),
+            "tools/list",
+            json!({}),
+            Some(&blocked_key),
+        )
+        .await;
+    assert!(tool_names(&body).is_empty(), "{body}");
+    let (_, body) = gateway
+        .rpc(
+            &blocked_session,
+            json!(3),
+            "tools/call",
+            json!({"name": "guarded__echo"}),
+            Some(&blocked_key),
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+
+    // The same allow expression grants every consumer the deny does not match.
+    let allowed_session = gateway.open_session(Some(&allowed_key)).await;
+    let (_, body) = gateway
+        .rpc(
+            &allowed_session,
+            json!(4),
+            "tools/list",
+            json!({}),
+            Some(&allowed_key),
+        )
+        .await;
+    assert_eq!(tool_names(&body), vec!["guarded__boom", "guarded__echo"]);
+    let (_, body) = gateway
+        .rpc(
+            &allowed_session,
+            json!(5),
+            "tools/call",
+            json!({"name": "guarded__echo", "arguments": {"message": "allowed"}}),
+            Some(&allowed_key),
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "allowed");
+}
+
+#[tokio::test]
+async fn per_tool_acl_rows_override_server_cel() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+
+    // Server CEL denies every tool without rows of its own.
+    let (status, updated) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{server_id}"),
+            json!({
+                "name": "remote",
+                "transport": "http",
+                "url": upstream.url(),
+                "acl_deny_when": ["true"],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+
+    let echo_id = find_tool_id(&gateway, &server_id, "echo").await;
+    let (status, acl) = set_acl(&gateway, json!({"tool_id": echo_id, "allowed": true})).await;
+    assert_eq!(status, StatusCode::CREATED, "{acl}");
+
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(&session, json!(2), "tools/list", json!({}), None)
+        .await;
+    assert_eq!(tool_names(&body), vec!["remote__echo"]);
+
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "override"}}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "override");
+
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(4),
+            "tools/call",
+            json!({"name": "remote__boom"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+}
+
+#[tokio::test]
+async fn invalid_cel_expressions_are_rejected_by_the_control_api() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+
+    let cases = [
+        (
+            json!({"name": "non-bool", "url": upstream.url(), "acl_allow_when": ["1 + 1"]}),
+            "must evaluate to a boolean",
+        ),
+        (
+            json!({"name": "syntax", "url": upstream.url(), "acl_deny_when": ["this is not cel"]}),
+            "acl_deny_when[0]",
+        ),
+        (
+            json!({"name": "empty", "url": upstream.url(), "acl_allow_when": [""]}),
+            "must not be empty",
+        ),
+        (
+            json!({"name": "too-long", "url": upstream.url(), "acl_allow_when": ["a".repeat(1025)]}),
+            "at most 1024",
+        ),
+    ];
+    for (body, expected) in cases {
+        let (status, response) = gateway.control("POST", "/api/v1/mcp/servers", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(expected),
+            "expected '{expected}' in {response}"
+        );
+    }
+
+    // Updates run the same validation before persisting.
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+    let (status, body) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{server_id}"),
+            json!({
+                "name": "remote",
+                "transport": "http",
+                "url": upstream.url(),
+                "acl_allow_when": ["request.method"],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("acl_allow_when[0]")
+    );
+}
+
+#[tokio::test]
+async fn cel_evaluation_failures_fail_closed() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+
+    // Bypass control-plane validation to simulate a corrupted/legacy row.
+    let update = NewMcpServer {
+        name: "remote".into(),
+        transport: Transport::Http,
+        mode: default_server_mode(),
+        sources: Vec::new(),
+        route_path: None,
+        acl_allow_when: vec!["unknown_variable".into()],
+        acl_deny_when: Vec::new(),
+        command: None,
+        url: Some(upstream.url()),
+        enabled: true,
+        config: json!({}),
+        headers: serde_json::Map::new(),
+    };
+    gateway
+        .storage
+        .mcp
+        .update_server(&server_id, &update)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let session = gateway.open_session(None).await;
+    let (status, body) = gateway
+        .rpc(&session, json!(2), "tools/list", json!({}), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        tool_names(&body).is_empty(),
+        "evaluation failures must hide tools: {body}"
+    );
+
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({"name": "remote__echo"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+    assert!(upstream.state.calls.lock().unwrap().is_empty());
 }

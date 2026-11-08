@@ -324,7 +324,16 @@ impl Gateway {
     // ----- data plane ----------------------------------------------------
 
     pub async fn initialize(&self, api_key: Option<&str>) -> (StatusCode, HeaderMap, Value) {
-        self.post_mcp(
+        self.initialize_at("/mcp", api_key).await
+    }
+
+    pub async fn initialize_at(
+        &self,
+        path: &str,
+        api_key: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        self.post_mcp_at(
+            path,
             json!({
                 "jsonrpc": "2.0",
                 "id": "init",
@@ -349,8 +358,22 @@ impl Gateway {
         params: Value,
         api_key: Option<&str>,
     ) -> (StatusCode, Value) {
+        self.rpc_at("/mcp", session, id, method, params, api_key)
+            .await
+    }
+
+    pub async fn rpc_at(
+        &self,
+        path: &str,
+        session: &str,
+        id: Value,
+        method: &str,
+        params: Value,
+        api_key: Option<&str>,
+    ) -> (StatusCode, Value) {
         let (status, _, body) = self
-            .post_mcp(
+            .post_mcp_at(
+                path,
                 json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
                 api_key,
                 Some(session),
@@ -365,8 +388,7 @@ impl Gateway {
         api_key: Option<&str>,
         session: Option<&str>,
     ) -> (StatusCode, HeaderMap, Value) {
-        self.post_mcp_with_content_type(body, api_key, session, "application/json")
-            .await
+        self.post_mcp_at("/mcp", body, api_key, session).await
     }
 
     pub async fn post_mcp_with_content_type(
@@ -376,9 +398,32 @@ impl Gateway {
         session: Option<&str>,
         content_type: &str,
     ) -> (StatusCode, HeaderMap, Value) {
+        self.post_mcp_at_with_content_type("/mcp", body, api_key, session, content_type)
+            .await
+    }
+
+    pub async fn post_mcp_at(
+        &self,
+        path: &str,
+        body: Value,
+        api_key: Option<&str>,
+        session: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        self.post_mcp_at_with_content_type(path, body, api_key, session, "application/json")
+            .await
+    }
+
+    pub async fn post_mcp_at_with_content_type(
+        &self,
+        path: &str,
+        body: Value,
+        api_key: Option<&str>,
+        session: Option<&str>,
+        content_type: &str,
+    ) -> (StatusCode, HeaderMap, Value) {
         let mut request = axum::http::Request::builder()
             .method("POST")
-            .uri("/mcp")
+            .uri(path)
             .header(header::CONTENT_TYPE, content_type);
         if let Some(key) = api_key {
             request = request.header(header::AUTHORIZATION, format!("Bearer {key}"));
@@ -398,7 +443,12 @@ impl Gateway {
 
     /// Initializes a session and returns its id.
     pub async fn open_session(&self, api_key: Option<&str>) -> String {
-        let (status, headers, body) = self.initialize(api_key).await;
+        self.open_session_at("/mcp", api_key).await
+    }
+
+    /// Initializes a session on a specific endpoint and returns its id.
+    pub async fn open_session_at(&self, path: &str, api_key: Option<&str>) -> String {
+        let (status, headers, body) = self.initialize_at(path, api_key).await;
         assert_eq!(status, StatusCode::OK, "initialize failed: {body}");
         assert_eq!(body["result"]["protocolVersion"], "2025-06-18");
         let session = headers

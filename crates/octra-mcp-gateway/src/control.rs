@@ -15,7 +15,8 @@ use axum::routing::{get, post};
 use octra_data_plane::body_bytes_limited;
 use octra_mcp_core::domain::{
     MCP_SERVER_MODE_LISTENER, McpServer, McpServerAcl, McpTool, NewMcpServer, default_server_mode,
-    is_source_server_mode, status, validate_secret_reference, validate_server_mode,
+    effective_route_path, is_source_server_mode, route_path_key, status, validate_route_path,
+    validate_secret_reference, validate_server_mode,
 };
 use octra_mcp_core::{Transport, domain::McpApiKey};
 use octra_storage::mcp::DiscoveredTool;
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::auth::{display_prefix, generate_key, hash_key};
+use crate::data::validate_acl_expressions;
 use crate::{DiscoveryStats, McpControlState};
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -166,6 +168,9 @@ pub struct ServerRequest {
     #[serde(rename = "type", alias = "mode")]
     pub mode: Option<String>,
     pub sources: Option<Vec<String>>,
+    pub route_path: Option<String>,
+    pub acl_allow_when: Option<Vec<String>>,
+    pub acl_deny_when: Option<Vec<String>>,
     pub command: Option<String>,
     pub url: Option<String>,
     pub enabled: bool,
@@ -180,6 +185,9 @@ impl Default for ServerRequest {
             transport: None,
             mode: None,
             sources: None,
+            route_path: None,
+            acl_allow_when: None,
+            acl_deny_when: None,
             command: None,
             url: None,
             enabled: true,
@@ -232,6 +240,9 @@ impl ServerRequest {
             transport,
             mode,
             sources: self.sources.unwrap_or_default(),
+            route_path: self.route_path.map(|path| path.trim().to_string()),
+            acl_allow_when: self.acl_allow_when.unwrap_or_default(),
+            acl_deny_when: self.acl_deny_when.unwrap_or_default(),
             command: self.command,
             url: self.url,
             enabled: self.enabled,
@@ -241,6 +252,46 @@ impl ServerRequest {
         server.validate().map_err(ApiError::bad_request)?;
         Ok(server)
     }
+}
+
+/// Validates route path syntax and rejects a path already used by another
+/// server. Name-derived defaults (`/mcp/<name>`) participate so an explicit
+/// path cannot shadow another server's endpoint.
+async fn validate_server_route(
+    state: &McpControlState,
+    candidate: &NewMcpServer,
+    exclude_id: Option<&str>,
+) -> ApiResult<()> {
+    if let Some(path) = candidate.route_path.as_deref() {
+        validate_route_path(path)
+            .map_err(|err| ApiError::bad_request(format!("route_path: {err}")))?;
+    }
+
+    let candidate_path = effective_route_path(candidate.route_path.as_deref(), &candidate.name);
+    let candidate_key = route_path_key(&candidate_path);
+    for server in state.storage.mcp.list_servers().await.map_err(storage)? {
+        if Some(server.id.as_str()) == exclude_id {
+            continue;
+        }
+        // A duplicate name is reported by the name unique constraint with the
+        // established message; do not mask it with a route-path error.
+        if server.name == candidate.name {
+            return Ok(());
+        }
+        let existing_path = server.effective_route_path();
+        if route_path_key(&existing_path) == candidate_key {
+            return Err(ApiError::conflict(format!(
+                "route_path '{candidate_path}' is already used by MCP server '{}'",
+                server.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_server_acl_expressions(server: &NewMcpServer) -> ApiResult<()> {
+    validate_acl_expressions(&server.acl_allow_when, &server.acl_deny_when)
+        .map_err(ApiError::bad_request)
 }
 
 /// Resolves `sources` references (server ids or names) to canonical server
@@ -311,7 +362,10 @@ pub struct ServerResponse {
     pub tool_count: usize,
 }
 
-async fn server_response(state: &McpControlState, server: McpServer) -> ApiResult<ServerResponse> {
+async fn server_response(
+    state: &McpControlState,
+    mut server: McpServer,
+) -> ApiResult<ServerResponse> {
     let tool_count = state
         .storage
         .mcp
@@ -319,6 +373,8 @@ async fn server_response(state: &McpControlState, server: McpServer) -> ApiResul
         .await
         .map_err(storage)?
         .len();
+    // Responses always expose the effective path, even when the column is null.
+    server.route_path = Some(server.effective_route_path());
     Ok(ServerResponse { server, tool_count })
 }
 
@@ -336,6 +392,8 @@ async fn create_server(State(state): State<McpControlState>, body: Body) -> ApiR
     let request: ServerRequest = json_body(&state, body).await?;
     let mut new_server = request.into_new_server()?;
     new_server.sources = resolve_sources(&state, &new_server.mode, &new_server.sources).await?;
+    validate_server_route(&state, &new_server, None).await?;
+    validate_server_acl_expressions(&new_server)?;
     let display_name = new_server.name.clone();
 
     let server = state
@@ -398,6 +456,9 @@ async fn update_server(
     let request: ServerRequest = json_body(&state, body).await?;
     let mode_given = request.mode.is_some();
     let sources_given = request.sources.is_some();
+    let route_path_given = request.route_path.is_some();
+    let allow_when_given = request.acl_allow_when.is_some();
+    let deny_when_given = request.acl_deny_when.is_some();
     let mut candidate = request.into_new_server()?;
     if candidate.name.trim().is_empty() {
         candidate.name = existing.name.clone();
@@ -411,7 +472,18 @@ async fn update_server(
     if !sources_given {
         candidate.sources = existing.sources.clone();
     }
+    if !route_path_given {
+        candidate.route_path = existing.route_path.clone();
+    }
+    if !allow_when_given {
+        candidate.acl_allow_when = existing.acl_allow_when.clone();
+    }
+    if !deny_when_given {
+        candidate.acl_deny_when = existing.acl_deny_when.clone();
+    }
     candidate.sources = resolve_sources(&state, &candidate.mode, &candidate.sources).await?;
+    validate_server_route(&state, &candidate, Some(&id)).await?;
+    validate_server_acl_expressions(&candidate)?;
 
     let display_name = candidate.name.clone();
     let updated = state

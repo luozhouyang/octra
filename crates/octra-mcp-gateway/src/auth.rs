@@ -22,17 +22,23 @@ pub const API_KEY_HEADER: &str = "x-api-key";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Caller {
     pub consumer_id: Option<String>,
+    /// Display name of the consumer, when one is resolved.
+    pub consumer_name: Option<String>,
     pub key_id: Option<String>,
     /// Groups the consumer belongs to, resolved once at authentication time.
     pub consumer_group_ids: Vec<String>,
+    /// Group names used by CEL expressions (`consumer_group.names`).
+    pub consumer_group_names: Vec<String>,
 }
 
 impl Caller {
     pub fn anonymous() -> Self {
         Self {
             consumer_id: None,
+            consumer_name: None,
             key_id: None,
             consumer_group_ids: Vec::new(),
+            consumer_group_names: Vec::new(),
         }
     }
 }
@@ -121,21 +127,33 @@ async fn caller_from_key(
     storage: &Storage,
     record: octra_mcp_core::McpApiKey,
 ) -> Result<Caller, AuthError> {
-    let consumer_group_ids = match record.consumer_id.as_deref() {
-        Some(consumer_id) => storage
-            .api
-            .list_consumer_groups_for_consumer(consumer_id)
-            .await?
-            .into_iter()
-            .map(|group| group.id)
-            .collect(),
-        None => Vec::new(),
-    };
+    let (consumer_name, consumer_group_ids, consumer_group_names) =
+        match record.consumer_id.as_deref() {
+            Some(consumer_id) => {
+                let name = storage
+                    .api
+                    .get_consumer(consumer_id)
+                    .await?
+                    .and_then(|consumer| consumer.username);
+                let groups = storage
+                    .api
+                    .list_consumer_groups_for_consumer(consumer_id)
+                    .await?;
+                (
+                    name,
+                    groups.iter().map(|group| group.id.clone()).collect(),
+                    groups.into_iter().map(|group| group.name).collect(),
+                )
+            }
+            None => (None, Vec::new(), Vec::new()),
+        };
 
     Ok(Caller {
         consumer_id: record.consumer_id,
+        consumer_name,
         key_id: Some(record.id),
         consumer_group_ids,
+        consumer_group_names,
     })
 }
 
@@ -260,8 +278,10 @@ mod tests {
         );
         let caller = authenticate(&storage, &headers).await.unwrap();
         assert_eq!(caller.consumer_id.as_deref(), Some("c1"));
+        assert_eq!(caller.consumer_name.as_deref(), Some("consumer-one"));
         assert!(caller.key_id.is_some());
         assert!(caller.consumer_group_ids.is_empty());
+        assert!(caller.consumer_group_names.is_empty());
     }
 
     #[tokio::test]
@@ -316,11 +336,14 @@ mod tests {
         headers.insert(API_KEY_HEADER, HeaderValue::from_str(&key).unwrap());
         let caller = authenticate(&storage, &headers).await.unwrap();
         assert_eq!(caller.consumer_group_ids, vec![group.id.clone()]);
+        assert_eq!(caller.consumer_group_names, vec![group.name.clone()]);
 
         let mut headers = HeaderMap::new();
         headers.insert(API_KEY_HEADER, HeaderValue::from_str(&unscoped).unwrap());
         let caller = authenticate(&storage, &headers).await.unwrap();
         assert!(caller.consumer_id.is_none());
+        assert!(caller.consumer_name.is_none());
         assert!(caller.consumer_group_ids.is_empty());
+        assert!(caller.consumer_group_names.is_empty());
     }
 }

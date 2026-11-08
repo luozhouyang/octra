@@ -91,6 +91,14 @@ pub struct McpServer {
     /// means every enabled `upstream-server` and `passthrough-listener`.
     #[serde(default)]
     pub sources: Vec<String>,
+    /// Explicit public path. `None` means the effective `/mcp/<name>` default.
+    pub route_path: Option<String>,
+    /// CEL expressions that may grant access when non-empty; any deny wins.
+    #[serde(default)]
+    pub acl_allow_when: Vec<String>,
+    /// CEL expressions that deny access when any evaluates to true.
+    #[serde(default)]
+    pub acl_deny_when: Vec<String>,
     pub command: Option<String>,
     pub url: Option<String>,
     pub enabled: bool,
@@ -110,6 +118,12 @@ pub struct NewMcpServer {
     pub mode: String,
     #[serde(default)]
     pub sources: Vec<String>,
+    #[serde(default)]
+    pub route_path: Option<String>,
+    #[serde(default)]
+    pub acl_allow_when: Vec<String>,
+    #[serde(default)]
+    pub acl_deny_when: Vec<String>,
     pub command: Option<String>,
     pub url: Option<String>,
     pub enabled: bool,
@@ -174,6 +188,55 @@ impl NewMcpServer {
 fn is_http_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// Default public route of a server: `/mcp/<name>`.
+pub fn default_route_path(name: &str) -> String {
+    format!("/mcp/{name}")
+}
+
+/// Effective route path, using the stored explicit value when present.
+pub fn effective_route_path(route_path: Option<&str>, name: &str) -> String {
+    route_path
+        .map(str::to_string)
+        .unwrap_or_else(|| default_route_path(name))
+}
+
+/// Normalizes a route path to the wildcard tail matched by `/mcp/{*rest}`.
+///
+/// Both `/mcp/files` and `/files` address the same scoped endpoint, so their
+/// keys are equal. This keeps uniqueness checks aligned with routing.
+pub fn route_path_key(route_path: &str) -> String {
+    let trimmed = route_path.trim_matches('/');
+    trimmed.strip_prefix("mcp/").unwrap_or(trimmed).to_string()
+}
+
+/// Validates an explicitly configured route path.
+///
+/// Paths live below the `/mcp/` wildcard, must be absolute, and may not carry
+/// a query or fragment. `/mcp` and `/mcp/` stay reserved for the global
+/// aggregate endpoint.
+pub fn validate_route_path(route_path: &str) -> Result<(), String> {
+    if !route_path.starts_with('/') {
+        return Err(format!("route_path must start with '/', got: {route_path}"));
+    }
+    if route_path.contains('?') || route_path.contains('#') {
+        return Err("route_path must not contain a query string or fragment".into());
+    }
+    if route_path == "/mcp" || route_path == "/mcp/" {
+        return Err("route_path '/mcp' is reserved for the global aggregate endpoint".into());
+    }
+    if route_path_key(route_path).is_empty() {
+        return Err("route_path must name a path below /mcp".into());
+    }
+    Ok(())
+}
+
+impl McpServer {
+    /// Explicit route path when stored, otherwise the `/mcp/<name>` default.
+    pub fn effective_route_path(&self) -> String {
+        effective_route_path(self.route_path.as_deref(), &self.name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -434,6 +497,9 @@ mod tests {
             transport: Transport::Stdio,
             mode: default_server_mode(),
             sources: Vec::new(),
+            route_path: None,
+            acl_allow_when: Vec::new(),
+            acl_deny_when: Vec::new(),
             command: Some("node".into()),
             url: None,
             enabled: true,
@@ -685,5 +751,39 @@ mod tests {
         let descriptor = tool_descriptor("files__read", "Read", &json!({"type": "object"}));
         assert_eq!(descriptor["name"], "files__read");
         assert_eq!(descriptor["inputSchema"]["type"], "object");
+    }
+
+    #[test]
+    fn effective_route_path_falls_back_to_the_server_name() {
+        assert_eq!(default_route_path("files"), "/mcp/files");
+        assert_eq!(effective_route_path(None, "files"), "/mcp/files");
+        assert_eq!(
+            effective_route_path(Some("/mcp/team/files"), "files"),
+            "/mcp/team/files"
+        );
+        assert_eq!(route_path_key("/mcp/files"), "files");
+        assert_eq!(route_path_key("/files"), "files");
+        assert_eq!(route_path_key("/mcp/team/files"), "team/files");
+    }
+
+    #[test]
+    fn validates_explicit_route_paths() {
+        assert!(validate_route_path("/mcp/files").is_ok());
+        assert!(validate_route_path("/team/files").is_ok());
+
+        for path in [
+            "mcp/files",
+            "",
+            "/mcp",
+            "/mcp/",
+            "/",
+            "/mcp/files?token=x",
+            "/mcp/files#fragment",
+        ] {
+            assert!(
+                validate_route_path(path).is_err(),
+                "route path should be rejected: {path}"
+            );
+        }
     }
 }
