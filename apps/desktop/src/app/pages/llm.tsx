@@ -18,13 +18,14 @@ import {
   cn,
 } from "@octra/ui";
 import { Pencil, Plus, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
 import { StatStrip, type StatItem } from "../../components/stat-strip";
 import { controlClient } from "../../lib/control-api";
 import { formatCompact, formatNumber, formatRelativeTime } from "../../lib/format";
 import { toneBar, toneDot, type Tone } from "../../lib/tone";
+import { ConsumerPolicyForm, type ConsumerPolicyInput } from "./llm-forms";
 
 const rowTones: Tone[] = ["primary", "sky", "violet", "amber", "coral"];
 
@@ -262,7 +263,7 @@ interface PolicyNotice {
 function ConsumerPolicyCard() {
   const queryClient = useQueryClient();
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [text, setText] = useState("{}");
+  const [formVersion, setFormVersion] = useState(0);
   const [notice, setNotice] = useState<PolicyNotice | null>(null);
 
   const policiesQuery = useQuery({
@@ -273,17 +274,15 @@ function ConsumerPolicyCard() {
 
   const policies = policiesQuery.data ?? [];
   const editing = policies.find((policy) => policy.id === editingId) ?? null;
-  const parsed = useMemo(() => parsePolicyBody(text), [text]);
 
   const save = useMutation({
-    mutationFn: ({ id, body }: { id: string | null; body: Record<string, unknown> }) =>
+    mutationFn: ({ id, body }: { id: string | null; body: ConsumerPolicyInput }) =>
       id
         ? controlClient().updateConsumerPolicy(id, body)
         : controlClient().createConsumerPolicy(body),
     onSuccess: (_result, variables) => {
       setNotice({ text: `Policy ${variables.id ? "updated" : "created"}.`, error: false });
-      setEditingId(null);
-      setText("{}");
+      resetForm();
       void queryClient.invalidateQueries({ queryKey: ["consumer-policies"] });
     },
     onError: (error) => setNotice({ text: describeError(error), error: true }),
@@ -293,8 +292,7 @@ function ConsumerPolicyCard() {
     mutationFn: (id: string) => controlClient().deleteConsumerPolicy(id),
     onSuccess: () => {
       setNotice({ text: "Policy deleted.", error: false });
-      setEditingId(null);
-      setText("{}");
+      resetForm();
       void queryClient.invalidateQueries({ queryKey: ["consumer-policies"] });
     },
     onError: (error) => setNotice({ text: describeError(error), error: true }),
@@ -302,23 +300,20 @@ function ConsumerPolicyCard() {
 
   const busy = save.isPending || remove.isPending;
 
-  function startNew() {
+  function resetForm() {
     setEditingId(null);
-    setText("{}");
+    setFormVersion((version) => version + 1);
+  }
+
+  function startNew() {
+    resetForm();
     setNotice(null);
   }
 
   function startEdit(policy: ConsumerPolicy) {
     setEditingId(policy.id);
-    setText(JSON.stringify(editablePolicy(policy), null, 2));
+    setFormVersion((version) => version + 1);
     setNotice(null);
-  }
-
-  function submit() {
-    if (parsed.body === null) {
-      return;
-    }
-    save.mutate({ id: editingId, body: parsed.body });
   }
 
   function removePolicy(policy: ConsumerPolicy) {
@@ -429,50 +424,15 @@ function ConsumerPolicyCard() {
           </Table>
         </div>
         <div className="flex min-w-0 flex-col gap-2">
-          <label className="flex flex-col gap-1">
-            <span className="text-[10.5px] text-muted-foreground">
-              {editing ? `Edit policy ${editing.name} (JSON)` : "New policy (JSON)"}
-            </span>
-            <textarea
-              value={text}
-              onChange={(event) => setText(event.target.value)}
-              spellCheck={false}
-              rows={10}
-              aria-invalid={parsed.error !== null}
-              className="min-h-[180px] w-full resize-y rounded-lg border border-border bg-surface p-3 font-mono text-[10.5px] leading-relaxed text-secondary outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/40 focus:ring-2 focus:ring-primary/15"
-            />
-          </label>
-          <p className="text-[9.5px] leading-relaxed text-muted-foreground">
-            Set <span className="font-mono text-secondary">consumer_id</span> when scope is{" "}
-            <span className="font-mono text-secondary">consumer</span>. The{" "}
-            <span className="font-mono text-secondary">document</span> supports{" "}
-            <span className="font-mono text-secondary">allowed_models</span> and{" "}
-            <span className="font-mono text-secondary">allowed_providers</span>; use{" "}
-            <span className="font-mono text-secondary">*</span> to allow everything.
-          </p>
-          {parsed.error ? <span className="text-[10px] text-danger">{parsed.error}</span> : null}
-          <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" onClick={submit} disabled={busy || parsed.error !== null}>
-              {save.isPending ? "Saving…" : "Save"}
-            </Button>
-            <Button size="sm" variant="secondary" disabled={busy} onClick={startNew}>
-              Cancel
-            </Button>
-            <Button
-              size="sm"
-              variant="danger"
-              className="ml-auto"
-              disabled={busy || editing === null}
-              onClick={() => {
-                if (editing) {
-                  removePolicy(editing);
-                }
-              }}
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              {remove.isPending ? "Deleting…" : "Delete"}
-            </Button>
-          </div>
+          <ConsumerPolicyForm
+            key={`${editingId ?? "new"}:${formVersion}`}
+            initial={editing}
+            saving={save.isPending}
+            deleting={remove.isPending}
+            onSave={(body) => save.mutate({ id: editingId, body })}
+            onCancel={startNew}
+            onDelete={editing ? () => removePolicy(editing) : undefined}
+          />
           {notice ? (
             <span className={cn("text-[10.5px]", notice.error ? "text-danger" : "text-secondary")}>
               {notice.text}
@@ -490,38 +450,6 @@ function ConsumerPolicyCard() {
       </CardFooter>
     </Card>
   );
-}
-
-function editablePolicy(policy: ConsumerPolicy): Record<string, unknown> {
-  return {
-    name: policy.name,
-    scope: policy.scope,
-    consumer_id: policy.consumer_id,
-    document: policy.document ?? {},
-  };
-}
-
-function parsePolicyBody(text: string): {
-  body: Record<string, unknown> | null;
-  error: string | null;
-} {
-  const trimmed = text.trim();
-  if (trimmed === "") {
-    return { body: null, error: "Policy body is required." };
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(trimmed);
-  } catch (error) {
-    return {
-      body: null,
-      error: `Invalid JSON: ${error instanceof Error ? error.message : "unable to parse"}`,
-    };
-  }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return { body: null, error: "Policy body must be a JSON object." };
-  }
-  return { body: value as Record<string, unknown>, error: null };
 }
 
 function describeError(error: unknown): string {
