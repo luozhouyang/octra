@@ -8,6 +8,7 @@ use octra_llm_core::Protocol;
 use octra_storage::{LlmRouteRecord, LlmRoutingTargetRecord, LlmRuntimeData};
 
 use crate::config::{ProviderConfig, model_protocol};
+use crate::embedding::SemanticVectors;
 use crate::similarity::{cosine_similarity, lexical_vector};
 
 /// One compiled routing target.
@@ -98,6 +99,7 @@ pub fn rank_targets(
     intent: Option<&RoutingIntent>,
     estimated_tokens: u64,
     prompt: &str,
+    semantic: Option<&SemanticVectors>,
     signal: impl Fn(&Target) -> TargetSignal,
 ) {
     if !matches!(
@@ -132,6 +134,7 @@ pub fn rank_targets(
                     &signal,
                     target.semantic_description.as_deref(),
                     &prompt_vector,
+                    semantic,
                 ),
                 target,
             )
@@ -139,15 +142,21 @@ pub fn rank_targets(
         .collect();
     if strategy == "semantic" {
         for (_, target) in &scored {
-            let semantic_score = target
-                .semantic_description
-                .as_deref()
+            let description = target.semantic_description.as_deref();
+            let lexical_score = description
                 .map(|description| cosine_similarity(&lexical_vector(description), &prompt_vector));
+            let embedding_score = semantic.and_then(|semantic| {
+                description
+                    .and_then(|description| semantic.targets.get(description))
+                    .map(|vector| cosine_similarity(vector, &semantic.prompt))
+            });
             tracing::debug!(
                 strategy,
                 target = %target.label(),
-                semantic_score = semantic_score.unwrap_or_default(),
-                has_description = semantic_score.is_some(),
+                used_embeddings = semantic.is_some(),
+                lexical_score = lexical_score.unwrap_or_default(),
+                embedding_score = embedding_score.unwrap_or_default(),
+                has_description = description.is_some(),
                 "semantic routing scores"
             );
         }
@@ -168,6 +177,7 @@ fn score_target(
     signal: &TargetSignal,
     description: Option<&str>,
     prompt_vector: &[f32],
+    semantic: Option<&SemanticVectors>,
 ) -> f64 {
     let health = -(signal.latency_ms as f64) * 0.05
         - (signal.failures as f64) * 500.0
@@ -190,11 +200,19 @@ fn score_target(
         "pace" => -(signal.pace_wait_ms as f64),
         "smart" => health,
         "intent" => health + intent_score(intent, estimated_tokens, signal),
-        "semantic" => match description {
-            Some(description) => {
+        "semantic" => match (semantic, description) {
+            (Some(vectors), Some(description)) => match vectors.targets.get(description) {
+                Some(target_vector) => {
+                    health + cosine_similarity(target_vector, &vectors.prompt) * 100.0
+                }
+                // Embedding vectors are active, so never mix in the lexical
+                // vector space for targets that failed to embed.
+                None => health,
+            },
+            (None, Some(description)) => {
                 health + cosine_similarity(&lexical_vector(description), prompt_vector) * 100.0
             }
-            None => health,
+            (Some(_), None) | (None, None) => health,
         },
         _ => 0.0,
     }
@@ -441,6 +459,8 @@ fn slot_for(key: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
     use octra_storage::{
         LlmModelRecord, LlmProviderRecord, LlmRoutingGroupRecord, LlmRoutingTargetRecord,
     };
@@ -554,6 +574,7 @@ mod tests {
             Some(&RoutingIntent::Vision),
             100,
             "",
+            None,
             |target| TargetSignal {
                 vision: Some(target.model_id == "vision"),
                 ..TargetSignal::default()
@@ -568,6 +589,7 @@ mod tests {
             Some(&RoutingIntent::LongContext),
             100_000,
             "",
+            None,
             |target| TargetSignal {
                 context_window: Some(if target.model_id == "large" {
                     200_000
@@ -583,16 +605,20 @@ mod tests {
     #[test]
     fn usage_and_quota_rank_targets() {
         let mut targets = vec![compiled("hot"), compiled("cold")];
-        rank_targets(&mut targets, "usage", None, 0, "", |target| TargetSignal {
-            usage: if target.model_id == "hot" { 50 } else { 0 },
-            ..TargetSignal::default()
+        rank_targets(&mut targets, "usage", None, 0, "", None, |target| {
+            TargetSignal {
+                usage: if target.model_id == "hot" { 50 } else { 0 },
+                ..TargetSignal::default()
+            }
         });
         assert_eq!(targets[0].model_id, "cold");
 
         let mut targets = vec![compiled("low"), compiled("high")];
-        rank_targets(&mut targets, "quota", None, 0, "", |target| TargetSignal {
-            quota_remaining: if target.model_id == "high" { 900 } else { 10 },
-            ..TargetSignal::default()
+        rank_targets(&mut targets, "quota", None, 0, "", None, |target| {
+            TargetSignal {
+                quota_remaining: if target.model_id == "high" { 900 } else { 10 },
+                ..TargetSignal::default()
+            }
         });
         assert_eq!(targets[0].model_id, "high");
     }
@@ -611,6 +637,54 @@ mod tests {
             None,
             0,
             "please summarize this legal contract",
+            None,
+            |_| TargetSignal::default(),
+        );
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].model_id, "matching");
+    }
+
+    #[test]
+    fn semantic_embedding_vectors_override_lexical_matches() {
+        let mut matching = compiled("matching");
+        matching.semantic_description = Some("summarize legal contracts and clauses".into());
+        let mut unrelated = compiled("unrelated");
+        unrelated.semantic_description = Some("generate python code for data pipelines".into());
+
+        let mut targets = vec![unrelated.clone(), matching.clone()];
+        rank_targets(
+            &mut targets,
+            "semantic",
+            None,
+            0,
+            "please generate python code for a data pipeline",
+            None,
+            |_| TargetSignal::default(),
+        );
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].model_id, "unrelated");
+
+        let mut vectors = HashMap::new();
+        vectors.insert(
+            "summarize legal contracts and clauses".to_string(),
+            vec![1.0, 0.0],
+        );
+        vectors.insert(
+            "generate python code for data pipelines".to_string(),
+            vec![0.0, 1.0],
+        );
+        let semantic = SemanticVectors {
+            prompt: vec![1.0, 0.0],
+            targets: vectors,
+        };
+        let mut targets = vec![unrelated, matching];
+        rank_targets(
+            &mut targets,
+            "semantic",
+            None,
+            0,
+            "please generate python code for a data pipeline",
+            Some(&semantic),
             |_| TargetSignal::default(),
         );
         assert_eq!(targets.len(), 2);
@@ -620,12 +694,18 @@ mod tests {
     #[test]
     fn semantic_ranking_without_descriptions_keeps_health_order() {
         let mut targets = vec![compiled("slow"), compiled("fast")];
-        rank_targets(&mut targets, "semantic", None, 0, "anything", |target| {
-            TargetSignal {
+        rank_targets(
+            &mut targets,
+            "semantic",
+            None,
+            0,
+            "anything",
+            None,
+            |target| TargetSignal {
                 latency_ms: if target.model_id == "slow" { 100 } else { 0 },
                 ..TargetSignal::default()
-            }
-        });
+            },
+        );
         assert_eq!(targets[0].model_id, "fast");
         assert_eq!(targets[1].model_id, "slow");
     }
@@ -657,6 +737,7 @@ mod tests {
             None,
             0,
             "review this legal contract",
+            None,
             |_| TargetSignal::default(),
         );
         // Ranking reorders but never removes targets, and the fallback stays
@@ -741,7 +822,7 @@ mod tests {
         data.groups[0].strategy = "manual".into();
         let plan = RoutePlan::compile(&data, &route(), &providers).unwrap();
         let (mut attempts, fallback) = plan.parts(7);
-        rank_targets(&mut attempts, &plan.strategy, None, 0, "", |target| {
+        rank_targets(&mut attempts, &plan.strategy, None, 0, "", None, |target| {
             TargetSignal {
                 latency_ms: if target.provider_id == "fast" {
                     10
@@ -768,17 +849,21 @@ mod tests {
     #[test]
     fn fast_prefers_lowest_latency_then_failures() {
         let mut targets = vec![compiled("slow"), compiled("fast")];
-        rank_targets(&mut targets, "fast", None, 0, "", |target| TargetSignal {
-            latency_ms: if target.model_id == "fast" { 20 } else { 200 },
-            ..TargetSignal::default()
+        rank_targets(&mut targets, "fast", None, 0, "", None, |target| {
+            TargetSignal {
+                latency_ms: if target.model_id == "fast" { 20 } else { 200 },
+                ..TargetSignal::default()
+            }
         });
         assert_eq!(targets[0].model_id, "fast");
 
         let mut targets = vec![compiled("flaky"), compiled("steady")];
-        rank_targets(&mut targets, "fast", None, 0, "", |target| TargetSignal {
-            latency_ms: 50,
-            failures: if target.model_id == "flaky" { 3 } else { 0 },
-            ..TargetSignal::default()
+        rank_targets(&mut targets, "fast", None, 0, "", None, |target| {
+            TargetSignal {
+                latency_ms: 50,
+                failures: if target.model_id == "flaky" { 3 } else { 0 },
+                ..TargetSignal::default()
+            }
         });
         assert_eq!(targets[0].model_id, "steady");
     }
@@ -786,17 +871,21 @@ mod tests {
     #[test]
     fn cheap_prefers_lowest_price_then_latency() {
         let mut targets = vec![compiled("expensive"), compiled("cheap")];
-        rank_targets(&mut targets, "cheap", None, 0, "", |target| TargetSignal {
-            price_per_million: if target.model_id == "cheap" { 0.5 } else { 9.0 },
-            ..TargetSignal::default()
+        rank_targets(&mut targets, "cheap", None, 0, "", None, |target| {
+            TargetSignal {
+                price_per_million: if target.model_id == "cheap" { 0.5 } else { 9.0 },
+                ..TargetSignal::default()
+            }
         });
         assert_eq!(targets[0].model_id, "cheap");
 
         let mut targets = vec![compiled("slow"), compiled("fast")];
-        rank_targets(&mut targets, "cheap", None, 0, "", |target| TargetSignal {
-            latency_ms: if target.model_id == "fast" { 10 } else { 500 },
-            price_per_million: 2.0,
-            ..TargetSignal::default()
+        rank_targets(&mut targets, "cheap", None, 0, "", None, |target| {
+            TargetSignal {
+                latency_ms: if target.model_id == "fast" { 10 } else { 500 },
+                price_per_million: 2.0,
+                ..TargetSignal::default()
+            }
         });
         assert_eq!(targets[0].model_id, "fast");
     }
@@ -811,7 +900,7 @@ mod tests {
             data.groups[0].strategy = strategy.into();
             let plan = RoutePlan::compile(&data, &route(), &providers).unwrap();
             let (mut attempts, fallback) = plan.parts(3);
-            rank_targets(&mut attempts, &plan.strategy, None, 0, "", |target| {
+            rank_targets(&mut attempts, &plan.strategy, None, 0, "", None, |target| {
                 TargetSignal {
                     latency_ms: if target.provider_id == "low" { 1 } else { 500 },
                     price_per_million: if target.provider_id == "low" {

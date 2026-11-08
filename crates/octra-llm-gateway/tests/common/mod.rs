@@ -91,6 +91,73 @@ impl MockUpstream {
     }
 }
 
+/// A local OpenAI-compatible embedding endpoint. It records parsed request
+/// bodies and delegates the response to the supplied handler.
+pub struct MockEmbedding {
+    pub base_url: String,
+    captured: Arc<Mutex<Vec<Captured>>>,
+    handle: JoinHandle<()>,
+}
+
+impl Drop for MockEmbedding {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+impl MockEmbedding {
+    pub async fn start(handler: fn(Captured) -> Response) -> Self {
+        let captured: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/{*path}", any(embedding_capture))
+            .with_state(EmbeddingHandlerState {
+                captured: captured.clone(),
+                handler,
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Self {
+            base_url: format!("http://{address}/v1"),
+            captured,
+            handle,
+        }
+    }
+
+    pub fn requests(&self) -> Vec<Captured> {
+        self.captured.lock().unwrap().clone()
+    }
+
+    pub fn request_count(&self) -> usize {
+        self.captured.lock().unwrap().len()
+    }
+}
+
+#[derive(Clone)]
+struct EmbeddingHandlerState {
+    captured: Arc<Mutex<Vec<Captured>>>,
+    handler: fn(Captured) -> Response,
+}
+
+async fn embedding_capture(
+    State(state): State<EmbeddingHandlerState>,
+    method: Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let request = Captured {
+        method,
+        path: uri.path().to_string(),
+        headers,
+        body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+    };
+    state.captured.lock().unwrap().push(request.clone());
+    (state.handler)(request)
+}
+
 #[derive(Clone)]
 struct HandlerState {
     captured: Arc<Mutex<Vec<Captured>>>,
@@ -704,6 +771,32 @@ impl Harness {
                 apply_metadata(&mut target, &metadata);
             }
             self.storage.ai.upsert_target(&target).await.unwrap();
+        }
+        self.runtime.reload().await.unwrap();
+    }
+
+    /// Sets semantic descriptions on a virtual model's targets, in target
+    /// order. Used by semantic routing tests.
+    pub async fn describe_targets(&self, virtual_model: &str, descriptions: &[&str]) {
+        let model = self
+            .storage
+            .ai
+            .list_models()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|model| model.name == virtual_model)
+            .unwrap_or_else(|| panic!("model {virtual_model} does not exist"));
+        let mut targets = self.storage.ai.list_targets(Some(&model.id)).await.unwrap();
+        targets.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| left.position.cmp(&right.position))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        for (target, description) in targets.iter_mut().zip(descriptions.iter()) {
+            target.semantic_description = Some((*description).to_string());
+            self.storage.ai.upsert_target(target).await.unwrap();
         }
         self.runtime.reload().await.unwrap();
     }

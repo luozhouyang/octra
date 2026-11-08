@@ -486,10 +486,20 @@ pub struct LlmDataState {
     pub upstream: Option<Arc<crate::upstream::Upstream>>,
     pub plugins: Option<Arc<crate::LlmPluginRuntime>>,
     pub oauth: Arc<crate::credentials::OAuthTokenCache>,
+    pub semantic_embedding: Option<Arc<crate::embedding::EmbeddingRuntime>>,
 }
 
 impl LlmDataState {
     pub fn new(runtime: Arc<LlmRuntime>, storage: Arc<Storage>, config: Arc<OctraConfig>) -> Self {
+        let semantic_embedding = match crate::embedding::EmbeddingRuntime::from_config(
+            config.llm.semantic_embedding.as_ref(),
+        ) {
+            Ok(embedding) => embedding,
+            Err(error) => {
+                tracing::warn!(%error, "semantic embedding runtime disabled");
+                None
+            }
+        };
         Self {
             runtime,
             storage: storage.clone(),
@@ -497,6 +507,7 @@ impl LlmDataState {
             upstream: None,
             plugins: None,
             oauth: Arc::new(crate::credentials::OAuthTokenCache::new(storage)),
+            semantic_embedding,
         }
     }
 

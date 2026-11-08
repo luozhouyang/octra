@@ -59,6 +59,21 @@ pub struct LlmConfig {
     pub intent_header: String,
     /// How long an account is skipped after a rate-limit or quota error.
     pub account_cooldown_secs: u64,
+    /// Optional OpenAI-compatible embedding endpoint for semantic routing.
+    pub semantic_embedding: Option<SemanticEmbeddingConfig>,
+}
+
+/// OpenAI-compatible embedding endpoint used to score semantic routing
+/// targets. Local lexical vectors remain the fallback when this is unset or
+/// the endpoint fails.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SemanticEmbeddingConfig {
+    pub base_url: String,
+    pub model: String,
+    pub auth_ref: Option<String>,
+    pub timeout_ms: u64,
+    pub cache_entries: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +197,19 @@ impl Default for LlmConfig {
             session_header: "x-octra-session".to_string(),
             intent_header: "x-octra-intent".to_string(),
             account_cooldown_secs: 60,
+            semantic_embedding: None,
+        }
+    }
+}
+
+impl Default for SemanticEmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            model: String::new(),
+            auth_ref: None,
+            timeout_ms: 1_500,
+            cache_entries: 1_024,
         }
     }
 }
@@ -437,6 +465,32 @@ fn validate(config: &OctraConfig) -> Result<()> {
         )));
     }
 
+    if let Some(embedding) = &config.llm.semantic_embedding {
+        if !(embedding.base_url.starts_with("http://")
+            || embedding.base_url.starts_with("https://"))
+        {
+            return Err(Error::Config(format!(
+                "llm.semantic_embedding.base_url '{}' must start with http:// or https://",
+                embedding.base_url
+            )));
+        }
+        if embedding.model.trim().is_empty() {
+            return Err(Error::Config(
+                "llm.semantic_embedding.model must not be empty".into(),
+            ));
+        }
+        if !(100..=10_000).contains(&embedding.timeout_ms) {
+            return Err(Error::Config(
+                "llm.semantic_embedding.timeout_ms must be between 100 and 10000".into(),
+            ));
+        }
+        if !(1..=65_536).contains(&embedding.cache_entries) {
+            return Err(Error::Config(
+                "llm.semantic_embedding.cache_entries must be between 1 and 65536".into(),
+            ));
+        }
+    }
+
     if config.storage.path.trim().is_empty() {
         return Err(Error::Config("storage.path must not be empty".into()));
     }
@@ -548,6 +602,93 @@ mod tests {
 
         config.gateway.real_ip_header = "x-real-ip".into();
         assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn semantic_embedding_defaults_to_none() {
+        let config = OctraConfig::default();
+        assert!(config.llm.semantic_embedding.is_none());
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn parses_semantic_embedding_config() {
+        let config: OctraConfig = toml::from_str(
+            r#"
+[llm.semantic_embedding]
+base_url = "https://embeddings.example.com/v1"
+model = "text-embedding-3-small"
+auth_ref = "env:OCTRA_EMBEDDING_KEY"
+timeout_ms = 2500
+cache_entries = 4096
+"#,
+        )
+        .unwrap();
+        let embedding = config.llm.semantic_embedding.as_ref().unwrap();
+        assert_eq!(embedding.base_url, "https://embeddings.example.com/v1");
+        assert_eq!(embedding.model, "text-embedding-3-small");
+        assert_eq!(
+            embedding.auth_ref.as_deref(),
+            Some("env:OCTRA_EMBEDDING_KEY")
+        );
+        assert_eq!(embedding.timeout_ms, 2500);
+        assert_eq!(embedding.cache_entries, 4096);
+        assert!(validate(&config).is_ok());
+
+        let defaults: OctraConfig = toml::from_str(
+            r#"
+[llm.semantic_embedding]
+base_url = "http://127.0.0.1:11434/v1"
+model = "nomic-embed-text"
+"#,
+        )
+        .unwrap();
+        let embedding = defaults.llm.semantic_embedding.as_ref().unwrap();
+        assert_eq!(embedding.timeout_ms, 1_500);
+        assert_eq!(embedding.cache_entries, 1_024);
+        assert!(embedding.auth_ref.is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_semantic_embedding_config() {
+        let mut config = OctraConfig::default();
+        config.llm.semantic_embedding = Some(SemanticEmbeddingConfig {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "nomic-embed-text".into(),
+            ..SemanticEmbeddingConfig::default()
+        });
+        assert!(validate(&config).is_ok());
+
+        let mut invalid_base = config.clone();
+        invalid_base
+            .llm
+            .semantic_embedding
+            .as_mut()
+            .unwrap()
+            .base_url = "ftp://127.0.0.1/v1".into();
+        assert!(validate(&invalid_base).is_err());
+
+        let mut invalid_model = config.clone();
+        invalid_model.llm.semantic_embedding.as_mut().unwrap().model = "  ".into();
+        assert!(validate(&invalid_model).is_err());
+
+        let mut invalid_timeout = config.clone();
+        invalid_timeout
+            .llm
+            .semantic_embedding
+            .as_mut()
+            .unwrap()
+            .timeout_ms = 99;
+        assert!(validate(&invalid_timeout).is_err());
+
+        let mut invalid_cache = config.clone();
+        invalid_cache
+            .llm
+            .semantic_embedding
+            .as_mut()
+            .unwrap()
+            .cache_entries = 0;
+        assert!(validate(&invalid_cache).is_err());
     }
 
     #[test]

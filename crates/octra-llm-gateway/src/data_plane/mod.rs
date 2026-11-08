@@ -857,12 +857,41 @@ async fn execute(
     let estimated_tokens = estimate_tokens(ir);
     let routing_text = similarity::request_text(ir, 8_000);
     let (mut attempts, fallback) = plan.parts(tick);
+    let semantic_vectors = if plan.strategy == "semantic" {
+        match state.semantic_embedding.as_ref() {
+            Some(embedding) => {
+                embedding
+                    .routing_vectors(
+                        &routing_text,
+                        attempts
+                            .iter()
+                            .filter_map(|target| target.semantic_description.as_deref()),
+                    )
+                    .await
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    if plan.strategy == "semantic" {
+        tracing::debug!(
+            strategy = %plan.strategy,
+            semantic_source = if semantic_vectors.is_some() {
+                "embedding"
+            } else {
+                "lexical"
+            },
+            "semantic routing vectors"
+        );
+    }
     rank_targets(
         &mut attempts,
         &plan.strategy,
         intent.as_ref(),
         estimated_tokens,
         &routing_text,
+        semantic_vectors.as_ref(),
         |target| target_signal(snapshot, target, now_ms),
     );
     if matches!(

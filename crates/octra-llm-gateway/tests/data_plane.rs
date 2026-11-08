@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use axum::http::StatusCode;
 use common::*;
 use octra_api_core::CreateConsumer;
+use octra_config::SemanticEmbeddingConfig;
+use octra_llm_gateway::LlmDataState;
 use octra_llm_gateway::keys::hash_key;
 use octra_storage::{LlmUsageInput, LlmVirtualKeyInput};
 use serde_json::json;
@@ -2739,4 +2741,79 @@ async fn fast_and_cheap_strategies_are_accepted_end_to_end() {
     let captured = upstream.requests();
     let request = captured.last().expect("upstream request");
     assert_eq!(request.body["model"], "cheap-model");
+}
+
+fn embedding_upstream(request: Captured) -> axum::response::Response {
+    let input = request.body["input"].as_str().unwrap_or_default();
+    let vector = if input.contains("vision") || input.contains("image") {
+        vec![1.0, 0.0]
+    } else {
+        vec![0.0, 1.0]
+    };
+    json_response(json!({"data": [{"embedding": vector}]}))
+}
+
+#[tokio::test]
+async fn semantic_strategy_uses_embedding_vectors() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let embedding = MockEmbedding::start(embedding_upstream).await;
+    let provider = harness
+        .provider("embedding-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness
+        .route_to_strategy(
+            "octra-semantic",
+            "semantic",
+            &[
+                (provider.clone(), "vision".to_string(), 0, 1),
+                (provider.clone(), "code".to_string(), 0, 1),
+            ],
+        )
+        .await;
+    harness
+        .describe_targets(
+            "octra-semantic",
+            &["vision and image analysis", "code generation and debugging"],
+        )
+        .await;
+
+    let mut config = (*harness.config).clone();
+    config.llm.semantic_embedding = Some(SemanticEmbeddingConfig {
+        base_url: embedding.base_url.clone(),
+        model: "test-embedding".into(),
+        auth_ref: None,
+        timeout_ms: 1_000,
+        cache_entries: 32,
+    });
+    let state = LlmDataState::new(
+        harness.runtime.clone(),
+        harness.storage.clone(),
+        Arc::new(config),
+    )
+    .with_upstream(test_upstream(&harness.config))
+    .with_plugins(harness.plugins.clone());
+    let app = state.into_router();
+
+    let mut body = openai_body("octra-semantic", false);
+    body["messages"][0]["content"] = json!("describe this image of a cat");
+    let (status, _, response) = post_json(app.clone(), COMPLETION_PATH, &[], body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "body: {response}");
+    let captured = upstream.requests();
+    let request = captured.last().expect("upstream request");
+    assert_eq!(request.body["model"], "vision");
+
+    let embedding_requests = embedding.requests();
+    assert_eq!(embedding_requests.len(), 3);
+    assert!(
+        embedding_requests
+            .iter()
+            .all(|request| request.path == "/v1/embeddings")
+    );
+
+    // Both the prompt and target descriptions are cached, so an identical
+    // request does not call the embedding endpoint again.
+    let (status, _, response) = post_json(app, COMPLETION_PATH, &[], body).await;
+    assert_eq!(status, StatusCode::OK, "body: {response}");
+    assert_eq!(embedding.request_count(), 3);
 }

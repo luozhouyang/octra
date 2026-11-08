@@ -21,6 +21,7 @@ pub mod control;
 pub mod cost;
 pub mod credentials;
 pub mod data_plane;
+pub mod embedding;
 pub mod error;
 pub mod keys;
 pub mod pii;

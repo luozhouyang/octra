@@ -16,6 +16,12 @@ max_body_bytes = 33554432
 [llm]
 request_timeout_secs = 120
 stream_idle_timeout_secs = 120
+# Optional OpenAI-compatible embedding endpoint for semantic routing.
+# [llm.semantic_embedding]
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "nomic-embed-text"
+# timeout_ms = 1500
+# cache_entries = 1024
 
 [mcp]
 request_timeout_secs = 60
