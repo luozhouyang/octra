@@ -13,6 +13,7 @@ mod list;
 mod operations;
 mod plugin_api;
 mod plugins;
+mod policies;
 mod routes;
 mod schemas;
 mod services;
@@ -146,6 +147,17 @@ pub fn router() -> Router<ApiControlState> {
         .route(
             "/admin/consumer_groups/{id}/plugins",
             get(plugins::list_for_consumer_group).post(plugins::create_for_consumer_group),
+        )
+        .route(
+            "/admin/policies",
+            get(policies::list).post(policies::create),
+        )
+        .route(
+            "/admin/policies/{id}",
+            get(policies::get)
+                .patch(policies::update)
+                .put(policies::upsert)
+                .delete(policies::delete),
         )
         .route("/admin/plugins", get(plugins::list).post(plugins::create))
         .route("/admin/plugins/enabled", get(plugins::enabled))

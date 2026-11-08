@@ -100,6 +100,20 @@ impl ApiStore {
         affected(result.rows_affected(), "policy")
     }
 
+    /// Clears the consumer binding without changing the policy scope. Used
+    /// when a policy switches from consumer scope to global scope.
+    pub async fn clear_policy_consumer(&self, id: &str) -> Result<()> {
+        let result = sqlx::query(&format!(
+            "UPDATE policies SET consumer_id = NULL, updated_at = {now} WHERE id = ?",
+            now = text_now()
+        ))
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(|e| map_db_error(e, "policy"))?;
+        affected(result.rows_affected(), "policy")
+    }
+
     pub async fn list_policies(&self) -> Result<Vec<octra_api_core::Policy>> {
         let rows = sqlx::query(
             "SELECT id, name, scope, consumer_id, document, created_at, updated_at \
