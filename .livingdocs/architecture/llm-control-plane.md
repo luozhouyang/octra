@@ -161,7 +161,7 @@ Remaining `llm_*` tables are deliberately outside the model control plane: `llm_
 | Prompt policy execution | PromptGuard blocks or masks matching prompts; PromptCompress normalizes whitespace, deduplicates adjacent text, and truncates under a character budget |
 | Semantic response cache | Exact canonical keys plus local lexical similarity, optional OpenAI-compatible embeddings with fallback, TTL/LRU bounds, consumer/virtual-key scoping, non-streaming JSON and streaming SSE cache hits, stream reconstruction through `on_final_response`, `X-Octra-Cache` headers, request-audit `cache_status`, and `llm_plugin_state` persistence |
 | Semantic target routing | `semantic` balancer ranks targets by OpenAI-compatible embedding cosine when `llm.semantic_embedding` is configured, with cached vectors, a failure cooldown, and local lexical fallback; nested groups inherit descriptions and targets without vectors score by health |
-| Provider configuration breadth | `config_json` supports `wire`, `headers`, `auth_header`, `query`, OAuth, and CLI providers; query pairs are appended to every upstream endpoint |
+| Provider configuration breadth | `config_json` supports `wire`, `headers`, `auth_header`, `query`, OAuth, and CLI providers; protocol presets cover Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Claude, Google, and OpenAI-compatible endpoints; query pairs are appended to every upstream endpoint |
 | Config compiler + revisions | Compiler, revision snapshots, apply, rollback, and transactional replace implemented |
 | Nested groups / cycle validation | Compiler and runtime mapping expand nested models; cycles/depth overflow are rejected |
 | Policy scope precedence | Compiler helper implements the target order; executable policies compile into the existing LLM plugin chains |
@@ -193,7 +193,7 @@ Phase 11 evidence:
 - `crates/octra-daemon/src/main.rs` compiles `ai_*` at startup and reloads it after activation endpoints.
 - `crates/octra-cli` exposes `ai` status/actions plus full CRUD, with `--body '<json>'`, `--body -`, and `--body @path`; legacy `accounts` and `ai import-legacy` commands are removed.
 - `apps/desktop/src/app/pages/ai-control.tsx` exposes live status, entity lists, typed forms for providers, accounts, models, targets, policies, and attachments, compile reports, apply, and revision rollback; LLM/Agents pages read AI providers/models.
-- `cargo test --workspace --exclude octra-desktop` reports 905 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass.
+- `cargo test --workspace --exclude octra-desktop` reports 907 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass.
 
 ## Drift instrument
 

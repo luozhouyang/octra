@@ -86,7 +86,26 @@ Provider `config_json` supports `wire`, `headers`, `auth_header`, `query`, `oaut
 }
 ```
 
-with a deployment-scoped `base_url`. New wire protocols (Bedrock, Vertex) still require dedicated adapters.
+with a deployment-scoped `base_url`.
+
+Provider protocol presets map to the four wire protocols and fill a default base URL when the record leaves it empty:
+
+| Preset | Wire protocol | Default base URL |
+|---|---|---|
+| `ollama` | OpenAI | `http://127.0.0.1:11434/v1` |
+| `vllm` | OpenAI | `http://127.0.0.1:8000/v1` |
+| `lmstudio` / `lm-studio` | OpenAI | `http://127.0.0.1:1234/v1` |
+| `groq` | OpenAI | `https://api.groq.com/openai/v1` |
+| `openrouter` | OpenAI | `https://openrouter.ai/api/v1` |
+| `deepseek` | OpenAI | `https://api.deepseek.com/v1` |
+| `together` | OpenAI | `https://api.together.xyz/v1` |
+| `fireworks` | OpenAI | `https://api.fireworks.ai/inference/v1` |
+| `openai-compatible` | OpenAI | OpenAI default; set `base_url` |
+| `claude` | Anthropic | Anthropic default |
+| `google` | Gemini | Gemini default |
+| `responses` | OpenAI Responses | OpenAI default |
+
+`config_json.wire` can override the recorded protocol, including the aliases above. New wire protocols (Bedrock, Vertex event streams) still require dedicated adapters.
 
 ## Response cache
 
