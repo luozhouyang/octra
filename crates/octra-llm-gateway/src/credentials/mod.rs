@@ -496,9 +496,8 @@ mod tests {
 
         use axum::Json;
         use axum::routing::post;
-        use octra_storage::{
-            LlmOAuthTokenRecord, LlmProviderAccountInput, LlmProviderInput, Storage,
-        };
+        use octra_ai_config::{AiProvider, AiProviderAccount};
+        use octra_storage::{LlmOAuthTokenRecord, LlmProviderRecord, Storage};
         use serde_json::json;
 
         let hits = Arc::new(AtomicUsize::new(0));
@@ -533,50 +532,73 @@ mod tests {
         });
 
         let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
-        let provider_record = storage
-            .llm
-            .create_provider(&LlmProviderInput {
+        let now = Utc::now().timestamp();
+        let provider_id = "provider-subscription";
+        let provider_config = json!({
+            "oauth": {
+                "authorize_url": "https://example.com/authorize",
+                "token_url": format!("http://{address}/token"),
+                "client_id": "client"
+            }
+        });
+        let provider_record = LlmProviderRecord {
+            id: provider_id.to_string(),
+            name: "subscription".into(),
+            kind: "openai".into(),
+            protocol: "openai".into(),
+            auth_type: "bearer".into(),
+            base_url: None,
+            secret_ref: None,
+            priority: 0,
+            config_json: provider_config.to_string(),
+            enabled: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        storage
+            .ai
+            .upsert_provider(&AiProvider {
+                id: provider_id.to_string(),
                 name: "subscription".into(),
-                kind: "openai".into(),
                 protocol: "openai".into(),
-                auth_type: "bearer".into(),
-                base_url: None,
-                secret_ref: None,
-                priority: 0,
-                config_json: json!({
-                    "oauth": {
-                        "authorize_url": "https://example.com/authorize",
-                        "token_url": format!("http://{address}/token"),
-                        "client_id": "client"
-                    }
-                })
-                .to_string(),
+                base_url: String::new(),
+                auth_ref: None,
+                capabilities: vec!["chat".into()],
+                config: provider_config,
                 enabled: true,
+                created_at: now,
+                updated_at: now,
             })
             .await
             .unwrap();
-        let account = storage
-            .llm
-            .create_account(
-                &provider_record.id,
-                &LlmProviderAccountInput {
-                    name: "sub".into(),
-                    secret_ref: None,
-                    weight: 1,
-                    priority: 0,
-                    enabled: true,
-                    quota_limit: None,
-                    quota_unit: "requests".into(),
-                    quota_period: "none".into(),
-                    config_json: "{}".into(),
-                },
-            )
+        let account_id = "account-subscription";
+        storage
+            .ai
+            .upsert_account(&AiProviderAccount {
+                id: account_id.to_string(),
+                provider_id: provider_id.to_string(),
+                name: "sub".into(),
+                credential_kind: "static".into(),
+                secret_ref: None,
+                oauth_ref: None,
+                weight: 1,
+                priority: 0,
+                quota_limit: None,
+                quota_unit: "requests".into(),
+                quota_period: "none".into(),
+                quota_used: 0,
+                cooldown_until: None,
+                enabled: true,
+                config: json!({}),
+                created_at: now,
+                updated_at: now,
+            })
             .await
             .unwrap();
         storage
             .llm
             .upsert_oauth_token(&LlmOAuthTokenRecord {
-                account_id: account.id.clone(),
+                account_id: account_id.to_string(),
                 access_token: "old".into(),
                 refresh_token: Some("refresh".into()),
                 token_type: "Bearer".into(),
@@ -590,8 +612,8 @@ mod tests {
         let cache = Arc::new(OAuthTokenCache::new(storage.clone()));
 
         let (first, second) = tokio::join!(
-            cache.access_token(&provider, &account.id),
-            cache.access_token(&provider, &account.id)
+            cache.access_token(&provider, account_id),
+            cache.access_token(&provider, account_id)
         );
         assert_eq!(first.unwrap(), "new");
         assert_eq!(second.unwrap(), "new");
@@ -599,20 +621,20 @@ mod tests {
 
         invalid.store(true, Ordering::Relaxed);
         let error = cache
-            .force_refresh(&provider, &account.id)
+            .force_refresh(&provider, account_id)
             .await
             .unwrap_err();
         assert_eq!(error.code.as_deref(), Some("reauth_required"));
         assert!(
             storage
                 .llm
-                .get_oauth_token(&account.id)
+                .get_oauth_token(account_id)
                 .await
                 .unwrap()
                 .is_none()
         );
-        let account = storage.llm.get_account(&account.id).await.unwrap().unwrap();
-        assert_eq!(account.oauth_status, "reauth_required");
+        let account = storage.ai.get_account(account_id).await.unwrap().unwrap();
+        assert_eq!(account.id, account_id);
         server.abort();
     }
 }

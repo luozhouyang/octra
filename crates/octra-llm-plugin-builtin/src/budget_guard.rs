@@ -376,8 +376,11 @@ mod tests {
             LlmAction::Continue
         ));
         let rejected = request(&harness.plugin, "hello").await.unwrap();
-        let LlmAction::Reject(error) = rejected else {
-            panic!("second request should be rejected");
+        let error = match rejected {
+            LlmAction::Reject(error) => error,
+            LlmAction::Continue | LlmAction::Respond(_) => {
+                panic!("second request should be rejected")
+            }
         };
         assert_eq!(error.status, 429);
         assert_eq!(error.code.as_deref(), Some("budget_exceeded"));

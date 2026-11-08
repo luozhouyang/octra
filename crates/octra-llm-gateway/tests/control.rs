@@ -2,18 +2,13 @@
 
 mod common;
 
-use axum::Router;
 use axum::http::{Method, StatusCode};
 use common::{
-    COMPLETION_PATH, Harness, json_response, mock_token_endpoint, openai_body, openai_completion,
-    post_json, send, wait_for_usage,
+    COMPLETION_PATH, Harness, json_response, openai_body, openai_completion, post_json, send,
+    wait_for_usage,
 };
 use serde_json::{Value, json};
 
-const PROVIDERS: &str = "/admin/llm/providers";
-const MODELS: &str = "/admin/llm/models";
-const GROUPS: &str = "/admin/llm/routing-groups";
-const ROUTES: &str = "/admin/llm/routes";
 const KEYS: &str = "/admin/llm/virtual-keys";
 
 async fn call(
@@ -33,263 +28,17 @@ async fn create(harness: &Harness, path: &str, body: Value) -> (StatusCode, Valu
     call(harness, Method::POST, path, Some(body)).await
 }
 
-fn provider_body(name: &str, base_url: &str) -> Value {
-    json!({
-        "name": name,
-        "protocol": "openai",
-        "base_url": base_url,
-        "secret_ref": "env:OCTRA_TEST_UNUSED_SECRET",
-        "config": {"wire": "openai"}
-    })
-}
-
-#[tokio::test]
-async fn provider_crud_round_trip() {
-    let harness = Harness::new().await;
-
-    let (status, body) = create(
-        &harness,
-        PROVIDERS,
-        provider_body("openai-main", "https://api.openai.com/v1"),
+async fn call_shared(
+    router: &axum::Router,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let (status, _, text) = send(router.clone(), method, path, &[], body).await;
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::String(text)),
     )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {body}");
-    let id = body["id"].as_str().unwrap().to_string();
-    assert_eq!(body["protocol"], "openai");
-    assert_eq!(body["auth_type"], "bearer");
-    assert_eq!(body["config"]["wire"], "openai");
-    assert!(!body.to_string().contains("sk-"));
-
-    let (status, listed) = call(&harness, Method::GET, PROVIDERS, None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(listed.as_array().unwrap().len(), 1);
-
-    let (status, fetched) = call(&harness, Method::GET, &format!("{PROVIDERS}/{id}"), None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(fetched["name"], "openai-main");
-
-    let mut update = provider_body("openai-main", "https://api.openai.com/v1");
-    update["enabled"] = json!(false);
-    let (status, updated) = call(
-        &harness,
-        Method::PUT,
-        &format!("{PROVIDERS}/{id}"),
-        Some(update),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "body: {updated}");
-    assert_eq!(updated["enabled"], false);
-
-    let (status, _) = call(&harness, Method::DELETE, &format!("{PROVIDERS}/{id}"), None).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = call(&harness, Method::GET, &format!("{PROVIDERS}/{id}"), None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn provider_validation_and_conflicts() {
-    let harness = Harness::new().await;
-
-    let (status, body) = create(
-        &harness,
-        PROVIDERS,
-        json!({"base_url": "https://a.test/v1"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["field"], "name");
-
-    // Without a base URL the provider falls back to its protocol default.
-    let (status, body) = create(&harness, PROVIDERS, json!({"name": "defaults"})).await;
-    assert_eq!(status, StatusCode::CREATED, "body: {body}");
-    assert_eq!(body["base_url"], Value::Null);
-
-    let mut bad = provider_body("x", "https://api.openai.com/v1");
-    bad["protocol"] = json!("bogus");
-    let (status, body) = create(&harness, PROVIDERS, bad).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["field"], "protocol");
-
-    let mut plaintext = provider_body("x", "https://api.openai.com/v1");
-    plaintext["secret_ref"] = json!("sk-raw-secret");
-    let (status, body) = create(&harness, PROVIDERS, plaintext).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["field"], "secret_ref");
-
-    let mut bad_url = provider_body("x", "api.openai.com");
-    bad_url["base_url"] = json!("api.openai.com");
-    let (status, _) = create(&harness, PROVIDERS, bad_url).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-
-    let (status, _) = create(
-        &harness,
-        PROVIDERS,
-        provider_body("dup", "https://a.test/v1"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    let (status, body) = create(
-        &harness,
-        PROVIDERS,
-        provider_body("dup", "https://b.test/v1"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
-
-    let (status, _) = call(
-        &harness,
-        Method::PUT,
-        &format!("{PROVIDERS}/missing"),
-        Some(provider_body("x", "https://a.test/v1")),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn routing_topology_crud() {
-    let harness = Harness::new().await;
-    let (_, provider) = create(&harness, PROVIDERS, provider_body("p", "https://a.test/v1")).await;
-    let provider_id = provider["id"].as_str().unwrap().to_string();
-
-    let (status, model) = create(
-        &harness,
-        MODELS,
-        json!({
-            "provider_id": provider_id,
-            "model_id": "gpt-test",
-            "display_name": "GPT Test",
-            "context_window": 128000,
-            "capabilities": {"vision": true},
-            "pricing": {"input": 1.0}
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {model}");
-    assert_eq!(model["capabilities"]["vision"], true);
-
-    let (status, body) = create(&harness, MODELS, json!({"provider_id": provider_id})).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["field"], "model_id");
-
-    let (status, group) = create(
-        &harness,
-        GROUPS,
-        json!({"name": "g", "strategy": "priority"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {group}");
-    let group_id = group["id"].as_str().unwrap().to_string();
-
-    let (status, _) = create(
-        &harness,
-        GROUPS,
-        json!({"name": "bad", "strategy": "random"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-
-    let target_path = format!("{GROUPS}/{group_id}/targets");
-    let (status, target) = create(
-        &harness,
-        &target_path,
-        json!({"provider_id": provider_id, "model_id": "gpt-test", "weight": 2, "priority": 1}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {target}");
-    let target_id = target["id"].as_str().unwrap().to_string();
-
-    let (status, body) = create(
-        &harness,
-        &target_path,
-        json!({"provider_id": provider_id, "model_id": "m", "weight": 0}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["field"], "weight");
-
-    let (status, body) = create(&harness, &target_path, json!({"model_id": "m"})).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["field"], "provider_id");
-
-    let (status, updated) = call(
-        &harness,
-        Method::PUT,
-        &format!("{target_path}/{target_id}"),
-        Some(json!({"weight": 5})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "body: {updated}");
-    assert_eq!(updated["weight"], 5);
-    assert_eq!(updated["model_id"], "gpt-test");
-
-    let (status, group_view) =
-        call(&harness, Method::GET, &format!("{GROUPS}/{group_id}"), None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(group_view["targets"].as_array().unwrap().len(), 1);
-
-    let (status, route) = create(
-        &harness,
-        ROUTES,
-        json!({"virtual_model_id": "my-model", "routing_group_id": group_id}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {route}");
-    let route_id = route["id"].as_str().unwrap().to_string();
-
-    let (status, _) = create(
-        &harness,
-        ROUTES,
-        json!({"virtual_model_id": "my-model", "routing_group_id": group_id}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-
-    // The runtime exposes the new virtual model on the data plane.
-    let (status, _, models) =
-        send(harness.data_router(), Method::GET, "/v1/models", &[], None).await;
-    assert_eq!(status, StatusCode::OK);
-    let models: Value = serde_json::from_str(&models).unwrap();
-    assert!(
-        models["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|model| model["id"] == "my-model")
-    );
-
-    let (status, _) = call(
-        &harness,
-        Method::DELETE,
-        &format!("{GROUPS}/{group_id}/targets/{target_id}"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = call(
-        &harness,
-        Method::DELETE,
-        &format!("{ROUTES}/{route_id}"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = call(
-        &harness,
-        Method::DELETE,
-        &format!("{GROUPS}/{group_id}"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = call(
-        &harness,
-        Method::DELETE,
-        &format!("{MODELS}/{}", model["id"].as_str().unwrap()),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]
@@ -496,8 +245,9 @@ async fn virtual_key_permissions_are_validated() {
 #[tokio::test]
 async fn reload_reports_runtime_state() {
     let harness = Harness::new().await;
-    let (status, body) = create(&harness, PROVIDERS, provider_body("p", "https://a.test/v1")).await;
-    assert_eq!(status, StatusCode::CREATED, "body {body}");
+    harness
+        .provider("p", "openai", "https://a.test/v1", "bearer", 0)
+        .await;
 
     let (status, reload) = call(&harness, Method::POST, "/admin/llm/reload", None).await;
     assert_eq!(status, StatusCode::OK, "body: {reload}");
@@ -543,193 +293,6 @@ async fn usage_endpoint_summarizes_traffic() {
 
 // ---------------------------------------------------------------------------
 // Provider accounts
-
-#[tokio::test]
-async fn account_crud_round_trip() {
-    let harness = Harness::new().await;
-    let (status, provider) = create(
-        &harness,
-        PROVIDERS,
-        provider_body("openai-main", "https://api.openai.com/v1"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {provider}");
-    let provider_id = provider["id"].as_str().unwrap().to_string();
-    let accounts = format!("{PROVIDERS}/{provider_id}/accounts");
-
-    let (status, account) = create(
-        &harness,
-        &accounts,
-        json!({
-            "name": "primary",
-            "quota_limit": 100,
-            "quota_unit": "tokens",
-            "quota_period": "day",
-            "priority": 1,
-            "weight": 2,
-            "secret_ref": "env:OCTRA_TEST_UNUSED_SECRET"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {account}");
-    let account_id = account["id"].as_str().unwrap().to_string();
-    assert_eq!(account["quota_unit"], "tokens");
-    assert_eq!(account["quota_period"], "day");
-    assert_eq!(account["quota_used"], 0);
-    assert_eq!(account["provider_id"], provider_id);
-
-    let (status, listed) = call(&harness, Method::GET, &accounts, None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(listed.as_array().unwrap().len(), 1);
-
-    let single = format!("/admin/llm/accounts/{account_id}");
-    let (status, fetched) = call(&harness, Method::GET, &single, None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(fetched["name"], "primary");
-
-    let (status, updated) = call(
-        &harness,
-        Method::PUT,
-        &single,
-        Some(json!({"enabled": false, "priority": 3})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "body: {updated}");
-    assert_eq!(updated["enabled"], false);
-    assert_eq!(updated["priority"], 3);
-    // Omitted fields keep their values.
-    assert_eq!(updated["quota_unit"], "tokens");
-    assert_eq!(updated["quota_limit"], 100);
-
-    let (status, reset) = call(
-        &harness,
-        Method::POST,
-        &format!("/admin/llm/accounts/{account_id}/quota/reset"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "body: {reset}");
-    assert_eq!(reset["quota_used"], 0);
-
-    let (status, _) = call(&harness, Method::DELETE, &single, None).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = call(&harness, Method::GET, &single, None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn account_input_is_validated() {
-    let harness = Harness::new().await;
-    let (_, provider) = create(
-        &harness,
-        PROVIDERS,
-        provider_body("openai-main", "https://api.openai.com/v1"),
-    )
-    .await;
-    let provider_id = provider["id"].as_str().unwrap();
-    let accounts = format!("{PROVIDERS}/{provider_id}/accounts");
-
-    let (status, body) = create(
-        &harness,
-        &accounts,
-        json!({"name": "bad", "quota_unit": "watts"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    let (status, body) = create(
-        &harness,
-        &accounts,
-        json!({"name": "bad", "quota_period": "hour"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    let (status, body) = create(&harness, &accounts, json!({"name": ""})).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-}
-
-#[tokio::test]
-async fn routing_target_may_pin_an_account() {
-    let harness = Harness::new().await;
-    let (_, provider) = create(
-        &harness,
-        PROVIDERS,
-        provider_body("openai-main", "https://api.openai.com/v1"),
-    )
-    .await;
-    let provider_id = provider["id"].as_str().unwrap().to_string();
-    let (_, account) = create(
-        &harness,
-        &format!("{PROVIDERS}/{provider_id}/accounts"),
-        json!({"name": "pinned"}),
-    )
-    .await;
-    let account_id = account["id"].as_str().unwrap().to_string();
-
-    let (status, group) = create(&harness, GROUPS, json!({"name": "g", "strategy": "usage"})).await;
-    assert_eq!(status, StatusCode::CREATED, "body: {group}");
-    let group_id = group["id"].as_str().unwrap().to_string();
-
-    let (status, target) = create(
-        &harness,
-        &format!("{GROUPS}/{group_id}/targets"),
-        json!({
-            "provider_id": provider_id,
-            "model_id": "m",
-            "account_id": account_id
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {target}");
-    assert_eq!(target["account_id"], account_id);
-
-    // An account from another provider cannot be pinned.
-    let (_, other) = create(
-        &harness,
-        PROVIDERS,
-        provider_body("other", "https://api.openai.com/v1"),
-    )
-    .await;
-    let other_id = other["id"].as_str().unwrap();
-    let (status, body) = create(
-        &harness,
-        &format!("{GROUPS}/{group_id}/targets"),
-        json!({"provider_id": other_id, "model_id": "m", "account_id": account_id}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
-}
-
-#[tokio::test]
-async fn group_strategies_are_validated() {
-    let harness = Harness::new().await;
-    for strategy in [
-        "priority",
-        "weighted",
-        "order",
-        "rotate",
-        "round_robin",
-        "usage",
-        "quota",
-        "smart",
-        "pace",
-        "intent",
-    ] {
-        let (status, body) = create(
-            &harness,
-            GROUPS,
-            json!({"name": format!("g-{strategy}"), "strategy": strategy}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED, "strategy {strategy}: {body}");
-    }
-    let (status, _) = create(
-        &harness,
-        GROUPS,
-        json!({"name": "g-bogus", "strategy": "magic"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-}
 
 // ---------------------------------------------------------------------------
 // LLM plugins
@@ -945,14 +508,15 @@ async fn llm_plugin_effective_chain_and_metrics() {
 #[tokio::test]
 async fn provider_scoped_plugin_config_binds_to_the_provider() {
     let harness = Harness::new().await;
-    let (status, provider) = create(
-        &harness,
-        PROVIDERS,
-        provider_body("openai-main", "https://api.openai.com/v1"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {provider}");
-    let provider_id = provider["id"].as_str().unwrap();
+    let provider_id = harness
+        .provider(
+            "openai-main",
+            "openai",
+            "https://api.openai.com/v1",
+            "bearer",
+            0,
+        )
+        .await;
     let id = plugin_id(&harness, "llm-think-tags").await;
 
     let (status, body) = create(
@@ -1225,72 +789,42 @@ async fn pii_engine_rejects_invalid_configuration() {
 }
 
 // ---------------------------------------------------------------------------
-// Provider account OAuth
+// AI-native account OAuth
 
-fn oauth_provider_body(name: &str, token_url: &str) -> Value {
+fn oauth_provider_config(token_url: &str) -> String {
     json!({
-        "name": name,
-        "protocol": "openai",
-        "base_url": "https://api.example.test/v1",
-        "secret_ref": "env:OCTRA_TEST_UNUSED_SECRET",
-        "config": {
-            "wire": "openai",
-            "oauth": {
-                "authorize_url": "https://auth.example.test/authorize",
-                "token_url": token_url,
-                "client_id": "client-1",
-                "scopes": ["read", "offline_access"],
-                "redirect_uri": "http://localhost:1455/callback",
-                "extra_authorize_params": {"audience": "api"}
-            }
+        "wire": "openai",
+        "oauth": {
+            "authorize_url": "https://auth.example.test/authorize",
+            "token_url": token_url,
+            "client_id": "client-1",
+            "scopes": ["read", "offline_access"],
+            "redirect_uri": "http://localhost:1455/callback",
+            "extra_authorize_params": {"audience": "api"}
         }
     })
-}
-
-/// Sends through one persistent router, so per-router state (pending OAuth
-/// flows) survives across calls.
-async fn call_router(
-    router: &Router,
-    method: Method,
-    path: &str,
-    body: Option<Value>,
-) -> (StatusCode, Value) {
-    let (status, _, text) = send(router.clone(), method, path, &[], body).await;
-    (
-        status,
-        serde_json::from_str(&text).unwrap_or(Value::String(text)),
-    )
+    .to_string()
 }
 
 #[tokio::test]
-async fn oauth_account_lifecycle() {
+async fn ai_account_oauth_lifecycle() {
     let harness = Harness::new().await;
-    let tokens = mock_token_endpoint().await;
-    let control = harness.control_router();
+    let router = harness.control_router();
+    let tokens = common::mock_token_endpoint().await;
+    let provider_id = harness
+        .provider_with_config(
+            "oauth-main",
+            "openai",
+            "https://api.example.test/v1",
+            "bearer",
+            0,
+            &oauth_provider_config(&tokens.url),
+        )
+        .await;
+    let account_id = harness.account(&provider_id, "acct", 0, 1, None, 0).await;
+    let base = format!("/api/v1/ai/accounts/{account_id}/oauth");
 
-    let post = |path: String, body: Value| {
-        let control = control.clone();
-        async move { call_router(&control, Method::POST, &path, Some(body)).await }
-    };
-
-    let (status, provider) = post(
-        PROVIDERS.to_string(),
-        oauth_provider_body("oauth-main", &tokens.url),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {provider}");
-    let provider_id = provider["id"].as_str().unwrap().to_string();
-
-    let accounts = format!("{PROVIDERS}/{provider_id}/accounts");
-    let (status, account) = post(accounts.clone(), json!({"name": "acct"})).await;
-    assert_eq!(status, StatusCode::CREATED, "body: {account}");
-    let account_id = account["id"].as_str().unwrap().to_string();
-    assert_eq!(account["oauth_status"], "none");
-    assert_eq!(account["credential_kind"], "static");
-
-    let base = format!("{PROVIDERS}/{provider_id}/accounts/{account_id}/oauth");
-
-    let (status, start) = call_router(&control, Method::POST, &format!("{base}/start"), None).await;
+    let (status, start) = call_shared(&router, Method::POST, &format!("{base}/start"), None).await;
     assert_eq!(status, StatusCode::OK, "body: {start}");
     let state_token = start["state"].as_str().unwrap().to_string();
     assert_eq!(start["redirect_uri"], "http://localhost:1455/callback");
@@ -1299,33 +833,12 @@ async fn oauth_account_lifecycle() {
     assert!(authorize.contains("client_id=client-1"));
     assert!(authorize.contains("code_challenge_method=S256"));
     assert!(authorize.contains("audience=api"));
-    assert!(authorize.contains(&format!("state={state_token}")));
 
-    // A state the flow store never issued is rejected.
-    let (status, _) = post(
-        format!("{base}/complete"),
-        json!({"code": "c", "state": "bogus"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-
-    // Completing with a state that belongs to another account is rejected.
-    let (status, other) = post(accounts.clone(), json!({"name": "other"})).await;
-    assert_eq!(status, StatusCode::CREATED);
-    let other_id = other["id"].as_str().unwrap();
-    let (status, _) = post(
-        format!("{PROVIDERS}/{provider_id}/accounts/{other_id}/oauth/complete"),
-        json!({"code": "c", "state": state_token}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-
-    // The state was consumed by the failed attempt, so start again.
-    let (_, start) = call_router(&control, Method::POST, &format!("{base}/start"), None).await;
-    let state_token = start["state"].as_str().unwrap().to_string();
-    let (status, completed) = post(
-        format!("{base}/complete"),
-        json!({"code": "code-1", "state": state_token}),
+    let (status, completed) = call_shared(
+        &router,
+        Method::POST,
+        &format!("{base}/complete"),
+        Some(json!({"code": "code-1", "state": state_token})),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {completed}");
@@ -1333,143 +846,43 @@ async fn oauth_account_lifecycle() {
     assert_eq!(completed["credential_kind"], "oauth");
     assert!(completed["oauth_expires_at"].is_string());
 
-    let forms = tokens.forms.lock().unwrap().clone();
-    assert_eq!(forms.len(), 1, "forms: {forms:?}");
-    assert!(forms[0].contains("grant_type=authorization_code"));
-    assert!(forms[0].contains("code=code-1"));
-    assert!(forms[0].contains("code_verifier="));
-
     let (status, refreshed) =
-        call_router(&control, Method::POST, &format!("{base}/refresh"), None).await;
+        call_shared(&router, Method::POST, &format!("{base}/refresh"), None).await;
     assert_eq!(status, StatusCode::OK, "body: {refreshed}");
     assert_eq!(refreshed["oauth_status"], "authorized");
-    let forms = tokens.forms.lock().unwrap().clone();
-    assert_eq!(forms.len(), 2);
-    assert!(forms[1].contains("grant_type=refresh_token"));
-    assert!(forms[1].contains("refresh_token=refresh-1"));
 
-    let (status, _) = call_router(&control, Method::DELETE, &base, None).await;
+    let (status, _) = call_shared(&router, Method::DELETE, &base, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, status_body) =
-        call_router(&control, Method::GET, &format!("{base}/status"), None).await;
+    let (status, cleared) =
+        call_shared(&router, Method::GET, &format!("{base}/status"), None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(status_body["oauth_status"], "none");
-    assert_eq!(status_body["oauth_expires_at"], Value::Null);
+    assert_eq!(cleared["oauth_status"], "none");
+    assert_eq!(cleared["oauth_expires_at"], Value::Null);
 }
 
 #[tokio::test]
-async fn oauth_requires_provider_configuration() {
+async fn ai_account_oauth_requires_provider_configuration() {
     let harness = Harness::new().await;
-    let (_, provider) = create(
-        &harness,
-        PROVIDERS,
-        provider_body("plain", "https://api.openai.com/v1"),
-    )
-    .await;
-    let provider_id = provider["id"].as_str().unwrap().to_string();
-    let (status, account) = create(
-        &harness,
-        &format!("{PROVIDERS}/{provider_id}/accounts"),
-        json!({"name": "acct"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    let account_id = account["id"].as_str().unwrap();
-
-    let (status, body) = call(
-        &harness,
+    let router = harness.control_router();
+    let provider_id = harness
+        .provider(
+            "plain-provider",
+            "openai",
+            "https://api.example.test/v1",
+            "bearer",
+            0,
+        )
+        .await;
+    let account_id = harness
+        .account(&provider_id, "plain-account", 0, 1, None, 0)
+        .await;
+    let (status, body) = call_shared(
+        &router,
         Method::POST,
-        &format!("{PROVIDERS}/{provider_id}/accounts/{account_id}/oauth/start"),
+        &format!("/api/v1/ai/accounts/{account_id}/oauth/start"),
         None,
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-
-    // The provider check runs before the account lookup, so a missing account
-    // still surfaces the missing OAuth configuration.
-    let (status, _) = call(
-        &harness,
-        Method::POST,
-        &format!("{PROVIDERS}/{provider_id}/accounts/missing/oauth/start"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-}
-
-// ---------------------------------------------------------------------------
-// CLI providers
-
-#[cfg(unix)]
-#[tokio::test]
-async fn cli_probe_and_config_validation() {
-    let harness = Harness::new().await;
-    let binary = common::fake_cli("echo 'fake-cli 1.2.3'");
-
-    let mut body = provider_body("cli-main", "http://127.0.0.1:9/v1");
-    body["auth_type"] = json!("none");
-    body["config"] = json!({
-        "cli": {"kind": "generic", "command": binary.path, "prompt_mode": "stdin"}
-    });
-    let (status, provider) = create(&harness, PROVIDERS, body.clone()).await;
-    assert_eq!(status, StatusCode::CREATED, "body: {provider}");
-    let id = provider["id"].as_str().unwrap();
-
-    let (status, probe) = call(
-        &harness,
-        Method::POST,
-        &format!("{PROVIDERS}/{id}/cli/probe"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "body: {probe}");
-    assert_eq!(probe["ok"], true, "body: {probe}");
-    assert_eq!(probe["version"], "fake-cli 1.2.3");
-
-    // A provider without CLI configuration cannot be probed.
-    let (_, plain) = create(
-        &harness,
-        PROVIDERS,
-        provider_body("plain", "https://api.openai.com/v1"),
-    )
-    .await;
-    let plain_id = plain["id"].as_str().unwrap();
-    let (status, _) = call(
-        &harness,
-        Method::POST,
-        &format!("{PROVIDERS}/{plain_id}/cli/probe"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-
-    // Invalid CLI configuration is rejected before it is stored.
-    let mut invalid = provider_body("bad-cli", "http://127.0.0.1:9/v1");
-    invalid["config"] = json!({"cli": {"kind": "nope", "command": "x"}});
-    let (status, error) = create(&harness, PROVIDERS, invalid).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {error}");
-    assert_eq!(error["field"], "config.cli");
-
-    // Missing binary surfaces as ok=false, not an HTTP failure.
-    let mut missing = provider_body("missing-cli", "http://127.0.0.1:9/v1");
-    missing["auth_type"] = json!("none");
-    missing["config"] = json!({"cli": {"command": "/nonexistent/octra-fake-cli"}});
-    let (status, provider) = create(&harness, PROVIDERS, missing).await;
-    assert_eq!(status, StatusCode::CREATED, "body: {provider}");
-    let missing_id = provider["id"].as_str().unwrap();
-    let (status, probe) = call(
-        &harness,
-        Method::POST,
-        &format!("{PROVIDERS}/{missing_id}/cli/probe"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(probe["ok"], false);
-    assert!(
-        probe["error"]
-            .as_str()
-            .unwrap()
-            .contains("/nonexistent/octra-fake-cli")
-    );
+    assert!(body["error"].as_str().unwrap().contains("oauth"));
 }

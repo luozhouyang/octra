@@ -3470,6 +3470,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "octra-ai-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "octra-api-core"
 version = "0.1.0"
 dependencies = [
@@ -3725,6 +3734,7 @@ dependencies = [
  "http",
  "http-body-util",
  "nix",
+ "octra-ai-config",
  "octra-api-core",
  "octra-config",
  "octra-core",
@@ -3964,6 +3974,7 @@ name = "octra-storage"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "octra-ai-config",
  "octra-api-core",
  "octra-api-plugin-types",
  "octra-core",

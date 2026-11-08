@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::http::StatusCode;
 use common::*;
-use octra_api_core::{CreateConsumer, CreatePolicy, UpdatePolicy};
+use octra_api_core::CreateConsumer;
 use octra_llm_gateway::keys::hash_key;
 use octra_storage::{LlmUsageInput, LlmVirtualKeyInput};
 use serde_json::json;
@@ -479,22 +479,8 @@ async fn missing_secret_is_a_502_and_falls_through() {
     assert_eq!(status, StatusCode::OK);
 
     // With only the broken provider, the error surfaces in ingress shape.
-    // The harness transport injects a test key, so build a runtime without it.
-    let storage = Arc::new(octra_storage::Storage::connect_in_memory().await.unwrap());
-    let config = Arc::new(octra_config::OctraConfig::default());
-    let runtime = Arc::new(
-        octra_llm_gateway::LlmRuntime::bootstrap(storage.clone(), config.clone())
-            .await
-            .unwrap(),
-    );
-    let harness = Harness {
-        storage,
-        runtime,
-        config,
-        plugins: Arc::new(octra_llm_gateway::LlmPluginRuntime::empty()),
-        pii: Arc::new(octra_llm_gateway::pii::PiiEngineRuntime::new()),
-        models: None,
-    };
+    // The harness data router injects a test key, so build one without it.
+    let harness = Harness::new().await;
     let broken_id = harness
         .provider(
             "broken",
@@ -841,17 +827,12 @@ async fn consumer_policies_restrict_models_and_providers() {
 
     // A policy that names other models defaults the request to deny.
     let policy = harness
-        .storage
-        .api
-        .create_policy(&CreatePolicy {
-            name: "restrict-model".into(),
-            consumer_id: Some(consumer.id.clone()),
-            document: Some(json!({"allowed_models": ["other-model"]})),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    harness.runtime.reload().await.unwrap();
+        .allowlist_policy(
+            "restrict-model",
+            Some(&consumer.id),
+            json!({"allowed_models": ["other-model"]}),
+        )
+        .await;
 
     let (status, _, body) = post_json(
         harness.data_router(),
@@ -878,21 +859,14 @@ async fn consumer_policies_restrict_models_and_providers() {
 
     // Allow the model but name a provider the route cannot reach.
     harness
-        .storage
-        .api
-        .update_policy(
-            &policy.id,
-            &UpdatePolicy {
-                document: Some(json!({
-                    "allowed_models": ["octra-default"],
-                    "allowed_providers": ["missing-provider"]
-                })),
-                ..Default::default()
-            },
+        .update_policy_document(
+            &policy,
+            json!({
+                "allowed_models": ["octra-default"],
+                "allowed_providers": ["missing-provider"]
+            }),
         )
-        .await
-        .unwrap();
-    harness.runtime.reload().await.unwrap();
+        .await;
 
     let (status, _, body) = post_json(
         harness.data_router(),
@@ -905,21 +879,14 @@ async fn consumer_policies_restrict_models_and_providers() {
 
     // Provider names are accepted as well as ids.
     harness
-        .storage
-        .api
-        .update_policy(
-            &policy.id,
-            &UpdatePolicy {
-                document: Some(json!({
-                    "allowed_models": ["octra-default"],
-                    "allowed_providers": ["openai-mock"]
-                })),
-                ..Default::default()
-            },
+        .update_policy_document(
+            &policy,
+            json!({
+                "allowed_models": ["octra-default"],
+                "allowed_providers": ["openai-mock"]
+            }),
         )
-        .await
-        .unwrap();
-    harness.runtime.reload().await.unwrap();
+        .await;
 
     let (status, _, body) = post_json(
         harness.data_router(),
@@ -1110,7 +1077,7 @@ async fn rate_limited_account_falls_back_to_the_next() {
     for _ in 0..50 {
         let account = harness
             .storage
-            .llm
+            .ai
             .get_account(&first)
             .await
             .unwrap()
@@ -1279,17 +1246,12 @@ async fn model_map_cannot_bypass_model_policy() {
         .await
         .unwrap();
     harness
-        .storage
-        .api
-        .create_policy(&CreatePolicy {
-            name: "allow-octra-default".into(),
-            consumer_id: Some(consumer.id),
-            document: Some(json!({"allowed_models": ["octra-default"]})),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    harness.runtime.reload().await.unwrap();
+        .allowlist_policy(
+            "allow-octra-default",
+            Some(&consumer.id),
+            json!({"allowed_models": ["octra-default"]}),
+        )
+        .await;
     harness
         .plugin_config(
             "llm-model-map",
@@ -2192,16 +2154,12 @@ async fn virtual_key_permissions_combine_with_consumer_policy() {
         .await
         .unwrap();
     harness
-        .storage
-        .api
-        .create_policy(&CreatePolicy {
-            name: "allow-octra-default".into(),
-            consumer_id: Some(consumer.id.clone()),
-            document: Some(json!({"allowed_models": ["octra-default"]})),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+        .allowlist_policy(
+            "allow-octra-default",
+            Some(&consumer.id),
+            json!({"allowed_models": ["octra-default"]}),
+        )
+        .await;
     harness
         .storage
         .llm
@@ -2593,7 +2551,7 @@ echo '{"type":"done"}'"#;
     .await;
     let provider = harness
         .storage
-        .llm
+        .ai
         .list_providers()
         .await
         .unwrap()
@@ -2616,4 +2574,117 @@ echo '{"type":"done"}'"#;
         format!("{}/{account}", dir.display())
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn semantic_cache_serves_the_second_identical_request() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("cache-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+    harness
+        .plugin_config(
+            "llm-semantic-cache",
+            "global",
+            None,
+            json!({"similarity_threshold": 1.0, "ttl_secs": 5}),
+        )
+        .await;
+
+    let body = openai_body("octra-default", false);
+    let (status, headers, first) =
+        post_json(harness.data_router(), COMPLETION_PATH, &[], body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "body: {first}");
+    assert_eq!(headers.get("x-octra-cache").unwrap(), "miss");
+    assert_eq!(
+        first["choices"][0]["message"]["content"],
+        "Hello from OpenAI"
+    );
+
+    let (status, headers, second) =
+        post_json(harness.data_router(), COMPLETION_PATH, &[], body).await;
+    assert_eq!(status, StatusCode::OK, "body: {second}");
+    assert_eq!(headers.get("x-octra-cache").unwrap(), "hit");
+    assert_eq!(
+        second["choices"][0]["message"]["content"],
+        "Hello from OpenAI"
+    );
+    assert_eq!(upstream.request_count(), 1);
+
+    let mut different = openai_body("octra-default", false);
+    different["messages"][0]["content"] = json!("a different prompt");
+    let (status, headers, _) =
+        post_json(harness.data_router(), COMPLETION_PATH, &[], different).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("x-octra-cache").unwrap(), "miss");
+    assert_eq!(upstream.request_count(), 2);
+}
+
+#[tokio::test]
+async fn semantic_cache_replays_streaming_responses_as_sse() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider(
+            "cache-stream-mock",
+            "openai",
+            &upstream.base_url,
+            "bearer",
+            0,
+        )
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+    harness
+        .plugin_config(
+            "llm-semantic-cache",
+            "global",
+            None,
+            json!({"similarity_threshold": 1.0, "ttl_secs": 5}),
+        )
+        .await;
+
+    let body = openai_body("octra-default", true);
+    let (status, headers, first) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[],
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "stream: {first}");
+    assert_eq!(headers.get("x-octra-cache").unwrap(), "miss");
+    assert!(first.contains("Hello from OpenAI"), "stream: {first}");
+    assert!(first.trim_end().ends_with("data: [DONE]"));
+    assert_eq!(upstream.request_count(), 1);
+
+    let (status, headers, second) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[],
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "stream: {second}");
+    assert_eq!(headers.get("x-octra-cache").unwrap(), "hit");
+    assert!(second.contains("Hello from OpenAI"), "stream: {second}");
+    assert!(second.trim_end().ends_with("data: [DONE]"));
+    assert_eq!(upstream.request_count(), 1);
+
+    let mut different = openai_body("octra-default", true);
+    different["messages"][0]["content"] = json!("a different streaming prompt");
+    let (status, headers, _) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[],
+        Some(different),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("x-octra-cache").unwrap(), "miss");
+    assert_eq!(upstream.request_count(), 2);
 }

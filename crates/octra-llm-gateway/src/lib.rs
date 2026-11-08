@@ -12,6 +12,9 @@
 
 pub mod accounts;
 pub mod adapter;
+pub mod ai_control;
+pub mod ai_policy_plugins;
+pub mod ai_runtime;
 pub mod cli;
 pub mod config;
 pub mod control;
@@ -23,6 +26,7 @@ pub mod keys;
 pub mod pii;
 pub mod routing;
 pub mod runtime;
+pub mod similarity;
 pub mod upstream;
 pub mod usage;
 pub mod vk_policy;

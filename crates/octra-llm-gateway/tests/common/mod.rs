@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -12,13 +13,15 @@ use axum::response::Response;
 use axum::routing::{any, post};
 use bytes::Bytes;
 use http_body_util::BodyExt;
+use octra_ai_config::{
+    AiBalancer, AiModel, AiModelKind, AiModelTarget, AiPolicy, AiPolicyAttachment, AiPolicyScope,
+    AiPolicyType, AiProvider, AiProviderAccount,
+};
 use octra_config::OctraConfig;
 use octra_llm_gateway::{
     LlmControlState, LlmDataState, LlmPluginRuntime, LlmRuntime, LlmUpstream, control_router,
 };
-use octra_storage::{
-    LlmModelInput, LlmProviderAccountInput, LlmProviderInput, LlmRoutingTargetInput, Storage,
-};
+use octra_storage::Storage;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
@@ -410,7 +413,43 @@ pub struct Harness {
     pub plugins: Arc<LlmPluginRuntime>,
     pub pii: Arc<octra_llm_gateway::pii::PiiEngineRuntime>,
     pub models: Option<tempfile::TempDir>,
+    /// Model metadata recorded by `model*` helpers before the route exists.
+    model_metadata: Mutex<HashMap<(String, String), TargetMetadata>>,
 }
+
+/// Target metadata carried by an AI model target.
+#[derive(Debug, Clone, Default)]
+struct TargetMetadata {
+    context_window: Option<i64>,
+    max_output_tokens: Option<i64>,
+    capabilities: Option<Value>,
+    pricing: Option<Value>,
+}
+
+fn parse_json_object(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| json!({}))
+}
+
+fn new_ai_id(prefix: &str) -> String {
+    format!("{prefix}-{}", uuid::Uuid::new_v4().simple())
+}
+
+fn apply_metadata(target: &mut AiModelTarget, metadata: &TargetMetadata) {
+    if let Some(context_window) = metadata.context_window {
+        target.context_window = Some(context_window);
+    }
+    if let Some(max_output_tokens) = metadata.max_output_tokens {
+        target.max_output_tokens = Some(max_output_tokens as i32);
+    }
+    if let Some(capabilities) = &metadata.capabilities {
+        target.capabilities = capabilities.clone();
+    }
+    if let Some(pricing) = &metadata.pricing {
+        target.pricing = pricing.clone();
+    }
+}
+
+const TEST_SECRET_REF: &str = "env:OCTRA_TEST_UNUSED_SECRET";
 
 impl Harness {
     pub async fn new() -> Self {
@@ -440,6 +479,7 @@ impl Harness {
             plugins,
             pii,
             models: Some(models),
+            model_metadata: Mutex::new(HashMap::new()),
         }
     }
 
@@ -500,7 +540,7 @@ impl Harness {
         record.id
     }
 
-    /// Creates a provider pointing at a mock upstream.
+    /// Creates an AI-native provider pointing at a mock upstream.
     pub async fn provider(
         &self,
         name: &str,
@@ -513,65 +553,47 @@ impl Harness {
             .await
     }
 
-    /// Creates a provider with an explicit `config_json` (for example OAuth).
+    /// Creates an AI-native provider with an explicit `config_json`.
     pub async fn provider_with_config(
         &self,
         name: &str,
         protocol: &str,
         base_url: &str,
-        auth_type: &str,
-        priority: i64,
+        _auth_type: &str,
+        _priority: i64,
         config_json: &str,
     ) -> String {
-        let record = self
-            .storage
-            .llm
-            .create_provider(&LlmProviderInput {
+        let id = new_ai_id("provider");
+        let now = chrono::Utc::now().timestamp();
+        self.storage
+            .ai
+            .upsert_provider(&AiProvider {
+                id: id.clone(),
                 name: name.to_string(),
-                kind: protocol.to_string(),
                 protocol: protocol.to_string(),
-                auth_type: auth_type.to_string(),
-                base_url: Some(base_url.to_string()),
-                secret_ref: Some("env:OCTRA_TEST_UNUSED_SECRET".to_string()),
-                priority,
-                config_json: config_json.to_string(),
+                base_url: base_url.to_string(),
+                auth_ref: Some(TEST_SECRET_REF.to_string()),
+                capabilities: vec!["chat".to_string()],
+                config: parse_json_object(config_json),
                 enabled: true,
+                created_at: now,
+                updated_at: now,
             })
             .await
             .unwrap();
-        record.id
+        self.runtime.reload().await.unwrap();
+        id
     }
 
     pub async fn route_to(&self, virtual_model: &str, targets: &[(String, i64, i64)]) {
-        let group = self
-            .storage
-            .llm
-            .create_routing_group(&format!("{virtual_model}-group"), "priority")
-            .await
-            .unwrap();
-        for (index, (provider_id, priority, weight)) in targets.iter().enumerate() {
-            self.storage
-                .llm
-                .create_routing_target(
-                    &group.id,
-                    &LlmRoutingTargetInput {
-                        provider_id: provider_id.clone(),
-                        model_id: "m".to_string(),
-                        account_id: None,
-                        weight: *weight,
-                        priority: *priority,
-                        position: index as i64,
-                    },
-                )
-                .await
-                .unwrap();
-        }
-        self.storage
-            .llm
-            .create_route(virtual_model, Some(&group.id))
-            .await
-            .unwrap();
-        self.runtime.reload().await.unwrap();
+        let expanded: Vec<(String, String, i64, i64)> = targets
+            .iter()
+            .map(|(provider_id, priority, weight)| {
+                (provider_id.clone(), "m".to_string(), *priority, *weight)
+            })
+            .collect();
+        self.route_to_strategy(virtual_model, "priority", &expanded)
+            .await;
     }
 
     pub async fn model(&self, provider_id: &str, model_id: &str) {
@@ -579,21 +601,16 @@ impl Harness {
     }
 
     pub async fn model_priced(&self, provider_id: &str, model_id: &str, pricing_json: &str) {
-        self.storage
-            .llm
-            .create_model(&LlmModelInput {
-                provider_id: provider_id.to_string(),
-                model_id: model_id.to_string(),
-                display_name: None,
-                protocol: None,
-                context_window: None,
-                max_output_tokens: None,
-                capabilities: "{}".to_string(),
-                pricing_json: pricing_json.to_string(),
-                enabled: true,
-            })
-            .await
-            .unwrap();
+        let key = (provider_id.to_string(), model_id.to_string());
+        let mut metadata = self
+            .model_metadata
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        metadata.pricing = Some(parse_json_object(pricing_json));
+        self.record_metadata(key, metadata).await;
         self.runtime.reload().await.unwrap();
     }
 
@@ -605,22 +622,31 @@ impl Harness {
         capabilities: &str,
         pricing_json: &str,
     ) {
-        self.storage
-            .llm
-            .create_model(&LlmModelInput {
-                provider_id: provider_id.to_string(),
-                model_id: model_id.to_string(),
-                display_name: None,
-                protocol: None,
-                context_window,
-                max_output_tokens: None,
-                capabilities: capabilities.to_string(),
-                pricing_json: pricing_json.to_string(),
-                enabled: true,
-            })
-            .await
-            .unwrap();
+        let key = (provider_id.to_string(), model_id.to_string());
+        let metadata = TargetMetadata {
+            context_window,
+            max_output_tokens: None,
+            capabilities: Some(parse_json_object(capabilities)),
+            pricing: Some(parse_json_object(pricing_json)),
+        };
+        self.record_metadata(key, metadata).await;
         self.runtime.reload().await.unwrap();
+    }
+
+    async fn record_metadata(&self, key: (String, String), metadata: TargetMetadata) {
+        self.model_metadata
+            .lock()
+            .unwrap()
+            .insert(key.clone(), metadata.clone());
+        let targets = self.storage.ai.list_targets(None).await.unwrap();
+        for mut target in targets {
+            let matches_provider = target.provider_id.as_deref() == Some(key.0.as_str());
+            let matches_model = target.upstream_model.as_deref() == Some(key.1.as_str());
+            if matches_provider && matches_model {
+                apply_metadata(&mut target, &metadata);
+                self.storage.ai.upsert_target(&target).await.unwrap();
+            }
+        }
     }
 
     pub async fn route_to_strategy(
@@ -629,34 +655,56 @@ impl Harness {
         strategy: &str,
         targets: &[(String, String, i64, i64)],
     ) {
-        let group = self
-            .storage
-            .llm
-            .create_routing_group(&format!("{virtual_model}-group"), strategy)
-            .await
-            .unwrap();
-        for (index, (provider_id, model_id, priority, weight)) in targets.iter().enumerate() {
-            self.storage
-                .llm
-                .create_routing_target(
-                    &group.id,
-                    &LlmRoutingTargetInput {
-                        provider_id: provider_id.clone(),
-                        model_id: model_id.clone(),
-                        account_id: None,
-                        weight: *weight,
-                        priority: *priority,
-                        position: index as i64,
-                    },
-                )
-                .await
-                .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let model = AiModel {
+            id: new_ai_id("model"),
+            name: virtual_model.to_string(),
+            kind: AiModelKind::Model,
+            capabilities: vec!["chat".to_string()],
+            formats: vec!["openai".to_string()],
+            route_paths: vec!["/v1/chat/completions".to_string()],
+            balancer: AiBalancer {
+                strategy: strategy.to_string(),
+                retries: 0,
+                failover_criteria: Vec::new(),
+            },
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        self.storage.ai.upsert_model(&model).await.unwrap();
+        for (index, (provider_id, upstream_model, priority, weight)) in targets.iter().enumerate() {
+            let metadata = self
+                .model_metadata
+                .lock()
+                .unwrap()
+                .get(&(provider_id.clone(), upstream_model.clone()))
+                .cloned();
+            let mut target = AiModelTarget {
+                id: new_ai_id("target"),
+                model_id: model.id.clone(),
+                target_model_id: None,
+                provider_id: Some(provider_id.clone()),
+                upstream_model: Some(upstream_model.clone()),
+                account_id: None,
+                weight: *weight,
+                priority: *priority,
+                position: index as i64,
+                config: json!({}),
+                context_window: None,
+                max_output_tokens: None,
+                capabilities: json!({}),
+                pricing: json!({}),
+                semantic_description: None,
+                enabled: true,
+                created_at: now,
+                updated_at: now,
+            };
+            if let Some(metadata) = metadata {
+                apply_metadata(&mut target, &metadata);
+            }
+            self.storage.ai.upsert_target(&target).await.unwrap();
         }
-        self.storage
-            .llm
-            .create_route(virtual_model, Some(&group.id))
-            .await
-            .unwrap();
         self.runtime.reload().await.unwrap();
     }
 
@@ -668,30 +716,36 @@ impl Harness {
         weight: i64,
         config_json: &str,
     ) -> String {
-        let record = self
-            .storage
-            .llm
-            .create_account(
-                provider_id,
-                &LlmProviderAccountInput {
-                    name: name.to_string(),
-                    secret_ref: Some("env:OCTRA_TEST_UNUSED_SECRET".to_string()),
-                    weight,
-                    priority,
-                    enabled: true,
-                    quota_limit: None,
-                    quota_unit: "requests".to_string(),
-                    quota_period: "none".to_string(),
-                    config_json: config_json.to_string(),
-                },
-            )
+        let id = new_ai_id("account");
+        let now = chrono::Utc::now().timestamp();
+        self.storage
+            .ai
+            .upsert_account(&AiProviderAccount {
+                id: id.clone(),
+                provider_id: provider_id.to_string(),
+                name: name.to_string(),
+                credential_kind: "static".to_string(),
+                secret_ref: Some(TEST_SECRET_REF.to_string()),
+                oauth_ref: None,
+                weight,
+                priority,
+                quota_limit: None,
+                quota_unit: "requests".to_string(),
+                quota_period: "none".to_string(),
+                quota_used: 0,
+                cooldown_until: None,
+                enabled: true,
+                config: parse_json_object(config_json),
+                created_at: now,
+                updated_at: now,
+            })
             .await
             .unwrap();
         self.runtime.reload().await.unwrap();
-        record.id
+        id
     }
 
-    /// Creates a provider account, optionally pre-consuming its quota.
+    /// Creates an AI-native provider account, optionally pre-consuming quota.
     pub async fn account(
         &self,
         provider_id: &str,
@@ -701,34 +755,96 @@ impl Harness {
         quota_limit: Option<i64>,
         quota_used: i64,
     ) -> String {
-        let record = self
-            .storage
-            .llm
-            .create_account(
-                provider_id,
-                &LlmProviderAccountInput {
-                    name: name.to_string(),
-                    secret_ref: Some("env:OCTRA_TEST_UNUSED_SECRET".to_string()),
-                    weight,
-                    priority,
-                    enabled: true,
-                    quota_limit,
-                    quota_unit: "requests".to_string(),
-                    quota_period: "none".to_string(),
-                    config_json: "{}".to_string(),
-                },
-            )
+        let id = new_ai_id("account");
+        let now = chrono::Utc::now().timestamp();
+        self.storage
+            .ai
+            .upsert_account(&AiProviderAccount {
+                id: id.clone(),
+                provider_id: provider_id.to_string(),
+                name: name.to_string(),
+                credential_kind: "static".to_string(),
+                secret_ref: Some(TEST_SECRET_REF.to_string()),
+                oauth_ref: None,
+                weight,
+                priority,
+                quota_limit,
+                quota_unit: "requests".to_string(),
+                quota_period: "none".to_string(),
+                quota_used: 0,
+                cooldown_until: None,
+                enabled: true,
+                config: json!({}),
+                created_at: now,
+                updated_at: now,
+            })
             .await
             .unwrap();
         if quota_used > 0 {
             self.storage
-                .llm
-                .consume_account_quota(&record.id, quota_used, 0, 0)
+                .ai
+                .consume_account_quota(&id, quota_used, 0, 0)
                 .await
                 .unwrap();
         }
         self.runtime.reload().await.unwrap();
-        record.id
+        id
+    }
+
+    /// Creates an AI-native allowlist policy bound to a consumer (or global).
+    pub async fn allowlist_policy(
+        &self,
+        name: &str,
+        consumer_id: Option<&str>,
+        document: Value,
+    ) -> String {
+        let now = chrono::Utc::now().timestamp();
+        let policy = AiPolicy {
+            id: new_ai_id("policy"),
+            name: name.to_string(),
+            policy_type: AiPolicyType::Allowlist,
+            config: document,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        self.storage.ai.upsert_policy(&policy).await.unwrap();
+        let (scope, scope_id) = match consumer_id {
+            Some(consumer_id) => (AiPolicyScope::Consumer, Some(consumer_id.to_string())),
+            None => (AiPolicyScope::Global, None),
+        };
+        let attachment = AiPolicyAttachment {
+            id: new_ai_id("attachment"),
+            policy_id: policy.id.clone(),
+            scope,
+            scope_id,
+            order: 0,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        self.storage
+            .ai
+            .upsert_attachment(&attachment)
+            .await
+            .unwrap();
+        self.runtime.reload().await.unwrap();
+        policy.id
+    }
+
+    /// Replaces an AI-native policy document in place.
+    pub async fn update_policy_document(&self, policy_id: &str, document: Value) {
+        let mut policy = self
+            .storage
+            .ai
+            .get_policy(policy_id)
+            .await
+            .unwrap()
+            .unwrap();
+        policy.config = document;
+        policy.updated_at = chrono::Utc::now().timestamp();
+        self.storage.ai.upsert_policy(&policy).await.unwrap();
+        self.runtime.reload().await.unwrap();
     }
 
     pub async fn key(

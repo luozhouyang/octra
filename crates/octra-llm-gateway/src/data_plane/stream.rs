@@ -16,7 +16,10 @@ use bytes::Bytes;
 use futures_util::stream::{BoxStream, StreamExt, unfold};
 use octra_config::OctraConfig;
 use octra_data_plane::sse::SseDecoder;
-use octra_llm_core::{GatewayError, Protocol, StreamEvent, Usage};
+use octra_llm_core::{
+    AssistantContent, ChatResponse, FinishReason, GatewayError, Message, Protocol, Reasoning, Role,
+    StreamEvent, ToolCallKind, Usage, Value,
+};
 use octra_llm_plugin_runtime::LlmPluginChain;
 use octra_llm_plugin_types::{LlmLogEvent, LlmRequestMeta, LlmRequestState};
 use octra_llm_protocol::{StreamDecoder, StreamEncoder};
@@ -59,6 +62,7 @@ pub fn start(
         finished: false,
         saw_finish: false,
         usage: Usage::default(),
+        accumulator: StreamAccumulator::default(),
     };
 
     let body_stream = unfold(state, |mut state| async move {
@@ -202,6 +206,282 @@ impl StreamMeta {
     }
 }
 
+/// One tool call assembled from a start event and argument deltas.
+#[derive(Debug)]
+struct AccumulatedToolCall {
+    index: usize,
+    id: String,
+    name: String,
+    kind: ToolCallKind,
+    arguments: String,
+}
+
+/// One provider-executed tool result observed in the stream.
+#[derive(Debug)]
+struct AccumulatedToolResult {
+    index: usize,
+    tool_use_id: String,
+    content: Value,
+    is_error: bool,
+}
+
+/// Reconstructs a canonical [`ChatResponse`] from the events that reached the
+/// client. The response is only built after a successful finish: failed or
+/// truncated streams must never enter a response cache.
+#[derive(Debug, Default)]
+struct StreamAccumulator {
+    id: Option<String>,
+    model: Option<String>,
+    text: String,
+    reasoning: String,
+    signature: String,
+    tool_calls: Vec<AccumulatedToolCall>,
+    tool_results: Vec<AccumulatedToolResult>,
+    usage: Usage,
+    finish_reason: Option<FinishReason>,
+    failed: bool,
+}
+
+impl StreamAccumulator {
+    fn observe(&mut self, event: &StreamEvent) {
+        match event {
+            StreamEvent::MessageStart { id, model } => {
+                self.id = Some(id.clone());
+                self.model = Some(model.clone());
+            }
+            StreamEvent::TextDelta { text } => self.text.push_str(text),
+            StreamEvent::ReasoningDelta { text } => self.reasoning.push_str(text),
+            StreamEvent::ReasoningSignatureDelta { signature } => {
+                self.signature.push_str(signature);
+            }
+            StreamEvent::ToolCallStart {
+                index,
+                id,
+                name,
+                kind,
+            } => {
+                if let Some(call) = self.tool_calls.iter_mut().find(|call| call.index == *index) {
+                    call.id = id.clone();
+                    call.name = name.clone();
+                    call.kind = *kind;
+                } else {
+                    self.tool_calls.push(AccumulatedToolCall {
+                        index: *index,
+                        id: id.clone(),
+                        name: name.clone(),
+                        kind: *kind,
+                        arguments: String::new(),
+                    });
+                }
+            }
+            StreamEvent::ToolCallDelta { index, arguments } => {
+                if let Some(call) = self.tool_calls.iter_mut().find(|call| call.index == *index) {
+                    call.arguments.push_str(arguments);
+                } else {
+                    self.tool_calls.push(AccumulatedToolCall {
+                        index: *index,
+                        id: String::new(),
+                        name: String::new(),
+                        kind: ToolCallKind::Function,
+                        arguments: arguments.clone(),
+                    });
+                }
+            }
+            // The IR cannot represent the provider tool metadata start block;
+            // only the result block is reconstructed.
+            StreamEvent::ProviderToolStart { .. } => {}
+            StreamEvent::ProviderToolResult {
+                index,
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                self.tool_results.push(AccumulatedToolResult {
+                    index: *index,
+                    tool_use_id: tool_use_id.clone(),
+                    content: content.clone(),
+                    is_error: *is_error,
+                });
+            }
+            StreamEvent::Usage(usage) => self.usage = usage.clone(),
+            StreamEvent::Finish { reason } => self.finish_reason = Some(*reason),
+            StreamEvent::Error(_) => self.failed = true,
+        }
+    }
+
+    fn build(&self, requested_model: &str) -> Option<ChatResponse> {
+        if self.failed {
+            return None;
+        }
+        let finish_reason = self.finish_reason?;
+        let mut message = Message::new(Role::Assistant);
+        if !self.reasoning.is_empty() || !self.signature.is_empty() {
+            message.assistant.push(AssistantContent::Reasoning {
+                text: self.reasoning.clone(),
+                signature: (!self.signature.is_empty()).then(|| self.signature.clone()),
+            });
+        }
+        if !self.text.is_empty() {
+            message.assistant.push(AssistantContent::Text {
+                text: self.text.clone(),
+            });
+        }
+        let mut tool_calls: Vec<&AccumulatedToolCall> = self.tool_calls.iter().collect();
+        tool_calls.sort_by_key(|call| call.index);
+        for call in tool_calls {
+            let arguments = serde_json::from_str(&call.arguments)
+                .unwrap_or_else(|_| Value::String(call.arguments.clone()));
+            message.assistant.push(AssistantContent::ToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments,
+                kind: (call.kind != ToolCallKind::Function).then_some(call.kind),
+            });
+        }
+        let mut tool_results: Vec<&AccumulatedToolResult> = self.tool_results.iter().collect();
+        tool_results.sort_by_key(|result| result.index);
+        for result in tool_results {
+            message.assistant.push(AssistantContent::ToolResult {
+                tool_use_id: result.tool_use_id.clone(),
+                content: result.content.clone(),
+                is_error: result.is_error,
+            });
+        }
+        let reasoning = if !self.reasoning.is_empty() || !self.signature.is_empty() {
+            Some(Reasoning {
+                text: self.reasoning.clone(),
+                signature: (!self.signature.is_empty()).then(|| self.signature.clone()),
+                encrypted: Vec::new(),
+            })
+        } else {
+            None
+        };
+        let model = if requested_model.is_empty() {
+            self.model.clone().unwrap_or_default()
+        } else {
+            requested_model.to_string()
+        };
+        Some(ChatResponse {
+            id: self
+                .id
+                .clone()
+                .unwrap_or_else(|| "octra-cached".to_string()),
+            model,
+            message,
+            finish_reason,
+            usage: self.usage.clone(),
+            reasoning,
+            programmatic: None,
+            extra: Default::default(),
+        })
+    }
+}
+
+/// Replays a stored response as protocol-native SSE. This is used when a
+/// streaming request is served from a response cache.
+pub fn cached_response(
+    response: &ChatResponse,
+    ingress: Protocol,
+    include_usage: bool,
+) -> Result<Response, GatewayError> {
+    fn encode_error(error: octra_llm_core::ProtocolError) -> GatewayError {
+        GatewayError::internal(format!("cannot encode a cached stream: {}", error.message))
+    }
+
+    let mut encoder = octra_llm_protocol::stream_encoder_with_usage(ingress, include_usage);
+    let mut events = vec![StreamEvent::MessageStart {
+        id: response.id.clone(),
+        model: response.model.clone(),
+    }];
+    let mut index = 0usize;
+    for block in &response.message.assistant {
+        match block {
+            AssistantContent::Reasoning { text, signature } => {
+                if !text.is_empty() {
+                    events.push(StreamEvent::ReasoningDelta { text: text.clone() });
+                }
+                if let Some(signature) = signature
+                    && !signature.is_empty()
+                {
+                    events.push(StreamEvent::ReasoningSignatureDelta {
+                        signature: signature.clone(),
+                    });
+                }
+            }
+            AssistantContent::Text { text } => {
+                events.push(StreamEvent::TextDelta { text: text.clone() });
+            }
+            AssistantContent::Refusal { text } => {
+                // There is no separate refusal stream event; the refusal text
+                // is visible content for streaming clients.
+                events.push(StreamEvent::TextDelta { text: text.clone() });
+            }
+            AssistantContent::ToolCall {
+                id,
+                name,
+                arguments,
+                kind,
+            } => {
+                events.push(StreamEvent::ToolCallStart {
+                    index,
+                    id: id.clone(),
+                    name: name.clone(),
+                    kind: kind.unwrap_or(ToolCallKind::Function),
+                });
+                events.push(StreamEvent::ToolCallDelta {
+                    index,
+                    arguments: arguments.to_string(),
+                });
+                index += 1;
+            }
+            AssistantContent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let tool_type = content
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("web_search_tool_result")
+                    .to_string();
+                events.push(StreamEvent::ProviderToolStart { index, tool_type });
+                events.push(StreamEvent::ProviderToolResult {
+                    index,
+                    tool_use_id: tool_use_id.clone(),
+                    content: content.clone(),
+                    is_error: *is_error,
+                });
+                index += 1;
+            }
+            AssistantContent::Raw { .. } => {}
+        }
+    }
+    if !response.usage.is_empty() {
+        events.push(StreamEvent::Usage(response.usage.clone()));
+    }
+    events.push(StreamEvent::Finish {
+        reason: response.finish_reason,
+    });
+
+    let mut bytes = Vec::new();
+    for event in &events {
+        for frame in encoder.encode(event).map_err(encode_error)? {
+            bytes.extend(frame.to_bytes());
+        }
+    }
+    for frame in encoder.finish().map_err(encode_error)? {
+        bytes.extend(frame.to_bytes());
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("x-accel-buffering", "no")
+        .body(Body::from(bytes))
+        .map_err(|error| GatewayError::internal(format!("cannot build a cached stream: {error}")))
+}
+
 /// Runs the error stage before an in-stream error frame is encoded, so
 /// plugins such as PII redaction also apply after the first byte.
 async fn apply_error_chain(
@@ -246,6 +526,7 @@ struct BridgeState {
     finished: bool,
     saw_finish: bool,
     usage: Usage,
+    accumulator: StreamAccumulator,
 }
 
 impl BridgeState {
@@ -256,11 +537,32 @@ impl BridgeState {
         if let StreamEvent::Finish { .. } = event {
             self.saw_finish = true;
         }
+        self.accumulator.observe(event);
         // Usage may arrive after the finish chunk upstream, so the encoder
         // tail and the usage record both wait for stream close.
         for frame in self.encoder.encode(event).unwrap_or_default() {
             out.extend(frame.to_bytes());
         }
+    }
+
+    /// Stores the reconstructed response through the final-response hook.
+    /// Best-effort: hook errors never fail the stream.
+    async fn store_final_response(&mut self) {
+        let Some(chain) = self.plugins.clone() else {
+            return;
+        };
+        let Some(response) = self.accumulator.build(&self.meta.requested_model) else {
+            return;
+        };
+        let meta = self.meta.as_meta();
+        chain
+            .on_final_response(
+                &meta,
+                &self.meta.requested_model,
+                &response,
+                &mut self.plugin_state,
+            )
+            .await;
     }
 
     /// Runs the plugin tail: decoder leftovers plus a synthetic Finish so
@@ -330,6 +632,7 @@ impl BridgeState {
         for frame in self.encoder.finish().unwrap_or_default() {
             out.extend(frame.to_bytes());
         }
+        self.store_final_response().await;
         self.record(None).await;
         self.finished = true;
         out
@@ -466,6 +769,7 @@ pub fn start_events(
         finished: false,
         saw_finish: false,
         usage: Usage::default(),
+        accumulator: StreamAccumulator::default(),
     };
 
     let body_stream = unfold(state, |mut state| async move {
@@ -504,6 +808,7 @@ struct EventBridgeState {
     finished: bool,
     saw_finish: bool,
     usage: Usage,
+    accumulator: StreamAccumulator,
 }
 
 impl EventBridgeState {
@@ -560,9 +865,30 @@ impl EventBridgeState {
         if let StreamEvent::Finish { .. } = event {
             self.saw_finish = true;
         }
+        self.accumulator.observe(event);
         for frame in self.encoder.encode(event).unwrap_or_default() {
             out.extend(frame.to_bytes());
         }
+    }
+
+    /// Stores the reconstructed response through the final-response hook.
+    /// Best-effort: hook errors never fail the stream.
+    async fn store_final_response(&mut self) {
+        let Some(chain) = self.plugins.clone() else {
+            return;
+        };
+        let Some(response) = self.accumulator.build(&self.meta.requested_model) else {
+            return;
+        };
+        let meta = self.meta.as_meta();
+        chain
+            .on_final_response(
+                &meta,
+                &self.meta.requested_model,
+                &response,
+                &mut self.plugin_state,
+            )
+            .await;
     }
 
     async fn finish(&mut self) -> Vec<u8> {
@@ -599,6 +925,7 @@ impl EventBridgeState {
         for frame in self.encoder.finish().unwrap_or_default() {
             out.extend(frame.to_bytes());
         }
+        self.store_final_response().await;
         self.record(None).await;
         out
     }
@@ -637,5 +964,238 @@ impl EventBridgeState {
             error,
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::*;
+
+    fn start(id: &str, model: &str) -> StreamEvent {
+        StreamEvent::MessageStart {
+            id: id.to_string(),
+            model: model.to_string(),
+        }
+    }
+
+    #[test]
+    fn accumulates_text_reasoning_usage_and_finish() {
+        let mut accumulator = StreamAccumulator::default();
+        for event in [
+            start("chatcmpl-1", "provider/model"),
+            StreamEvent::ReasoningDelta {
+                text: "thinking".to_string(),
+            },
+            StreamEvent::ReasoningSignatureDelta {
+                signature: "sig-1".to_string(),
+            },
+            StreamEvent::TextDelta {
+                text: "hello ".to_string(),
+            },
+            StreamEvent::TextDelta {
+                text: "world".to_string(),
+            },
+            StreamEvent::Usage(Usage {
+                input_tokens: 3,
+                output_tokens: 4,
+                ..Default::default()
+            }),
+            StreamEvent::Finish {
+                reason: FinishReason::Stop,
+            },
+        ] {
+            accumulator.observe(&event);
+        }
+
+        let response = accumulator
+            .build("requested-model")
+            .expect("finished stream");
+        assert_eq!(response.id, "chatcmpl-1");
+        assert_eq!(response.model, "requested-model");
+        assert_eq!(response.finish_reason, FinishReason::Stop);
+        assert_eq!(response.usage.input_tokens, 3);
+        assert_eq!(response.usage.output_tokens, 4);
+        assert_eq!(
+            response.message.assistant,
+            vec![
+                AssistantContent::Reasoning {
+                    text: "thinking".to_string(),
+                    signature: Some("sig-1".to_string()),
+                },
+                AssistantContent::Text {
+                    text: "hello world".to_string(),
+                },
+            ]
+        );
+        let reasoning = response.reasoning.expect("reasoning summary");
+        assert_eq!(reasoning.text, "thinking");
+        assert_eq!(reasoning.signature.as_deref(), Some("sig-1"));
+    }
+
+    #[test]
+    fn accumulates_tool_calls_by_index_and_parses_arguments() {
+        let mut accumulator = StreamAccumulator::default();
+        for event in [
+            start("chatcmpl-tool", "provider/model"),
+            StreamEvent::ToolCallStart {
+                index: 1,
+                id: "call-b".to_string(),
+                name: "second".to_string(),
+                kind: ToolCallKind::Function,
+            },
+            StreamEvent::ToolCallDelta {
+                index: 1,
+                arguments: "{\"b\":".to_string(),
+            },
+            StreamEvent::ToolCallDelta {
+                index: 1,
+                arguments: "2}".to_string(),
+            },
+            StreamEvent::ToolCallStart {
+                index: 0,
+                id: "call-a".to_string(),
+                name: "first".to_string(),
+                kind: ToolCallKind::Function,
+            },
+            StreamEvent::ToolCallDelta {
+                index: 0,
+                arguments: "{\"a\":1}".to_string(),
+            },
+            StreamEvent::Finish {
+                reason: FinishReason::ToolCalls,
+            },
+        ] {
+            accumulator.observe(&event);
+        }
+
+        let response = accumulator.build("m").expect("finished stream");
+        let calls: Vec<&AssistantContent> = response
+            .message
+            .assistant
+            .iter()
+            .filter(|block| matches!(block, AssistantContent::ToolCall { .. }))
+            .collect();
+        assert_eq!(calls.len(), 2);
+        match calls[0] {
+            AssistantContent::ToolCall { id, arguments, .. } => {
+                assert_eq!(id, "call-a");
+                assert_eq!(arguments, &serde_json::json!({"a": 1}));
+            }
+            other => panic!("expected a tool call, got {other:?}"),
+        }
+        match calls[1] {
+            AssistantContent::ToolCall { id, arguments, .. } => {
+                assert_eq!(id, "call-b");
+                assert_eq!(arguments, &serde_json::json!({"b": 2}));
+            }
+            other => panic!("expected a tool call, got {other:?}"),
+        }
+        assert_eq!(response.finish_reason, FinishReason::ToolCalls);
+    }
+
+    #[test]
+    fn invalid_tool_arguments_are_kept_as_text() {
+        let mut accumulator = StreamAccumulator::default();
+        for event in [
+            start("chatcmpl-tool", "provider/model"),
+            StreamEvent::ToolCallStart {
+                index: 0,
+                id: "call-a".to_string(),
+                name: "broken".to_string(),
+                kind: ToolCallKind::Function,
+            },
+            StreamEvent::ToolCallDelta {
+                index: 0,
+                arguments: "not json".to_string(),
+            },
+            StreamEvent::Finish {
+                reason: FinishReason::ToolCalls,
+            },
+        ] {
+            accumulator.observe(&event);
+        }
+
+        let response = accumulator.build("m").expect("finished stream");
+        match &response.message.assistant[0] {
+            AssistantContent::ToolCall { arguments, .. } => {
+                assert_eq!(arguments, &Value::String("not json".to_string()));
+            }
+            other => panic!("expected a tool call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accumulates_provider_tool_results() {
+        let mut accumulator = StreamAccumulator::default();
+        for event in [
+            start("msg-1", "provider/model"),
+            StreamEvent::ProviderToolStart {
+                index: 0,
+                tool_type: "web_search".to_string(),
+            },
+            StreamEvent::ProviderToolResult {
+                index: 0,
+                tool_use_id: "srvtoolu_1".to_string(),
+                content: serde_json::json!({"type": "web_search_tool_result", "block": {}}),
+                is_error: false,
+            },
+            StreamEvent::Finish {
+                reason: FinishReason::Stop,
+            },
+        ] {
+            accumulator.observe(&event);
+        }
+
+        let response = accumulator.build("m").expect("finished stream");
+        assert_eq!(
+            response.message.assistant,
+            vec![AssistantContent::ToolResult {
+                tool_use_id: "srvtoolu_1".to_string(),
+                content: serde_json::json!({"type": "web_search_tool_result", "block": {}}),
+                is_error: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn failed_or_unfinished_streams_are_not_built() {
+        let mut accumulator = StreamAccumulator::default();
+        accumulator.observe(&start("chatcmpl-1", "provider/model"));
+        accumulator.observe(&StreamEvent::TextDelta {
+            text: "partial".to_string(),
+        });
+        assert!(accumulator.build("m").is_none(), "no finish observed");
+
+        accumulator.observe(&StreamEvent::Error(GatewayError::internal("boom")));
+        accumulator.observe(&StreamEvent::Finish {
+            reason: FinishReason::Stop,
+        });
+        assert!(accumulator.build("m").is_none(), "errored stream");
+    }
+
+    #[tokio::test]
+    async fn cached_text_response_encodes_to_sse() {
+        let mut message = Message::new(Role::Assistant);
+        message.assistant.push(AssistantContent::Text {
+            text: "cached answer".to_string(),
+        });
+        let response = ChatResponse::new("chatcmpl-cached", "m", message);
+
+        let encoded = cached_response(&response, Protocol::Openai, false).expect("encode");
+        assert_eq!(encoded.status(), StatusCode::OK);
+        assert_eq!(
+            encoded.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(
+            encoded.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
+        let bytes = to_bytes(encoded.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("cached answer"));
+        assert!(text.trim_end().ends_with("data: [DONE]"));
     }
 }

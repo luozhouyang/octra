@@ -1,5 +1,5 @@
-//! LLM control plane: CRUD for providers, models, routing groups, targets,
-//! routes and virtual keys, plus reload and usage reporting.
+//! LLM control plane: virtual keys, plugins, PII engines, reload and usage
+//! reporting.
 //!
 //! Mutations validate input (400), resolve references (404) and surface
 //! uniqueness violations as 409, then reload the runtime synchronously so the
@@ -11,14 +11,12 @@ use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::{Router, extract};
 use chrono::{DateTime, Utc};
-use octra_llm_core::Protocol;
+use octra_ai_config::{AiProvider, AiProviderAccount};
 use octra_llm_plugin_types::LlmScope;
 use octra_storage::plugins::{PluginConfigRecord, PluginRecord};
 use octra_storage::{
-    LlmModelInput, LlmModelRecord, LlmPiiEngineInput, LlmPiiEngineRecord, LlmProviderAccountInput,
-    LlmProviderAccountRecord, LlmProviderInput, LlmProviderRecord, LlmRouteRecord,
-    LlmRoutingGroupRecord, LlmRoutingTargetInput, LlmRoutingTargetRecord, LlmStorageError,
-    LlmUsageRecord, LlmVirtualKeyInput, LlmVirtualKeyRecord, LlmVirtualKeyRotation,
+    LlmPiiEngineInput, LlmPiiEngineRecord, LlmProviderRecord, LlmStorageError, LlmUsageRecord,
+    LlmVirtualKeyInput, LlmVirtualKeyRecord, LlmVirtualKeyRotation,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -30,79 +28,6 @@ use crate::pii::EngineStatus;
 use crate::runtime::{LlmControlState, LlmRuntime};
 
 pub fn router(state: LlmControlState) -> Router {
-    let providers = Router::new()
-        .route(
-            "/admin/llm/providers",
-            get(list_providers).post(create_provider),
-        )
-        .route(
-            "/admin/llm/providers/{id}",
-            get(get_provider)
-                .put(update_provider)
-                .delete(delete_provider),
-        )
-        .route("/admin/llm/providers/{id}/cli/probe", post(cli_probe))
-        .route(
-            "/admin/llm/providers/{id}/accounts",
-            get(list_provider_accounts).post(create_account),
-        )
-        .route(
-            "/admin/llm/accounts/{id}",
-            get(get_account).put(update_account).delete(delete_account),
-        )
-        .route(
-            "/admin/llm/accounts/{id}/quota/reset",
-            post(reset_account_quota),
-        )
-        .route(
-            "/admin/llm/providers/{id}/accounts/{account}/oauth/start",
-            post(oauth_start),
-        )
-        .route(
-            "/admin/llm/providers/{id}/accounts/{account}/oauth/complete",
-            post(oauth_complete),
-        )
-        .route(
-            "/admin/llm/providers/{id}/accounts/{account}/oauth/refresh",
-            post(oauth_refresh),
-        )
-        .route(
-            "/admin/llm/providers/{id}/accounts/{account}/oauth/status",
-            get(oauth_status),
-        )
-        .route(
-            "/admin/llm/providers/{id}/accounts/{account}/oauth",
-            axum::routing::delete(oauth_delete),
-        );
-    let models = Router::new()
-        .route("/admin/llm/models", get(list_models).post(create_model))
-        .route(
-            "/admin/llm/models/{id}",
-            get(get_model).put(update_model).delete(delete_model),
-        );
-    let groups = Router::new()
-        .route(
-            "/admin/llm/routing-groups",
-            get(list_groups).post(create_group),
-        )
-        .route(
-            "/admin/llm/routing-groups/{id}",
-            get(get_group).put(update_group).delete(delete_group),
-        )
-        .route(
-            "/admin/llm/routing-groups/{id}/targets",
-            get(list_targets).post(create_target),
-        )
-        .route(
-            "/admin/llm/routing-groups/{id}/targets/{target_id}",
-            put(update_target).delete(delete_target),
-        );
-    let routes = Router::new()
-        .route("/admin/llm/routes", get(list_routes).post(create_route))
-        .route(
-            "/admin/llm/routes/{id}",
-            get(get_route).put(update_route).delete(delete_route),
-        );
     let keys = Router::new()
         .route(
             "/admin/llm/virtual-keys",
@@ -162,14 +87,29 @@ pub fn router(state: LlmControlState) -> Router {
             "/admin/llm/pii-models/{id}",
             get(get_pii_model).post(pii_model_action),
         );
+    let oauth = Router::new()
+        .route("/api/v1/ai/accounts/{id}/oauth/start", post(ai_oauth_start))
+        .route(
+            "/api/v1/ai/accounts/{id}/oauth/complete",
+            post(ai_oauth_complete),
+        )
+        .route(
+            "/api/v1/ai/accounts/{id}/oauth/refresh",
+            post(ai_oauth_refresh),
+        )
+        .route(
+            "/api/v1/ai/accounts/{id}/oauth/status",
+            get(ai_oauth_status),
+        )
+        .route(
+            "/api/v1/ai/accounts/{id}/oauth",
+            axum::routing::delete(ai_oauth_delete),
+        );
     Router::new()
-        .merge(providers)
-        .merge(models)
-        .merge(groups)
-        .merge(routes)
         .merge(keys)
         .merge(plugins)
         .merge(pii)
+        .merge(oauth)
         .route("/admin/llm/reload", post(reload))
         .route("/admin/llm/usage", get(usage))
         .with_state(state)
@@ -278,155 +218,6 @@ fn json_object(raw: Option<String>, field: &str) -> ApiResult<String> {
     Ok(value.to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Wire shapes
-
-#[derive(Debug, Deserialize)]
-pub struct ProviderBody {
-    pub name: Option<String>,
-    pub kind: Option<String>,
-    pub protocol: Option<String>,
-    pub auth_type: Option<String>,
-    pub base_url: Option<String>,
-    pub secret_ref: Option<String>,
-    pub priority: Option<i64>,
-    /// Accepts an object (preferred) or a JSON string.
-    pub config: Option<Value>,
-    pub config_json: Option<String>,
-    pub enabled: Option<bool>,
-}
-
-impl ProviderBody {
-    fn into_input(self, options: ProviderOptions) -> ApiResult<LlmProviderInput> {
-        let name = required(&self.name, "name")?;
-        let kind = self.kind.unwrap_or_else(|| "openai".to_string());
-        let protocol = self.protocol.unwrap_or_else(|| "openai".to_string());
-        if Protocol::parse(&protocol).is_none() {
-            return Err(ApiError::bad_request(format!(
-                "unknown protocol '{protocol}': use openai or anthropic"
-            ))
-            .field("protocol"));
-        }
-        let auth_type = self.auth_type.unwrap_or_else(|| match protocol.as_str() {
-            "anthropic" => "anthropic".to_string(),
-            _ => "bearer".to_string(),
-        });
-        if crate::config::AuthType::parse(&auth_type).is_none() {
-            return Err(
-                ApiError::bad_request(format!("unknown auth_type '{auth_type}'"))
-                    .field("auth_type"),
-            );
-        }
-        let secret_ref = non_empty(self.secret_ref, "secret_ref")?;
-        if let Some(reference) = &secret_ref
-            && !(reference.starts_with("env:") || reference.starts_with("file:"))
-        {
-            return Err(ApiError::bad_request(
-                "secret_ref must use env:VAR or file:/path; plaintext secrets are not stored",
-            )
-            .field("secret_ref"));
-        }
-        let base_url = non_empty(self.base_url, "base_url")?;
-        if let Some(url) = &base_url
-            && !(url.starts_with("http://") || url.starts_with("https://"))
-        {
-            return Err(
-                ApiError::bad_request("base_url must start with http:// or https://")
-                    .field("base_url"),
-            );
-        }
-        let config_json = match (self.config, self.config_json) {
-            (Some(value), None) => {
-                if !value.is_object() {
-                    return Err(
-                        ApiError::bad_request("`config` must be a JSON object").field("config")
-                    );
-                }
-                value.to_string()
-            }
-            (None, value) => json_object(value, "config_json")?,
-            (Some(_), Some(_)) => {
-                return Err(ApiError::bad_request(
-                    "send either `config` or `config_json`, not both",
-                ));
-            }
-        };
-        if let Ok(value) = serde_json::from_str::<Value>(&config_json)
-            && let Some(cli) = value.get("cli")
-        {
-            crate::cli::CliConfig::from_value(cli)
-                .map_err(|message| ApiError::bad_request(message).field("config.cli"))?;
-        }
-        Ok(LlmProviderInput {
-            name,
-            kind,
-            protocol,
-            auth_type,
-            base_url,
-            secret_ref,
-            priority: self.priority.unwrap_or(0),
-            config_json,
-            enabled: self.enabled.unwrap_or(options.default_enabled),
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ProviderOptions {
-    pub default_enabled: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ProviderView {
-    pub id: String,
-    pub name: String,
-    pub kind: String,
-    pub protocol: String,
-    pub auth_type: String,
-    pub base_url: Option<String>,
-    pub secret_ref: Option<String>,
-    pub priority: i64,
-    pub config: Value,
-    pub enabled: bool,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-impl From<LlmProviderRecord> for ProviderView {
-    fn from(record: LlmProviderRecord) -> Self {
-        Self {
-            id: record.id,
-            name: record.name,
-            kind: record.kind,
-            protocol: record.protocol,
-            auth_type: record.auth_type,
-            base_url: record.base_url,
-            secret_ref: record.secret_ref,
-            priority: record.priority,
-            config: serde_json::from_str(&record.config_json).unwrap_or_else(|_| json!({})),
-            enabled: record.enabled,
-            created_at: record.created_at,
-            updated_at: record.updated_at,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ModelBody {
-    pub provider_id: Option<String>,
-    pub model_id: Option<String>,
-    pub display_name: Option<String>,
-    pub protocol: Option<String>,
-    pub context_window: Option<i64>,
-    pub max_output_tokens: Option<i64>,
-    pub capabilities: Option<Value>,
-    #[serde(default)]
-    pub capabilities_json: Option<String>,
-    pub pricing: Option<Value>,
-    pub pricing_json: Option<String>,
-    pub enabled: Option<bool>,
-}
-
 fn merge_json_field(object: Option<Value>, raw: Option<String>, field: &str) -> ApiResult<String> {
     match (object, raw) {
         (Some(value), None) => {
@@ -444,234 +235,8 @@ fn merge_json_field(object: Option<Value>, raw: Option<String>, field: &str) -> 
     }
 }
 
-impl ModelBody {
-    fn into_input(self) -> ApiResult<LlmModelInput> {
-        let protocol = non_empty(self.protocol, "protocol")?;
-        if let Some(protocol) = &protocol
-            && Protocol::parse(protocol).is_none()
-        {
-            return Err(
-                ApiError::bad_request(format!("unknown protocol '{protocol}'")).field("protocol"),
-            );
-        }
-        for (value, field) in [
-            (self.context_window, "context_window"),
-            (self.max_output_tokens, "max_output_tokens"),
-        ] {
-            if value.is_some_and(|value| value <= 0) {
-                return Err(
-                    ApiError::bad_request(format!("`{field}` must be positive")).field(field)
-                );
-            }
-        }
-        Ok(LlmModelInput {
-            provider_id: required(&self.provider_id, "provider_id")?,
-            model_id: required(&self.model_id, "model_id")?,
-            display_name: non_empty(self.display_name, "display_name")?,
-            protocol,
-            context_window: self.context_window,
-            max_output_tokens: self.max_output_tokens,
-            capabilities: merge_json_field(
-                self.capabilities,
-                self.capabilities_json,
-                "capabilities",
-            )?,
-            pricing_json: merge_json_field(self.pricing, self.pricing_json, "pricing")?,
-            enabled: self.enabled.unwrap_or(true),
-        })
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct ModelView {
-    pub id: String,
-    pub provider_id: String,
-    pub model_id: String,
-    pub display_name: Option<String>,
-    pub protocol: Option<String>,
-    pub context_window: Option<i64>,
-    pub max_output_tokens: Option<i64>,
-    pub capabilities: Value,
-    pub pricing: Value,
-    pub enabled: bool,
-    pub created_at: String,
-}
-
-impl From<LlmModelRecord> for ModelView {
-    fn from(record: LlmModelRecord) -> Self {
-        Self {
-            id: record.id,
-            provider_id: record.provider_id,
-            model_id: record.model_id,
-            display_name: record.display_name,
-            protocol: record.protocol,
-            context_window: record.context_window,
-            max_output_tokens: record.max_output_tokens,
-            capabilities: serde_json::from_str(&record.capabilities).unwrap_or_else(|_| json!({})),
-            pricing: serde_json::from_str(&record.pricing_json).unwrap_or_else(|_| json!({})),
-            enabled: record.enabled,
-            created_at: record.created_at,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GroupBody {
-    pub name: Option<String>,
-    pub strategy: Option<String>,
-}
-
-impl GroupBody {
-    fn parts(&self) -> ApiResult<(String, String)> {
-        let strategy = self
-            .strategy
-            .clone()
-            .unwrap_or_else(|| "priority".to_string());
-        if !matches!(
-            strategy.as_str(),
-            "priority"
-                | "weighted"
-                | "order"
-                | "rotate"
-                | "round_robin"
-                | "usage"
-                | "quota"
-                | "smart"
-                | "pace"
-                | "intent"
-        ) {
-            return Err(ApiError::bad_request(
-                "strategy must be priority, weighted, order, rotate, usage, quota, smart, pace or intent",
-            )
-            .field("strategy"));
-        }
-        Ok((required(&self.name, "name")?, strategy))
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct GroupView {
-    pub id: String,
-    pub name: String,
-    pub strategy: String,
-    pub created_at: String,
-    pub targets: Vec<TargetView>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TargetBody {
-    pub provider_id: Option<String>,
-    pub model_id: Option<String>,
-    pub account_id: Option<String>,
-    pub weight: Option<i64>,
-    pub priority: Option<i64>,
-    pub position: Option<i64>,
-}
-
-impl TargetBody {
-    fn into_input(
-        self,
-        existing: Option<&LlmRoutingTargetRecord>,
-    ) -> ApiResult<LlmRoutingTargetInput> {
-        let weight = self
-            .weight
-            .or(existing.map(|target| target.weight))
-            .unwrap_or(1);
-        if !(1..=1000).contains(&weight) {
-            return Err(
-                ApiError::bad_request("`weight` must be between 1 and 1000").field("weight")
-            );
-        }
-        Ok(LlmRoutingTargetInput {
-            provider_id: self
-                .provider_id
-                .or_else(|| existing.map(|target| target.provider_id.clone()))
-                .ok_or_else(|| {
-                    ApiError::bad_request("`provider_id` is required").field("provider_id")
-                })?
-                .trim()
-                .to_string(),
-            model_id: self
-                .model_id
-                .or_else(|| existing.map(|target| target.model_id.clone()))
-                .ok_or_else(|| ApiError::bad_request("`model_id` is required").field("model_id"))?
-                .trim()
-                .to_string(),
-            account_id: self
-                .account_id
-                .or_else(|| existing.and_then(|target| target.account_id.clone()))
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
-            weight,
-            priority: self
-                .priority
-                .or(existing.map(|target| target.priority))
-                .unwrap_or(0),
-            position: self
-                .position
-                .or(existing.map(|target| target.position))
-                .unwrap_or(0),
-        })
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct TargetView {
-    pub id: String,
-    pub group_id: String,
-    pub provider_id: String,
-    pub model_id: String,
-    pub account_id: Option<String>,
-    pub weight: i64,
-    pub priority: i64,
-    pub position: i64,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-impl From<LlmRoutingTargetRecord> for TargetView {
-    fn from(record: LlmRoutingTargetRecord) -> Self {
-        Self {
-            id: record.id,
-            group_id: record.group_id,
-            provider_id: record.provider_id,
-            model_id: record.model_id,
-            account_id: record.account_id,
-            weight: record.weight,
-            priority: record.priority,
-            position: record.position,
-            created_at: record.created_at,
-            updated_at: record.updated_at,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RouteBody {
-    pub virtual_model_id: Option<String>,
-    pub routing_group_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RouteView {
-    pub id: String,
-    pub virtual_model_id: String,
-    pub routing_group_id: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-impl From<LlmRouteRecord> for RouteView {
-    fn from(record: LlmRouteRecord) -> Self {
-        Self {
-            id: record.id,
-            virtual_model_id: record.virtual_model_id,
-            routing_group_id: record.routing_group_id,
-            created_at: record.created_at,
-            updated_at: record.updated_at,
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Wire shapes
 
 #[derive(Debug, Deserialize)]
 pub struct VirtualKeyBody {
@@ -803,788 +368,6 @@ pub struct RotatedVirtualKey {
     /// Id of the key this one replaces.
     pub replaces: String,
     pub previous_expires_at: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Providers
-
-async fn list_providers(
-    State(state): State<LlmControlState>,
-) -> ApiResult<extract::Json<Vec<ProviderView>>> {
-    let records = state
-        .storage
-        .llm
-        .list_providers()
-        .await
-        .map_err(ApiError::from_storage)?;
-    Ok(extract::Json(
-        records.into_iter().map(ProviderView::from).collect(),
-    ))
-}
-
-async fn get_provider(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<extract::Json<ProviderView>> {
-    let record = state
-        .storage
-        .llm
-        .get_provider(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("provider", &id))?;
-    Ok(extract::Json(record.into()))
-}
-
-async fn create_provider(
-    State(state): State<LlmControlState>,
-    extract::Json(body): extract::Json<ProviderBody>,
-) -> ApiResult<(StatusCode, extract::Json<ProviderView>)> {
-    let input = body.into_input(ProviderOptions {
-        default_enabled: true,
-    })?;
-    let record = state
-        .storage
-        .llm
-        .create_provider(&input)
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok((StatusCode::CREATED, extract::Json(record.into())))
-}
-
-async fn update_provider(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-    extract::Json(body): extract::Json<ProviderBody>,
-) -> ApiResult<extract::Json<ProviderView>> {
-    let existing = state
-        .storage
-        .llm
-        .get_provider(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("provider", &id))?;
-    let mut input = body.into_input(ProviderOptions {
-        default_enabled: existing.enabled,
-    })?;
-    // PUT is a full replace, but omitted optional fields keep their values so
-    // a client that only flips `enabled` does not lose the secret reference.
-    if input.secret_ref.is_none() {
-        input.secret_ref = existing.secret_ref;
-    }
-    if input.base_url.is_none() {
-        input.base_url = existing.base_url;
-    }
-    if input.config_json == "{}" && existing.config_json != "{}" {
-        input.config_json = existing.config_json;
-    }
-    let record = state
-        .storage
-        .llm
-        .update_provider(&id, &input)
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok(extract::Json(record.into()))
-}
-
-async fn delete_provider(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    if !state
-        .storage
-        .llm
-        .delete_provider(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-    {
-        return Err(ApiError::not_found("provider", &id));
-    }
-    reload_now(&state).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// Runs the configured CLI binary's version command so an operator can verify
-/// a machine before sending traffic to it. Always 200: `ok` carries the result.
-async fn cli_probe(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<extract::Json<Value>> {
-    let record = state
-        .storage
-        .llm
-        .get_provider(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("provider", &id))?;
-    let provider = ProviderConfig::from_record(&record)
-        .map_err(|error| ApiError::bad_request(format!("{error:?}")))?;
-    let Some(cli) = provider.cli else {
-        return Err(ApiError::bad_request("provider has no `cli` configuration"));
-    };
-    Ok(extract::Json(match crate::cli::probe(&cli).await {
-        Ok(version) => json!({
-            "ok": true,
-            "command": cli.command,
-            "version": version,
-        }),
-        Err(error) => json!({
-            "ok": false,
-            "command": cli.command,
-            "error": error,
-        }),
-    }))
-}
-
-// ---------------------------------------------------------------------------
-// Provider accounts
-
-#[derive(Debug, Deserialize)]
-pub struct AccountBody {
-    pub name: Option<String>,
-    pub secret_ref: Option<String>,
-    pub weight: Option<i64>,
-    pub priority: Option<i64>,
-    pub enabled: Option<bool>,
-    pub quota_limit: Option<i64>,
-    pub quota_unit: Option<String>,
-    pub quota_period: Option<String>,
-    pub config: Option<Value>,
-}
-
-impl AccountBody {
-    fn into_input(
-        self,
-        existing: Option<&LlmProviderAccountRecord>,
-    ) -> ApiResult<LlmProviderAccountInput> {
-        let weight = self
-            .weight
-            .or(existing.map(|account| account.weight))
-            .unwrap_or(1);
-        if !(1..=1000).contains(&weight) {
-            return Err(
-                ApiError::bad_request("`weight` must be between 1 and 1000").field("weight")
-            );
-        }
-        let quota_unit = self
-            .quota_unit
-            .or_else(|| existing.map(|account| account.quota_unit.clone()))
-            .unwrap_or_else(|| "requests".to_string());
-        if !matches!(quota_unit.as_str(), "requests" | "tokens" | "cost_micros") {
-            return Err(ApiError::bad_request(
-                "`quota_unit` must be requests, tokens or cost_micros",
-            )
-            .field("quota_unit"));
-        }
-        let quota_period = self
-            .quota_period
-            .or_else(|| existing.map(|account| account.quota_period.clone()))
-            .unwrap_or_else(|| "none".to_string());
-        if !matches!(quota_period.as_str(), "none" | "day" | "month") {
-            return Err(
-                ApiError::bad_request("`quota_period` must be none, day or month")
-                    .field("quota_period"),
-            );
-        }
-        if self.quota_limit.is_some_and(|limit| limit < 0) {
-            return Err(
-                ApiError::bad_request("`quota_limit` must not be negative").field("quota_limit")
-            );
-        }
-        let name = self
-            .name
-            .or_else(|| existing.map(|account| account.name.clone()))
-            .ok_or_else(|| ApiError::bad_request("`name` is required").field("name"))?
-            .trim()
-            .to_string();
-        if name.is_empty() {
-            return Err(ApiError::bad_request("`name` is required").field("name"));
-        }
-        Ok(LlmProviderAccountInput {
-            name,
-            secret_ref: match self.secret_ref {
-                Some(value) => non_empty(Some(value), "secret_ref")?,
-                None => existing.and_then(|account| account.secret_ref.clone()),
-            },
-            weight,
-            priority: self
-                .priority
-                .or(existing.map(|account| account.priority))
-                .unwrap_or(0),
-            enabled: self
-                .enabled
-                .or(existing.map(|account| account.enabled))
-                .unwrap_or(true),
-            quota_limit: self
-                .quota_limit
-                .or(existing.and_then(|account| account.quota_limit)),
-            quota_unit,
-            quota_period,
-            config_json: match self.config {
-                Some(value) => value.to_string(),
-                None => existing
-                    .map(|account| account.config_json.clone())
-                    .unwrap_or_else(|| "{}".to_string()),
-            },
-        })
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct AccountView {
-    pub id: String,
-    pub provider_id: String,
-    pub name: String,
-    pub secret_ref: Option<String>,
-    pub weight: i64,
-    pub priority: i64,
-    pub enabled: bool,
-    pub quota_limit: Option<i64>,
-    pub quota_unit: String,
-    pub quota_period: String,
-    pub quota_used: i64,
-    pub quota_reset_at: Option<String>,
-    pub cooldown_until: Option<String>,
-    pub last_error: Option<String>,
-    pub credential_kind: String,
-    pub oauth_status: String,
-    pub oauth_expires_at: Option<String>,
-    pub config: Value,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-impl From<LlmProviderAccountRecord> for AccountView {
-    fn from(record: LlmProviderAccountRecord) -> Self {
-        Self {
-            id: record.id,
-            provider_id: record.provider_id,
-            name: record.name,
-            secret_ref: record.secret_ref,
-            weight: record.weight,
-            priority: record.priority,
-            enabled: record.enabled,
-            quota_limit: record.quota_limit,
-            quota_unit: record.quota_unit,
-            quota_period: record.quota_period,
-            quota_used: record.quota_used,
-            quota_reset_at: record.quota_reset_at,
-            cooldown_until: record.cooldown_until,
-            last_error: record.last_error,
-            credential_kind: record.credential_kind,
-            oauth_status: record.oauth_status,
-            oauth_expires_at: record.oauth_expires_at,
-            config: serde_json::from_str(&record.config_json).unwrap_or_else(|_| json!({})),
-            created_at: record.created_at,
-            updated_at: record.updated_at,
-        }
-    }
-}
-
-async fn list_provider_accounts(
-    State(state): State<LlmControlState>,
-    Path(provider_id): Path<String>,
-) -> ApiResult<extract::Json<Vec<AccountView>>> {
-    if state
-        .storage
-        .llm
-        .get_provider(&provider_id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .is_none()
-    {
-        return Err(ApiError::not_found("provider", &provider_id));
-    }
-    let records = state
-        .storage
-        .llm
-        .list_provider_accounts(&provider_id)
-        .await
-        .map_err(ApiError::from_storage)?;
-    Ok(extract::Json(
-        records.into_iter().map(AccountView::from).collect(),
-    ))
-}
-
-async fn get_account(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<extract::Json<AccountView>> {
-    let record = state
-        .storage
-        .llm
-        .get_account(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("account", &id))?;
-    Ok(extract::Json(record.into()))
-}
-
-async fn create_account(
-    State(state): State<LlmControlState>,
-    Path(provider_id): Path<String>,
-    extract::Json(body): extract::Json<AccountBody>,
-) -> ApiResult<(StatusCode, extract::Json<AccountView>)> {
-    let input = body.into_input(None)?;
-    let record = state
-        .storage
-        .llm
-        .create_account(&provider_id, &input)
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok((StatusCode::CREATED, extract::Json(record.into())))
-}
-
-async fn update_account(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-    extract::Json(body): extract::Json<AccountBody>,
-) -> ApiResult<extract::Json<AccountView>> {
-    let existing = state
-        .storage
-        .llm
-        .get_account(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("account", &id))?;
-    let input = body.into_input(Some(&existing))?;
-    let record = state
-        .storage
-        .llm
-        .update_account(&id, &input)
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok(extract::Json(record.into()))
-}
-
-async fn delete_account(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    if !state
-        .storage
-        .llm
-        .delete_account(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-    {
-        return Err(ApiError::not_found("account", &id));
-    }
-    reload_now(&state).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn reset_account_quota(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<extract::Json<AccountView>> {
-    if !state
-        .storage
-        .llm
-        .reset_account_quota(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-    {
-        return Err(ApiError::not_found("account", &id));
-    }
-    state.runtime.accounts().reset(&id);
-    reload_now(&state).await?;
-    let record = state
-        .storage
-        .llm
-        .get_account(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("account", &id))?;
-    Ok(extract::Json(record.into()))
-}
-
-// ---------------------------------------------------------------------------
-// Models
-
-async fn list_models(
-    State(state): State<LlmControlState>,
-) -> ApiResult<extract::Json<Vec<ModelView>>> {
-    let records = state
-        .storage
-        .llm
-        .list_models()
-        .await
-        .map_err(ApiError::from_storage)?;
-    Ok(extract::Json(
-        records.into_iter().map(ModelView::from).collect(),
-    ))
-}
-
-async fn get_model(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<extract::Json<ModelView>> {
-    let record = state
-        .storage
-        .llm
-        .get_model(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("model", &id))?;
-    Ok(extract::Json(record.into()))
-}
-
-async fn create_model(
-    State(state): State<LlmControlState>,
-    extract::Json(body): extract::Json<ModelBody>,
-) -> ApiResult<(StatusCode, extract::Json<ModelView>)> {
-    let input = body.into_input()?;
-    let record = state
-        .storage
-        .llm
-        .create_model(&input)
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok((StatusCode::CREATED, extract::Json(record.into())))
-}
-
-async fn update_model(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-    extract::Json(body): extract::Json<ModelBody>,
-) -> ApiResult<extract::Json<ModelView>> {
-    let existing = state
-        .storage
-        .llm
-        .get_model(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("model", &id))?;
-    let mut input = body.into_input()?;
-    if input.capabilities == "{}" && existing.capabilities != "{}" {
-        input.capabilities = existing.capabilities;
-    }
-    if input.pricing_json == "{}" && existing.pricing_json != "{}" {
-        input.pricing_json = existing.pricing_json;
-    }
-    let record = state
-        .storage
-        .llm
-        .update_model(&id, &input)
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok(extract::Json(record.into()))
-}
-
-async fn delete_model(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    if !state
-        .storage
-        .llm
-        .delete_model(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-    {
-        return Err(ApiError::not_found("model", &id));
-    }
-    reload_now(&state).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ---------------------------------------------------------------------------
-// Routing groups and targets
-
-async fn group_view(
-    state: &LlmControlState,
-    record: LlmRoutingGroupRecord,
-) -> ApiResult<GroupView> {
-    let targets = state
-        .storage
-        .llm
-        .list_routing_targets()
-        .await
-        .map_err(ApiError::from_storage)?
-        .into_iter()
-        .filter(|target| target.group_id == record.id)
-        .map(TargetView::from)
-        .collect();
-    Ok(GroupView {
-        id: record.id,
-        name: record.name,
-        strategy: record.strategy,
-        created_at: record.created_at,
-        targets,
-    })
-}
-
-async fn list_groups(
-    State(state): State<LlmControlState>,
-) -> ApiResult<extract::Json<Vec<GroupView>>> {
-    let records = state
-        .storage
-        .llm
-        .list_routing_groups()
-        .await
-        .map_err(ApiError::from_storage)?;
-    let mut views = Vec::with_capacity(records.len());
-    for record in records {
-        views.push(group_view(&state, record).await?);
-    }
-    Ok(extract::Json(views))
-}
-
-async fn get_group(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<extract::Json<GroupView>> {
-    let record = state
-        .storage
-        .llm
-        .get_routing_group(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("routing group", &id))?;
-    Ok(extract::Json(group_view(&state, record).await?))
-}
-
-async fn create_group(
-    State(state): State<LlmControlState>,
-    extract::Json(body): extract::Json<GroupBody>,
-) -> ApiResult<(StatusCode, extract::Json<GroupView>)> {
-    let (name, strategy) = body.parts()?;
-    let record = state
-        .storage
-        .llm
-        .create_routing_group(&name, &strategy)
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok((
-        StatusCode::CREATED,
-        extract::Json(group_view(&state, record).await?),
-    ))
-}
-
-async fn update_group(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-    extract::Json(body): extract::Json<GroupBody>,
-) -> ApiResult<extract::Json<GroupView>> {
-    let existing = state
-        .storage
-        .llm
-        .get_routing_group(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("routing group", &id))?;
-    let (name, strategy) = GroupBody {
-        name: body.name.or(Some(existing.name)),
-        strategy: body.strategy.or(Some(existing.strategy)),
-    }
-    .parts()?;
-    let record = state
-        .storage
-        .llm
-        .update_routing_group(&id, &name, &strategy)
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok(extract::Json(group_view(&state, record).await?))
-}
-
-async fn delete_group(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    if !state
-        .storage
-        .llm
-        .delete_routing_group(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-    {
-        return Err(ApiError::not_found("routing group", &id));
-    }
-    reload_now(&state).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn list_targets(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<extract::Json<Vec<TargetView>>> {
-    if !state
-        .storage
-        .llm
-        .group_exists(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-    {
-        return Err(ApiError::not_found("routing group", &id));
-    }
-    let targets = state
-        .storage
-        .llm
-        .list_routing_targets()
-        .await
-        .map_err(ApiError::from_storage)?
-        .into_iter()
-        .filter(|target| target.group_id == id)
-        .map(TargetView::from)
-        .collect();
-    Ok(extract::Json(targets))
-}
-
-async fn create_target(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-    extract::Json(body): extract::Json<TargetBody>,
-) -> ApiResult<(StatusCode, extract::Json<TargetView>)> {
-    let input = body.into_input(None)?;
-    let record = state
-        .storage
-        .llm
-        .create_routing_target(&id, &input)
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok((StatusCode::CREATED, extract::Json(record.into())))
-}
-
-async fn update_target(
-    State(state): State<LlmControlState>,
-    Path((id, target_id)): Path<(String, String)>,
-    extract::Json(body): extract::Json<TargetBody>,
-) -> ApiResult<extract::Json<TargetView>> {
-    let existing = state
-        .storage
-        .llm
-        .get_routing_target(&target_id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .filter(|target| target.group_id == id)
-        .ok_or_else(|| ApiError::not_found("routing target", &target_id))?;
-    let input = body.into_input(Some(&existing))?;
-    let record = state
-        .storage
-        .llm
-        .update_routing_target(&target_id, &input)
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok(extract::Json(record.into()))
-}
-
-async fn delete_target(
-    State(state): State<LlmControlState>,
-    Path((_id, target_id)): Path<(String, String)>,
-) -> ApiResult<StatusCode> {
-    if !state
-        .storage
-        .llm
-        .delete_routing_target(&target_id)
-        .await
-        .map_err(ApiError::from_storage)?
-    {
-        return Err(ApiError::not_found("routing target", &target_id));
-    }
-    reload_now(&state).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ---------------------------------------------------------------------------
-// Routes
-
-async fn list_routes(
-    State(state): State<LlmControlState>,
-) -> ApiResult<extract::Json<Vec<RouteView>>> {
-    let records = state
-        .storage
-        .llm
-        .list_routes()
-        .await
-        .map_err(ApiError::from_storage)?;
-    Ok(extract::Json(
-        records.into_iter().map(RouteView::from).collect(),
-    ))
-}
-
-async fn get_route(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<extract::Json<RouteView>> {
-    let record = state
-        .storage
-        .llm
-        .get_route(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("route", &id))?;
-    Ok(extract::Json(record.into()))
-}
-
-async fn create_route(
-    State(state): State<LlmControlState>,
-    extract::Json(body): extract::Json<RouteBody>,
-) -> ApiResult<(StatusCode, extract::Json<RouteView>)> {
-    let virtual_model_id = required(&body.virtual_model_id, "virtual_model_id")?;
-    let group = non_empty(body.routing_group_id, "routing_group_id")?;
-    let record = state
-        .storage
-        .llm
-        .create_route(&virtual_model_id, group.as_deref())
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok((StatusCode::CREATED, extract::Json(record.into())))
-}
-
-async fn update_route(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-    extract::Json(body): extract::Json<RouteBody>,
-) -> ApiResult<extract::Json<RouteView>> {
-    let existing = state
-        .storage
-        .llm
-        .get_route(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("route", &id))?;
-    let virtual_model_id = body
-        .virtual_model_id
-        .or(Some(existing.virtual_model_id))
-        .ok_or_else(|| ApiError::bad_request("`virtual_model_id` is required"))?;
-    let group = non_empty(body.routing_group_id, "routing_group_id")?;
-    let record = state
-        .storage
-        .llm
-        .update_route(&id, &virtual_model_id, group.as_deref())
-        .await
-        .map_err(ApiError::from_storage)?;
-    reload_now(&state).await?;
-    Ok(extract::Json(record.into()))
-}
-
-async fn delete_route(
-    State(state): State<LlmControlState>,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    if !state
-        .storage
-        .llm
-        .delete_route(&id)
-        .await
-        .map_err(ApiError::from_storage)?
-    {
-        return Err(ApiError::not_found("route", &id));
-    }
-    reload_now(&state).await?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
@@ -2239,17 +1022,17 @@ async fn ensure_scope_target(
             .is_some(),
         LlmScope::Model => state
             .storage
-            .llm
+            .ai
             .get_model(id)
             .await
-            .map_err(ApiError::from_storage)?
+            .map_err(ApiError::internal)?
             .is_some(),
         LlmScope::Provider => state
             .storage
-            .llm
+            .ai
             .get_provider(id)
             .await
-            .map_err(ApiError::from_storage)?
+            .map_err(ApiError::internal)?
             .is_some(),
     };
     if exists {
@@ -3091,62 +1874,76 @@ async fn pii_model_action(
 }
 
 // ---------------------------------------------------------------------------
-// OAuth credentials
+// AI-native account OAuth
 
 #[derive(Debug, Deserialize)]
-pub struct OAuthCompleteBody {
+pub struct AiOAuthCompleteBody {
     pub code: String,
     pub state: String,
 }
 
-async fn oauth_provider(state: &LlmControlState, provider_id: &str) -> ApiResult<ProviderConfig> {
-    let record = state
+fn ai_auth_type(protocol: &str) -> &'static str {
+    match protocol.trim().to_ascii_lowercase().as_str() {
+        "anthropic" => "anthropic",
+        "gemini" => "header",
+        _ => "bearer",
+    }
+}
+
+fn ai_provider_record(provider: &AiProvider) -> LlmProviderRecord {
+    LlmProviderRecord {
+        id: provider.id.clone(),
+        name: provider.name.clone(),
+        kind: provider.protocol.clone(),
+        protocol: provider.protocol.clone(),
+        auth_type: ai_auth_type(&provider.protocol).to_string(),
+        base_url: Some(provider.base_url.clone()),
+        secret_ref: provider.auth_ref.clone(),
+        priority: 0,
+        config_json: provider.config.to_string(),
+        enabled: provider.enabled,
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+async fn ai_oauth_provider(
+    state: &LlmControlState,
+    account_id: &str,
+) -> ApiResult<(AiProviderAccount, ProviderConfig)> {
+    let account = state
         .storage
-        .llm
-        .get_provider(provider_id)
+        .ai
+        .get_account(account_id)
         .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("provider", provider_id))?;
-    let provider = ProviderConfig::from_record(&record)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account", account_id))?;
+    let provider = state
+        .storage
+        .ai
+        .get_provider(&account.provider_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("provider", &account.provider_id))?;
+    let config = ProviderConfig::from_record(&ai_provider_record(&provider))
         .map_err(|error| ApiError::bad_request(format!("{error:?}")))?;
-    if provider.oauth.is_none() {
+    if config.oauth.is_none() {
         return Err(ApiError::bad_request(
             "provider has no `oauth` configuration",
         ));
     }
-    Ok(provider)
+    Ok((account, config))
 }
 
-async fn oauth_account(
-    state: &LlmControlState,
-    provider_id: &str,
-    account_id: &str,
-) -> ApiResult<LlmProviderAccountRecord> {
-    let account = state
-        .storage
-        .llm
-        .get_account(account_id)
-        .await
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| ApiError::not_found("account", account_id))?;
-    if account.provider_id != provider_id {
-        return Err(ApiError::bad_request(
-            "account does not belong to this provider",
-        ));
-    }
-    Ok(account)
-}
-
-fn oauth_error(error: octra_llm_core::GatewayError) -> ApiError {
+fn ai_oauth_error(error: octra_llm_core::GatewayError) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, error.message)
 }
 
-async fn oauth_start(
+async fn ai_oauth_start(
     State(state): State<LlmControlState>,
-    Path((provider_id, account_id)): Path<(String, String)>,
+    Path(account_id): Path<String>,
 ) -> ApiResult<extract::Json<crate::credentials::FlowStart>> {
-    let provider = oauth_provider(&state, &provider_id).await?;
-    let account = oauth_account(&state, &provider_id, &account_id).await?;
+    let (account, provider) = ai_oauth_provider(&state, &account_id).await?;
     let flow = state
         .oauth_flows
         .begin(&provider, &account.id)
@@ -3154,18 +1951,17 @@ async fn oauth_start(
     Ok(extract::Json(flow))
 }
 
-async fn oauth_complete(
+async fn ai_oauth_complete(
     State(state): State<LlmControlState>,
-    Path((provider_id, account_id)): Path<(String, String)>,
-    extract::Json(body): extract::Json<OAuthCompleteBody>,
+    Path(account_id): Path<String>,
+    extract::Json(body): extract::Json<AiOAuthCompleteBody>,
 ) -> ApiResult<extract::Json<Value>> {
-    let provider = oauth_provider(&state, &provider_id).await?;
-    let account = oauth_account(&state, &provider_id, &account_id).await?;
+    let (account, provider) = ai_oauth_provider(&state, &account_id).await?;
     let flow = state
         .oauth_flows
         .take(&body.state)
         .ok_or_else(|| ApiError::bad_request("unknown or expired OAuth state"))?;
-    if flow.provider_id != provider_id || flow.account_id != account.id {
+    if flow.provider_id != account.provider_id || flow.account_id != account.id {
         return Err(ApiError::bad_request(
             "OAuth state does not match this account",
         ));
@@ -3180,43 +1976,61 @@ async fn oauth_complete(
             &flow.redirect_uri,
         )
         .await
-        .map_err(oauth_error)?;
-    oauth_status(State(state), Path((provider_id, account_id))).await
+        .map_err(ai_oauth_error)?;
+    ai_oauth_status(State(state), Path(account.id)).await
 }
 
-async fn oauth_refresh(
+async fn ai_oauth_refresh(
     State(state): State<LlmControlState>,
-    Path((provider_id, account_id)): Path<(String, String)>,
+    Path(account_id): Path<String>,
 ) -> ApiResult<extract::Json<Value>> {
-    let provider = oauth_provider(&state, &provider_id).await?;
-    let account = oauth_account(&state, &provider_id, &account_id).await?;
+    let (account, provider) = ai_oauth_provider(&state, &account_id).await?;
     state
         .oauth
         .refresh_account(&provider, &account.id)
         .await
-        .map_err(oauth_error)?;
-    oauth_status(State(state), Path((provider_id, account_id))).await
+        .map_err(ai_oauth_error)?;
+    ai_oauth_status(State(state), Path(account.id)).await
 }
 
-async fn oauth_status(
+async fn ai_oauth_status(
     State(state): State<LlmControlState>,
-    Path((provider_id, account_id)): Path<(String, String)>,
+    Path(account_id): Path<String>,
 ) -> ApiResult<extract::Json<Value>> {
-    let account = oauth_account(&state, &provider_id, &account_id).await?;
+    let account = state
+        .storage
+        .ai
+        .get_account(&account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account", &account_id))?;
+    let (status, expires_at) = state
+        .storage
+        .ai
+        .account_oauth_status(&account.id)
+        .await
+        .map_err(ApiError::internal)?
+        .unwrap_or_else(|| ("none".to_string(), None));
     Ok(extract::Json(json!({
         "account_id": account.id,
         "provider_id": account.provider_id,
         "credential_kind": account.credential_kind,
-        "oauth_status": account.oauth_status,
-        "oauth_expires_at": account.oauth_expires_at,
+        "oauth_status": status,
+        "oauth_expires_at": expires_at,
     })))
 }
 
-async fn oauth_delete(
+async fn ai_oauth_delete(
     State(state): State<LlmControlState>,
-    Path((provider_id, account_id)): Path<(String, String)>,
+    Path(account_id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    let account = oauth_account(&state, &provider_id, &account_id).await?;
+    let account = state
+        .storage
+        .ai
+        .get_account(&account_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account", &account_id))?;
     state
         .storage
         .llm

@@ -147,7 +147,7 @@ pub fn spawn_record(storage: Arc<Storage>, record: UsageRecord) {
         if let Some(account_id) = &record.account_id {
             let tokens = input_tokens.saturating_add(output_tokens);
             if let Err(error) = storage
-                .llm
+                .ai
                 .consume_account_quota(account_id, 1, tokens, cost_micros)
                 .await
             {

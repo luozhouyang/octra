@@ -385,7 +385,7 @@ pub struct LlmRuntime {
 impl LlmRuntime {
     pub async fn bootstrap(storage: Arc<Storage>, config: Arc<OctraConfig>) -> Result<Self> {
         let account_pool = AccountPool::new();
-        let data = storage.llm.load_runtime_data().await?;
+        let data = load_runtime_data(&storage).await?;
         persist_quota_resets(&storage, account_pool.sync(&data.accounts));
         let consumer_groups = load_consumer_groups(&storage).await?;
         let mut snapshot =
@@ -409,7 +409,7 @@ impl LlmRuntime {
     /// Reloads configuration and atomically swaps the snapshot. In-flight
     /// requests keep the snapshot they started with.
     pub async fn reload(&self) -> Result<()> {
-        let data = self.storage.llm.load_runtime_data().await?;
+        let data = load_runtime_data(&self.storage).await?;
         persist_quota_resets(&self.storage, self.account_pool.sync(&data.accounts));
         let consumer_groups = load_consumer_groups(&self.storage).await?;
         let snapshot = Arc::new(RuntimeSnapshot::build_with_pool_and_groups(
@@ -432,6 +432,21 @@ impl LlmRuntime {
     }
 }
 
+/// Loads the routing data from the AI-native control plane.
+///
+/// The compiler maps `ai_*` entities onto the internal `LlmRuntimeData`
+/// snapshot. Virtual keys remain in `llm_virtual_keys` and are passed through.
+/// Any failure leaves the caller's previous snapshot intact.
+async fn load_runtime_data(storage: &Arc<Storage>) -> Result<LlmRuntimeData> {
+    let data = storage.ai.load_control_plane().await?;
+    let virtual_keys = storage
+        .llm
+        .list_virtual_keys()
+        .await
+        .map_err(|error| error.into_octra())?;
+    crate::ai_runtime::runtime_data_from_ai(&data, virtual_keys)
+}
+
 async fn load_consumer_groups(storage: &Storage) -> Result<BTreeMap<String, Vec<String>>> {
     let memberships = storage.api.list_consumer_group_memberships().await?;
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -449,7 +464,7 @@ fn persist_quota_resets(storage: &Arc<Storage>, resets: Vec<crate::accounts::Quo
     tokio::spawn(async move {
         for reset in resets {
             if let Err(error) = storage
-                .llm
+                .ai
                 .roll_account_quota(&reset.account_id, &reset.quota_reset_at)
                 .await
             {
@@ -544,23 +559,69 @@ impl LlmControlState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use octra_storage::{LlmModelInput, LlmProviderInput, LlmRoutingTargetInput, LlmStorageError};
+    use octra_ai_config::{AiBalancer, AiModel, AiModelKind, AiModelTarget, AiProvider};
+    use octra_storage::LlmStorageError;
+    use serde_json::json;
 
     async fn storage() -> Arc<Storage> {
         Arc::new(Storage::connect_in_memory().await.unwrap())
     }
 
-    fn provider_input(name: &str, base_url: &str, enabled: bool) -> LlmProviderInput {
-        LlmProviderInput {
+    fn ai_provider(id: &str, protocol: &str) -> AiProvider {
+        AiProvider {
+            id: id.into(),
+            name: id.into(),
+            protocol: protocol.into(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            auth_ref: None,
+            capabilities: vec!["chat".into()],
+            config: json!({}),
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn ai_model(id: &str, name: &str) -> AiModel {
+        AiModel {
+            id: id.into(),
             name: name.into(),
-            kind: "openai".into(),
-            protocol: "openai".into(),
-            auth_type: "none".into(),
-            base_url: Some(base_url.into()),
-            secret_ref: None,
+            kind: AiModelKind::Model,
+            capabilities: vec!["chat".into()],
+            formats: vec!["openai".into()],
+            route_paths: Vec::new(),
+            balancer: AiBalancer::default(),
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn ai_target(
+        id: &str,
+        model_id: &str,
+        provider_id: &str,
+        upstream_model: &str,
+    ) -> AiModelTarget {
+        AiModelTarget {
+            id: id.into(),
+            model_id: model_id.into(),
+            target_model_id: None,
+            provider_id: Some(provider_id.into()),
+            upstream_model: Some(upstream_model.into()),
+            account_id: None,
+            weight: 1,
             priority: 0,
-            config_json: "{}".into(),
-            enabled,
+            position: 0,
+            config: json!({}),
+            context_window: None,
+            max_output_tokens: None,
+            capabilities: json!({}),
+            pricing: json!({}),
+            semantic_description: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
         }
     }
 
@@ -573,49 +634,19 @@ mod tests {
             .unwrap();
         assert!(runtime.snapshot().await.resolve("octra-default").is_none());
 
-        let provider = storage
-            .llm
-            .create_provider(&provider_input("local", "http://127.0.0.1:9/v1", true))
+        storage
+            .ai
+            .upsert_provider(&ai_provider("provider-1", "openai"))
             .await
             .unwrap();
         storage
-            .llm
-            .create_model(&LlmModelInput {
-                provider_id: provider.id.clone(),
-                model_id: "m1".into(),
-                display_name: Some("Model One".into()),
-                protocol: None,
-                context_window: None,
-                max_output_tokens: None,
-                capabilities: "{}".into(),
-                pricing_json: "{}".into(),
-                enabled: true,
-            })
-            .await
-            .unwrap();
-        let group = storage
-            .llm
-            .create_routing_group("g", "priority")
+            .ai
+            .upsert_model(&ai_model("model-1", "octra-default"))
             .await
             .unwrap();
         storage
-            .llm
-            .create_routing_target(
-                &group.id,
-                &LlmRoutingTargetInput {
-                    provider_id: provider.id.clone(),
-                    model_id: "m1".into(),
-                    account_id: None,
-                    weight: 1,
-                    priority: 0,
-                    position: 0,
-                },
-            )
-            .await
-            .unwrap();
-        storage
-            .llm
-            .create_route("octra-default", Some(&group.id))
+            .ai
+            .upsert_target(&ai_target("target-1", "model-1", "provider-1", "m1"))
             .await
             .unwrap();
 
@@ -631,12 +662,9 @@ mod tests {
     #[tokio::test]
     async fn invalid_provider_config_is_reported_and_skipped() {
         let storage = storage().await;
-        let bad = storage
-            .llm
-            .create_provider(&LlmProviderInput {
-                protocol: "grpc".into(),
-                ..provider_input("bad", "http://127.0.0.1:9/v1", true)
-            })
+        storage
+            .ai
+            .upsert_provider(&ai_provider("bad", "grpc"))
             .await
             .unwrap();
         let snapshot = LlmRuntime::bootstrap(storage, Arc::new(OctraConfig::default()))
@@ -644,7 +672,7 @@ mod tests {
             .unwrap()
             .snapshot()
             .await;
-        assert!(snapshot.provider(&bad.id).is_none());
+        assert!(snapshot.provider("bad").is_none());
         assert_eq!(snapshot.issues.len(), 1);
     }
 

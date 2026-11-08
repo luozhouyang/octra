@@ -78,6 +78,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 octra-agent-core = { path = "crates/octra-agent-core" }
+octra-ai-config = { path = "crates/octra-ai-config" }
 octra-api-core = { path = "crates/octra-api-core" }
 octra-api-gateway = { path = "crates/octra-api-gateway" }
 octra-config = { path = "crates/octra-config" }

@@ -7,9 +7,12 @@ mod budget_guard;
 mod intent_hint;
 mod model_map;
 mod param_override;
+mod prompt_compress;
+mod prompt_guard;
 mod rate_limit;
 mod redaction;
 mod request_audit;
+mod semantic_cache;
 mod system_prompt;
 mod think_tags;
 
@@ -17,9 +20,12 @@ pub use budget_guard::BudgetGuardFactory;
 pub use intent_hint::IntentHintFactory;
 pub use model_map::ModelMapFactory;
 pub use param_override::ParamOverrideFactory;
+pub use prompt_compress::PromptCompressFactory;
+pub use prompt_guard::PromptGuardFactory;
 pub use rate_limit::RateLimitFactory;
 pub use redaction::RedactionFactory;
 pub use request_audit::RequestAuditFactory;
+pub use semantic_cache::SemanticCacheFactory;
 pub use system_prompt::SystemPromptFactory;
 pub use think_tags::ThinkTagsFactory;
 
@@ -45,8 +51,11 @@ pub fn registry_with(
     registry.register(RequestAuditFactory);
     registry.register(ModelMapFactory);
     registry.register(ParamOverrideFactory);
+    registry.register(PromptCompressFactory);
+    registry.register(PromptGuardFactory);
     registry.register(RateLimitFactory);
     registry.register(RedactionFactory::new(engines));
+    registry.register(SemanticCacheFactory);
     registry.register(SystemPromptFactory);
     registry.register(ThinkTagsFactory);
     registry
@@ -90,8 +99,11 @@ mod tests {
             "llm-model-map",
             "llm-param-override",
             "llm-pii-redaction",
+            "llm-prompt-compress",
+            "llm-prompt-guard",
             "llm-rate-limit",
             "llm-request-audit",
+            "llm-semantic-cache",
             "llm-system-prompt",
             "llm-think-tags",
         ] {
@@ -132,11 +144,14 @@ mod tests {
             ("llm-model-map", 900),
             ("llm-param-override", 850),
             ("llm-system-prompt", 800),
+            ("llm-prompt-guard", 750),
             ("llm-pii-redaction", 700),
             ("llm-budget-guard", 650),
             ("llm-intent-hint", 600),
+            ("llm-prompt-compress", 550),
             ("llm-request-audit", 0),
             ("llm-think-tags", 0),
+            ("llm-semantic-cache", -100),
         ];
         for (name, priority) in expected {
             let factory = registry.factory(name).expect("registered factory");
@@ -153,7 +168,10 @@ mod tests {
             "llm-model-map",
             "llm-param-override",
             "llm-pii-redaction",
+            "llm-prompt-compress",
+            "llm-prompt-guard",
             "llm-rate-limit",
+            "llm-semantic-cache",
             "llm-system-prompt",
         ] {
             let factory = registry.factory(name).expect("registered factory");

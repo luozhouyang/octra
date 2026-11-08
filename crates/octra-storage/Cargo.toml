@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+octra-ai-config.workspace = true
 octra-api-core.workspace = true
 octra-core.workspace = true
 octra-llm-core.workspace = true

@@ -1,6 +1,7 @@
 //! SQLite persistence layer. Secrets are stored as references only.
 
 pub mod agents;
+pub mod ai;
 pub mod api;
 pub mod events;
 pub mod llm;
@@ -10,11 +11,11 @@ pub mod mcp;
 pub mod plugins;
 
 pub use agents::{AgentBackup, AgentProfile, AgentStore, NewAgentBackup, NewAgentProfile};
+pub use ai::{AiConfigRevisionRecord, AiStore};
 pub use events::{EventDeliveryRecord, EventRecord, JobRecord, NewEvent, NewJob};
 pub use llm::{
-    LlmAccountUsage, LlmModelInput, LlmModelRecord, LlmOAuthTokenRecord, LlmPiiEngineInput,
-    LlmPiiEngineRecord, LlmProviderAccountInput, LlmProviderAccountRecord, LlmProviderInput,
-    LlmProviderRecord, LlmRouteRecord, LlmRoutingGroupRecord, LlmRoutingTargetInput,
+    LlmAccountUsage, LlmModelRecord, LlmOAuthTokenRecord, LlmPiiEngineInput, LlmPiiEngineRecord,
+    LlmProviderAccountRecord, LlmProviderRecord, LlmRouteRecord, LlmRoutingGroupRecord,
     LlmRoutingTargetRecord, LlmRuntimeData, LlmStorageError, LlmUsageInput, LlmUsageProviderRow,
     LlmUsageRecord, LlmUsageSummaryRow, LlmVirtualKeyInput, LlmVirtualKeyRecord,
     LlmVirtualKeyRotation, LlmVirtualKeyRotationResult, LlmVirtualKeyUsage, canonical_timestamp,
@@ -42,6 +43,7 @@ pub struct RuntimeData {
 pub struct Storage {
     pool: SqlitePool,
     pub agents: agents::AgentStore,
+    pub ai: ai::AiStore,
     pub api: api::ApiStore,
     pub llm: llm::LlmStore,
     pub mcp: mcp::McpStore,
@@ -93,6 +95,7 @@ impl Storage {
 
         Ok(Self {
             agents: agents::AgentStore::new(pool.clone()),
+            ai: ai::AiStore::new(pool.clone()),
             api: api::ApiStore::new(pool.clone()),
             llm: llm::LlmStore::new(pool.clone()),
             mcp: mcp::McpStore::new(pool.clone()),
@@ -238,13 +241,26 @@ mod tests {
         assert!(data.routes.is_empty());
         assert_eq!(data.counts.services, 0);
 
-        let tables: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'llm_providers'",
+        let removed_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (
+                 'llm_providers', 'llm_provider_accounts', 'llm_models', 'llm_routing_groups',
+                 'llm_routes', 'llm_routing_targets', 'llm_provider_oauth_tokens'
+             )",
         )
         .fetch_one(storage.pool())
         .await
         .unwrap();
-        assert_eq!(tables, 1);
+        assert_eq!(removed_tables, 0, "legacy model tables must be dropped");
+
+        let ai_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (
+                 'ai_providers', 'ai_provider_accounts', 'ai_provider_oauth_tokens'
+             )",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(ai_tables, 3, "AI-native tables must exist");
 
         let rollup: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'llm_usage_rollup'",

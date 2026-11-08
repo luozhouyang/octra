@@ -221,6 +221,20 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("cannot build the LLM plugin runtime")?,
     );
+
+    // The control state reloads the LLM runtime and plugin chains after
+    // apply/rollback/import, so it receives both runtimes before they move
+    // into the data-plane state.
+    let ai_control = octra_llm_gateway::ai_control::AiControlState::new(storage.clone())
+        .with_runtime(llm_runtime.clone())
+        .with_plugin_runtime(llm_plugin_runtime.clone());
+    match ai_control.refresh().await {
+        Ok(()) => {
+            tracing::info!("AI control-plane runtime and plugin chains refreshed at startup")
+        }
+        Err(error) => tracing::warn!(%error, "AI control-plane startup refresh failed"),
+    }
+
     let llm_wasm_lifecycle: Option<Arc<dyn LlmWasmLifecycle>> =
         wasm_control.as_ref().map(|control| {
             Arc::new(LlmWasmRuntime::new(
@@ -294,6 +308,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(octra_plugin_events::control_router(
             octra_plugin_events::EventControlState::new(event_bus.clone()),
         ))
+        .merge(octra_llm_gateway::ai_control::router(ai_control))
         .layer(axum::middleware::from_fn_with_state(
             AuditState {
                 storage: storage.clone(),

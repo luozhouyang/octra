@@ -76,6 +76,12 @@ impl fmt::Display for LlmScope {
 
 pub enum LlmAction {
     Continue,
+    /// Short-circuits the request stage with an already built response.
+    ///
+    /// Only the request stage honours this action. Other stages use it for
+    /// nothing and fail closed when a plugin returns it there, because they
+    /// cannot replace the response they already received.
+    Respond(Box<ChatResponse>),
     Reject(GatewayError),
 }
 
@@ -93,7 +99,7 @@ pub type LlmStreamResult = Result<LlmStreamAction, PluginError>;
 
 /// Contract version a factory must implement to be registered. Bumped when a
 /// context or trait signature changes incompatibly.
-pub const LLM_PLUGIN_API_VERSION: u32 = 5;
+pub const LLM_PLUGIN_API_VERSION: u32 = 6;
 
 const MAX_RESPONSE_HEADERS: usize = 128;
 const MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
@@ -256,6 +262,20 @@ pub struct LlmResponseContext<'a> {
     pub state: &'a mut Value,
 }
 
+/// Read-only view of the response that is about to be encoded for the client.
+///
+/// The final-response hook runs after every response-stage transform and
+/// before protocol encoding, so a plugin observes exactly the canonical
+/// response the client will receive. It is best-effort and cannot mutate the
+/// response; it exists for observation, logging and cache population.
+pub struct LlmFinalResponseContext<'a> {
+    pub meta: &'a LlmRequestMeta<'a>,
+    pub request_model: &'a str,
+    /// Read-only: this hook runs after every response transform.
+    pub response: &'a ChatResponse,
+    pub state: &'a mut Value,
+}
+
 pub struct LlmStreamContext<'a> {
     pub meta: &'a LlmRequestMeta<'a>,
     pub event: &'a mut StreamEvent,
@@ -321,6 +341,12 @@ pub trait LlmPlugin: Send + Sync {
     async fn on_error(&self, _cx: &mut LlmErrorContext<'_>) -> LlmPluginResult {
         Ok(LlmAction::Continue)
     }
+
+    /// Observes the final canonical response after the response chain has run
+    /// and before protocol encoding. The hook is best-effort: a failure or
+    /// timeout is logged and never changes the response, and it cannot mutate
+    /// the response it receives.
+    async fn on_final_response(&self, _cx: &mut LlmFinalResponseContext<'_>) {}
 
     async fn on_log(&self, _cx: &mut LlmLogContext<'_>) {}
 }

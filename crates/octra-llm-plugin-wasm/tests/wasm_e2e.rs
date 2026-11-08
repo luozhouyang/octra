@@ -129,6 +129,7 @@ async fn runs_the_reference_component_through_the_host() {
             assert_eq!(error.code.as_deref(), Some("model_blocked"));
         }
         LlmAction::Continue => panic!("expected the guest to reject the model"),
+        LlmAction::Respond(_) => panic!("the guest must not short-circuit a response"),
     }
     assert!(headers.iter().next().is_none());
 

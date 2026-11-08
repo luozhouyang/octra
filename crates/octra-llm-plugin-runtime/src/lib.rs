@@ -19,13 +19,13 @@ use std::time::{Duration, Instant};
 
 use octra_api_plugin_types::{Capability, FailPolicy, PluginError, PluginManifest};
 use octra_core::{Error, Result};
-use octra_llm_core::{GatewayError, StreamEvent};
+use octra_llm_core::{ChatResponse, GatewayError, StreamEvent};
 use octra_llm_plugin_types::{
-    LLM_PLUGIN_API_VERSION, LlmAction, LlmCounterStore, LlmErrorContext, LlmLogContext,
-    LlmLogEvent, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory, LlmPluginResult,
-    LlmPluginStateStore, LlmProviderInfo, LlmProviderRequestContext, LlmRequestContext,
-    LlmRequestMeta, LlmRequestState, LlmResponseContext, LlmResponseHeaders, LlmScope,
-    LlmStreamAction, LlmStreamContext, LlmStreamResult, MemoryCounterStore,
+    LLM_PLUGIN_API_VERSION, LlmAction, LlmCounterStore, LlmErrorContext, LlmFinalResponseContext,
+    LlmLogContext, LlmLogEvent, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory,
+    LlmPluginResult, LlmPluginStateStore, LlmProviderInfo, LlmProviderRequestContext,
+    LlmRequestContext, LlmRequestMeta, LlmRequestState, LlmResponseContext, LlmResponseHeaders,
+    LlmScope, LlmStreamAction, LlmStreamContext, LlmStreamResult, MemoryCounterStore,
 };
 use octra_storage::Storage;
 use octra_storage::plugins::{PluginConfigRecord, PluginData, PluginRecord};
@@ -107,7 +107,7 @@ impl LlmPluginRegistry {
 }
 
 /// Stages tracked by the metrics counters, in snapshot order.
-const STAGE_COUNT: usize = 6;
+const STAGE_COUNT: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -117,6 +117,7 @@ enum Stage {
     StreamEvent,
     Error,
     Log,
+    FinalResponse,
 }
 
 impl Stage {
@@ -128,6 +129,7 @@ impl Stage {
             Self::StreamEvent => 3,
             Self::Error => 4,
             Self::Log => 5,
+            Self::FinalResponse => 6,
         }
     }
 
@@ -139,6 +141,7 @@ impl Stage {
             Self::StreamEvent => "stream_event",
             Self::Error => "error",
             Self::Log => "log",
+            Self::FinalResponse => "final_response",
         }
     }
 }
@@ -399,6 +402,7 @@ impl PluginMetricsView {
             Stage::StreamEvent,
             Stage::Error,
             Stage::Log,
+            Stage::FinalResponse,
         ]
         .into_iter()
         .enumerate()
@@ -482,6 +486,21 @@ impl From<PluginError> for LlmChainError {
     }
 }
 
+/// Result of the client-facing request chain.
+///
+/// `Respond` carries a short-circuit response built by a plugin, such as a
+/// cache hit. Callers that cannot serve one (for example the compatibility
+/// [`LlmPluginChain::on_request`] wrapper) treat it as `Continue`.
+// The outcome lives for a single request, so keeping the response inline is
+// cheaper than an allocation on the common `Continue` path.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum LlmRequestOutcome {
+    Continue,
+    Respond(ChatResponse),
+    Reject(GatewayError),
+}
+
 #[derive(Default)]
 pub struct LlmPluginChain {
     entries: Vec<LlmEntry>,
@@ -515,13 +534,19 @@ impl LlmPluginChain {
             .collect()
     }
 
-    pub async fn on_request(
+    /// Runs the client-facing request chain and reports a plugin short-circuit
+    /// as an outcome.
+    ///
+    /// Entries run in request order. The first plugin that returns
+    /// [`LlmAction::Respond`] stops the chain; later request plugins do not
+    /// run, because the request is already answered.
+    pub async fn on_request_outcome(
         &self,
         meta: &LlmRequestMeta<'_>,
         headers: &mut LlmResponseHeaders,
         request: &mut octra_llm_core::ChatRequest,
         state: &mut LlmRequestState,
-    ) -> std::result::Result<Option<GatewayError>, LlmChainError> {
+    ) -> std::result::Result<LlmRequestOutcome, LlmChainError> {
         for entry in &self.entries {
             let mut cx = LlmRequestContext {
                 meta,
@@ -538,10 +563,34 @@ impl LlmPluginChain {
             .await?
             {
                 LlmAction::Continue => {}
-                LlmAction::Reject(error) => return Ok(Some(error)),
+                LlmAction::Respond(response) => {
+                    return Ok(LlmRequestOutcome::Respond(*response));
+                }
+                LlmAction::Reject(error) => return Ok(LlmRequestOutcome::Reject(error)),
             }
         }
-        Ok(None)
+        Ok(LlmRequestOutcome::Continue)
+    }
+
+    /// Compatibility wrapper over [`Self::on_request_outcome`].
+    ///
+    /// The `Option<GatewayError>` signature cannot represent a short-circuit
+    /// response, so [`LlmAction::Respond`] is reported as `Ok(None)`. Callers
+    /// that must serve cache hits have to use [`Self::on_request_outcome`].
+    pub async fn on_request(
+        &self,
+        meta: &LlmRequestMeta<'_>,
+        headers: &mut LlmResponseHeaders,
+        request: &mut octra_llm_core::ChatRequest,
+        state: &mut LlmRequestState,
+    ) -> std::result::Result<Option<GatewayError>, LlmChainError> {
+        match self
+            .on_request_outcome(meta, headers, request, state)
+            .await?
+        {
+            LlmRequestOutcome::Continue | LlmRequestOutcome::Respond(_) => Ok(None),
+            LlmRequestOutcome::Reject(error) => Ok(Some(error)),
+        }
     }
 
     pub async fn on_provider_request(
@@ -567,6 +616,7 @@ impl LlmPluginChain {
             .await?
             {
                 LlmAction::Continue => {}
+                LlmAction::Respond(_) => return Err(respond_outside_request_stage(entry)),
                 LlmAction::Reject(error) => return Ok(Some(error)),
             }
         }
@@ -599,6 +649,7 @@ impl LlmPluginChain {
             .await?
             {
                 LlmAction::Continue => {}
+                LlmAction::Respond(_) => return Err(respond_outside_request_stage(entry)),
                 LlmAction::Reject(error) => return Ok(Some(error)),
             }
         }
@@ -623,12 +674,50 @@ impl LlmPluginChain {
             };
             match run_stage(entry, Stage::Error, entry.plugin.on_error(&mut cx), false).await? {
                 LlmAction::Continue => {}
+                LlmAction::Respond(_) => return Err(respond_outside_request_stage(entry)),
                 LlmAction::Reject(replacement) => {
                     *cx.error = replacement;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Runs observational final-response hooks in reverse order, after every
+    /// response-stage transform and before protocol encoding.
+    ///
+    /// The hook is best-effort: a timed-out plugin is logged and skipped, and
+    /// it cannot change the response.
+    pub async fn on_final_response(
+        &self,
+        meta: &LlmRequestMeta<'_>,
+        request_model: &str,
+        response: &ChatResponse,
+        state: &mut LlmRequestState,
+    ) {
+        for entry in self.entries.iter().rev() {
+            let mut cx = LlmFinalResponseContext {
+                meta,
+                request_model,
+                response,
+                state: state.slot(&entry.name),
+            };
+            let started = Instant::now();
+            let timed_out =
+                tokio::time::timeout(entry.timeout, entry.plugin.on_final_response(&mut cx))
+                    .await
+                    .is_err();
+            entry.stats.record(
+                Stage::FinalResponse,
+                started.elapsed(),
+                timed_out.then_some(StageFailure::Timeout),
+                timed_out,
+                false,
+            );
+            if timed_out {
+                tracing::warn!(plugin = %entry.name, "LLM plugin final-response hook timed out");
+            }
+        }
     }
 
     /// Runs observational log hooks; failures never affect the response.
@@ -756,6 +845,9 @@ where
             match handle_plugin_error(entry, error) {
                 Ok(LlmAction::Continue) => Ok(LlmStreamAction::Continue),
                 Ok(LlmAction::Reject(_)) => unreachable!("stream errors never reject this way"),
+                Ok(LlmAction::Respond(_)) => {
+                    unreachable!("stream errors never short-circuit this way")
+                }
                 Err(error) => Err(error),
             }
         }
@@ -764,6 +856,9 @@ where
             match timeout_error(entry) {
                 Ok(LlmAction::Continue) => Ok(LlmStreamAction::Continue),
                 Ok(LlmAction::Reject(_)) => unreachable!("stream timeouts never reject this way"),
+                Ok(LlmAction::Respond(_)) => {
+                    unreachable!("stream timeouts never short-circuit this way")
+                }
                 Err(error) => Err(error),
             }
         }
@@ -778,6 +873,15 @@ where
         rejected,
     );
     result
+}
+
+/// Builds the fail-closed chain error for a plugin that returns
+/// [`LlmAction::Respond`] outside the request stage.
+fn respond_outside_request_stage(entry: &LlmEntry) -> LlmChainError {
+    LlmChainError::Plugin(PluginError::fail_closed(format!(
+        "LLM plugin '{}' returned a short-circuit response, which is only valid at the request stage",
+        entry.name
+    )))
 }
 
 fn handle_plugin_error(
@@ -1210,10 +1314,41 @@ impl LlmPluginRuntime {
         let Some(storage) = &self.storage else {
             return Ok(());
         };
+        self.upsert_manifests(storage).await?;
+        let data = storage.llm.load_plugin_data().await?;
+        self.compile_and_swap(data)
+    }
+
+    /// Reloads the chains with storage-backed plugin data plus extra records
+    /// that are not persisted, such as AI policies compiled on the fly.
+    ///
+    /// The extra records are appended to the stored plugin catalog and
+    /// configuration, so the normal plugin-admin view stays authoritative for
+    /// everything that lives in storage. A failed compilation keeps the
+    /// previously active chains.
+    pub async fn reload_with_extra(&self, extra: PluginData) -> Result<()> {
+        let mut data = match &self.storage {
+            Some(storage) => {
+                self.upsert_manifests(storage).await?;
+                storage.llm.load_plugin_data().await?
+            }
+            None => PluginData::default(),
+        };
+        data.plugins.extend(extra.plugins);
+        data.configs.extend(extra.configs);
+        self.compile_and_swap(data)
+    }
+
+    async fn upsert_manifests(&self, storage: &Storage) -> Result<()> {
         for manifest in self.registry.manifests() {
             storage.llm.upsert_plugin(&manifest).await?;
         }
-        let data = storage.llm.load_plugin_data().await?;
+        Ok(())
+    }
+
+    /// Compiles a new chain set and swaps it in only after compilation
+    /// succeeds, so a bad configuration leaves the old chains serving.
+    fn compile_and_swap(&self, data: PluginData) -> Result<()> {
         let chains = LlmPluginChains::compile_with(
             data,
             &self.registry,
@@ -1290,7 +1425,9 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use octra_api_plugin_types::{Capability, PluginKind, PluginRuntimeKind};
-    use octra_llm_core::{ChatRequest, ChatResponse, FinishReason, Protocol, Usage};
+    use octra_llm_core::{
+        AssistantContent, ChatRequest, ChatResponse, FinishReason, Message, Protocol, Role, Usage,
+    };
     use octra_llm_plugin_types::LlmPluginResult;
 
     struct MarkPlugin {
@@ -2199,5 +2336,231 @@ mod tests {
             programmatic: None,
             extra: Default::default(),
         };
+    }
+
+    /// Factory that returns one shared plugin instance.
+    struct SharedFactory {
+        manifest: PluginManifest,
+        plugin: Arc<dyn LlmPlugin>,
+    }
+
+    impl LlmPluginFactory for SharedFactory {
+        fn manifest(&self) -> PluginManifest {
+            self.manifest.clone()
+        }
+
+        fn create(&self, _config: Value) -> std::result::Result<Arc<dyn LlmPlugin>, PluginError> {
+            Ok(self.plugin.clone())
+        }
+    }
+
+    fn chain_for_plugin(name: &str, instance: Arc<dyn LlmPlugin>) -> Arc<LlmPluginChain> {
+        let registry = LlmPluginRegistry::new();
+        registry.register(SharedFactory {
+            manifest: manifest(name),
+            plugin: instance,
+        });
+        let data = PluginData {
+            plugins: vec![plugin(name, "p1", "llm", true)],
+            configs: vec![config("c1", "p1", "global", "")],
+        };
+        LlmPluginChains::compile(data, &registry)
+            .unwrap()
+            .chain_for(None, None, "m", None)
+    }
+
+    fn assistant_response(id: &str, model: &str, text: &str) -> ChatResponse {
+        let mut response = ChatResponse::new(id, model, Message::new(Role::Assistant));
+        response.message.assistant.push(AssistantContent::Text {
+            text: text.to_string(),
+        });
+        response
+    }
+
+    struct ShortCircuitPlugin {
+        manifest: PluginManifest,
+    }
+
+    #[async_trait]
+    impl LlmPlugin for ShortCircuitPlugin {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn on_request(&self, _cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
+            Ok(LlmAction::Respond(Box::new(assistant_response(
+                "cached-1",
+                "cached-model",
+                "cached answer",
+            ))))
+        }
+    }
+
+    #[tokio::test]
+    async fn request_short_circuit_returns_the_plugin_response() {
+        let chain = chain_for_plugin(
+            "cache",
+            Arc::new(ShortCircuitPlugin {
+                manifest: manifest("cache"),
+            }),
+        );
+        let mut request = ChatRequest::new("m", Vec::new());
+        let mut state = LlmRequestState::new();
+        let outcome = chain
+            .on_request_outcome(
+                &test_meta(),
+                &mut LlmResponseHeaders::default(),
+                &mut request,
+                &mut state,
+            )
+            .await
+            .unwrap();
+        let LlmRequestOutcome::Respond(response) = outcome else {
+            panic!("expected the request chain to short-circuit");
+        };
+        assert_eq!(response.model, "cached-model");
+        assert_eq!(response.text(), "cached answer");
+    }
+
+    #[tokio::test]
+    async fn compatibility_on_request_ignores_a_short_circuit() {
+        let chain = chain_for_plugin(
+            "cache",
+            Arc::new(ShortCircuitPlugin {
+                manifest: manifest("cache"),
+            }),
+        );
+        let mut request = ChatRequest::new("m", Vec::new());
+        let mut state = LlmRequestState::new();
+        let rejection = chain
+            .on_request(
+                &test_meta(),
+                &mut LlmResponseHeaders::default(),
+                &mut request,
+                &mut state,
+            )
+            .await
+            .unwrap();
+        assert!(rejection.is_none());
+    }
+
+    struct FinalObserverPlugin {
+        manifest: PluginManifest,
+    }
+
+    #[async_trait]
+    impl LlmPlugin for FinalObserverPlugin {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn on_final_response(&self, cx: &mut LlmFinalResponseContext<'_>) {
+            *cx.state = Value::String(cx.response.text());
+        }
+    }
+
+    #[tokio::test]
+    async fn final_response_hook_observes_the_final_text() {
+        let chain = chain_for_plugin(
+            "observer",
+            Arc::new(FinalObserverPlugin {
+                manifest: manifest("observer"),
+            }),
+        );
+        let response = assistant_response("id", "m", "final text");
+        let mut state = LlmRequestState::new();
+        chain
+            .on_final_response(&test_meta(), "m", &response, &mut state)
+            .await;
+        assert_eq!(
+            state.slot("observer"),
+            &Value::String("final text".to_string())
+        );
+    }
+
+    struct MisplacedRespondPlugin {
+        manifest: PluginManifest,
+    }
+
+    #[async_trait]
+    impl LlmPlugin for MisplacedRespondPlugin {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn on_provider_request(
+            &self,
+            _cx: &mut LlmProviderRequestContext<'_>,
+        ) -> LlmPluginResult {
+            Ok(LlmAction::Respond(Box::new(assistant_response(
+                "id", "m", "nope",
+            ))))
+        }
+
+        async fn on_response(&self, _cx: &mut LlmResponseContext<'_>) -> LlmPluginResult {
+            Ok(LlmAction::Respond(Box::new(assistant_response(
+                "id", "m", "nope",
+            ))))
+        }
+    }
+
+    #[tokio::test]
+    async fn respond_outside_the_request_stage_fails_closed() {
+        let chain = chain_for_plugin(
+            "misplaced",
+            Arc::new(MisplacedRespondPlugin {
+                manifest: manifest("misplaced"),
+            }),
+        );
+        let provider = LlmProviderInfo {
+            attempt: 1,
+            target_model_id: "m",
+            provider_id: "provider-1",
+            provider_name: "provider",
+            protocol: Protocol::Openai,
+            account_id: None,
+            account_name: None,
+        };
+        let mut request = ChatRequest::new("m", Vec::new());
+        let mut state = LlmRequestState::new();
+        assert!(matches!(
+            chain
+                .on_provider_request(&test_meta(), &provider, &mut request, &mut state)
+                .await,
+            Err(LlmChainError::Plugin(error))
+                if error.message.contains("only valid at the request stage")
+        ));
+
+        let mut response = assistant_response("id", "m", "final");
+        let mut usage = Usage::default();
+        assert!(matches!(
+            chain
+                .on_response(
+                    &test_meta(),
+                    "m",
+                    &mut response,
+                    &mut usage,
+                    &mut state
+                )
+                .await,
+            Err(LlmChainError::Plugin(error))
+                if error.message.contains("only valid at the request stage")
+        ));
+    }
+
+    #[test]
+    fn metrics_include_the_final_response_stage() {
+        let stats = PluginStats::default();
+        stats.record(
+            Stage::FinalResponse,
+            Duration::from_micros(5),
+            None,
+            false,
+            false,
+        );
+        let view = PluginMetricsView::from_stats(&test_identity(), &stats);
+        assert_eq!(view.stages.len(), STAGE_COUNT);
+        assert_eq!(view.stages["final_response"].calls, 1);
+        assert_eq!(view.stages["request"].calls, 0);
     }
 }
