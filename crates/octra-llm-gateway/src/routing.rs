@@ -102,7 +102,16 @@ pub fn rank_targets(
 ) {
     if !matches!(
         strategy,
-        "usage" | "quota" | "smart" | "intent" | "pace" | "semantic"
+        "manual"
+            | "weight"
+            | "fast"
+            | "cheap"
+            | "usage"
+            | "quota"
+            | "smart"
+            | "intent"
+            | "pace"
+            | "semantic"
     ) {
         return;
     }
@@ -165,6 +174,17 @@ fn score_target(
         - (signal.usage as f64) * 0.001
         - signal.price_per_million * 10.0;
     match strategy {
+        "manual" | "weight" => 0.0,
+        "fast" => {
+            -(signal.latency_ms as f64)
+                - (signal.failures as f64) * 500.0
+                - (signal.usage as f64) * 0.001
+        }
+        "cheap" => {
+            -signal.price_per_million * 100.0
+                - (signal.latency_ms as f64) * 0.01
+                - (signal.failures as f64) * 100.0
+        }
         "usage" => -(signal.usage as f64),
         "quota" => signal.quota_remaining as f64,
         "pace" => -(signal.pace_wait_ms as f64),
@@ -347,7 +367,7 @@ impl RoutePlan {
     /// which always stays at the end.
     pub fn parts(&self, tick: u64) -> (Vec<Target>, Vec<Target>) {
         let attempts = match self.strategy.as_str() {
-            "order" => self.flat(),
+            "manual" | "order" => self.flat(),
             "rotate" | "round_robin" => {
                 let mut flat = self.flat();
                 if !flat.is_empty() {
@@ -686,6 +706,131 @@ mod tests {
         assert_eq!(first, vec!["a", "a", "a", "b"]);
         // Every tick still tries both targets on fallback.
         assert_eq!(plan.attempts(0)[1].provider_id, "b");
+    }
+
+    #[test]
+    fn weight_strategy_uses_the_weighted_cycle() {
+        let (mut data, providers) = setup(
+            vec![target("t1", "a", 0, 3), target("t2", "b", 0, 1)],
+            vec![provider("a", "openai"), provider("b", "openai")],
+        );
+        data.groups[0].strategy = "weight".into();
+        let plan = RoutePlan::compile(&data, &route(), &providers).unwrap();
+        let first: Vec<String> = (0..4)
+            .map(|tick| plan.attempts(tick)[0].provider_id.clone())
+            .collect();
+        assert_eq!(first, vec!["a", "a", "a", "b"]);
+    }
+
+    #[test]
+    fn manual_preserves_configured_target_order() {
+        let mut first = target("b", "slow", 0, 1);
+        first.position = 0;
+        let mut second = target("a", "fast", 0, 1);
+        second.position = 1;
+        let third = target("c", "mid", 1, 1);
+
+        let (mut data, providers) = setup(
+            vec![first, second, third],
+            vec![
+                provider("slow", "openai"),
+                provider("fast", "openai"),
+                provider("mid", "openai"),
+            ],
+        );
+        data.groups[0].strategy = "manual".into();
+        let plan = RoutePlan::compile(&data, &route(), &providers).unwrap();
+        let (mut attempts, fallback) = plan.parts(7);
+        rank_targets(&mut attempts, &plan.strategy, None, 0, "", |target| {
+            TargetSignal {
+                latency_ms: if target.provider_id == "fast" {
+                    10
+                } else {
+                    900
+                },
+                failures: if target.provider_id == "slow" { 2 } else { 0 },
+                price_per_million: if target.provider_id == "fast" {
+                    0.5
+                } else {
+                    50.0
+                },
+                ..TargetSignal::default()
+            }
+        });
+        let order: Vec<&str> = attempts
+            .iter()
+            .map(|target| target.provider_id.as_str())
+            .collect();
+        assert_eq!(order, ["slow", "fast", "mid"]);
+        assert_eq!(fallback[0].provider_id, "slow");
+    }
+
+    #[test]
+    fn fast_prefers_lowest_latency_then_failures() {
+        let mut targets = vec![compiled("slow"), compiled("fast")];
+        rank_targets(&mut targets, "fast", None, 0, "", |target| TargetSignal {
+            latency_ms: if target.model_id == "fast" { 20 } else { 200 },
+            ..TargetSignal::default()
+        });
+        assert_eq!(targets[0].model_id, "fast");
+
+        let mut targets = vec![compiled("flaky"), compiled("steady")];
+        rank_targets(&mut targets, "fast", None, 0, "", |target| TargetSignal {
+            latency_ms: 50,
+            failures: if target.model_id == "flaky" { 3 } else { 0 },
+            ..TargetSignal::default()
+        });
+        assert_eq!(targets[0].model_id, "steady");
+    }
+
+    #[test]
+    fn cheap_prefers_lowest_price_then_latency() {
+        let mut targets = vec![compiled("expensive"), compiled("cheap")];
+        rank_targets(&mut targets, "cheap", None, 0, "", |target| TargetSignal {
+            price_per_million: if target.model_id == "cheap" { 0.5 } else { 9.0 },
+            ..TargetSignal::default()
+        });
+        assert_eq!(targets[0].model_id, "cheap");
+
+        let mut targets = vec![compiled("slow"), compiled("fast")];
+        rank_targets(&mut targets, "cheap", None, 0, "", |target| TargetSignal {
+            latency_ms: if target.model_id == "fast" { 10 } else { 500 },
+            price_per_million: 2.0,
+            ..TargetSignal::default()
+        });
+        assert_eq!(targets[0].model_id, "fast");
+    }
+
+    #[test]
+    fn fallback_remains_last_for_manual_fast_and_cheap() {
+        for strategy in ["manual", "fast", "cheap"] {
+            let (mut data, providers) = setup(
+                vec![target("t1", "low", 10, 100), target("t2", "high", 0, 1)],
+                vec![provider("low", "openai"), provider("high", "openai")],
+            );
+            data.groups[0].strategy = strategy.into();
+            let plan = RoutePlan::compile(&data, &route(), &providers).unwrap();
+            let (mut attempts, fallback) = plan.parts(3);
+            rank_targets(&mut attempts, &plan.strategy, None, 0, "", |target| {
+                TargetSignal {
+                    latency_ms: if target.provider_id == "low" { 1 } else { 500 },
+                    price_per_million: if target.provider_id == "low" {
+                        1.0
+                    } else {
+                        20.0
+                    },
+                    ..TargetSignal::default()
+                }
+            });
+            attempts.extend(fallback.clone());
+            assert_eq!(fallback.len(), 1, "strategy {strategy}");
+            assert_eq!(fallback[0].provider_id, "high", "strategy {strategy}");
+            assert_eq!(
+                attempts.last().unwrap().provider_id,
+                "high",
+                "strategy {strategy}"
+            );
+        }
     }
 
     #[test]

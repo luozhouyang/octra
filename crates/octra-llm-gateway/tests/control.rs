@@ -257,6 +257,62 @@ async fn reload_reports_runtime_state() {
 }
 
 #[tokio::test]
+async fn group_strategies_are_validated() {
+    let harness = Harness::new().await;
+    let router = harness
+        .control_router()
+        .merge(octra_llm_gateway::ai_control::router(
+            octra_llm_gateway::ai_control::AiControlState::new(harness.storage.clone()),
+        ));
+
+    for strategy in [
+        "priority",
+        "weighted",
+        "order",
+        "rotate",
+        "round_robin",
+        "manual",
+        "weight",
+        "fast",
+        "cheap",
+        "usage",
+        "quota",
+        "smart",
+        "pace",
+        "intent",
+        "semantic",
+    ] {
+        let (status, body) = call_shared(
+            &router,
+            Method::POST,
+            "/api/v1/ai/models",
+            Some(json!({
+                "name": format!("g-{strategy}"),
+                "balancer": {"strategy": strategy}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "strategy {strategy}: {body}");
+    }
+
+    let (status, body) = call_shared(
+        &router,
+        Method::POST,
+        "/api/v1/ai/models",
+        Some(json!({"name": "g-bogus", "balancer": {"strategy": "magic"}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("strategy"),
+        "body: {body}"
+    );
+}
+
+#[tokio::test]
 async fn usage_endpoint_summarizes_traffic() {
     let harness = Harness::new().await;
     let config = harness.config.clone();

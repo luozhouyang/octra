@@ -218,6 +218,38 @@ fn json_object(raw: Option<String>, field: &str) -> ApiResult<String> {
     Ok(value.to_string())
 }
 
+/// Routing-group strategies accepted by the control plane. `free` and
+/// `expiring` remain unimplemented and are intentionally rejected.
+pub const ROUTING_STRATEGIES: &[&str] = &[
+    "priority",
+    "weighted",
+    "order",
+    "rotate",
+    "round_robin",
+    "manual",
+    "weight",
+    "fast",
+    "cheap",
+    "usage",
+    "quota",
+    "smart",
+    "pace",
+    "intent",
+    "semantic",
+];
+
+/// Validates a routing strategy name before it reaches the runtime.
+pub fn validate_routing_strategy(strategy: &str) -> Result<(), String> {
+    if ROUTING_STRATEGIES.contains(&strategy) {
+        Ok(())
+    } else {
+        Err(
+            "strategy must be priority, weighted, order, rotate, round_robin, manual, weight, fast, cheap, usage, quota, smart, pace, intent or semantic"
+                .to_string(),
+        )
+    }
+}
+
 fn merge_json_field(object: Option<Value>, raw: Option<String>, field: &str) -> ApiResult<String> {
     match (object, raw) {
         (Some(value), None) => {

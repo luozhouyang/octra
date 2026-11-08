@@ -2688,3 +2688,55 @@ async fn semantic_cache_replays_streaming_responses_as_sse() {
     assert_eq!(headers.get("x-octra-cache").unwrap(), "miss");
     assert_eq!(upstream.request_count(), 2);
 }
+
+#[tokio::test]
+async fn fast_and_cheap_strategies_are_accepted_end_to_end() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("strategy-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness
+        .model_with(
+            &provider,
+            "expensive-model",
+            Some(128_000),
+            "{}",
+            r#"{"input_per_million": 12.0}"#,
+        )
+        .await;
+    harness
+        .model_with(
+            &provider,
+            "cheap-model",
+            Some(128_000),
+            "{}",
+            r#"{"input_per_million": 0.5}"#,
+        )
+        .await;
+    let targets = [
+        (provider.clone(), "expensive-model".to_string(), 0, 1),
+        (provider.clone(), "cheap-model".to_string(), 0, 1),
+    ];
+
+    for strategy in ["fast", "cheap"] {
+        harness
+            .route_to_strategy(&format!("octra-{strategy}"), strategy, &targets)
+            .await;
+        let (status, _, text) = send(
+            harness.data_router(),
+            axum::http::Method::POST,
+            COMPLETION_PATH,
+            &[],
+            Some(openai_body(&format!("octra-{strategy}"), false)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "strategy {strategy}: {text}");
+    }
+
+    // The cheap strategy ranks by input price, so its first attempt uses the
+    // cheaper upstream model.
+    let captured = upstream.requests();
+    let request = captured.last().expect("upstream request");
+    assert_eq!(request.body["model"], "cheap-model");
+}

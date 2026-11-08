@@ -427,6 +427,14 @@ impl AccountInput {
 }
 
 impl ModelInput {
+    fn validate(&self) -> AiResult<()> {
+        match &self.balancer {
+            Some(balancer) => crate::control::validate_routing_strategy(&balancer.strategy)
+                .map_err(|message| AiError::new(StatusCode::BAD_REQUEST, message)),
+            None => Ok(()),
+        }
+    }
+
     fn into_record(self, id: String, created_at: i64, updated_at: i64) -> AiModel {
         AiModel {
             id,
@@ -921,6 +929,7 @@ async fn create_model(
     State(state): State<AiControlState>,
     Json(input): Json<ModelInput>,
 ) -> AiResult<(StatusCode, Json<AiModel>)> {
+    input.validate()?;
     let timestamp = now();
     let id = input.id.clone().unwrap_or_else(new_id);
     let model = input.into_record(id, timestamp, timestamp);
@@ -952,6 +961,7 @@ async fn update_model(
     Path(id): Path<String>,
     Json(input): Json<ModelInput>,
 ) -> AiResult<Json<AiModel>> {
+    input.validate()?;
     let created_at = state
         .storage
         .ai
