@@ -6,6 +6,17 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.97.1"
+
 jobs:
   package:
     name: Package (${{ matrix.os }})
@@ -17,8 +28,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -46,14 +59,281 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build the daemon sidecar
+        shell: bash
         run: bash scripts/build-desktop-sidecar.sh
 
+      - name: Configure Apple signing environment
+        id: apple_signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD_SECRET: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY_SECRET: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD_SECRET: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_P8_SECRET: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID_SECRET: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_SECRET: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+
+          certificate_present=false
+          if [[ -n "${APPLE_CERTIFICATE_BASE64:-}" ]]; then
+            if [[ -z "${APPLE_CERTIFICATE_PASSWORD_SECRET:-}" ]]; then
+              echo "APPLE_CERTIFICATE_PASSWORD must be set when APPLE_CERTIFICATE is set" >&2
+              exit 1
+            fi
+            certificate_base64="$(printf '%s' "$APPLE_CERTIFICATE_BASE64" | tr -d '\r\n')"
+            if [[ -z "$certificate_base64" ]]; then
+              echo "APPLE_CERTIFICATE is empty after base64 normalization" >&2
+              exit 1
+            fi
+            certificate_present=true
+            {
+              echo "APPLE_CERTIFICATE=${certificate_base64}"
+              echo "APPLE_CERTIFICATE_PASSWORD=${APPLE_CERTIFICATE_PASSWORD_SECRET}"
+            } >> "$GITHUB_ENV"
+            if [[ -n "${APPLE_SIGNING_IDENTITY_SECRET:-}" ]]; then
+              echo "APPLE_SIGNING_IDENTITY=${APPLE_SIGNING_IDENTITY_SECRET}" >> "$GITHUB_ENV"
+            fi
+          fi
+
+          if [[ -n "${APPLE_ID_SECRET:-}" ]]; then
+            if [[ "$certificate_present" != true ]]; then
+              echo "APPLE_ID notarization credentials require APPLE_CERTIFICATE" >&2
+              exit 1
+            fi
+            if [[ -z "${APPLE_PASSWORD_SECRET:-}" || -z "${APPLE_TEAM_ID_SECRET:-}" ]]; then
+              echo "APPLE_ID requires APPLE_PASSWORD and APPLE_TEAM_ID" >&2
+              exit 1
+            fi
+            {
+              echo "APPLE_ID=${APPLE_ID_SECRET}"
+              echo "APPLE_PASSWORD=${APPLE_PASSWORD_SECRET}"
+              echo "APPLE_TEAM_ID=${APPLE_TEAM_ID_SECRET}"
+            } >> "$GITHUB_ENV"
+          fi
+
+          if [[ -n "${APPLE_API_KEY_P8_SECRET:-}" ]]; then
+            if [[ "$certificate_present" != true ]]; then
+              echo "App Store Connect API key credentials require APPLE_CERTIFICATE" >&2
+              exit 1
+            fi
+            if [[ -z "${APPLE_API_KEY_ID_SECRET:-}" || -z "${APPLE_API_ISSUER_SECRET:-}" ]]; then
+              echo "APPLE_API_KEY requires APPLE_API_KEY_ID and APPLE_API_ISSUER" >&2
+              exit 1
+            fi
+            api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID_SECRET}.p8"
+            printf '%s\n' "$APPLE_API_KEY_P8_SECRET" > "$api_key_path"
+            chmod 600 "$api_key_path"
+            {
+              echo "APPLE_API_KEY=${APPLE_API_KEY_ID_SECRET}"
+              echo "APPLE_API_KEY_PATH=${api_key_path}"
+              echo "APPLE_API_ISSUER=${APPLE_API_ISSUER_SECRET}"
+            } >> "$GITHUB_ENV"
+          fi
+
+          if [[ "$certificate_present" == true ]]; then
+            echo "macOS signing enabled"
+          else
+            echo "macOS signing secrets are not configured; building unsigned"
+          fi
+          echo "certificate_present=$certificate_present" >> "$GITHUB_OUTPUT"
+
+      - name: Import Apple signing certificate
+        if: runner.os == 'macOS' && steps.apple_signing.outputs.certificate_present == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          certificate_path="$RUNNER_TEMP/octra-signing-certificate.p12"
+          keychain_path="$RUNNER_TEMP/octra-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | tr -d '\r\n' | base64 -D > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain_path"
+          security list-keychain -d user -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path"
+          rm -f "$certificate_path"
+
       - name: Build the desktop bundle
+        shell: bash
         run: pnpm --filter @octra/desktop tauri:build
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
         with:
           name: octra-desktop-${{ matrix.os }}
-          path: apps/desktop/src-tauri/target/release/bundle/
+          path: |
+            target/release/bundle/
+            apps/desktop/src-tauri/target/release/bundle/
           if-no-files-found: error
+
+      - name: Clean up Apple signing keychain
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/octra-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+
+  universal-macos:
+    name: Package (macOS universal)
+    if: github.event_name != 'pull_request'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install universal macOS Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build the universal daemon sidecar
+        run: bash scripts/build-desktop-sidecar.sh --target universal-apple-darwin
+
+      - name: Configure Apple signing environment
+        id: apple_signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD_SECRET: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY_SECRET: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD_SECRET: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_P8_SECRET: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID_SECRET: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_SECRET: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+
+          certificate_present=false
+          if [[ -n "${APPLE_CERTIFICATE_BASE64:-}" ]]; then
+            if [[ -z "${APPLE_CERTIFICATE_PASSWORD_SECRET:-}" ]]; then
+              echo "APPLE_CERTIFICATE_PASSWORD must be set when APPLE_CERTIFICATE is set" >&2
+              exit 1
+            fi
+            certificate_base64="$(printf '%s' "$APPLE_CERTIFICATE_BASE64" | tr -d '\r\n')"
+            if [[ -z "$certificate_base64" ]]; then
+              echo "APPLE_CERTIFICATE is empty after base64 normalization" >&2
+              exit 1
+            fi
+            certificate_present=true
+            {
+              echo "APPLE_CERTIFICATE=${certificate_base64}"
+              echo "APPLE_CERTIFICATE_PASSWORD=${APPLE_CERTIFICATE_PASSWORD_SECRET}"
+            } >> "$GITHUB_ENV"
+            if [[ -n "${APPLE_SIGNING_IDENTITY_SECRET:-}" ]]; then
+              echo "APPLE_SIGNING_IDENTITY=${APPLE_SIGNING_IDENTITY_SECRET}" >> "$GITHUB_ENV"
+            fi
+          fi
+
+          if [[ -n "${APPLE_ID_SECRET:-}" ]]; then
+            if [[ "$certificate_present" != true ]]; then
+              echo "APPLE_ID notarization credentials require APPLE_CERTIFICATE" >&2
+              exit 1
+            fi
+            if [[ -z "${APPLE_PASSWORD_SECRET:-}" || -z "${APPLE_TEAM_ID_SECRET:-}" ]]; then
+              echo "APPLE_ID requires APPLE_PASSWORD and APPLE_TEAM_ID" >&2
+              exit 1
+            fi
+            {
+              echo "APPLE_ID=${APPLE_ID_SECRET}"
+              echo "APPLE_PASSWORD=${APPLE_PASSWORD_SECRET}"
+              echo "APPLE_TEAM_ID=${APPLE_TEAM_ID_SECRET}"
+            } >> "$GITHUB_ENV"
+          fi
+
+          if [[ -n "${APPLE_API_KEY_P8_SECRET:-}" ]]; then
+            if [[ "$certificate_present" != true ]]; then
+              echo "App Store Connect API key credentials require APPLE_CERTIFICATE" >&2
+              exit 1
+            fi
+            if [[ -z "${APPLE_API_KEY_ID_SECRET:-}" || -z "${APPLE_API_ISSUER_SECRET:-}" ]]; then
+              echo "APPLE_API_KEY requires APPLE_API_KEY_ID and APPLE_API_ISSUER" >&2
+              exit 1
+            fi
+            api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID_SECRET}.p8"
+            printf '%s\n' "$APPLE_API_KEY_P8_SECRET" > "$api_key_path"
+            chmod 600 "$api_key_path"
+            {
+              echo "APPLE_API_KEY=${APPLE_API_KEY_ID_SECRET}"
+              echo "APPLE_API_KEY_PATH=${api_key_path}"
+              echo "APPLE_API_ISSUER=${APPLE_API_ISSUER_SECRET}"
+            } >> "$GITHUB_ENV"
+          fi
+
+          if [[ "$certificate_present" == true ]]; then
+            echo "macOS signing enabled"
+          else
+            echo "macOS signing secrets are not configured; building unsigned"
+          fi
+          echo "certificate_present=$certificate_present" >> "$GITHUB_OUTPUT"
+
+      - name: Import Apple signing certificate
+        if: runner.os == 'macOS' && steps.apple_signing.outputs.certificate_present == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          certificate_path="$RUNNER_TEMP/octra-signing-certificate.p12"
+          keychain_path="$RUNNER_TEMP/octra-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | tr -d '\r\n' | base64 -D > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain_path"
+          security list-keychain -d user -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path"
+          rm -f "$certificate_path"
+
+      - name: Build the universal desktop bundle
+        run: pnpm --filter @octra/desktop tauri:build --target universal-apple-darwin
+
+      - name: Upload universal bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: octra-desktop-macos-universal
+          path: |
+            target/universal-apple-darwin/release/bundle/
+            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/
+          if-no-files-found: error
+
+      - name: Clean up Apple signing keychain
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/octra-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8
