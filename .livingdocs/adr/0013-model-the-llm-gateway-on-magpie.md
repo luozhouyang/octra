@@ -23,7 +23,7 @@ We will model the LLM gateway on magpie's local-gateway shape and keep the imple
 
 - Serve one local endpoint with OpenAI Chat Completions (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), Anthropic Messages (`/v1/messages`, `/v1/messages/count_tokens`), and Gemini (`/v1beta/models`, `/v1beta/models/{model}:{action}`). Decode every protocol into the canonical IR from ADR 0004 and encode the response or stream back into the ingress protocol.
 - Expose virtual models (`llm_routes.virtual_model_id`) that resolve to a routing group. A group has priority rounds and weighted targets; a request walks the rounds and then the fallback target, bounded by the attempt budget.
-- Support the routing strategies that are implemented: `priority` (default rounds), `order`, `rotate` / `round_robin`, `smart`, `usage`, `quota`, `pace`, and `intent`. Ranking uses account quota, observed latency, failure EWMA, recent usage, price, and the client intent header. Octra also adds a native `semantic` strategy that ranks AI-native targets by local lexical similarity to `semantic_description`; it is not a magpie strategy.
+- Support the routing strategies that are implemented: `priority` (default rounds), `order`, `manual`, `weight`, `rotate` / `round_robin`, `smart`, `fast`, `cheap`, `usage`, `quota`, `pace`, and `intent`. Ranking uses account quota, observed latency, failure EWMA, recent usage, price, and the client intent header. Octra also adds a native `semantic` strategy that ranks AI-native targets by local lexical similarity to `semantic_description`; it is not a magpie strategy.
 - Support provider accounts with static `env:` / `file:` secret references and OAuth credentials. The account pool tracks quota, cooldown, pacing, latency EWMA, and failure EWMA; a 429 or quota error puts an account on cooldown and moves to the next candidate.
 - Enforce consumer policies (`allowed_models`, `allowed_providers`) and virtual-key permissions (`allowed_models`, `allowed_providers`, `allowed_accounts`, and hourly/daily/weekly/monthly token or cost limits). Virtual-key limits are read from persisted usage so they survive restarts.
 - Record usage asynchronously with protocol, status, latency, account, model, finish reason, cache/reasoning tokens, and computed cost. Roll up hourly usage and prune it through the retention policy.
@@ -33,7 +33,7 @@ We will model the LLM gateway on magpie's local-gateway shape and keep the imple
 **Not adopted in v0.1:**
 
 - magpie's signed-in subscription discovery, menu-bar app, remote sharing, Docker/NAS mode, library of prompts/skills, and Bun/JavaScript plugin runtime.
-- `manual`, `weight`, `free`, `fast`, `drain`, `cheap`, and `expiring` routing strategies. The code accepts the strategy string but only the implemented strategies change ordering; unimplemented names fall back to priority/weighted rounds.
+- `free`, `drain`, and `expiring` routing strategies. The code rejects unimplemented strategy names at the AI-native control API instead of silently changing behavior.
 - magpie's intent classifier. Octra accepts a client-supplied `x-octra-intent` header and ranks on it; it does not make a separate classifier call.
 - Cloud-side PII detection or any PII value leaving the machine.
 
@@ -66,7 +66,7 @@ We will model the LLM gateway on magpie's local-gateway shape and keep the imple
 
 - Add a control-plane CRUD surface and desktop editor for consumer policies.
 - If the AI-native entity model is adopted, see ADR 0018 for the provider/model/target/policy migration path; this record remains the data-plane and magpie-parity decision.
-- Decide which magpie strategies to add next (`manual`, `weight`, `fast`, or `cheap`) and record the decision in a new ADR or in this record's superseding version.
+- Decide which magpie strategies to add next (`free`, `drain`, or `expiring`) and record the decision in a new ADR or in this record's superseding version.
 - Add a postgres-free concurrency test for quota and cooldown counters under parallel requests.
 - Encrypt or keychain-back OAuth tokens (ADR 0007 follow-up).
 

@@ -145,7 +145,7 @@ shows a sandbox banner, and preview never writes anything.
 - Agent discovery / config adapter / bridge for agents beyond the three
   supported adapters.
 - Full reference-model parity where justified: magpie strategies such as
-  `manual`/`weight`/`fast`/`cheap`, and Kong MCP consumer-group/default/CEL
+  `free`/`drain`/`expiring`, and Kong MCP consumer-group/default/CEL
   ACLs or conversion modes.
 - Complete the AI-native LLM control plane (ADR 0018): neural embeddings for
   semantic routing (the cache already supports an optional embedding endpoint),

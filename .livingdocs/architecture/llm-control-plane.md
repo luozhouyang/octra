@@ -125,8 +125,8 @@ The control API supports `validate`, `preview`, `apply`, and `rollback`. A faile
 | Provider presets / custom provider | `ai_providers` + `ai_provider_accounts` |
 | Subscription accounts | `ai_provider_accounts.credential_kind=oauth`; tokens in `ai_provider_oauth_tokens` |
 | Routing groups | `ai_models.kind=group` + `ai_model_targets.target_model_id` |
-| smart/order/rotate/usage/pace/manual | `ai_models.balancer_json.strategy` |
-| weight/free/fast/drain/cheap/expiring | strategy extensions; not all in the first implementation |
+| smart/order/rotate/usage/pace/manual/weight/fast/cheap | `ai_models.balancer_json.strategy` |
+| free/drain/expiring | not implemented; rejected by the AI-native control API |
 | Account failover / quota / cooldown | account pool + target selection |
 | Session affinity | session header + `ai_sessions` or account affinity state |
 | Privacy masking | `pii-redaction` policy |
@@ -167,7 +167,7 @@ Remaining `llm_*` tables are deliberately outside the model control plane: `llm_
 | Policy scope precedence | Compiler helper implements the target order; executable policies compile into the existing LLM plugin chains |
 | Daemon integration | AI-native only; startup compiles `ai_*`, and apply/rollback reload the runtime and plugin chains. No legacy/shadow/on mode, no auto-import |
 | CLI / Desktop | Full CRUD for providers/accounts/models/targets/policies/attachments; `octra ai` accepts inline, stdin, and file JSON bodies; typed desktop forms for all six AI entity types; no legacy model commands or import-legacy |
-| magpie routing strategies | `order`/`rotate`/`usage`/`quota`/`pace`/`smart`/`intent` plus an Octra-native `semantic` strategy; `manual`/`weight`/`fast`/`cheap` remain unimplemented; see ADR 0013 |
+| magpie routing strategies | `order`/`manual`/`weight`/`rotate`/`fast`/`cheap`/`usage`/`quota`/`pace`/`smart`/`intent` plus an Octra-native `semantic` strategy; `free`/`drain`/`expiring` remain unimplemented; see ADR 0013 |
 | Coding-agent integration | Implemented separately from the LLM control plane; keep separate |
 
 Phase 11 evidence:
@@ -192,7 +192,7 @@ Phase 11 evidence:
 - `crates/octra-daemon/src/main.rs` compiles `ai_*` at startup and reloads it after activation endpoints.
 - `crates/octra-cli` exposes `ai` status/actions plus full CRUD, with `--body '<json>'`, `--body -`, and `--body @path`; legacy `accounts` and `ai import-legacy` commands are removed.
 - `apps/desktop/src/app/pages/ai-control.tsx` exposes live status, entity lists, typed forms for providers, accounts, models, targets, policies, and attachments, compile reports, apply, and revision rollback; LLM/Agents pages read AI providers/models.
-- `cargo test --workspace --exclude octra-desktop` reports 889 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass.
+- `cargo test --workspace --exclude octra-desktop` reports 896 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass.
 
 ## Drift instrument
 

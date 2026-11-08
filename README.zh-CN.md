@@ -132,7 +132,7 @@ sandbox_path = "/tmp/octra-agent-bin"
 - 桌面端与 CLI 对 API、MCP 实体的完整 CRUD；这些页面目前是实时只读视图，大部分变更仍需走控制面 API。LLM 实体已经通过 AI Control 和 `octra ai` 完整管理。
 - 事件总线的投递、重试/退避、定时任务与无订阅者跳过路径的集成测试；存储层保留策略已有测试。
 - 更多协议适配器与更多 Agent 适配器/Agent Bridge。
-- 有明确产品价值的参考模型补齐：magpie 的 `manual`/`weight`/`fast`/`cheap` 等策略，以及 Kong MCP 的 Consumer Group/默认/CEL ACL 或转换模式。
+- 有明确产品价值的参考模型补齐：magpie 的 `free`/`drain`/`expiring` 等策略，以及 Kong MCP 的 Consumer Group/默认/CEL ACL 或转换模式。
 - 完善 AI 原生 LLM 控制面（ADR 0018）：semantic routing 的神经 embedding（SemanticCache 已支持可选 embedding endpoint）、OpenAI/Anthropic/OpenAI Responses/Gemini 之外的新 wire protocol adapter，以及桌面 webview 中更完善的 OAuth callback 处理。Phase 12 的控制 API、rollback、含 PromptGuard/PromptCompress/SemanticCache 的完整 policy 执行、`semantic` target routing、Provider query 参数、streaming cache 写入/SSE 回放、AI-native account OAuth 端点与桌面控制、cache/routing 可观测性、完整 CRUD CLI 与全部 AI 实体的桌面 typed forms 已经存在。legacy 模型表、端点、模式和 import 路径已移除；`ai_*` 是唯一的模型控制面。SemanticCache/Routing 默认使用精确 key 加本地词法相似度。
 - OS Keychain Secrets 集成与 OAuth Token 加密。
 - 桌面端 Daemon 生命周期管理（启动、停止、健康监督）。
