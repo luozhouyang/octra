@@ -13,6 +13,8 @@ import type {
   AiCompileReport,
   AiModel,
   AiModelTarget,
+  AiOAuthFlow,
+  AiOAuthStatus,
   AiPolicy,
   AiPolicyAttachment,
   AiProvider,
@@ -376,6 +378,38 @@ export class ControlApiClient {
 
   aiDeleteAccount(id: string): Promise<void> {
     return this.deleteEmpty(`/api/v1/ai/accounts/${encodeURIComponent(id)}`);
+  }
+
+  aiAccountOAuthStart(accountId: string): Promise<AiOAuthFlow> {
+    return this.postEmpty<AiOAuthFlow>(
+      `/api/v1/ai/accounts/${encodeURIComponent(accountId)}/oauth/start`,
+    );
+  }
+
+  aiAccountOAuthComplete(
+    accountId: string,
+    body: { code: string; state: string },
+  ): Promise<AiOAuthStatus> {
+    return this.postJson<AiOAuthStatus>(
+      `/api/v1/ai/accounts/${encodeURIComponent(accountId)}/oauth/complete`,
+      body,
+    );
+  }
+
+  aiAccountOAuthRefresh(accountId: string): Promise<AiOAuthStatus> {
+    return this.postEmpty<AiOAuthStatus>(
+      `/api/v1/ai/accounts/${encodeURIComponent(accountId)}/oauth/refresh`,
+    );
+  }
+
+  aiAccountOAuthStatus(accountId: string): Promise<AiOAuthStatus> {
+    return this.request<AiOAuthStatus>(
+      `/api/v1/ai/accounts/${encodeURIComponent(accountId)}/oauth/status`,
+    );
+  }
+
+  aiAccountOAuthClear(accountId: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/ai/accounts/${encodeURIComponent(accountId)}/oauth`);
   }
 
   aiModels(signal?: AbortSignal): Promise<AiModel[]> {

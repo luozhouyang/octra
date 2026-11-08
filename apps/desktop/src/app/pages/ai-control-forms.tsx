@@ -2,6 +2,8 @@ import type {
   AiModelInput,
   AiModelKind,
   AiModelTargetInput,
+  AiOAuthFlow,
+  AiOAuthStatus,
   AiPolicyAttachmentInput,
   AiPolicyInput,
   AiPolicyScope,
@@ -9,8 +11,10 @@ import type {
   AiProviderAccountInput,
   AiProviderInput,
 } from "@octra/types";
-import { Button, Input, Switch } from "@octra/ui";
+import { Badge, Button, Input, Switch } from "@octra/ui";
 import { useState, type FormEvent, type ReactNode } from "react";
+
+import { controlClient } from "../../lib/control-api";
 
 const MODEL_KINDS: ReadonlyArray<{ value: AiModelKind; label: string }> = [
   { value: "model", label: "Model" },
@@ -79,6 +83,7 @@ export interface TypedFormProps {
   pending: boolean;
   onSave: (body: unknown) => void;
   onCancel: () => void;
+  onOAuthChanged?: () => void;
   providers?: SelectorOption[];
   models?: SelectorOption[];
   accounts?: SelectorOption[];
@@ -383,8 +388,16 @@ export function PolicyForm({ title, initial, pending, onSave, onCancel }: TypedF
   );
 }
 
-export function AccountForm({ title, initial, pending, onSave, onCancel }: TypedFormProps) {
+export function AccountForm({
+  title,
+  initial,
+  pending,
+  onSave,
+  onCancel,
+  onOAuthChanged,
+}: TypedFormProps) {
   const source = asRecord(initial);
+  const accountId = typeof source.id === "string" ? source.id : "";
   const [name, setName] = useState(readString(source, "name", "default"));
   const [credentialKind, setCredentialKind] = useState(
     readOption(source.credential_kind, CREDENTIAL_KINDS, "static"),
@@ -404,6 +417,16 @@ export function AccountForm({ title, initial, pending, onSave, onCancel }: Typed
   const [enabled, setEnabled] = useState(readBoolean(source, "enabled", true));
   const [config, setConfig] = useState(readJson(source, "config", {}));
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [oauthStatus, setOauthStatus] = useState(readString(source, "oauth_status", "none"));
+  const [oauthExpiresAt, setOauthExpiresAt] = useState(
+    readNullableString(source, "oauth_expires_at"),
+  );
+  const [oauthFlow, setOauthFlow] = useState<AiOAuthFlow | null>(null);
+  const [oauthCode, setOauthCode] = useState("");
+  const [oauthAction, setOauthAction] = useState<string | null>(null);
+  const [oauthError, setOauthError] = useState<string | null>(null);
+  const oauthBusy = oauthAction !== null;
+  const showOAuth = accountId !== "";
 
   function submit() {
     const nextErrors: Record<string, string> = {};
@@ -436,6 +459,97 @@ export function AccountForm({ title, initial, pending, onSave, onCancel }: Typed
       enabled,
     };
     onSave(body);
+  }
+
+  function applyOAuthStatus(next: AiOAuthStatus) {
+    setOauthStatus(next.oauth_status || "none");
+    setOauthExpiresAt(next.oauth_expires_at);
+  }
+
+  async function startOAuth() {
+    if (!accountId || oauthBusy) {
+      return;
+    }
+    setOauthAction("start");
+    setOauthError(null);
+    try {
+      const flow = await controlClient().aiAccountOAuthStart(accountId);
+      setOauthFlow(flow);
+      setOauthCode("");
+      try {
+        window.open(flow.authorize_url, "_blank", "noopener,noreferrer");
+      } catch {
+        // The authorize URL stays visible for manual copy when the popup is blocked.
+      }
+    } catch (error) {
+      setOauthError(oauthErrorMessage(error));
+    } finally {
+      setOauthAction(null);
+    }
+  }
+
+  async function completeOAuth() {
+    if (!accountId || !oauthFlow || oauthBusy) {
+      return;
+    }
+    const code = oauthCode.trim();
+    if (code === "") {
+      setOauthError("Authorization code is required.");
+      return;
+    }
+    setOauthAction("complete");
+    setOauthError(null);
+    try {
+      const next = await controlClient().aiAccountOAuthComplete(accountId, {
+        code,
+        state: oauthFlow.state,
+      });
+      applyOAuthStatus(next);
+      setOauthFlow(null);
+      setOauthCode("");
+      onOAuthChanged?.();
+    } catch (error) {
+      setOauthError(oauthErrorMessage(error));
+    } finally {
+      setOauthAction(null);
+    }
+  }
+
+  async function refreshOAuth() {
+    if (!accountId || oauthBusy) {
+      return;
+    }
+    setOauthAction("refresh");
+    setOauthError(null);
+    try {
+      const next = await controlClient().aiAccountOAuthRefresh(accountId);
+      applyOAuthStatus(next);
+      onOAuthChanged?.();
+    } catch (error) {
+      setOauthError(oauthErrorMessage(error));
+    } finally {
+      setOauthAction(null);
+    }
+  }
+
+  async function clearOAuth() {
+    if (!accountId || oauthBusy) {
+      return;
+    }
+    setOauthAction("clear");
+    setOauthError(null);
+    try {
+      await controlClient().aiAccountOAuthClear(accountId);
+      setOauthStatus("none");
+      setOauthExpiresAt(null);
+      setOauthFlow(null);
+      setOauthCode("");
+      onOAuthChanged?.();
+    } catch (error) {
+      setOauthError(oauthErrorMessage(error));
+    } finally {
+      setOauthAction(null);
+    }
   }
 
   return (
@@ -552,6 +666,79 @@ export function AccountForm({ title, initial, pending, onSave, onCancel }: Typed
       >
         <JsonTextarea value={config} onChange={setConfig} rows={5} />
       </Field>
+      {showOAuth ? (
+        <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface/60 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="flex flex-wrap items-center gap-2 text-[10.5px] text-muted-foreground">
+              OAuth
+              <Badge variant={oauthStatusVariant(oauthStatus)}>
+                {oauthStatusLabel(oauthStatus)}
+              </Badge>
+              <span>{oauthExpiresAt ? `expires ${oauthExpiresAt}` : "no expiry recorded"}</span>
+            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={pending || oauthBusy}
+                onClick={() => void startOAuth()}
+              >
+                {oauthAction === "start" ? "Starting…" : "Start OAuth"}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={pending || oauthBusy}
+                onClick={() => void refreshOAuth()}
+              >
+                {oauthAction === "refresh" ? "Refreshing…" : "Refresh"}
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={pending || oauthBusy}
+                onClick={() => void clearOAuth()}
+              >
+                {oauthAction === "clear" ? "Clearing…" : "Clear"}
+              </Button>
+            </div>
+          </div>
+          {oauthFlow ? (
+            <div className="flex flex-col gap-2">
+              <span className="text-[10px] text-muted-foreground">
+                Authorize URL (copy manually if the browser did not open):
+              </span>
+              <Input
+                readOnly
+                value={oauthFlow.authorize_url}
+                onFocus={(event) => event.currentTarget.select()}
+                className="font-mono text-[10.5px]"
+              />
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                <div className="min-w-0 flex-1">
+                  <Field label="Authorization code">
+                    <Input
+                      value={oauthCode}
+                      onChange={(event) => setOauthCode(event.target.value)}
+                      placeholder="Paste the code from the provider"
+                      autoComplete="off"
+                      className="font-mono text-[11px]"
+                    />
+                  </Field>
+                </div>
+                <Button
+                  size="sm"
+                  disabled={pending || oauthBusy}
+                  onClick={() => void completeOAuth()}
+                >
+                  {oauthAction === "complete" ? "Completing…" : "Complete"}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          {oauthError ? <span className="text-[10px] text-danger">{oauthError}</span> : null}
+        </div>
+      ) : null}
     </TypedFormShell>
   );
 }
@@ -1040,6 +1227,11 @@ function readString(source: Record<string, unknown>, key: string, fallback = "")
   return typeof value === "string" ? value : fallback;
 }
 
+function readNullableString(source: Record<string, unknown>, key: string): string | null {
+  const value = source[key];
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
 function readBoolean(source: Record<string, unknown>, key: string, fallback: boolean): boolean {
   const value = source[key];
   return typeof value === "boolean" ? value : fallback;
@@ -1167,6 +1359,34 @@ function splitList(value: string): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function oauthStatusVariant(status: string): "accent" | "neutral" | "warning" {
+  switch (status) {
+    case "authorized":
+      return "accent";
+    case "reauth_required":
+      return "warning";
+    default:
+      return "neutral";
+  }
+}
+
+function oauthStatusLabel(status: string): string {
+  switch (status) {
+    case "none":
+      return "not connected";
+    case "authorized":
+      return "authorized";
+    case "reauth_required":
+      return "reauth required";
+    default:
+      return status || "unknown";
+  }
+}
+
+function oauthErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : "OAuth request failed.";
 }
 
 function parseJsonText(text: string, field: string, errors: Record<string, string>): unknown {

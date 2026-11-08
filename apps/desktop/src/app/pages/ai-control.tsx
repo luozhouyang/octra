@@ -334,6 +334,7 @@ export function AiControlPage() {
             {...shared}
             initial={editor.initial}
             providers={providers.data ?? []}
+            onOAuthChanged={() => invalidate(["ai-accounts", "ai-status"])}
           />
         );
       case "model":

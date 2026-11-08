@@ -581,6 +581,8 @@ export interface AiProviderAccount {
   credential_kind: string;
   secret_ref: string | null;
   oauth_ref: string | null;
+  oauth_status: string;
+  oauth_expires_at: string | null;
   weight: number;
   priority: number;
   quota_limit: number | null;
@@ -592,6 +594,20 @@ export interface AiProviderAccount {
   config: unknown;
   created_at: number;
   updated_at: number;
+}
+
+export interface AiOAuthFlow {
+  state: string;
+  authorize_url: string;
+  redirect_uri: string;
+}
+
+export interface AiOAuthStatus {
+  account_id: string;
+  provider_id: string;
+  credential_kind: string;
+  oauth_status: string;
+  oauth_expires_at: string | null;
 }
 
 export type AiModelKind = "model" | "group";
@@ -716,6 +732,8 @@ export interface AiProviderAccountInput {
   credential_kind?: string;
   secret_ref?: string | null;
   oauth_ref?: string | null;
+  oauth_status?: string;
+  oauth_expires_at?: string | null;
   weight?: number;
   priority?: number;
   quota_limit?: number | null;
