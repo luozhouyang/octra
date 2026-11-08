@@ -135,7 +135,7 @@ This table is the authoritative progress summary for v0.1. "Implemented" means t
 
 - `cargo fmt --all --check` passes.
 - `cargo clippy --workspace --exclude octra-desktop --all-targets -- -D warnings` passes.
-- `cargo test --workspace --exclude octra-desktop` passes: 886 passed, 0 failed, 17 ignored.
+- `cargo test --workspace --exclude octra-desktop` passes: 889 passed, 0 failed, 17 ignored.
 - WASM integration tests are ignored by default and require `cargo-component`; `scripts/test-wasm.sh` runs them in CI.
 - `pnpm typecheck`, `pnpm test`, and `pnpm build` pass (5 frontend tests across the shared packages).
 
@@ -180,7 +180,9 @@ Open acceptance gaps, in priority order:
 - Should the desktop console become a full CRUD console, or remain a live observability console with the Admin API as the management surface? If full CRUD, which entities come first?
 - When do consumer policies get a control-plane CRUD API and desktop editor?
 - Which magpie strategy should be added next: `manual`, `weight`, `fast`, `cheap`, or `expiring`?
-- When should `on` become the default LLM data source, and which AI policy types (rate limit, budget guard, PII, prompt guard) should be executed first?
+- Which embedding provider should back semantic cache/routing, and should it be configured per provider, per model, or globally?
+- Should the remaining non-model `llm_*` tables (`virtual_keys`, usage, counters, plugin state, PII engines) be renamed in a follow-up cleanup?
+- Which OAuth providers should get first-class presets instead of raw `config_json.oauth` documents?
 - Which Kong MCP capability should be added next: consumer-group ACLs, default/CEL ACLs, conversion modes, or notifications?
 - When do OS keychain storage and OAuth-token encryption land? The current boundary is recorded in ADR 0007.
 - When does desktop-side daemon supervision replace the current operator-started daemon? The current boundary is recorded in ADR 0003.

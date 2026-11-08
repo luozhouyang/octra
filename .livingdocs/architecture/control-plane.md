@@ -45,7 +45,7 @@ flowchart TB
 | Overview | `/` | health, overview range, config, traffic chart | reload snapshot |
 | API Gateway | `/gateway` | services, routes, upstreams, targets, metrics | none |
 | LLM Gateway | `/llm` | usage, providers | none |
-| AI Control | `/ai-control` | AI status, providers, accounts, models, targets, policies, attachments, revisions | typed forms for all six entity types, validate, apply, rollback |
+| AI Control | `/ai-control` | AI status, providers, accounts, models, targets, policies, attachments, revisions | typed forms for all six entity types, OAuth start/complete/refresh/clear, validate, apply, rollback |
 | Agents | `/agents` | agents, mode, profiles, routes, virtual keys, backups | create/update/delete profile, preview, apply, restore |
 | MCP Gateway | `/mcp` | servers, tools, invocations, sessions | none |
 | Plugins | `/plugins` | LLM plugins and stage metrics | enable/disable |

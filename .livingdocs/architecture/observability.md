@@ -34,6 +34,7 @@ flowchart LR
 - **Request logs:** method, path, status, latency, route, service, target, consumer, error; queried at `/admin/logs`.
 - **Audit logs:** actor, action, target, detail; every control mutation; queried at `/admin/audit-logs`.
 - **LLM usage:** request id, virtual model, provider, model, account, API key, protocol, status, latency, input/output/cache/reasoning tokens, finish reason, cost, error. Hourly rollups feed the overview and usage pages.
+- **LLM request audit:** content-free request metadata plus `cache_status` (`hit` for cached responses, otherwise null/absent). Semantic cache lookups log `hit`/`miss` with the match kind at debug level; semantic routing logs target scores at debug level; clients also see `X-Octra-Cache: hit|miss`.
 - **MCP invocations:** server, tool, consumer, request id, status, duration, error.
 - **Metrics:** API request counts/latency/status and upstream errors; JSON at `/admin/metrics`, Prometheus at `/admin/metrics/prometheus`; LLM plugin stage metrics at `/admin/llm/plugins/metrics`; plugin metrics at `/admin/plugin-metrics`.
 - **Events and jobs:** outbox rows and delivery attempts at `/admin/events`; job schedule and last result at `/admin/jobs`.

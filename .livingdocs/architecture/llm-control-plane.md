@@ -8,7 +8,7 @@ timestamp: 2026-11-08T01:19:43Z
 
 # LLM Control Plane
 
-> **Status: Phase 11 landed; AI-native only. Neural semantic features and protocol breadth pending.** The `ai_*` schema, compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, the AI-native runtime mapping, built-in policy execution for every policy type (including PromptGuard, PromptCompress, and SemanticCache), semantic target routing, provider query parameters, streaming cache population and SSE replay, AI-native account OAuth endpoints, full CRUD CLI with stdin/file bodies, and typed desktop forms for every AI entity exist and are tested. The legacy `llm_*` model control plane, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, `auto_import_legacy`, and import-legacy compatibility path have been removed without backward compatibility. Remaining `llm_*` tables are auth, usage, counters, plugin state, PII-engine, and OAuth-token state, not model control plane. Neural embedding-based semantic routing and new wire-protocol adapters remain future work.
+> **Status: Phase 12 landed; AI-native only. Neural semantic features and protocol breadth pending.** The `ai_*` schema, compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, the AI-native runtime mapping, built-in policy execution for every policy type (including PromptGuard, PromptCompress, and SemanticCache), semantic target routing, provider query parameters, streaming cache population and SSE replay, AI-native account OAuth with exposed status/expiry and desktop controls, cache/routing observability, full CRUD CLI with stdin/file bodies, and typed desktop forms for every AI entity exist and are tested. The legacy `llm_*` model control plane, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, `auto_import_legacy`, and import-legacy compatibility path have been removed without backward compatibility. Remaining `llm_*` tables are auth, usage, counters, plugin state, PII-engine, and OAuth-token state, not model control plane. Neural embedding-based semantic routing and new wire-protocol adapters remain future work.
 
 The LLM control plane separates three concerns that are currently mixed:
 
@@ -155,11 +155,11 @@ Remaining `llm_*` tables are deliberately outside the model control plane: `llm_
 
 | Capability | Status |
 |---|---|
-| AI Provider / Account entities | Schema, storage, compiler, CRUD API, AI-native runtime mapping, and AI-native OAuth start/complete/refresh/status/delete implemented; legacy model/account tables and endpoints removed |
+| AI Provider / Account entities | Schema, storage, compiler, CRUD API, AI-native runtime mapping, exposed OAuth status/expiry, and AI-native OAuth start/complete/refresh/status/delete implemented; legacy model/account tables and endpoints removed |
 | AI Model / Target entities | Schema, storage, compiler, CRUD API, AI-native runtime mapping, nested groups, and per-target context/capability/pricing metadata implemented |
 | AI Policy / Attachment CRUD | Schema, storage, compiler validation, CRUD API, Allowlist mapping, and built-in plugin execution for every policy type |
 | Prompt policy execution | PromptGuard blocks or masks matching prompts; PromptCompress normalizes whitespace, deduplicates adjacent text, and truncates under a character budget |
-| Semantic response cache | Exact canonical keys plus local lexical similarity, optional OpenAI-compatible embeddings with fallback, TTL/LRU bounds, consumer/virtual-key scoping, non-streaming JSON and streaming SSE cache hits, stream reconstruction through `on_final_response`, and `llm_plugin_state` persistence |
+| Semantic response cache | Exact canonical keys plus local lexical similarity, optional OpenAI-compatible embeddings with fallback, TTL/LRU bounds, consumer/virtual-key scoping, non-streaming JSON and streaming SSE cache hits, stream reconstruction through `on_final_response`, `X-Octra-Cache` headers, request-audit `cache_status`, and `llm_plugin_state` persistence |
 | Semantic target routing | `semantic` balancer ranks targets by local lexical similarity against AI-native `semantic_description`; nested groups inherit descriptions and targets without descriptions score by health |
 | Provider configuration breadth | `config_json` supports `wire`, `headers`, `auth_header`, `query`, OAuth, and CLI providers; query pairs are appended to every upstream endpoint |
 | Config compiler + revisions | Compiler, revision snapshots, apply, rollback, and transactional replace implemented |
@@ -183,8 +183,8 @@ Phase 11 evidence:
 - `crates/octra-llm-plugin-builtin/src/prompt_compress.rs` implements `llm-prompt-compress` with whitespace normalization, adjacent line/paragraph dedupe, and middle-out truncation under a character budget.
 - `crates/octra-llm-plugin-builtin/src/semantic_cache.rs` implements `llm-semantic-cache` with exact keys, local lexical similarity, optional embeddings with fallback, TTL/LRU bounds, consumer/virtual-key scoping, and `llm_plugin_state` persistence.
 - `crates/octra-llm-plugin-types` adds `LlmAction::Respond` and the `on_final_response` hook; `crates/octra-llm-plugin-runtime` adds `LlmRequestOutcome`/`on_request_outcome` and the `final_response` metric stage.
-- `crates/octra-llm-gateway/src/control.rs` exposes AI-native account OAuth start/complete/refresh/status/delete under `/api/v1/ai/accounts/{id}/oauth/*`, with tokens in `ai_provider_oauth_tokens`.
-- `crates/octra-llm-gateway/src/data_plane/mod.rs` serves non-streaming JSON and streaming SSE cache hits after model policy checks; `stream.rs` accumulates streamed events into a canonical response, stores it through `on_final_response`, and replays cached responses as protocol-native SSE.
+- `crates/octra-llm-gateway/src/control.rs` exposes AI-native account OAuth start/complete/refresh/status/delete under `/api/v1/ai/accounts/{id}/oauth/*`; account responses expose `oauth_status`/`oauth_expires_at`, and tokens live in `ai_provider_oauth_tokens`.
+- `crates/octra-llm-gateway/src/data_plane/mod.rs` serves non-streaming JSON and streaming SSE cache hits after model policy checks; `stream.rs` accumulates streamed events into a canonical response, stores it through `on_final_response`, and replays cached responses as protocol-native SSE. Cached responses set request-audit `cache_status`, and the cache/routing plugins emit structured debug logs.
 - `crates/octra-llm-gateway/src/similarity.rs` provides deterministic local lexical vectors and request-text extraction for semantic routing.
 - `crates/octra-llm-gateway/src/routing.rs` implements the `semantic` strategy and reads `LlmRuntimeData::target_semantic_descriptions`; `ai_runtime.rs` maps AI-native target descriptions, including nested inheritance.
 - `crates/octra-llm-gateway/src/config.rs` and `upstream.rs` parse `config_json.query` and append validated query pairs to upstream endpoints.
@@ -192,7 +192,7 @@ Phase 11 evidence:
 - `crates/octra-daemon/src/main.rs` compiles `ai_*` at startup and reloads it after activation endpoints.
 - `crates/octra-cli` exposes `ai` status/actions plus full CRUD, with `--body '<json>'`, `--body -`, and `--body @path`; legacy `accounts` and `ai import-legacy` commands are removed.
 - `apps/desktop/src/app/pages/ai-control.tsx` exposes live status, entity lists, typed forms for providers, accounts, models, targets, policies, and attachments, compile reports, apply, and revision rollback; LLM/Agents pages read AI providers/models.
-- `cargo test --workspace --exclude octra-desktop` reports 886 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass.
+- `cargo test --workspace --exclude octra-desktop` reports 889 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass.
 
 ## Drift instrument
 
