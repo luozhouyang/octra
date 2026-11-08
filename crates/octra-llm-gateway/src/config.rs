@@ -150,6 +150,9 @@ pub struct ProviderConfig {
     pub auth_header: Option<String>,
     /// Extra headers from `config_json.headers`.
     pub headers: Vec<(String, String)>,
+    /// Query parameters from `config_json.query`, appended to every upstream
+    /// endpoint URL (for example Azure OpenAI `api-version`).
+    pub query: Vec<(String, String)>,
     pub anthropic_version: String,
     pub oauth: Option<OAuthProfile>,
     /// Set when the provider is reached by spawning a local CLI instead of
@@ -236,6 +239,8 @@ impl ProviderConfig {
             }
         }
 
+        let query = parse_query(&config, &record.name)?;
+
         Ok(Self {
             id: record.id.clone(),
             name: record.name.clone(),
@@ -248,6 +253,7 @@ impl ProviderConfig {
                 .filter(|value| !value.trim().is_empty()),
             auth_header,
             headers,
+            query,
             anthropic_version: config
                 .get("anthropic_version")
                 .and_then(Value::as_str)
@@ -265,6 +271,39 @@ impl ProviderConfig {
     pub fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
+}
+
+/// Parses `config_json.query` into ordered name/value pairs. The map keeps
+/// whatever order the underlying JSON object stores; values must be strings
+/// so a typo cannot silently drop an `api-version`.
+fn parse_query(
+    config: &Map<String, Value>,
+    provider_name: &str,
+) -> Result<Vec<(String, String)>, ProviderConfigError> {
+    let Some(value) = config.get("query") else {
+        return Ok(Vec::new());
+    };
+    let object = value.as_object().ok_or_else(|| {
+        ProviderConfigError::Invalid(format!(
+            "provider {provider_name}: config_json.query must be an object"
+        ))
+    })?;
+    let mut query = Vec::with_capacity(object.len());
+    for (key, value) in object {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(ProviderConfigError::Invalid(format!(
+                "provider {provider_name}: config_json.query keys must not be empty"
+            )));
+        }
+        let value = value.as_str().ok_or_else(|| {
+            ProviderConfigError::Invalid(format!(
+                "provider {provider_name}: config_json.query.{key} must be a string"
+            ))
+        })?;
+        query.push((key.to_string(), value.to_string()));
+    }
+    Ok(query)
 }
 
 pub fn default_base_url(protocol: Protocol) -> &'static str {
@@ -415,6 +454,54 @@ mod tests {
             r#"{"cli":{"kind":"unknown"}}"#,
         ));
         assert!(broken.is_err());
+    }
+
+    #[test]
+    fn parses_provider_query_parameters() {
+        let config = ProviderConfig::from_record(&record(
+            "openai",
+            "bearer",
+            Some("https://example.test/v1"),
+            r#"{"query":{"api-version":"2024-10-21","x-extra":"1"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            config.query,
+            vec![
+                ("api-version".to_string(), "2024-10-21".to_string()),
+                ("x-extra".to_string(), "1".to_string()),
+            ]
+        );
+
+        let no_query =
+            ProviderConfig::from_record(&record("openai", "bearer", None, "{}")).unwrap();
+        assert!(no_query.query.is_empty());
+
+        let empty_query =
+            ProviderConfig::from_record(&record("openai", "bearer", None, r#"{"query":{}}"#))
+                .unwrap();
+        assert!(empty_query.query.is_empty());
+    }
+
+    #[test]
+    fn invalid_query_parameters_are_rejected() {
+        for config in [
+            r#"{"query":"api-version=2024-10-21"}"#,
+            r#"{"query":["api-version"]}"#,
+            r#"{"query":null}"#,
+            r#"{"query":{"api-version":20241021}}"#,
+            r#"{"query":{"api-version":true}}"#,
+            r#"{"query":{"api-version":null}}"#,
+            r#"{"query":{"   ":"value"}}"#,
+        ] {
+            let error =
+                ProviderConfig::from_record(&record("openai", "bearer", None, config)).unwrap_err();
+            let ProviderConfigError::Invalid(message) = error;
+            assert!(
+                message.contains("config_json.query"),
+                "unexpected message: {message}"
+            );
+        }
     }
 
     #[test]

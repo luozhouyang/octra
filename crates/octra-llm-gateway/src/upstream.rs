@@ -111,7 +111,9 @@ impl Upstream {
         model: &str,
         stream: bool,
     ) -> Result<String, GatewayError> {
-        crate::adapter::for_protocol(provider.protocol).endpoint(provider, model, stream)
+        let endpoint =
+            crate::adapter::for_protocol(provider.protocol).endpoint(provider, model, stream)?;
+        append_query(provider, &endpoint)
     }
 
     /// Builds an authenticated POST for the provider, tagging it with the
@@ -263,6 +265,28 @@ impl Upstream {
     }
 }
 
+/// Appends `config_json.query` pairs to an adapter-produced endpoint. Parsing
+/// with `reqwest::Url` keeps an existing query (Gemini `?alt=sse`, custom
+/// gateways) intact and percent-encodes names and values.
+fn append_query(provider: &ProviderConfig, endpoint: &str) -> Result<String, GatewayError> {
+    if provider.query.is_empty() {
+        return Ok(endpoint.to_string());
+    }
+    let mut url = reqwest::Url::parse(endpoint).map_err(|error| {
+        GatewayError::config(format!(
+            "provider {}: invalid upstream endpoint '{endpoint}': {error}",
+            provider.name
+        ))
+    })?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        for (name, value) in &provider.query {
+            pairs.append_pair(name, value);
+        }
+    }
+    Ok(url.to_string())
+}
+
 /// Converts an upstream failure into a canonical error, keeping the upstream
 /// status so clients see the provider's own code where it makes sense.
 pub fn error_from_upstream(status: StatusCode, body: Option<Value>) -> GatewayError {
@@ -375,13 +399,14 @@ mod tests {
     use octra_llm_core::ErrorKind;
     use octra_storage::LlmProviderRecord;
 
-    fn provider(
+    fn provider_record(
         protocol: &str,
         auth: &str,
         secret: Option<&str>,
         base: Option<&str>,
-    ) -> ProviderConfig {
-        let record = LlmProviderRecord {
+        config: &str,
+    ) -> LlmProviderRecord {
+        LlmProviderRecord {
             id: "p".into(),
             name: "test".into(),
             kind: protocol.into(),
@@ -390,12 +415,29 @@ mod tests {
             base_url: base.map(str::to_string),
             secret_ref: secret.map(str::to_string),
             priority: 0,
-            config_json: "{}".into(),
+            config_json: config.into(),
             enabled: true,
             created_at: String::new(),
             updated_at: String::new(),
-        };
-        ProviderConfig::from_record(&record).unwrap()
+        }
+    }
+
+    fn provider(
+        protocol: &str,
+        auth: &str,
+        secret: Option<&str>,
+        base: Option<&str>,
+    ) -> ProviderConfig {
+        ProviderConfig::from_record(&provider_record(protocol, auth, secret, base, "{}")).unwrap()
+    }
+
+    fn provider_with_config(
+        protocol: &str,
+        auth: &str,
+        base: Option<&str>,
+        config: &str,
+    ) -> ProviderConfig {
+        ProviderConfig::from_record(&provider_record(protocol, auth, None, base, config)).unwrap()
     }
 
     #[test]
@@ -474,6 +516,72 @@ mod tests {
             upstream.endpoint(&bad, "m", false).unwrap_err().kind,
             ErrorKind::Config
         );
+    }
+
+    #[test]
+    fn endpoints_append_provider_query() {
+        let upstream = Upstream::new(&OctraConfig::default());
+        let openai = provider_with_config(
+            "openai",
+            "none",
+            Some("https://api.openai.com/v1"),
+            r#"{"query":{"api-version":"2024-10-21"}}"#,
+        );
+        assert_eq!(
+            upstream.endpoint(&openai, "gpt-4o", false).unwrap(),
+            "https://api.openai.com/v1/chat/completions?api-version=2024-10-21"
+        );
+
+        let anthropic = provider_with_config(
+            "anthropic",
+            "none",
+            Some("https://api.anthropic.com/v1"),
+            r#"{"query":{"api-version":"2024-10-21"}}"#,
+        );
+        assert_eq!(
+            upstream.endpoint(&anthropic, "claude", false).unwrap(),
+            "https://api.anthropic.com/v1/messages?api-version=2024-10-21"
+        );
+
+        let encoded = provider_with_config(
+            "openai",
+            "none",
+            Some("https://example.test/v1"),
+            r#"{"query":{"tag":"a&b"}}"#,
+        );
+        assert_eq!(
+            upstream.endpoint(&encoded, "m", false).unwrap(),
+            "https://example.test/v1/chat/completions?tag=a%26b"
+        );
+    }
+
+    #[test]
+    fn provider_query_preserves_existing_query_parameters() {
+        let upstream = Upstream::new(&OctraConfig::default());
+        let gemini = provider_with_config(
+            "gemini",
+            "none",
+            Some("https://generativelanguage.googleapis.com/v1beta"),
+            r#"{"query":{"key":"abc"}}"#,
+        );
+        assert_eq!(
+            upstream.endpoint(&gemini, "gemini-pro", true).unwrap(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:streamGenerateContent?alt=sse&key=abc"
+        );
+    }
+
+    #[test]
+    fn provider_query_rejects_unparsable_endpoints() {
+        let upstream = Upstream::new(&OctraConfig::default());
+        let bad = provider_with_config(
+            "openai",
+            "none",
+            Some("https://bad host/v1"),
+            r#"{"query":{"a":"b"}}"#,
+        );
+        let error = upstream.endpoint(&bad, "m", false).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Config);
+        assert!(error.message.contains("invalid upstream endpoint"));
     }
 
     #[test]
