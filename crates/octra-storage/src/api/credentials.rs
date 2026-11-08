@@ -3,34 +3,6 @@
 use super::*;
 
 impl ApiStore {
-    /// Key-auth keys are sealed with a random nonce, so the plaintext UNIQUE
-    /// constraint no longer catches duplicates. Compare decrypted values
-    /// before writing to keep key-auth keys unique.
-    async fn ensure_unique_keyauth_key(&self, id: &str, key: &str) -> Result<()> {
-        let rows = sqlx::query("SELECT id, key FROM keyauth_credentials WHERE id <> ?")
-            .bind(id)
-            .fetch_all(self.pool())
-            .await
-            .map_err(|e| map_db_error(e, "credential"))?;
-        for row in rows {
-            let existing_id: String = decode(row.try_get("id"), "credential")?;
-            let stored: String = decode(row.try_get("key"), "credential")?;
-            let existing = open_secret(
-                &self.secrets,
-                &stored,
-                "keyauth_credentials",
-                &existing_id,
-                "key",
-            )?;
-            if existing == key {
-                return Err(Error::Storage(
-                    "conflict: credential already exists".to_string(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
     // Key-auth credentials
 
     pub async fn list_credentials_page(
@@ -91,16 +63,17 @@ impl ApiStore {
             .key
             .clone()
             .unwrap_or_else(|| format!("key_{}", uuid::Uuid::new_v4().simple()));
-        self.ensure_unique_keyauth_key(&id, &key).await?;
         let sealed_key = self.seal_secret(&key, "keyauth_credentials", &id, "key")?;
         sqlx::query(&format!(
-            "INSERT INTO keyauth_credentials (id, consumer_id, key, ttl, tags, created_at) \
-             VALUES (?, ?, ?, ?, ?, {now})",
+            "INSERT INTO keyauth_credentials \
+                (id, consumer_id, key, key_lookup, ttl, tags, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, {now})",
             now = epoch_now()
         ))
         .bind(&id)
         .bind(&input.consumer_id)
         .bind(&sealed_key)
+        .bind(crate::key_lookup(&key))
         .bind(input.ttl)
         .bind(encode_json(&input.tags.clone().unwrap_or_default())?)
         .execute(self.pool())
@@ -117,22 +90,22 @@ impl ApiStore {
         id: &str,
         input: &UpdateKeyauthCredential,
     ) -> Result<KeyauthCredential> {
-        if let Some(key) = input.key.as_deref() {
-            self.ensure_unique_keyauth_key(id, key).await?;
-        }
         let sealed_key = input
             .key
             .as_deref()
             .map(|value| self.seal_secret(value, "keyauth_credentials", id, "key"))
             .transpose()?;
+        let lookup = input.key.as_deref().map(crate::key_lookup);
         let result = sqlx::query(
             "UPDATE keyauth_credentials SET \
                 key = COALESCE(?, key), \
+                key_lookup = COALESCE(?, key_lookup), \
                 ttl = COALESCE(?, ttl), \
                 tags = COALESCE(?, tags) \
              WHERE id = ?",
         )
         .bind(&sealed_key)
+        .bind(lookup)
         .bind(input.ttl)
         .bind(input.tags.as_ref().map(encode_json).transpose()?)
         .bind(id)

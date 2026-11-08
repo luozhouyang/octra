@@ -32,7 +32,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use octra_core::{Error, Result, RouteSummary, ServiceSummary, SnapshotCounts};
-use octra_secrets::{MasterKey, SecretBox};
+use octra_secrets::{MasterKey, MasterKeySet, SecretBox};
+use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
@@ -42,6 +43,35 @@ pub struct RuntimeData {
     pub routes: Vec<RouteSummary>,
     pub counts: SnapshotCounts,
 }
+
+/// Summary of a master-key rotation and the secret rows re-encrypted with it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SecretRotationReport {
+    /// Number of non-empty secret columns re-encrypted with the new key.
+    pub rotated: u64,
+}
+
+/// Stable AES-GCM associated data for one stored secret column.
+pub(crate) fn secret_context(table: &str, row_id: &str, column: &str) -> String {
+    format!("{table}|{row_id}|{column}")
+}
+
+/// Deterministic KeyAuth lookup/dedup hash. This is not encryption: weak keys
+/// remain guessable offline, so KeyAuth keys must be high-entropy.
+pub(crate) fn key_lookup(key: &str) -> String {
+    hex::encode(Sha256::digest(key.as_bytes()))
+}
+
+const SECRET_TABLES: [(&str, &str, &[&str]); 4] = [
+    (
+        "ai_provider_oauth_tokens",
+        "account_id",
+        &["access_token", "refresh_token", "extra_json"],
+    ),
+    ("keyauth_credentials", "id", &["key"]),
+    ("basicauth_credentials", "id", &["password"]),
+    ("jwt_secrets", "id", &["secret"]),
+];
 
 pub struct Storage {
     pool: SqlitePool,
@@ -77,9 +107,9 @@ impl Storage {
             .map(|parent| parent.join("master.key"))
             .unwrap_or_else(|| PathBuf::from("master.key"));
         let existed = path.exists();
-        let key = MasterKey::load_or_create(&key_file, true, !existed)
+        let key_set = MasterKeySet::load_or_create(&key_file, true, !existed)
             .map_err(|err| Error::Storage(format!("cannot load master key: {err}")))?;
-        let secrets = Arc::new(SecretBox::new(key));
+        let secrets = Arc::new(SecretBox::from_key_set(key_set));
 
         let storage = Self::from_options(options, 5, secrets).await?;
         storage.migrate().await?;
@@ -126,39 +156,49 @@ impl Storage {
         })
     }
 
-    /// Seals legacy plaintext credential values in place. The operation is
-    /// idempotent: values that already carry the sealed prefix are skipped.
-    /// Proves that the resolved master key can open the existing sealed rows.
+    /// Proves that the resolved master key set can open every existing sealed
+    /// row. v2 rows are validated with their `table|row|column` AAD context;
+    /// v1 rows are validated against every retained key.
     ///
     /// This prevents a changed keychain entry or key file from silently
     /// serving a database whose secrets can no longer be decrypted.
     pub async fn verify_secrets(&self) -> Result<()> {
-        for (table, column) in [
-            ("ai_provider_oauth_tokens", "access_token"),
-            ("keyauth_credentials", "key"),
-            ("basicauth_credentials", "password"),
-            ("jwt_secrets", "secret"),
-        ] {
-            let sql =
-                format!("SELECT {column} FROM {table} WHERE {column} LIKE 'enc:v1:%' LIMIT 1");
-            let stored = sqlx::query_scalar::<_, String>(&sql)
-                .fetch_optional(self.pool())
+        for (table, id_column, columns) in SECRET_TABLES {
+            let selected = columns.join(", ");
+            let sql = format!("SELECT {id_column}, {selected} FROM {table}");
+            let rows = sqlx::query(&sql)
+                .fetch_all(self.pool())
                 .await
                 .map_err(|err| {
                     Error::Storage(format!("cannot read sealed secrets from {table}: {err}"))
                 })?;
-            if let Some(stored) = stored {
-                self.secrets.open(&stored).map_err(|_| {
-                    Error::Storage(format!(
-                        "cannot decrypt stored secrets in {table}; the master key does not match the database"
-                    ))
-                })?;
-                return Ok(());
+            for row in rows {
+                let id: String = row.get(id_column);
+                for column in columns {
+                    let stored: Option<String> = row.try_get(*column).map_err(|err| {
+                        Error::Storage(format!(
+                            "cannot read stored secret {table}.{column} for row '{id}': {err}"
+                        ))
+                    })?;
+                    let Some(stored) = stored.filter(|value| !value.is_empty()) else {
+                        continue;
+                    };
+                    let context = secret_context(table, &id, column);
+                    self.secrets
+                        .open_with_context(&stored, &context)
+                        .map_err(|error| {
+                            Error::Storage(format!(
+                                "cannot decrypt stored secrets in {table}.{column} for row '{id}': {error}"
+                            ))
+                        })?;
+                }
             }
         }
         Ok(())
     }
 
+    /// Seals plaintext values and upgrades v1 ciphertext to v2 with AAD. The
+    /// operation is idempotent: v2 values are left untouched.
     pub async fn backfill_secrets(&self) -> Result<()> {
         let mut tx = self
             .pool
@@ -225,26 +265,62 @@ impl Storage {
             updated += 1;
         }
 
-        let keyauth_rows = sqlx::query("SELECT id, key FROM keyauth_credentials")
+        let keyauth_rows = sqlx::query("SELECT id, key, key_lookup FROM keyauth_credentials")
             .fetch_all(&mut *tx)
             .await
             .map_err(|err| Error::Storage(format!("cannot read keyauth credentials: {err}")))?;
         for row in keyauth_rows {
             let id: String = row.get("id");
             let key: String = row.get("key");
-            if let Some(sealed) = self.seal_if_needed(&key, "keyauth_credentials", "key", &id)? {
-                sqlx::query("UPDATE keyauth_credentials SET key = ? WHERE id = ?")
-                    .bind(sealed)
-                    .bind(&id)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|err| {
+            let existing_lookup: Option<String> = row.get("key_lookup");
+            let context = secret_context("keyauth_credentials", &id, "key");
+            let plaintext = if SecretBox::is_sealed(&key) {
+                self.secrets
+                    .open_with_context(&key, &context)
+                    .map_err(|error| {
                         Error::Storage(format!(
-                            "cannot seal keyauth_credentials for row '{id}': {err}"
+                            "cannot decrypt keyauth_credentials.key for row '{id}': {error}"
                         ))
-                    })?;
-                updated += 1;
+                    })?
+            } else {
+                key.as_bytes().to_vec()
+            };
+            let plaintext = String::from_utf8(plaintext).map_err(|_| {
+                Error::Storage(format!(
+                    "decrypted keyauth_credentials.key for row '{id}' is not UTF-8"
+                ))
+            })?;
+            let lookup = key_lookup(&plaintext);
+            let sealed = if key.starts_with("enc:v2:") {
+                None
+            } else {
+                Some(
+                    self.secrets
+                        .seal_with_context(plaintext.as_bytes(), &context)
+                        .map_err(|_| {
+                            Error::Storage(format!(
+                                "cannot encrypt keyauth_credentials.key for row '{id}'"
+                            ))
+                        })?,
+                )
+            };
+            if sealed.is_none() && existing_lookup.as_deref() == Some(lookup.as_str()) {
+                continue;
             }
+            sqlx::query(
+                "UPDATE keyauth_credentials SET key = COALESCE(?, key), key_lookup = ? WHERE id = ?",
+            )
+            .bind(sealed)
+            .bind(&lookup)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| {
+                Error::Storage(format!(
+                    "cannot backfill keyauth_credentials for row '{id}': {err}"
+                ))
+            })?;
+            updated += 1;
         }
 
         let basicauth_rows = sqlx::query("SELECT id, password FROM basicauth_credentials")
@@ -300,6 +376,109 @@ impl Storage {
         Ok(())
     }
 
+    /// Rotates the active master key and re-encrypts every stored secret with
+    /// it and its `table|row|column` AAD context. All tables are updated in one
+    /// transaction, and any undecryptable row aborts the whole rotation.
+    pub async fn rotate_secrets(&self) -> Result<SecretRotationReport> {
+        self.secrets
+            .rotate()
+            .map_err(|error| Error::Storage(format!("cannot rotate the master key: {error}")))?;
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| Error::Storage(format!("cannot start secret rotation: {err}")))?;
+        let mut rotated = 0u64;
+        for (table, id_column, columns) in SECRET_TABLES {
+            rotated += self
+                .reseal_table(&mut tx, table, id_column, columns)
+                .await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|err| Error::Storage(format!("cannot commit secret rotation: {err}")))?;
+        tracing::info!(rotated, "rotated and re-encrypted stored secrets");
+        Ok(SecretRotationReport { rotated })
+    }
+
+    async fn reseal_table(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        table: &str,
+        id_column: &str,
+        columns: &[&str],
+    ) -> Result<u64> {
+        let selected = columns.join(", ");
+        let sql = format!("SELECT {id_column}, {selected} FROM {table}");
+        let rows = sqlx::query(&sql)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|err| Error::Storage(format!("cannot read secrets from {table}: {err}")))?;
+
+        let mut updates = Vec::with_capacity(rows.len());
+        let mut rotated = 0u64;
+        for row in rows {
+            let id: String = row.get(id_column);
+            let mut values = Vec::with_capacity(columns.len());
+            for column in columns {
+                let stored: Option<String> = row.try_get(*column).map_err(|err| {
+                    Error::Storage(format!(
+                        "cannot read stored secret {table}.{column} for row '{id}': {err}"
+                    ))
+                })?;
+                let sealed = match stored.filter(|value| !value.is_empty()) {
+                    Some(value) => {
+                        let context = secret_context(table, &id, column);
+                        let plaintext =
+                            self.secrets
+                                .open_with_context(&value, &context)
+                                .map_err(|error| {
+                                    Error::Storage(format!(
+                                        "cannot re-encrypt {table}.{column} for row '{id}': {error}"
+                                    ))
+                                })?;
+                        rotated += 1;
+                        Some(
+                            self.secrets
+                                .seal_with_context(&plaintext, &context)
+                                .map_err(|error| {
+                                    Error::Storage(format!(
+                                        "cannot re-encrypt {table}.{column} for row '{id}': {error}"
+                                    ))
+                                })?,
+                        )
+                    }
+                    None => None,
+                };
+                values.push(sealed);
+            }
+            updates.push((id, values));
+        }
+
+        let assignments = columns
+            .iter()
+            .map(|column| format!("{column} = COALESCE(?, {column})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("UPDATE {table} SET {assignments} WHERE {id_column} = ?");
+        for (id, values) in updates {
+            if values.iter().all(|value| value.is_none()) {
+                continue;
+            }
+            let mut query = sqlx::query(&sql);
+            for value in values {
+                query = query.bind(value);
+            }
+            query.bind(id).execute(&mut **tx).await.map_err(|err| {
+                Error::Storage(format!(
+                    "cannot store re-encrypted secrets in {table}: {err}"
+                ))
+            })?;
+        }
+        Ok(rotated)
+    }
+
     fn seal_if_needed(
         &self,
         value: &str,
@@ -307,11 +486,23 @@ impl Storage {
         column: &str,
         id: &str,
     ) -> Result<Option<String>> {
-        if value.is_empty() || SecretBox::is_sealed(value) {
+        if value.is_empty() || value.starts_with("enc:v2:") {
             return Ok(None);
         }
+        let context = secret_context(table, id, column);
+        let plaintext = if value.starts_with("enc:v1:") {
+            self.secrets
+                .open_with_context(value, &context)
+                .map_err(|error| {
+                    Error::Storage(format!(
+                        "cannot decrypt legacy {table}.{column} for row '{id}': {error}"
+                    ))
+                })?
+        } else {
+            value.as_bytes().to_vec()
+        };
         self.secrets
-            .seal(value.as_bytes())
+            .seal_with_context(&plaintext, &context)
             .map(Some)
             .map_err(|_| Error::Storage(format!("cannot encrypt {table}.{column} for row '{id}'")))
     }
@@ -525,6 +716,215 @@ mod tests {
         let sealed = storage.secrets.seal(b"ephemeral").unwrap();
         assert!(SecretBox::is_sealed(&sealed));
         assert_eq!(storage.secrets.open(&sealed).unwrap(), b"ephemeral");
+    }
+
+    #[tokio::test]
+    async fn rotation_reencrypts_every_secret_and_upgrades_v1() {
+        use octra_ai_config::{AiProvider, AiProviderAccount};
+        use octra_api_core::{
+            CreateBasicauthCredential, CreateConsumer, CreateJwtSecret, CreateKeyauthCredential,
+        };
+        use serde_json::json;
+
+        let storage = Storage::connect_in_memory().await.unwrap();
+        let consumer = storage
+            .api
+            .create_consumer(&CreateConsumer {
+                username: Some("rotation".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let keyauth = storage
+            .api
+            .create_credential(&CreateKeyauthCredential {
+                consumer_id: consumer.id.clone(),
+                key: Some("rotation-key".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let basicauth = storage
+            .api
+            .create_basicauth(&CreateBasicauthCredential {
+                consumer_id: consumer.id.clone(),
+                username: "rotator".into(),
+                password: "rotation-password".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let jwt = storage
+            .api
+            .create_jwt(&CreateJwtSecret {
+                consumer_id: consumer.id.clone(),
+                key: "rotation-jwt-key".into(),
+                secret: "rotation-jwt-secret".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let provider = AiProvider {
+            id: "provider-rotation".into(),
+            name: "rotation".into(),
+            protocol: "openai".into(),
+            base_url: "https://api.example.com".into(),
+            auth_ref: None,
+            capabilities: Vec::new(),
+            config: json!({}),
+            enabled: true,
+            created_at: 100,
+            updated_at: 100,
+        };
+        storage.ai.upsert_provider(&provider).await.unwrap();
+        let account = AiProviderAccount {
+            id: "account-rotation".into(),
+            provider_id: provider.id.clone(),
+            name: "rotation".into(),
+            credential_kind: "oauth".into(),
+            secret_ref: None,
+            oauth_ref: None,
+            weight: 1,
+            priority: 0,
+            quota_limit: None,
+            quota_unit: "requests".into(),
+            quota_period: "none".into(),
+            quota_used: 0,
+            cooldown_until: None,
+            enabled: true,
+            oauth_status: "authorized".into(),
+            oauth_expires_at: None,
+            config: json!({}),
+            created_at: 100,
+            updated_at: 100,
+        };
+        storage.ai.upsert_account(&account).await.unwrap();
+        storage
+            .llm
+            .upsert_oauth_token(&LlmOAuthTokenRecord {
+                account_id: account.id.clone(),
+                access_token: "rotation-access".into(),
+                refresh_token: Some("rotation-refresh".into()),
+                token_type: "Bearer".into(),
+                scope: "chat".into(),
+                expires_at: None,
+                extra_json: "{\"region\":\"eu\"}".into(),
+            })
+            .await
+            .unwrap();
+
+        let legacy = storage.secrets.seal_legacy(b"legacy-key").unwrap();
+        assert!(legacy.starts_with("enc:v1:"));
+        sqlx::query(
+            "INSERT INTO keyauth_credentials (id, consumer_id, key, key_lookup, tags, created_at) \
+             VALUES (?, ?, ?, ?, '[]', CAST(strftime('%s', 'now') AS INTEGER))",
+        )
+        .bind("cred_legacy")
+        .bind(&consumer.id)
+        .bind(&legacy)
+        .bind(key_lookup("legacy-key"))
+        .execute(storage.pool())
+        .await
+        .unwrap();
+
+        let report = storage.rotate_secrets().await.unwrap();
+        assert_eq!(report.rotated, 7);
+
+        let raw_key: String =
+            sqlx::query_scalar("SELECT key FROM keyauth_credentials WHERE id = ?")
+                .bind(&keyauth.id)
+                .fetch_one(storage.pool())
+                .await
+                .unwrap();
+        assert!(raw_key.starts_with("enc:v2:"));
+        let raw_legacy: String =
+            sqlx::query_scalar("SELECT key FROM keyauth_credentials WHERE id = 'cred_legacy'")
+                .fetch_one(storage.pool())
+                .await
+                .unwrap();
+        assert!(raw_legacy.starts_with("enc:v2:"));
+        let raw_password: String =
+            sqlx::query_scalar("SELECT password FROM basicauth_credentials WHERE id = ?")
+                .bind(&basicauth.id)
+                .fetch_one(storage.pool())
+                .await
+                .unwrap();
+        assert!(raw_password.starts_with("enc:v2:"));
+        let raw_jwt: String = sqlx::query_scalar("SELECT secret FROM jwt_secrets WHERE id = ?")
+            .bind(&jwt.id)
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+        assert!(raw_jwt.starts_with("enc:v2:"));
+        let raw_oauth: (String, Option<String>, String) = sqlx::query_as(
+            "SELECT access_token, refresh_token, extra_json
+             FROM ai_provider_oauth_tokens WHERE account_id = ?",
+        )
+        .bind(&account.id)
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert!(raw_oauth.0.starts_with("enc:v2:"));
+        assert!(raw_oauth.1.as_deref().unwrap().starts_with("enc:v2:"));
+        assert!(raw_oauth.2.starts_with("enc:v2:"));
+
+        assert_eq!(
+            storage
+                .api
+                .get_credential(&keyauth.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .key,
+            "rotation-key"
+        );
+        assert_eq!(
+            storage
+                .api
+                .get_credential("cred_legacy")
+                .await
+                .unwrap()
+                .unwrap()
+                .key,
+            "legacy-key"
+        );
+        assert_eq!(
+            storage
+                .api
+                .get_basicauth(&basicauth.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .password,
+            "rotation-password"
+        );
+        assert_eq!(
+            storage.api.get_jwt(&jwt.id).await.unwrap().unwrap().secret,
+            "rotation-jwt-secret"
+        );
+        let oauth = storage
+            .llm
+            .get_oauth_token(&account.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(oauth.access_token, "rotation-access");
+        assert_eq!(oauth.refresh_token.as_deref(), Some("rotation-refresh"));
+        assert_eq!(oauth.extra_json, "{\"region\":\"eu\"}");
+
+        let second = storage.rotate_secrets().await.unwrap();
+        assert_eq!(second.rotated, 7);
+        assert_eq!(
+            storage
+                .api
+                .get_credential(&keyauth.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .key,
+            "rotation-key"
+        );
     }
 
     #[cfg(unix)]

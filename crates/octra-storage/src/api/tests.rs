@@ -345,7 +345,7 @@ async fn credentials_are_sealed_at_rest_and_plaintext_to_callers() {
         .fetch_one(storage.pool())
         .await
         .unwrap();
-    assert!(raw_key.starts_with("enc:v1:"));
+    assert!(raw_key.starts_with("enc:v2:"));
 
     let basicauth = storage
         .api
@@ -364,7 +364,7 @@ async fn credentials_are_sealed_at_rest_and_plaintext_to_callers() {
             .fetch_one(storage.pool())
             .await
             .unwrap();
-    assert!(raw_password.starts_with("enc:v1:"));
+    assert!(raw_password.starts_with("enc:v2:"));
 
     let jwt = storage
         .api
@@ -382,7 +382,7 @@ async fn credentials_are_sealed_at_rest_and_plaintext_to_callers() {
         .fetch_one(storage.pool())
         .await
         .unwrap();
-    assert!(raw_jwt.starts_with("enc:v1:"));
+    assert!(raw_jwt.starts_with("enc:v2:"));
     let raw_jwt_key: String = sqlx::query_scalar("SELECT key FROM jwt_secrets WHERE id = ?")
         .bind(&jwt.id)
         .fetch_one(storage.pool())
@@ -407,7 +407,14 @@ async fn credentials_are_sealed_at_rest_and_plaintext_to_callers() {
         .fetch_one(storage.pool())
         .await
         .unwrap();
-    assert!(raw_key.starts_with("enc:v1:"));
+    assert!(raw_key.starts_with("enc:v2:"));
+    let lookup: String =
+        sqlx::query_scalar("SELECT key_lookup FROM keyauth_credentials WHERE id = ?")
+            .bind(&keyauth.id)
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+    assert_eq!(lookup, crate::key_lookup("key-rotated"));
 
     let data = storage.api.load_runtime_data().await.unwrap();
     assert_eq!(data.keyauth[0].key, "key-rotated");
@@ -423,4 +430,95 @@ async fn credentials_are_sealed_at_rest_and_plaintext_to_callers() {
     assert!(message.contains("keyauth_credentials"));
     assert!(message.contains(&keyauth.id));
     assert!(!message.contains("enc:v1:"));
+}
+
+#[tokio::test]
+async fn keyauth_backfill_populates_the_lookup_and_upgrades_v1() {
+    let storage = setup().await;
+    let consumer = storage
+        .api
+        .create_consumer(&CreateConsumer {
+            username: Some("lookup".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let legacy = storage.secrets.seal_legacy(b"lookup-key").unwrap();
+    sqlx::query(
+        "INSERT INTO keyauth_credentials (id, consumer_id, key, tags, created_at) \
+         VALUES ('cred_lookup', ?, ?, '[]', CAST(strftime('%s', 'now') AS INTEGER))",
+    )
+    .bind(&consumer.id)
+    .bind(&legacy)
+    .execute(storage.pool())
+    .await
+    .unwrap();
+
+    storage.backfill_secrets().await.unwrap();
+    let (key, lookup): (String, Option<String>) =
+        sqlx::query_as("SELECT key, key_lookup FROM keyauth_credentials WHERE id = 'cred_lookup'")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+    assert!(key.starts_with("enc:v2:"));
+    assert_eq!(
+        lookup.as_deref(),
+        Some(crate::key_lookup("lookup-key").as_str())
+    );
+
+    storage.backfill_secrets().await.unwrap();
+    let (key_again, lookup_again): (String, Option<String>) =
+        sqlx::query_as("SELECT key, key_lookup FROM keyauth_credentials WHERE id = 'cred_lookup'")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+    assert_eq!(key, key_again);
+    assert_eq!(lookup, lookup_again);
+}
+
+#[tokio::test]
+async fn concurrent_keyauth_inserts_allow_exactly_one_winner() {
+    let storage = setup().await;
+    let consumer = storage
+        .api
+        .create_consumer(&CreateConsumer {
+            username: Some("race".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let input = CreateKeyauthCredential {
+        consumer_id: consumer.id.clone(),
+        key: Some("shared-race-key".into()),
+        ..Default::default()
+    };
+    let first = storage.api.create_credential(&input);
+    let second = storage.api.create_credential(&input);
+    let (first, second) = tokio::join!(first, second);
+
+    let successes = [&first, &second]
+        .iter()
+        .filter(|result| result.is_ok())
+        .count();
+    assert_eq!(
+        successes, 1,
+        "exactly one insert must win the unique key race"
+    );
+    let loser = if first.is_err() { &first } else { &second };
+    assert!(
+        matches!(loser, Err(Error::Storage(message)) if message.contains("conflict")),
+        "{loser:?}"
+    );
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM keyauth_credentials")
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let lookup: String = sqlx::query_scalar("SELECT key_lookup FROM keyauth_credentials")
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+    assert_eq!(lookup, crate::key_lookup("shared-race-key"));
 }

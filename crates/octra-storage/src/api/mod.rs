@@ -213,7 +213,7 @@ impl ApiStore {
             return Ok(String::new());
         }
         self.secrets
-            .seal(value.as_bytes())
+            .seal_with_context(value.as_bytes(), &crate::secret_context(table, id, column))
             .map_err(|_| Error::Storage(format!("cannot encrypt {table}.{column} for row '{id}'")))
     }
 }

@@ -16,6 +16,7 @@ mod plugins;
 mod policies;
 mod routes;
 mod schemas;
+mod secrets;
 mod services;
 mod status;
 mod upstreams;
@@ -262,6 +263,7 @@ pub fn router() -> Router<ApiControlState> {
         .route("/admin/schemas/plugins/validate", post(schemas::validate))
         .route("/admin/schemas/plugins/{name}", get(schemas::get))
         .route("/admin/status", get(status::status))
+        .route("/admin/secrets/rotate", post(secrets::rotate))
         .route("/admin/metrics", get(operations::metrics))
         .route(
             "/admin/metrics/prometheus",

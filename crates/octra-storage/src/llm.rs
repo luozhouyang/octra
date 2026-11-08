@@ -336,9 +336,11 @@ fn seal_secret(
     if value.is_empty() {
         return Ok(String::new());
     }
-    secrets.seal(value.as_bytes()).map_err(|_| {
-        LlmStorageError::Backend(format!("cannot encrypt {table}.{column} for row '{id}'"))
-    })
+    secrets
+        .seal_with_context(value.as_bytes(), &crate::secret_context(table, id, column))
+        .map_err(|_| {
+            LlmStorageError::Backend(format!("cannot encrypt {table}.{column} for row '{id}'"))
+        })
 }
 
 fn open_secret(
@@ -351,9 +353,11 @@ fn open_secret(
     if stored.is_empty() {
         return Ok(String::new());
     }
-    let bytes = secrets.open(stored).map_err(|_| {
-        LlmStorageError::Backend(format!("cannot decrypt {table}.{column} for row '{id}'"))
-    })?;
+    let bytes = secrets
+        .open_with_context(stored, &crate::secret_context(table, id, column))
+        .map_err(|_| {
+            LlmStorageError::Backend(format!("cannot decrypt {table}.{column} for row '{id}'"))
+        })?;
     String::from_utf8(bytes).map_err(|_| {
         LlmStorageError::Backend(format!(
             "decrypted {table}.{column} for row '{id}' is not UTF-8"
@@ -1872,12 +1876,12 @@ mod tests {
         .fetch_one(storage.pool())
         .await
         .unwrap();
-        assert!(raw.0.starts_with("enc:v1:"), "access token must be sealed");
+        assert!(raw.0.starts_with("enc:v2:"), "access token must be sealed");
         assert!(
-            raw.1.as_deref().unwrap().starts_with("enc:v1:"),
+            raw.1.as_deref().unwrap().starts_with("enc:v2:"),
             "refresh token must be sealed"
         );
-        assert!(raw.2.starts_with("enc:v1:"), "extra JSON must be sealed");
+        assert!(raw.2.starts_with("enc:v2:"), "extra JSON must be sealed");
 
         let loaded = storage
             .llm
@@ -2007,9 +2011,9 @@ mod tests {
         .fetch_one(storage.pool())
         .await
         .unwrap();
-        assert!(sealed.0.starts_with("enc:v1:"));
-        assert!(sealed.1.as_deref().unwrap().starts_with("enc:v1:"));
-        assert!(sealed.2.starts_with("enc:v1:"));
+        assert!(sealed.0.starts_with("enc:v2:"));
+        assert!(sealed.1.as_deref().unwrap().starts_with("enc:v2:"));
+        assert!(sealed.2.starts_with("enc:v2:"));
 
         storage.backfill_secrets().await.unwrap();
         let after_second: (String, Option<String>, String) = sqlx::query_as(

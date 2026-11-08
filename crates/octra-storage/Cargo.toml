@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+hex.workspace = true
 octra-ai-config.workspace = true
 octra-api-core.workspace = true
 octra-core.workspace = true
@@ -17,6 +18,7 @@ octra-secrets.workspace = true
 octra-llm-plugin-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 tracing.workspace = true
 uuid.workspace = true

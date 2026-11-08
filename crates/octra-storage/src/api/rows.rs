@@ -196,7 +196,7 @@ pub(super) fn open_secret(
         return Ok(String::new());
     }
     let bytes = secrets
-        .open(stored)
+        .open_with_context(stored, &crate::secret_context(table, id, column))
         .map_err(|_| Error::Storage(format!("cannot decrypt {table}.{column} for row '{id}'")))?;
     String::from_utf8(bytes).map_err(|_| {
         Error::Storage(format!(

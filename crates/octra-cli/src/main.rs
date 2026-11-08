@@ -51,6 +51,9 @@ enum Command {
     /// Manage consumer (LLM access) policies
     #[command(subcommand)]
     Policies(PoliciesCommand),
+    /// Manage stored secret encryption
+    #[command(subcommand)]
+    Secrets(SecretsCommand),
 }
 
 #[derive(Subcommand)]
@@ -548,6 +551,12 @@ enum PoliciesCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum SecretsCommand {
+    /// Rotate the master key and re-encrypt all stored secrets
+    Rotate,
+}
+
 struct Control {
     workspace: Workspace,
     base_url: String,
@@ -572,6 +581,7 @@ fn main() -> Result<()> {
         Command::Keys(command) => keys(&control, command)?,
         Command::Ai(command) => ai(&control, command)?,
         Command::Policies(command) => policies(&control, command)?,
+        Command::Secrets(command) => secrets(&control, command)?,
     }
 
     Ok(())
@@ -799,6 +809,12 @@ fn policies(control: &Control, command: PoliciesCommand) -> Result<()> {
         PoliciesCommand::Delete { id } => {
             print_json(control.delete(&format!("/admin/policies/{id}"))?)
         }
+    }
+}
+
+fn secrets(control: &Control, command: SecretsCommand) -> Result<()> {
+    match command {
+        SecretsCommand::Rotate => print_json(control.post("/admin/secrets/rotate")?),
     }
 }
 
