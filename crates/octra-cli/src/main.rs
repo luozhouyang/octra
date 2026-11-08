@@ -29,6 +29,9 @@ enum Command {
     /// Manage API Gateway upstreams and targets
     #[command(subcommand)]
     Upstreams(UpstreamsCommand),
+    /// Manage MCP servers, tools, keys, and ACLs
+    #[command(subcommand)]
+    Mcp(McpCommand),
     /// Reload the gateway runtime snapshot from SQLite
     Reload,
     /// Print local paths and daemon reachability
@@ -151,6 +154,123 @@ enum UpstreamTargetsCommand {
     /// Delete a target
     Delete {
         /// Target id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    /// Manage MCP servers
+    #[command(subcommand)]
+    Servers(McpServersCommand),
+    /// Manage MCP tools
+    #[command(subcommand)]
+    Tools(McpToolsCommand),
+    /// Manage MCP API keys
+    #[command(subcommand)]
+    Keys(McpKeysCommand),
+    /// Manage MCP tool ACLs
+    #[command(subcommand)]
+    Acls(McpAclsCommand),
+}
+
+#[derive(Subcommand)]
+enum McpServersCommand {
+    /// List MCP servers
+    List,
+    /// Create an MCP server from a JSON body
+    Create {
+        /// JSON object with the server fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update an MCP server from a JSON body
+    Update {
+        /// Server id
+        id: String,
+        /// JSON object with the server fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete an MCP server
+    Delete {
+        /// Server id
+        id: String,
+    },
+    /// Refresh tools for an MCP server
+    Refresh {
+        /// Server id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpToolsCommand {
+    /// List tools, optionally filtered by server
+    List {
+        /// Server id
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Create a tool from a JSON body
+    Create {
+        /// JSON object with the tool fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update a tool from a JSON body
+    Update {
+        /// Tool id
+        id: String,
+        /// JSON object with the tool fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete a tool
+    Delete {
+        /// Tool id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpKeysCommand {
+    /// List MCP API keys
+    List,
+    /// Create an MCP API key
+    Create {
+        /// JSON object with the key fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete an MCP API key
+    Delete {
+        /// Key id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpAclsCommand {
+    /// List MCP tool ACLs
+    List,
+    /// Create an MCP ACL from a JSON body
+    Create {
+        /// JSON object with the ACL fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update an MCP ACL from a JSON body
+    Update {
+        /// ACL id
+        id: String,
+        /// JSON object with the ACL fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete an MCP ACL
+    Delete {
+        /// ACL id
         id: String,
     },
 }
@@ -415,6 +535,7 @@ fn main() -> Result<()> {
         Command::Services(command) => services(&control, command)?,
         Command::Routes(command) => routes(&control, command)?,
         Command::Upstreams(command) => upstreams(&control, command)?,
+        Command::Mcp(command) => mcp(&control, command)?,
         Command::Reload => print_json(control.post("/api/v1/system/reload")?)?,
         Command::Doctor => doctor(&control)?,
         Command::Usage { limit } => {
@@ -492,6 +613,88 @@ fn upstream_targets(control: &Control, command: UpstreamTargetsCommand) -> Resul
         }
         UpstreamTargetsCommand::Delete { id } => {
             print_json(control.delete(&format!("/admin/targets/{id}"))?)
+        }
+    }
+}
+
+fn mcp(control: &Control, command: McpCommand) -> Result<()> {
+    match command {
+        McpCommand::Servers(command) => mcp_servers(control, command),
+        McpCommand::Tools(command) => mcp_tools(control, command),
+        McpCommand::Keys(command) => mcp_keys(control, command),
+        McpCommand::Acls(command) => mcp_acls(control, command),
+    }
+}
+
+fn mcp_servers(control: &Control, command: McpServersCommand) -> Result<()> {
+    match command {
+        McpServersCommand::List => print_json(control.get("/api/v1/mcp/servers")?),
+        McpServersCommand::Create { body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.post_json("/api/v1/mcp/servers", &body)?)
+        }
+        McpServersCommand::Update { id, body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.put(&format!("/api/v1/mcp/servers/{id}"), &body)?)
+        }
+        McpServersCommand::Delete { id } => {
+            print_json(control.delete(&format!("/api/v1/mcp/servers/{id}"))?)
+        }
+        McpServersCommand::Refresh { id } => {
+            print_json(control.post(&format!("/api/v1/mcp/servers/{id}/refresh"))?)
+        }
+    }
+}
+
+fn mcp_tools(control: &Control, command: McpToolsCommand) -> Result<()> {
+    match command {
+        McpToolsCommand::List { server } => {
+            let path = match server {
+                Some(server) => format!("/api/v1/mcp/tools?server_id={server}"),
+                None => "/api/v1/mcp/tools".to_string(),
+            };
+            print_json(control.get(&path)?)
+        }
+        McpToolsCommand::Create { body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.post_json("/api/v1/mcp/tools", &body)?)
+        }
+        McpToolsCommand::Update { id, body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.put(&format!("/api/v1/mcp/tools/{id}"), &body)?)
+        }
+        McpToolsCommand::Delete { id } => {
+            print_json(control.delete(&format!("/api/v1/mcp/tools/{id}"))?)
+        }
+    }
+}
+
+fn mcp_keys(control: &Control, command: McpKeysCommand) -> Result<()> {
+    match command {
+        McpKeysCommand::List => print_json(control.get("/api/v1/mcp/keys")?),
+        McpKeysCommand::Create { body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.post_json("/api/v1/mcp/keys", &body)?)
+        }
+        McpKeysCommand::Delete { id } => {
+            print_json(control.delete(&format!("/api/v1/mcp/keys/{id}"))?)
+        }
+    }
+}
+
+fn mcp_acls(control: &Control, command: McpAclsCommand) -> Result<()> {
+    match command {
+        McpAclsCommand::List => print_json(control.get("/api/v1/mcp/acls")?),
+        McpAclsCommand::Create { body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.post_json("/api/v1/mcp/acls", &body)?)
+        }
+        McpAclsCommand::Update { id, body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.put(&format!("/api/v1/mcp/acls/{id}"), &body)?)
+        }
+        McpAclsCommand::Delete { id } => {
+            print_json(control.delete(&format!("/api/v1/mcp/acls/{id}"))?)
         }
     }
 }
