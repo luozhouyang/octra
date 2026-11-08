@@ -36,7 +36,8 @@ erDiagram
     MCP_SERVERS ||--o{ MCP_TOOLS : exposes
     MCP_SERVERS ||--o{ MCP_SESSIONS : anchors
     MCP_TOOLS ||--o{ MCP_TOOL_ACLS : grants
-    CONSUMERS ||--o{ MCP_TOOL_ACLS : receives
+    CONSUMERS o|--o{ MCP_TOOL_ACLS : receives
+    CONSUMER_GROUPS o|--o{ MCP_TOOL_ACLS : receives
     CONSUMERS o|--o{ MCP_API_KEYS : owns
     PLUGINS ||--o{ PLUGIN_CONFIGS : configures
     PLUGIN_ARTIFACTS o|--o{ PLUGINS : packages
@@ -53,7 +54,7 @@ The diagram shows enforced foreign keys. `llm_usage`, `llm_usage_rollup`, `event
 
 **LLM routing and accounting.** `llm_providers`, `llm_models`, `llm_provider_accounts`, `llm_provider_oauth_tokens`, `llm_routing_groups`, `llm_routing_targets`, `llm_routes`, `llm_virtual_keys`, `llm_usage`, `llm_usage_rollup`, `llm_pii_engines`, `llm_plugin_state`, `llm_counters`, and `llm_budget_windows`. A route's `virtual_model_id` is unique; `routing_group_id` is nullable so a route can exist before a group is attached. A target points at a provider, model, optional account, weight, priority, and position. `llm_usage` keeps `api_key_id`, `virtual_model_id`, `provider_id`, `account_id`, and `model_id` as historical labels rather than enforced foreign keys, so deleting configuration does not erase usage history. `llm_usage_rollup` is a `WITHOUT ROWID` hourly aggregate keyed by bucket and dimensions. `llm_counters` and `llm_budget_windows` are short-lived shared counters for rate limits and budget guards.
 
-**MCP.** `mcp_servers`, `mcp_tools`, `mcp_sessions`, `mcp_tool_acls`, `mcp_api_keys`, and `mcp_invocations`. `mcp_servers.transport` is `stdio` or `http`; `config_json` and `headers_json` keep transport configuration and secret references. `mcp_tools` is unique per `(server_id, name)` and stores the input schema. `mcp_sessions.server_id` is non-null, so a gateway session is anchored to the first enabled server even though it spans the aggregate. `mcp_tool_acls` is unique per `(tool_id, consumer_id)`; a tool with no rows follows the open-local default. `mcp_api_keys` stores a prefix and hash, never the key.
+**MCP.** `mcp_servers`, `mcp_tools`, `mcp_sessions`, `mcp_tool_acls`, `mcp_api_keys`, and `mcp_invocations`. `mcp_servers.transport` is `stdio` or `http`; `config_json` and `headers_json` keep transport configuration and secret references. `mcp_tools` is unique per `(server_id, name)` and stores the input schema. `mcp_sessions.server_id` is non-null, so a gateway session is anchored to the first enabled server even though it spans the aggregate. `mcp_tool_acls` is unique per `(tool_id, consumer_id)`, `(tool_id, consumer_group_id)`, or `(tool_id)` for the default row; a tool with no rows follows the open-local default. Precedence is explicit consumer, then matching groups with deny-wins, then the default row. `mcp_api_keys` stores a prefix and hash, never the key.
 
 **Agents.** `agents`, `agent_profiles`, and `agent_config_backups`. A profile is unique per `(agent_id, name)` and may reference a virtual key and a config path. A backup stores the exact original content, original/applied SHA-256, whether the file existed, and a restore timestamp; backups are capped at 20 per agent and are not removed by an agent cascade.
 

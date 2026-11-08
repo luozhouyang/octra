@@ -26,7 +26,7 @@ The product has three protocol surfaces and one management surface:
 - A local daemon that unifies API, LLM, and MCP gateways behind one control plane and one persistence layer.
 - Kong-style API routing, upstreams, health checks, plugins, consumers, and a Kong-shaped Admin API.
 - LLM protocol compatibility, virtual models, routing groups, provider accounts, virtual-key governance, usage/cost accounting, and opt-in PII masking.
-- MCP fronting, tool aggregation, sessions, API keys, per-consumer tool ACLs, and invocation audit.
+- MCP fronting, tool aggregation, sessions, API keys, consumer/consumer-group/tool-default ACLs, and invocation audit.
 - Detection, preview, atomic apply, backup, and restore of Claude Code, Codex, and OpenCode configuration.
 - First-party Rust plugins and sandboxed third-party WASM plugins, including durable events and scheduled jobs.
 - A Tauri desktop app, a browser frontend, and an administrative CLI over the same control API.
@@ -39,7 +39,7 @@ The product has three protocol surfaces and one management surface:
 - Complete Kong Lua plugin compatibility, Kong PDK compatibility, or a drop-in Kong Admin API replacement.
 - magpie's signed-in subscription discovery, menu-bar app, remote sharing, Docker/NAS mode, or Bun/JavaScript plugin runtime.
 - OpenAPI-to-MCP conversion modes in v0.1.
-- Complete Kong MCP ACL parity (consumer groups, default ACL entries, CEL expressions) in v0.1.
+- Complete Kong MCP ACL parity (CEL expressions) in v0.1.
 - Rust dynamic-library plugin loading or unsandboxed third-party native code.
 - OS keychain integration in the current phase; secret references are the implemented boundary.
 - Desktop-side daemon lifecycle supervision, signed installers, and notarized packages in v0.1.
@@ -74,7 +74,8 @@ erDiagram
     MCP_SERVERS ||--o{ MCP_TOOLS : exposes
     MCP_SERVERS ||--o{ MCP_SESSIONS : runs
     MCP_TOOLS ||--o{ MCP_TOOL_ACLS : grants
-    CONSUMERS ||--o{ MCP_TOOL_ACLS : receives
+    CONSUMERS o|--o{ MCP_TOOL_ACLS : receives
+    CONSUMER_GROUPS o|--o{ MCP_TOOL_ACLS : receives
     CONSUMERS o|--o{ MCP_API_KEYS : owns
     PLUGINS ||--o{ PLUGIN_CONFIGS : configures
     PLUGIN_ARTIFACTS o|--o{ PLUGINS : packages

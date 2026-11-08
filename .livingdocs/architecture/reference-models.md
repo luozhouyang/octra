@@ -36,7 +36,7 @@ flowchart LR
 **Not adopted**
 
 - Kong's Nginx data path, Lua plugin ABI/PDK, workspaces, RBAC, Dev Portal, Vitals, and full Admin API compatibility.
-- Sticky-session cookies and the `least-connections` / `latency` selection algorithms in the current implementation. The enum accepts the values, but selection currently falls back to round-robin.
+- Sticky-session cookies. The `least-connections` and `latency` selectors are implemented with in-flight and latency-EWMA signals.
 - A declarative Kong configuration file as the source of truth; SQLite is the source of truth.
 
 **Current status**
@@ -45,12 +45,11 @@ flowchart LR
 |---|---|---|
 | Service/route/upstream/target CRUD | Implemented | `/admin/*`, `migrations/0009_gateway_entities.sql` |
 | Route matching and priority | Implemented | `crates/octra-runtime/src/matcher.rs` |
-| Round-robin, weighted, consistent hashing | Implemented | `crates/octra-runtime/src/balancer.rs` |
-| Least-connections, latency | Not implemented | Enum values fall through to round-robin |
+| Round-robin, weighted, consistent hashing, least-connections, latency | Implemented | `crates/octra-runtime/src/balancer.rs` |
 | Active/passive health checks | Implemented | `balancer.rs`, `check_health` loop |
 | Plugin phases and 12-level scopes | Implemented | `crates/octra-api-plugin-runtime/src/lib.rs` |
 | Kong-shaped Admin API | Implemented | `crates/octra-api-gateway/src/admin/` |
-| UI/CLI CRUD for API entities | Not implemented | UI pages are read-only; CLI lists services/routes only |
+| UI/CLI CRUD for API entities | Implemented | Desktop typed forms and `octra services/routes/upstreams/targets` |
 
 ## LLM gateway — yetone/magpie
 
@@ -115,7 +114,7 @@ magpie remains the primary LLM product reference. Kong AI Gateway 2.x contribute
 - Fronting upstream MCP servers behind one managed endpoint; the `passthrough-listener` / `listener` half of Kong's model.
 - Streamable HTTP ingress at `/mcp` with `initialize`, `ping`, `tools/list`, `tools/call`, and session binding.
 - Tool aggregation with a stable `<server>__<tool>` namespace.
-- API-key authentication and per-consumer tool ACLs.
+- API-key authentication and per-consumer, per-group, and per-tool-default ACLs.
 - Invocation audit rows for calls, denials, and unknown tools.
 
 **Not adopted**
@@ -123,7 +122,7 @@ magpie remains the primary LLM product reference. Kong AI Gateway 2.x contribute
 - Kong's `conversion-listener`, `conversion-only`, tag-based `listener` aggregation, and `upstream-server` modes; Octra does not convert OpenAPI operations into MCP tools.
 - Kong auth plugins (Key Auth, OIDC, etc.) as the MCP authentication mechanism; Octra uses its own MCP keys.
 - Kong's plugin-based MCP proxy model; Octra's MCP gateway is a first-class router, and API/LLM plugin chains do not run on MCP traffic.
-- Consumer-group ACLs, default ACL entries, and CEL-based ACL expressions.
+- CEL-based ACL expressions.
 - MCP protocol revision `2025-11-25`; Octra negotiates `2025-06-18`, `2025-03-26`, and `2024-11-05`.
 - Server-initiated notifications, tool-list change notifications, session sharing, and non-HTTP upstreams beyond stdio.
 
@@ -137,14 +136,14 @@ magpie remains the primary LLM product reference. Kong AI Gateway 2.x contribute
 | Tool discovery and aggregation | Implemented | `servers.rs`, `mcp_tools` |
 | `<server>__<tool>` namespace | Implemented | `octra-mcp-core/src/protocol.rs` |
 | MCP API keys | Implemented | `auth.rs`, `mcp_api_keys` |
-| Per-consumer tool ACL | Implemented | `mcp_tool_acls` |
-| Consumer-group/default/CEL ACL | Not implemented | Only per-tool consumer rows |
+| Consumer/group/default tool ACL | Implemented | `mcp_tool_acls`, `acl_allows_scoped` |
+| CEL ACL | Not implemented | Scope rules only; no expression language |
 | Invocation audit | Implemented | `mcp_invocations` |
 | OpenAPI-to-MCP conversion | Not implemented | Deliberately out of v0.1 |
 
 ## Desktop and control plane
 
-The UI is a live control-plane console, not a full management console. Overview, API Gateway, LLM Gateway, MCP Gateway, Agents, Plugins, and Settings all read live data. Mutations exist for agent preview/apply/restore/profiles, LLM plugin enable/disable, and PII model actions; API/LLM/MCP entity CRUD is still API-only. The Tauri host holds the control token and exposes one path- and method-allow-listed bridge command (ADR 0015).
+The UI is a live control-plane console with targeted editors. Overview, API Gateway, LLM Gateway, MCP Gateway, Agents, Plugins, and Settings all read live data. AI Control, API Gateway, and MCP expose typed-form CRUD; the LLM page edits consumer policies; agents, LLM plugin enable/disable, and PII model actions retain their mutation surfaces. The Tauri host holds the control token, exposes one path- and method-allow-listed bridge command, and adds a narrow loopback OAuth callback listener (ADR 0015).
 
 ## Sources
 
@@ -168,4 +167,4 @@ The external documentation below was reviewed on 2026-11-07. Kong references ref
 
 ## Drift instrument
 
-Drift caught by: comparing this table with the code paths named in each row, the ADR verification criteria, and the PRD implementation-status table. There is no generated reference-conformance test yet; a future fixture should assert the adopted/not-adopted boundaries (for example, that `least-connections` is either implemented or rejected at configuration time).
+Drift caught by: comparing this table with the code paths named in each row, the ADR verification criteria, and the PRD implementation-status table. There is no generated reference-conformance test yet; a future fixture should assert the adopted/not-adopted boundaries (for example, that CEL ACLs remain rejected while consumer/group/default scopes are accepted).

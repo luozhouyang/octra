@@ -35,7 +35,6 @@ Rejected alternatives:
 - Delivery is eventually consistent rather than immediate.
 
 **Follow-ups:**
-- Add integration tests for delivery, retry/backoff, scheduled job execution, and the no-subscriber skip path; the storage layer has retention tests, but the event bus currently has no crate integration test.
 - Expose delivery lag and retry counts in the plugin operational view as the event surface grows.
 
 ## Verification
@@ -47,6 +46,7 @@ Rejected alternatives:
 - A failing subscriber records attempts, backoff, and a terminal failure without blocking other deliveries.
 - Events with no matching subscriber do not create rows.
 - Retention deletes only completed or failed events and leaves pending events untouched.
+- `crates/octra-plugin-events/src/lib.rs` unit tests cover matching delivery, retry/backoff and max attempts, the no-subscriber skip path, and scheduled-job success/error/timeout.
 
 # References
 

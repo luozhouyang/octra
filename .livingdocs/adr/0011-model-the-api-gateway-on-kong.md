@@ -28,7 +28,7 @@ We will model the API gateway on Kong's concepts and keep the implementation in 
 
 - Persist `services`, `routes`, `upstreams`, `targets`, `consumers`, `consumer_groups`, credentials, ACLs, and plugin instances with Kong-compatible field names where practical.
 - Match routes on protocol, host, path (prefix or regex), method, and headers. Order matches by `regex_priority` descending, then longest path descending, then route id ascending.
-- Resolve a Service to a direct target or to an Upstream; select healthy Targets with round-robin, weighted round-robin, or consistent hashing. Consistent hashing follows Kong's wheel and supports `hash_on` / `hash_fallback` inputs.
+- Resolve a Service to a direct target or to an Upstream; select healthy Targets with round-robin, weighted round-robin, consistent hashing, least-connections, or latency EWMA. Consistent hashing follows Kong's wheel and supports `hash_on` / `hash_fallback` inputs.
 - Apply passive and active health checks from the Upstream `healthchecks` document. Passive checks observe live traffic; active checks probe Targets on their configured intervals.
 - Retry transport failures only for idempotent methods, bounded by the Service retry count and the total attempt budget. A non-idempotent request is attempted once.
 - Expose a Kong-shaped Admin API at `/admin` (`/admin/services`, `/admin/routes`, `/admin/upstreams`, `/admin/targets`, `/admin/consumers`, `/admin/consumer_groups`, `/admin/plugins`, auth credentials, ACLs, schemas, status, metrics, logs, audit logs, reload) with `{data, next, offset}` list envelopes. The daemon's Bearer token and audit middleware remain in front of it.
@@ -58,13 +58,12 @@ We will model the API gateway on Kong's concepts and keep the implementation in 
 **Harder / accepted trade-offs:**
 
 - The API is only Kong-shaped; operators cannot paste a full Kong declarative config and expect every field to be honored.
-- `least-connections` and `latency` are accepted enum values but currently fall through to round-robin; the model advertises more than the implementation delivers.
+- `least-connections` and `latency` use process-local in-flight and latency-EWMA signals. The counters reset on a runtime reload, and the in-flight guard covers response headers rather than a fully streamed body.
 - Active health checks add background traffic and must be documented as opt-in.
 - The Admin API is a second public surface that needs its own compatibility tests.
 
 **Follow-ups:**
 
-- Implement least-connections and latency selection, or remove the values from the accepted schema until they are real.
 - Add a benchmark for proxy overhead (the PRD open question) before publishing performance claims.
 - Add UI and CLI CRUD for services, routes, upstreams, and targets; today they list and inspect but do not mutate these entities.
 - Add a conformance fixture set for the Kong-shaped Admin API.

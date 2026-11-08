@@ -1,7 +1,7 @@
 ---
 type: ADR
 title: Model the MCP gateway as a Kong-style aggregator
-description: Front many MCP servers behind one /mcp endpoint with Streamable HTTP ingress, stdio or HTTP upstreams, session binding, namespaced tools, API-key authentication, per-consumer tool ACLs, and invocation audit.
+description: Front many MCP servers behind one /mcp endpoint with Streamable HTTP ingress, stdio or HTTP upstreams, session binding, namespaced tools, API-key authentication, consumer/group/default tool ACLs, and invocation audit.
 owner: luozhouyang
 status: Proposed
 timestamp: 2026-11-07T12:40:00Z
@@ -27,6 +27,7 @@ We will model the MCP gateway as a Kong-style aggregator with Octra's local-firs
 - Create an Octra session on `initialize`, return it in `Mcp-Session-Id`, and require the header on every later request except `initialize`. The session row is persisted so a restart can still answer `DELETE`.
 - Namespace every upstream tool as `<server>__<tool>`. `tools/list` returns only enabled tools whose server is enabled and whose ACL allows the caller. `tools/call` parses the namespace, resolves the server and tool, re-checks enablement and ACL, then calls the upstream.
 - Authenticate data-plane callers with MCP API keys (`Authorization: Bearer` or `X-API-Key`); keys are stored as a display prefix plus SHA-256 hash. When no keys exist, the loopback-local default remains open.
+- Enforce tool ACLs by scope: an explicit consumer row wins, then matching consumer-group rows with deny-wins, then the tool default row. A tool with no rows follows the open-local default. Callers resolve their consumer groups at authentication time.
 - Persist one invocation row per tool call, including denials and unknown tools when the owning server can be identified, with request id, status, duration, consumer, and error.
 - Manage upstream connections lazily, keyed by the full server definition; retry a retryable failed call once after restarting the connection; drop every live connection on runtime reload.
 - Expose control endpoints under `/api/v1/mcp/*` for servers, tools, sessions, invocations, keys, and ACLs, plus a refresh action that re-runs discovery.
@@ -36,7 +37,7 @@ We will model the MCP gateway as a Kong-style aggregator with Octra's local-firs
 - Kong's `conversion-listener`, `conversion-only`, `listener` tag aggregation, and `upstream-server` modes. Octra does not convert OpenAPI operations into MCP tools.
 - Kong auth plugins (Key Auth, OIDC, etc.) as the MCP auth mechanism. Octra uses its own MCP API keys and consumer identity.
 - Kong's plugin-based MCP proxy model. Octra's MCP gateway is a first-class router; API and LLM plugin chains do not run on MCP traffic.
-- Consumer-group ACLs, default ACL entries, and CEL-based ACL expressions. Octra supports per-tool consumer ACLs only.
+- CEL-based ACL expressions. Octra supports consumer, consumer-group, and tool-default scopes.
 - Server-initiated notifications, tool-list change notifications, session sharing between gateway instances, and structured output.
 - Non-HTTP upstream protocols beyond stdio (for example WebSocket or gRPC).
 
@@ -62,12 +63,12 @@ We will model the MCP gateway as a Kong-style aggregator with Octra's local-firs
 - The tool namespace limits server and tool names (the separator is reserved) and requires validation on discovery.
 - A session is anchored to the first registered server because `mcp_sessions.server_id` is non-null; a gateway session can span servers but the schema cannot yet express that cleanly.
 - The gateway does not push notifications, so GET is only a keepalive channel.
-- Consumer-group and default ACL semantics are missing; adding them later will change the ACL data model.
+- ACL scopes are limited to consumer, consumer group, and tool default; there is no expression language or per-tool CEL policy.
 - stdio child processes are a local code-execution boundary; operators must trust the commands they register.
 
 **Follow-ups:**
 
-- Add consumer-group ACLs, default ACL entries, and an explicit allow/deny precedence rule.
+- Add CEL-based ACL expressions only if a product requirement justifies a policy language.
 - Add a session model that does not require a server anchor.
 - Add tool-list change notifications and server-initiated notifications when clients need them.
 - Add OpenAPI-to-MCP conversion only if a product requirement justifies the mode.

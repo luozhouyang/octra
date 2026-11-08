@@ -121,10 +121,10 @@ shows a sandbox banner, and preview never writes anything.
 - Authenticated control plane: system health/config/reload plus CRUD for services, routes, upstreams, targets, consumers, consumer groups, credentials, plugins/configs, LLM providers/models/routing groups/routes/virtual keys/accounts, LLM consumer policies, and MCP servers/tools/ACLs/keys; request and audit logs, events, and jobs are queryable.
 - Constant-time Bearer token authentication; the token is randomly generated and persisted to disk.
 - SQLite + SQLx migrations with WAL / foreign_keys / busy_timeout; runtime snapshots keep routing and authorization decisions off the database (virtual-key limit checks still read persisted usage).
-- API Gateway: host/path/method/header routing, longest-prefix matching, round-robin, weighted, and consistent-hashing load balancing with active/passive health checks, path stripping, body limits, connect/request timeouts, retries, key/basic/JWT/ACL authentication with consumers and consumer groups, streaming proxy, persisted access logs, and JSON and Prometheus metrics.
+- API Gateway: host/path/method/header routing, longest-prefix matching, round-robin, weighted, consistent-hashing, least-connections, and latency load balancing with active/passive health checks, path stripping, body limits, connect/request timeouts, retries, key/basic/JWT/ACL authentication with consumers and consumer groups, streaming proxy, persisted access logs, and JSON and Prometheus metrics.
 - Plugin system: Kong-style phase chain with the full 12-level consumer/consumer-group/route/service/global scope precedence, priority ordering, fail-open/fail-closed policies, and built-in `key-auth`, `basic-auth`, `jwt`, `acl`, `correlation-id`, `request-transformer`, `response-transformer`, `cors`, `rate-limiting`, `header-rewrite`, `circuit-breaker`, `ip-restriction`, `request-size-limiting`, and `request-termination` plugins configured per scope.
 - LLM Gateway: canonical IR, OpenAI Chat/Responses, Anthropic, Gemini, Vertex, and Bedrock Converse request/response/SSE conversion (Bedrock uses its binary event stream upstream), virtual models, routing groups with priority/weight fallback and `order`/`manual`/`weight`/`rotate`/`fast`/`cheap`/`free`/`drain`/`expiring`/`smart`/`usage`/`quota`/`pace`/`intent`/`semantic` strategies, provider accounts with static or OAuth credentials, provider query/header configuration, quota/cooldown/pacing, virtual keys hashed in SQLite, consumer policies that restrict allowed models and providers, usage/cost rollups, `count_tokens`, and opt-in PII redaction.
-- MCP Gateway: Streamable HTTP and stdio upstreams, tool discovery and aggregation with a `<server>__<tool>` namespace, `/mcp` JSON-RPC endpoint with sessions, per-consumer tool ACLs, API keys, and invocation audit rows.
+- MCP Gateway: Streamable HTTP and stdio upstreams, tool discovery and aggregation with a `<server>__<tool>` namespace, `/mcp` JSON-RPC endpoint with sessions, per-consumer, per-group, and per-tool default ACLs, API keys, and invocation audit rows.
 - Plugins: native and WASM (API and LLM) plugin runtimes, plugin-owned SQLite storage, config schemas, per-instance metrics and latency percentiles, durable plugin events, scheduled jobs, and shared rate-limit/budget counters.
 - AI-native LLM control plane (Phase 26, AI-native only): `ai_*` schema, `octra-ai-config` compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, per-target model metadata (context, capabilities, pricing), built-in policy execution for every policy type (rate limit, budget guard, PII, model map, param override, system prompt, request audit, think tags, PromptGuard, PromptCompress, SemanticCache), `semantic` target routing over AI-native descriptions with optional OpenAI-compatible embeddings and lexical fallback, provider `config_json.query` parameters and protocol presets (Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Claude, Google, Vertex, Bedrock, OpenAI-compatible), streaming cache population and SSE replay, AI-native account OAuth with exposed status, desktop controls, and a loopback callback listener, request-audit `cache_status` and cache/routing logs, full CRUD CLI with inline/stdin/file JSON bodies, and a desktop AI Control page with typed forms for providers, accounts, models, targets, policies, and attachments. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed without backward compatibility.
 - Agent integration: detects Claude Code, Codex and OpenCode, previews and applies the Octra provider into their native config files, and restores backups atomically.
@@ -137,15 +137,13 @@ shows a sandbox banner, and preview never writes anything.
 - Bedrock SigV4 authentication and additional vendor-specific protocol adapters
   beyond OpenAI, Anthropic, OpenAI Responses, Gemini, Vertex, and Bedrock
   Converse. Bedrock currently authenticates with a Bedrock API key.
-- Event-bus integration tests for delivery, retry/backoff, scheduled jobs, and
-  the no-subscriber skip path; the storage retention path is already tested.
 - Agent discovery / config adapter / bridge for agents beyond the three
   supported adapters.
-- Full reference-model parity where justified: Kong MCP consumer-group/default/
-  CEL ACLs or conversion modes.
+- Full reference-model parity where justified: Kong MCP CEL ACLs or conversion
+  modes.
 - Remaining hardening: OS Keychain secret storage, OAuth-token encryption,
   desktop daemon lifecycle management, and cross-platform packaging/signing.
-  The Phase 26 control API, rollback, full policy execution including
+  The Phase 29 control API, rollback, full policy execution including
   PromptGuard, PromptCompress, and SemanticCache, `semantic` target routing
   with optional embeddings, provider query parameters and presets, streaming
   cache population/SSE replay, Vertex/Bedrock adapters, AI-native account OAuth

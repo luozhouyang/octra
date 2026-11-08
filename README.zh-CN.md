@@ -117,9 +117,9 @@ sandbox_path = "/tmp/octra-agent-bin"
 - 认证控制面：健康检查/配置/重载，以及 services、routes、upstreams、targets、consumers、consumer groups、credentials、plugins/configs、LLM providers/models/routing groups/routes/virtual keys/accounts、MCP servers/tools/ACLs/keys 的 CRUD；请求/审计日志、事件与任务可查询。LLM Consumer Policy 会被执行，但还没有控制面 CRUD。
 - 常量时间 Bearer Token 认证，Token 随机生成并落盘。
 - SQLite + SQLx 迁移，WAL / foreign_keys / busy_timeout；Runtime Snapshot 让路由与鉴权热路径不直接查库（虚拟密钥限额仍会读取持久化用量）。
-- API Gateway：Host/Path/Method/Header 路由、最长前缀、轮询/加权/一致性哈希负载均衡、主动/被动健康检查、路径剥离、超时、重试、Key/Basic/JWT/ACL 认证与 Consumer Group、流式代理、访问日志与 JSON/Prometheus 指标。
+- API Gateway：Host/Path/Method/Header 路由、最长前缀、轮询/加权/一致性哈希/least-connections/latency 负载均衡、主动/被动健康检查、路径剥离、超时、重试、Key/Basic/JWT/ACL 认证与 Consumer Group、流式代理、访问日志与 JSON/Prometheus 指标。
 - LLM Gateway：Canonical IR、OpenAI Chat/Responses、Anthropic、Gemini、Vertex、Bedrock Converse 请求/响应/SSE 转换（Bedrock 上游使用二进制 event stream）、虚拟模型、优先级/权重路由与回退、`order`/`manual`/`weight`/`rotate`/`fast`/`cheap`/`free`/`drain`/`expiring`/`smart`/`usage`/`quota`/`pace`/`intent`/`semantic` 策略、静态或 OAuth Provider Account、Provider query/header 配置、配额/冷却/节流、虚拟密钥哈希存储、Consumer Policy、用量/成本 Rollup、`count_tokens`、可选的 PII 脱敏。
-- MCP Gateway：Streamable HTTP 与 stdio 上游、工具发现与聚合、`<server>__<tool>` 命名、`/mcp` JSON-RPC 会话、按 Consumer 的 Tool ACL、API Key、调用审计。
+- MCP Gateway：Streamable HTTP 与 stdio 上游、工具发现与聚合、`<server>__<tool>` 命名、`/mcp` JSON-RPC 会话、按 Consumer/Consumer Group/工具默认作用域的 Tool ACL、API Key、调用审计。
 - 插件：Native 与 WASM（API / LLM）运行时、插件自有 SQLite 存储、配置 Schema、按实例的指标与延迟分位数、持久化事件与定时任务，以及共享的限流/预算计数器。
 - AI 原生 LLM 控制面（Phase 26，仅 AI-native）：`ai_*` schema、`octra-ai-config` 编译器、`AiStore`、`/api/v1/ai/*` CRUD、validate/preview/apply/revisions/rollback、revision snapshot、事务化 replace、target 级模型元数据（context、capabilities、pricing）、所有 policy 类型的内置执行（rate limit、budget guard、PII、model map、param override、system prompt、request audit、think tags、PromptGuard、PromptCompress、SemanticCache）、基于 AI 原生 description 的 `semantic` target routing（可选 OpenAI-compatible embedding，失败回退本地词法）、Provider `config_json.query` 参数与 protocol presets（Ollama、vLLM、LM Studio、Groq、OpenRouter、DeepSeek、Together、Fireworks、Claude、Google、Vertex、Bedrock、OpenAI-compatible）、streaming cache 写入与 SSE 回放、AI-native account OAuth 状态、桌面控制与 loopback callback 监听、request audit `cache_status` 与 cache/routing 日志、支持 inline/stdin/file JSON body 的完整 CRUD CLI，以及 providers/accounts/models/targets/policies/attachments 全部使用 typed forms 的桌面端 AI Control 页面。legacy 模型表、`/admin/llm/*` 模型端点、`legacy`/`shadow`/`on` 模式和 import-legacy 路径已移除，不考虑向后兼容。
 - Agent 集成：探测 Claude Code、Codex、OpenCode，预览并把 Octra Provider 写入其原生配置，支持原子写入与备份恢复。
@@ -129,10 +129,9 @@ sandbox_path = "/tmp/octra-agent-bin"
 
 ## 尚未实现（按路线图推进）
 
-- 事件总线的投递、重试/退避、定时任务与无订阅者跳过路径的集成测试；存储层保留策略已有测试。
 - Bedrock SigV4 认证，以及 OpenAI/Anthropic/OpenAI Responses/Gemini/Vertex/Bedrock Converse 之外的更多 vendor-specific protocol adapter 与 Agent 适配器/Agent Bridge。Bedrock 当前使用 Bedrock API key。
-- 有明确产品价值的参考模型补齐：Kong MCP 的 Consumer Group/默认/CEL ACL 或转换模式。
-- 剩余生产加固：OS Keychain Secrets、OAuth Token 加密、桌面端 Daemon 生命周期管理、跨平台打包/签名/公证。Phase 26 的控制 API、rollback、含 PromptGuard/PromptCompress/SemanticCache 的完整 policy 执行、带可选 embedding 的 `semantic` target routing、Provider query 参数与 protocol presets、streaming cache 写入/SSE 回放、Vertex/Bedrock adapter、AI-native account OAuth 与桌面 loopback callback、cache/routing 可观测性、完整 CRUD CLI，以及 AI/API/MCP 全部实体使用 typed forms 的桌面端已经存在。legacy 模型表、端点、模式和 import 路径已移除；`ai_*` 是唯一的模型控制面。SemanticCache/Routing 默认使用精确 key 加本地词法相似度。
+- 有明确产品价值的参考模型补齐：Kong MCP 的 CEL ACL 或转换模式。
+- 剩余生产加固：OS Keychain Secrets、OAuth Token 加密、桌面端 Daemon 生命周期管理、跨平台打包/签名/公证。Phase 29 的控制 API、rollback、含 PromptGuard/PromptCompress/SemanticCache 的完整 policy 执行、带可选 embedding 的 `semantic` target routing、Provider query 参数与 protocol presets、streaming cache 写入/SSE 回放、Vertex/Bedrock adapter、AI-native account OAuth 与桌面 loopback callback、cache/routing 可观测性、完整 CRUD CLI，以及 AI/API/MCP 全部实体使用 typed forms 的桌面端已经存在。legacy 模型表、端点、模式和 import 路径已移除；`ai_*` 是唯一的模型控制面。SemanticCache/Routing 默认使用精确 key 加本地词法相似度。
 
 ## 安全边界
 

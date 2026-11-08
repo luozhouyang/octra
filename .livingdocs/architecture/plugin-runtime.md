@@ -63,4 +63,4 @@ Each plugin name gets its own SQLite database under the plugin root. The host ow
 
 ## Drift instrument
 
-Drift caught by: `crates/octra-api-plugin-runtime` unit tests, `crates/octra-api-plugin-wasm/tests/`, `crates/octra-api-gateway/tests/plugins/`, `crates/octra-llm-plugin-runtime` tests, and `crates/octra-llm-plugin-wasm/tests/wasm_e2e.rs`. The event bus itself has no integration test yet (ADR 0009 follow-up).
+Drift caught by: `crates/octra-api-plugin-runtime` unit tests, `crates/octra-api-plugin-wasm/tests/`, `crates/octra-api-gateway/tests/plugins/`, `crates/octra-llm-plugin-runtime` tests, `crates/octra-llm-plugin-wasm/tests/wasm_e2e.rs`, and the `octra-plugin-events` delivery/retry/job tests.
