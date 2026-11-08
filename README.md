@@ -124,7 +124,7 @@ shows a sandbox banner, and preview never writes anything.
 - API Gateway: host/path/method/header routing, longest-prefix matching, round-robin, weighted, consistent-hashing, least-connections, and latency load balancing with active/passive health checks, path stripping, body limits, connect/request timeouts, retries, key/basic/JWT/ACL authentication with consumers and consumer groups, streaming proxy, persisted access logs, and JSON and Prometheus metrics.
 - Plugin system: Kong-style phase chain with the full 12-level consumer/consumer-group/route/service/global scope precedence, priority ordering, fail-open/fail-closed policies, and built-in `key-auth`, `basic-auth`, `jwt`, `acl`, `correlation-id`, `request-transformer`, `response-transformer`, `cors`, `rate-limiting`, `header-rewrite`, `circuit-breaker`, `ip-restriction`, `request-size-limiting`, and `request-termination` plugins configured per scope.
 - LLM Gateway: canonical IR, OpenAI Chat/Responses, Anthropic, Gemini, Vertex, and Bedrock Converse request/response/SSE conversion (Bedrock uses its binary event stream upstream), virtual models, routing groups with priority/weight fallback and `order`/`manual`/`weight`/`rotate`/`fast`/`cheap`/`free`/`drain`/`expiring`/`smart`/`usage`/`quota`/`pace`/`intent`/`semantic` strategies, provider accounts with static or OAuth credentials, provider query/header configuration, quota/cooldown/pacing, virtual keys hashed in SQLite, consumer policies that restrict allowed models and providers, usage/cost rollups, `count_tokens`, and opt-in PII redaction.
-- MCP Gateway: Streamable HTTP and stdio upstreams, Kong-shaped server `type`/`sources`, tool discovery and aggregation with a `<server>__<tool>` namespace, `/mcp` JSON-RPC endpoint with sessions, server-default and per-tool ACLs with consumer/group/default scopes, API keys, and invocation audit rows.
+- MCP Gateway: Streamable HTTP and stdio upstreams, Kong-shaped server `type`/`sources`/`route_path`, global and per-server `/mcp` JSON-RPC endpoints with sessions, server-default and per-tool ACLs with consumer/group/default scopes and CEL `allow_when`/`deny_when`, OIDC JWKS auth strategies plus MCP API keys, JSON/YAML OpenAPI conversion modes, tool discovery and aggregation with a `<server>__<tool>` namespace, and invocation audit rows.
 - Plugins: native and WASM (API and LLM) plugin runtimes, plugin-owned SQLite storage, config schemas, per-instance metrics and latency percentiles, durable plugin events, scheduled jobs, and shared rate-limit/budget counters.
 - AI-native LLM control plane (Phase 35, AI-native only): `ai_*` schema, `octra-ai-config` compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, per-target model metadata (context, capabilities, pricing), built-in policy execution for every policy type (rate limit, budget guard, PII, model map, param override, system prompt, request audit, think tags, PromptGuard, PromptCompress, SemanticCache), `semantic` target routing over AI-native descriptions with optional OpenAI-compatible embeddings and lexical fallback, provider `config_json.query` parameters and protocol presets (Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Claude, Google, Vertex, Bedrock, OpenAI-compatible), Vertex and Bedrock Converse adapters with optional SigV4, streaming cache population and SSE replay, AI-native account OAuth with exposed status, desktop controls, and a loopback callback listener, request-audit `cache_status` and cache/routing logs, full CRUD CLI with inline/stdin/file JSON bodies, and a desktop AI Control page with typed forms for providers, accounts, models, targets, policies, and attachments. Stored OAuth tokens, KeyAuth keys, BasicAuth passwords, and JWT secrets are sealed with AES-256-GCM under an OS-keychain-backed master key. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed without backward compatibility.
 - Agent integration: detects Claude Code, Codex and OpenCode, previews and applies the Octra provider into their native config files, and restores backups atomically.
@@ -139,15 +139,18 @@ shows a sandbox banner, and preview never writes anything.
   API-key bearer auth and optional SigV4.
 - Agent discovery / config adapter / bridge for agents beyond the three
   supported adapters.
-- Full reference-model parity where justified: Kong MCP CEL ACLs, conversion
-  modes, or per-server routes.
-- Remaining hardening: key rotation and AAD-bound secret formats, signed/
-  notarized installers, and daemon/desktop version handshakes. The Phase 35
+- Full reference-model parity where justified: full OpenAPI serialization
+  styles/external `$ref`s, OIDC discovery/introspection, and MCP
+  server-initiated notifications or session sharing.
+- Remaining hardening: old-master-key retirement, signed/notarized release
+  execution (wired, needs Apple credentials), and daemon/desktop version
+  handshakes. The Phase 40
   control API, rollback, full policy execution including PromptGuard,
   PromptCompress, and SemanticCache, `semantic` target routing with optional
   embeddings, provider query parameters and presets, streaming cache
   population/SSE replay, Vertex/Bedrock adapters with SigV4, AI-native account
-  OAuth with desktop controls and loopback callbacks, encrypted stored secrets,
+  OAuth with desktop controls and loopback callbacks, encrypted and rotatable
+  stored secrets,
   cache/routing observability, full CRUD CLI, Kong-shaped MCP modes/ACLs, and
   desktop typed forms for all AI/API/MCP/consumer-policy entities already
   exist. The legacy model tables, endpoints, modes, and import path are

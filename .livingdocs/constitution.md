@@ -42,7 +42,7 @@ The product has three protocol surfaces and one management surface:
 - Complete Kong MCP ACL parity (CEL expressions) in v0.1.
 - Rust dynamic-library plugin loading or unsandboxed third-party native code.
 - OS keychain integration in the current phase; secret references are the implemented boundary.
-- Signed installers and notarized packages in v0.1; packaging workflows produce unsigned bundles.
+- Apple signing/notarization credentials are operator-provided; packaging workflows produce unsigned bundles without them.
 
 **Phase boundaries:**
 

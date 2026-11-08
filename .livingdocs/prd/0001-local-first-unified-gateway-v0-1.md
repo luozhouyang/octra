@@ -22,7 +22,7 @@ Octra is a local-first composite of three external models. The full adopt/not-ad
 |---|---|---|---|
 | API gateway | Kong Gateway | Service/route/upstream/target, route priority, plugin phases and 12-level scopes, round-robin/weighted/consistent hashing/least-connections/latency, active/passive health checks, Kong-shaped Admin API, consumer groups, key/basic/JWT/ACL auth | Nginx/Lua runtime, PDK, workspaces, RBAC, Dev Portal, full Admin API compatibility, sticky-session cookies |
 | LLM gateway | yetone/magpie | One local endpoint for OpenAI Chat/Responses, Anthropic, Gemini, Vertex, and Bedrock Converse; canonical IR; virtual models and routing groups; provider accounts with static/OAuth credentials, quota, cooldown, pacing; virtual-key/consumer policies; usage/cost; opt-in PII masking; agent config adapters; all documented routing strategies; Bedrock SigV4 | Signed-in subscription discovery, menu-bar app, remote sharing, Docker/NAS mode, Bun/JS plugin runtime, classifier intent routing |
-| MCP gateway | Kong AI MCP Proxy | One `/mcp` endpoint, Streamable HTTP ingress, stdio/HTTP upstreams, sessions, tool aggregation with `<server>__<tool>` names, Kong-shaped server `type`/`sources`, server-default + per-tool ACLs, MCP API keys, invocation audit | OpenAPI conversion modes, per-server routes, Kong auth strategies, CEL ACLs, server-initiated notifications, session sharing |
+| MCP gateway | Kong AI MCP Proxy | Global and per-server `/mcp` endpoints, Streamable HTTP ingress, stdio/HTTP upstreams, sessions, tool aggregation with `<server>__<tool>` names, Kong-shaped server `type`/`sources`, server-default + per-tool ACLs, CEL allow/deny, OIDC JWKS auth, MCP API keys, OpenAPI JSON/YAML conversion, invocation audit | Full OpenAPI serialization parity, OIDC discovery/introspection, Kong auth plugins beyond Bearer JWKS, server-initiated notifications, session sharing |
 
 ## Goals
 
@@ -40,9 +40,9 @@ Octra is a local-first composite of three external models. The full adopt/not-ad
 - PostgreSQL, MySQL, Redis, Elasticsearch, or any required external database, cache, or broker.
 - Complete Kong Lua plugin compatibility, Kong PDK compatibility, or a drop-in Kong Admin API replacement.
 - A general-purpose agent runtime, magpie's signed-in subscription discovery, or magpie's remote sharing/menu-bar product surface.
-- OpenAPI-to-MCP conversion modes in v0.1.
+- Full OpenAPI serialization parity (external `$ref`s, cookie/multipart bodies, `explode`/`deepObject`) in v0.1; the conversion subset is documented.
 - Unsandboxed third-party native code or Rust dynamic-library plugin loading.
-- Signed installers and notarized packages in v0.1; the packaging workflow produces unsigned bundles and documents signing placeholders.
+- Apple signing/notarization credentials are operator-provided; CI publishes unsigned bundles when the secrets are absent. The workflow and credential-generation guide exist, but notarization has not run in this environment.
 
 ## Requirements
 
@@ -122,11 +122,11 @@ This table is the authoritative progress summary for v0.1. "Implemented" means t
 | R1 Local runtime | Implemented | `crates/octra-daemon/src/main.rs`, health/config/overview/reload routes |
 | R2 API gateway | Implemented core | Matcher, balancer (round-robin/weighted/consistent hashing/least-connections/latency), health checks, plugins, Admin API, CLI and desktop typed-form CRUD |
 | R3 LLM gateway | Implemented core | Six wire protocols (OpenAI Chat/Responses, Anthropic, Gemini, Vertex, Bedrock Converse with API-key or SigV4 auth), IR, routing with all magpie strategies, accounts, OAuth with loopback callbacks, virtual-key/consumer policies, usage/cost, PII; the AI-native control plane is the only model source with CRUD/validate/preview/apply/rollback, built-in policy execution for every policy type including PromptGuard, PromptCompress, and SemanticCache, semantic target routing with optional embeddings, provider query parameters and protocol presets, streaming cache population/replay, full CRUD CLI with stdin/file bodies, and typed desktop forms |
-| R4 MCP gateway | Implemented core | `/mcp`, stdio/HTTP, sessions, namespace, keys, Kong-shaped server type/sources, server-default + per-tool ACL scopes, audit; no CEL ACL, conversion modes, per-server routes, or unanchored sessions |
+| R4 MCP gateway | Implemented core | Global + scoped `/mcp`, stdio/HTTP, sessions, namespace, keys, Kong-shaped server type/sources, server-default + per-tool ACL scopes, CEL allow/deny, OIDC JWKS auth, JSON/YAML OpenAPI conversion, audit; no full OpenAPI serialization parity, OIDC discovery/introspection, or unanchored sessions |
 | R5 Agent integration | Implemented | Three adapters, atomic apply/restore, backups; sandbox end-to-end test covers Claude Code only, not Codex/OpenCode |
 | R6 Plugins | Implemented | Native/WASM, capabilities, storage, events, jobs; delivery/retry/no-subscriber/job tests cover the bus; no delivery-lag operational view |
-| R7 Persistence | Implemented | 29 migrations, WAL, retention, `0600`; write-contention benchmark not done |
-| R8 Console/CLI | Partial | Eight live pages: AI Control, API Gateway, MCP, and consumer policies have typed forms for their core entities, the MCP ACL form has a consumer-group picker, and Settings can start/stop/restart a bundled daemon; CLI covers status, API services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, consumer-policy CRUD, keys/usage, full AI entity CRUD, and AI activation actions |
+| R7 Persistence | Implemented | 33 migrations, WAL, retention, `0600`; write-contention benchmark not done |
+| R8 Console/CLI | Partial | Eight live pages: AI Control, API Gateway, MCP, and consumer policies have typed forms, Settings can start/stop/restart a bundled daemon, and the packaging workflow supports signed/notarized macOS bundles and a universal sidecar; CLI covers status, API services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, consumer-policy CRUD, keys/usage, full AI entity CRUD, and AI activation actions |
 | R9 Security | Implemented with accepted exceptions | Secret references, hashed keys, control token boundary, `0600`, masked control responses, OS-keychain-backed AES-256-GCM encryption for stored secrets; browser mode stores a token in settings; no key rotation yet |
 | R10 Observability/retention | Implemented core | Logs, usage, metrics, events, retention; API metrics are in-memory; no OTLP; no delivery-lag metric |
 
@@ -134,7 +134,7 @@ This table is the authoritative progress summary for v0.1. "Implemented" means t
 
 - `cargo fmt --all --check` passes.
 - `cargo clippy --workspace --exclude octra-desktop --all-targets -- -D warnings` passes.
-- `cargo test --workspace --exclude octra-desktop` passes: 1017 passed, 0 failed, 17 ignored.
+- `cargo test --workspace` passes: 1063 passed, 0 failed, 17 ignored (including octra-desktop).
 - WASM integration tests are ignored by default and require `cargo-component`; `scripts/test-wasm.sh` runs them in CI.
 - `pnpm typecheck`, `pnpm test`, and `pnpm build` pass (5 frontend tests across the shared packages).
 

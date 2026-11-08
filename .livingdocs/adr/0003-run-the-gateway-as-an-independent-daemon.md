@@ -31,20 +31,23 @@ Rejected alternatives:
 
 **Harder / accepted trade-offs:**
 - The desktop can supervise a sidecar, but an externally started daemon is never killed by the GUI.
-- Packaging ships and reconciles two processes and their versions.
+- Packaging ships and reconciles two processes and their versions; macOS bundles need Developer ID signing and notarization.
 - Cross-process communication adds an authenticated HTTP boundary inside the local machine.
 
 **Follow-ups:**
-- Add an explicit daemon/desktop version handshake during upgrade and signing/notarization work.
+- Add an explicit daemon/desktop version handshake during upgrade work.
+- Configure the Apple Developer secrets in CI; signing/notarization steps are wired but have not run in this environment.
 
 ## Verification
 
-**Implementation impact:** `crates/octra-daemon/src/main.rs`, `crates/octra-desktop-daemon/`, `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src/lib/control-api.ts`, `apps/desktop/src/app/pages/settings.tsx`, `scripts/build-desktop-sidecar.sh`.
+**Implementation impact:** `crates/octra-daemon/src/main.rs`, `crates/octra-desktop-daemon/`, `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src/lib/control-api.ts`, `apps/desktop/src/app/pages/settings.tsx`, `scripts/build-desktop-sidecar.sh`, `scripts/check-desktop-linux.sh`, `.github/workflows/desktop.yml`.
 
 **Verification criteria:**
 - The daemon starts standalone and serves both listeners without the desktop app.
 - The Tauri host exposes only allow-listed bridge/lifecycle commands; no gateway runtime code lives in `apps/desktop/src-tauri`.
 - The lifecycle crate discovers a binary, starts/health-checks/stops an owned child, refuses to kill an external daemon, and reports early exits with a log tail.
+- The Tauri crate compiles and links on Linux with WebKitGTK/GTK/DBus; `tauri build --debug --no-bundle` succeeds.
+- Universal macOS sidecars are staged with `lipo`; the CI workflow signs/notarizes when Apple secrets are present.
 - Daemon integration tests exercise the control and data planes without a WebView.
 
 # References

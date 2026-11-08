@@ -47,7 +47,7 @@ flowchart TB
 | LLM Gateway | `/llm` | usage, providers, consumer policies | typed consumer-policy CRUD |
 | AI Control | `/ai-control` | AI status, providers, accounts, models, targets, policies, attachments, revisions | typed forms for all six entity types, OAuth start/complete/refresh/clear, validate, apply, rollback |
 | Agents | `/agents` | agents, mode, profiles, routes, virtual keys, backups | create/update/delete profile, preview, apply, restore |
-| MCP Gateway | `/mcp` | servers, tools, keys, ACLs, invocations, sessions | Typed forms for servers/tools/keys/ACLs, including server `type`/`sources` and ACL scopes, with advanced JSON for config/schema |
+| MCP Gateway | `/mcp` | servers, tools, keys, auth strategies, ACLs, invocations, sessions | Typed forms for servers/tools/keys/ACLs/OIDC strategies, including `type`/`sources`/`route_path`, CEL allow/deny, ACL scopes, and conversion OpenAPI config in advanced JSON |
 | Plugins | `/plugins` | LLM plugins and stage metrics | enable/disable |
 | Settings | `/settings` | control connection, daemon lifecycle, local PII model, local data | daemon start/stop/restart; PII model on/off/download/cancel/remove/score |
 

@@ -15,7 +15,7 @@ Provider API keys and OAuth tokens are the most valuable secrets in the system, 
 
 ## Decision
 
-We will store static provider secrets as references (`env:` or `file:`) and resolve the value inside the daemon at request time. Agents receive Octra virtual keys, never provider keys; virtual keys are hashed in SQLite and carry model/provider permissions. The control-plane Bearer token is admin-only and is never handed to agents. The control API never returns secret values. Values that must survive restarts are sealed at rest with AES-256-GCM under a 32-byte master key: OAuth access/refresh/extra values, KeyAuth keys, BasicAuth passwords, and JWT secrets. Sealed values use the `enc:v1:` prefix and legacy plaintext is read once and backfilled. The master key resolves from `OCTRA_MASTER_KEY`, an existing `master.key`, or the OS keychain (`dev.octra` / `master-key`); if the database exists but no key is available, startup fails instead of generating a new key. The SQLite database and its WAL/SHM sidecars remain `0600` on Unix as defense in depth.
+We will store static provider secrets as references (`env:` or `file:`) and resolve the value inside the daemon at request time. Agents receive Octra virtual keys, never provider keys; virtual keys are hashed in SQLite and carry model/provider permissions. The control-plane Bearer token is admin-only and is never handed to agents. The control API never returns secret values. Values that must survive restarts are sealed at rest with AES-256-GCM under a 32-byte master key: OAuth access/refresh/extra values, KeyAuth keys, BasicAuth passwords, and JWT secrets. Sealed values use `enc:v2:<key_id>:<base64>` with AAD `table|row_id|column`; `enc:v1:` values remain readable and are upgraded on startup. The master key set resolves from `OCTRA_MASTER_KEY`, an existing `master.key`, or the OS keychain (`dev.octra` / `master-key`); if the database exists but no key is available, startup fails instead of generating a new key. `octra secrets rotate` and `POST /admin/secrets/rotate` generate a new active key and re-encrypt every secret row transactionally while old keys remain available for decryption. The SQLite database and its WAL/SHM sidecars remain `0600` on Unix as defense in depth.
 
 Rejected alternatives:
 - **Plaintext provider secrets in SQLite** — exposes them to database backups, copies, and any file reader.
@@ -38,8 +38,8 @@ Rejected alternatives:
 - A local attacker with the same OS permissions can still read process memory or environment; the boundary is OS-level.
 
 **Follow-ups:**
-- Add key rotation and re-encryption, ideally with a key id stored in the database and OS-level signing/notarization for packaged apps.
-- Bind ciphertext to its table/row with AAD in a future format version.
+- Retire old master keys after a confirmed rotation; currently they remain available for decryption.
+- Add a future ciphertext format with per-column AAD everywhere and audit the key rotation procedure.
 
 ## Verification
 
