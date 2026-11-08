@@ -197,6 +197,61 @@ impl MasterKeySet {
         &self.active
     }
 
+    /// Returns every retained key id, in stable sorted order.
+    pub fn key_ids(&self) -> Vec<String> {
+        self.keys.keys().cloned().collect()
+    }
+
+    /// Removes every key that is not the active key and not in `keep`.
+    ///
+    /// The active key is always retained, so a set can never be emptied. The
+    /// remaining key set is persisted before the in-memory set is changed; if
+    /// persistence fails, the old keys remain usable in memory.
+    pub fn retire(&mut self, keep: &std::collections::HashSet<String>) -> Result<usize, String> {
+        let removals: Vec<String> = self
+            .keys
+            .keys()
+            .filter(|id| *id != &self.active && !keep.contains(*id))
+            .cloned()
+            .collect();
+        if removals.is_empty() {
+            return Ok(0);
+        }
+        if matches!(self.persistence, Persistence::Environment) {
+            return Err(format!(
+                "cannot retire master keys while {ENV_MASTER_KEY} is set: the removal cannot be persisted"
+            ));
+        }
+
+        let removed: std::collections::HashSet<&String> = removals.iter().collect();
+        let remaining: BTreeMap<String, MasterKey> = self
+            .keys
+            .iter()
+            .filter(|(id, _)| !removed.contains(id))
+            .map(|(id, key)| (id.clone(), key.clone()))
+            .collect();
+        if remaining.is_empty() || !remaining.contains_key(&self.active) {
+            return Err("cannot retire the last master key".to_string());
+        }
+
+        if let Err(error) = self.persist_set(&self.active, &remaining) {
+            let _ = self.persist_set(&self.active, &self.keys);
+            return Err(error);
+        }
+
+        if matches!(self.persistence, Persistence::Keychain) {
+            for id in &removals {
+                if let Err(error) = delete_keychain_key(id) {
+                    let _ = self.persist_set(&self.active, &self.keys);
+                    return Err(error);
+                }
+            }
+        }
+
+        self.keys = remaining;
+        Ok(removals.len())
+    }
+
     /// Generates and persists a new active key while retaining old keys for
     /// decryption. Returns the new key id.
     ///
@@ -231,12 +286,16 @@ impl MasterKeySet {
     }
 
     fn persist(&self) -> Result<(), String> {
+        self.persist_set(&self.active, &self.keys)
+    }
+
+    fn persist_set(&self, active: &str, keys: &BTreeMap<String, MasterKey>) -> Result<(), String> {
         match &self.persistence {
             Persistence::Environment => Err(format!(
                 "cannot persist the master key while {ENV_MASTER_KEY} is set"
             )),
-            Persistence::Keychain => save_keychain_set(&self.active, &self.keys),
-            Persistence::File(path) => write_key_file_set(path, &self.active, &self.keys),
+            Persistence::Keychain => save_keychain_set(active, keys),
+            Persistence::File(path) => write_key_file_set(path, active, keys),
             Persistence::Memory => Ok(()),
         }
     }
@@ -328,6 +387,33 @@ impl SecretBox {
             .write()
             .map_err(|_| "master key set lock is poisoned".to_string())?;
         keys.rotate()
+    }
+
+    /// Returns every retained key id, in stable sorted order.
+    pub fn key_ids(&self) -> Result<Vec<String>, String> {
+        let keys = self
+            .keys
+            .read()
+            .map_err(|_| "master key set lock is poisoned".to_string())?;
+        Ok(keys.key_ids())
+    }
+
+    /// Returns the id of the key used for new ciphertext.
+    pub fn active_key_id(&self) -> Result<String, String> {
+        let keys = self
+            .keys
+            .read()
+            .map_err(|_| "master key set lock is poisoned".to_string())?;
+        Ok(keys.active_key_id().to_string())
+    }
+
+    /// Removes every non-active key that is not in `keep`.
+    pub fn retire(&self, keep: &std::collections::HashSet<String>) -> Result<usize, String> {
+        let mut keys = self
+            .keys
+            .write()
+            .map_err(|_| "master key set lock is poisoned".to_string())?;
+        keys.retire(keep)
     }
 
     pub fn is_sealed(stored: &str) -> bool {
@@ -422,6 +508,16 @@ fn read_keychain(account: &str) -> Result<Option<String>, String> {
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(format!(
             "cannot read OS keychain entry '{account}': {error}"
+        )),
+    }
+}
+
+fn delete_keychain_key(id: &str) -> Result<(), String> {
+    let account = format!("{KEYCHAIN_KEY_PREFIX}{id}");
+    match keychain_entry(&account)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!(
+            "cannot delete OS keychain master key '{id}': {error}"
         )),
     }
 }
@@ -641,6 +737,7 @@ fn write_key_file_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn secret_box() -> SecretBox {
         SecretBox::new(MasterKey::ephemeral())
@@ -797,6 +894,106 @@ mod tests {
                 .unwrap(),
             b"new"
         );
+    }
+
+    #[test]
+    fn retire_removes_unreferenced_keys_from_the_key_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("master.key");
+        let mut set = MasterKeySet::load_or_create(&path, false, true).unwrap();
+        let old_id = set.active_key_id().to_string();
+        let old_sealed = SecretBox::from_key_set(set.clone())
+            .seal(b"retired")
+            .unwrap();
+        assert!(old_sealed.starts_with(&format!("{SEALED_V2_PREFIX}{old_id}:")));
+
+        let new_id = set.rotate().unwrap();
+        let keep = HashSet::from([new_id.clone()]);
+        assert_eq!(set.retire(&keep).unwrap(), 1);
+        assert_eq!(set.key_ids(), vec![new_id.clone()]);
+
+        let error = SecretBox::from_key_set(set.clone())
+            .open(&old_sealed)
+            .unwrap_err();
+        assert!(error.contains(&old_id), "{error}");
+
+        let reloaded = MasterKeySet::load_or_create(&path, false, false).unwrap();
+        assert_eq!(reloaded.active_key_id(), new_id);
+        assert_eq!(reloaded.key_ids(), vec![new_id]);
+    }
+
+    #[test]
+    fn retire_always_keeps_the_active_key() {
+        let first = MasterKey::ephemeral();
+        let mut set = MasterKeySet::single(first.key_id(), first, Persistence::Memory);
+        let new_id = set.rotate().unwrap();
+
+        assert_eq!(set.retire(&HashSet::new()).unwrap(), 1);
+        assert_eq!(set.key_ids(), vec![new_id]);
+    }
+
+    #[test]
+    fn retire_keeps_referenced_keys() {
+        let first = MasterKey::ephemeral();
+        let mut set = MasterKeySet::single(first.key_id(), first, Persistence::Memory);
+        let old_id = set.active_key_id().to_string();
+        let new_id = set.rotate().unwrap();
+
+        let keep = HashSet::from([old_id.clone()]);
+        assert_eq!(set.retire(&keep).unwrap(), 0);
+        let ids = set.key_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&old_id));
+        assert!(ids.contains(&new_id));
+    }
+
+    #[test]
+    fn secret_box_exposes_key_ids_and_retires_in_memory() {
+        let first = MasterKey::ephemeral();
+        let first_id = first.key_id();
+        let secret = SecretBox::new(first);
+        assert_eq!(secret.key_ids().unwrap(), vec![first_id]);
+        assert_eq!(
+            secret.active_key_id().unwrap(),
+            secret.key_ids().unwrap()[0]
+        );
+
+        let new_id = secret.rotate().unwrap();
+        assert_eq!(secret.retire(&HashSet::new()).unwrap(), 1);
+        assert_eq!(secret.key_ids().unwrap(), vec![new_id]);
+    }
+
+    #[test]
+    fn environment_key_store_refuses_retirement_when_a_key_would_be_removed() {
+        let active_key = MasterKey::ephemeral();
+        let active = active_key.key_id();
+        let old_key = MasterKey::ephemeral();
+        let old = old_key.key_id();
+        let mut keys = BTreeMap::new();
+        keys.insert(active.clone(), active_key);
+        keys.insert(old.clone(), old_key);
+        let mut set = MasterKeySet {
+            active,
+            keys,
+            persistence: Persistence::Environment,
+        };
+
+        let keep = HashSet::from([set.active_key_id().to_string()]);
+        let error = set.retire(&keep).unwrap_err();
+        assert!(error.contains(ENV_MASTER_KEY), "{error}");
+        let ids = set.key_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&old));
+    }
+
+    #[test]
+    fn environment_key_store_allows_a_no_op_retirement() {
+        let key = MasterKey::ephemeral();
+        let id = key.key_id();
+        let mut set = MasterKeySet::single(id.clone(), key, Persistence::Environment);
+
+        assert_eq!(set.retire(&HashSet::new()).unwrap(), 0);
+        assert_eq!(set.key_ids(), vec![id]);
     }
 
     #[test]

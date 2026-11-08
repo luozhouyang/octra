@@ -51,6 +51,15 @@ pub struct SecretRotationReport {
     pub rotated: u64,
 }
 
+/// Summary of a master-key retirement pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SecretRetirementReport {
+    /// Number of keys removed from the key set.
+    pub retired: usize,
+    /// Number of keys still retained, including the active key.
+    pub remaining: usize,
+}
+
 /// Stable AES-GCM associated data for one stored secret column.
 pub(crate) fn secret_context(table: &str, row_id: &str, column: &str) -> String {
     format!("{table}|{row_id}|{column}")
@@ -402,6 +411,76 @@ impl Storage {
         Ok(SecretRotationReport { rotated })
     }
 
+    /// Retires master keys that are no longer referenced by any stored v2
+    /// ciphertext. The active key and every key id found in an `enc:v2:`
+    /// prefix are retained.
+    ///
+    /// Retirement is refused while any `enc:v1:` value remains because those
+    /// values carry no key id. Run a rotation or backfill first so every row
+    /// records its key id.
+    pub async fn retire_secrets(&self) -> Result<SecretRetirementReport> {
+        let mut referenced = std::collections::HashSet::new();
+        for (table, id_column, columns) in SECRET_TABLES {
+            let selected = columns.join(", ");
+            let sql = format!("SELECT {id_column}, {selected} FROM {table}");
+            let rows = sqlx::query(&sql)
+                .fetch_all(self.pool())
+                .await
+                .map_err(|err| {
+                    Error::Storage(format!(
+                        "cannot scan {table} for master-key references: {err}"
+                    ))
+                })?;
+            for row in rows {
+                let id: String = row.get(id_column);
+                for column in columns {
+                    let stored: Option<String> = row.try_get(*column).map_err(|err| {
+                        Error::Storage(format!(
+                            "cannot read stored secret {table}.{column} for row '{id}': {err}"
+                        ))
+                    })?;
+                    let Some(stored) = stored.filter(|value| !value.is_empty()) else {
+                        continue;
+                    };
+                    if stored.starts_with("enc:v1:") {
+                        return Err(Error::Storage(format!(
+                            "cannot retire master keys: {table}.{column} for row '{id}' contains enc:v1 data with no key id; run secret rotation or backfill first"
+                        )));
+                    }
+                    let Some(rest) = stored.strip_prefix("enc:v2:") else {
+                        continue;
+                    };
+                    let key_id = rest.split_once(':').map(|(key_id, _)| key_id);
+                    match key_id.filter(|key_id| !key_id.is_empty()) {
+                        Some(key_id) => {
+                            referenced.insert(key_id.to_string());
+                        }
+                        None => {
+                            return Err(Error::Storage(format!(
+                                "cannot retire master keys: {table}.{column} for row '{id}' has a malformed enc:v2: prefix"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        referenced.insert(self.secrets.active_key_id().map_err(|error| {
+            Error::Storage(format!("cannot read the active master key id: {error}"))
+        })?);
+        let retired = self
+            .secrets
+            .retire(&referenced)
+            .map_err(|error| Error::Storage(format!("cannot retire master keys: {error}")))?;
+        let remaining = self
+            .secrets
+            .key_ids()
+            .map_err(|error| Error::Storage(format!("cannot list master keys: {error}")))?
+            .len();
+        tracing::info!(retired, remaining, "retired unreferenced master keys");
+        Ok(SecretRetirementReport { retired, remaining })
+    }
+
     async fn reseal_table(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -633,6 +712,43 @@ fn restrict_database_permissions(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn seed_keyauth(storage: &Storage, key: &str) -> (String, String) {
+        use octra_api_core::{CreateConsumer, CreateKeyauthCredential};
+
+        let consumer = storage
+            .api
+            .create_consumer(&CreateConsumer {
+                username: Some(format!("retirement-{key}")),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let credential = storage
+            .api
+            .create_credential(&CreateKeyauthCredential {
+                consumer_id: consumer.id.clone(),
+                key: Some(key.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        (consumer.id, credential.id)
+    }
+
+    async fn insert_keyauth_row(storage: &Storage, consumer_id: &str, id: &str, key: &str) {
+        sqlx::query(
+            "INSERT INTO keyauth_credentials (id, consumer_id, key, key_lookup, tags, created_at) \
+             VALUES (?, ?, ?, ?, '[]', CAST(strftime('%s', 'now') AS INTEGER))",
+        )
+        .bind(id)
+        .bind(consumer_id)
+        .bind(key)
+        .bind(key_lookup(key))
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn migrations_create_the_initial_schema() {
@@ -925,6 +1041,101 @@ mod tests {
                 .key,
             "rotation-key"
         );
+    }
+
+    #[tokio::test]
+    async fn retirement_removes_unreferenced_keys_and_keeps_the_active_key() {
+        let storage = Storage::connect_in_memory().await.unwrap();
+        let (_, credential_id) = seed_keyauth(&storage, "retirement-key").await;
+        let old_id = storage.secrets.active_key_id().unwrap();
+
+        let rotation = storage.rotate_secrets().await.unwrap();
+        assert_eq!(rotation.rotated, 1);
+        let new_id = storage.secrets.active_key_id().unwrap();
+        assert_ne!(old_id, new_id);
+
+        let report = storage.retire_secrets().await.unwrap();
+        assert_eq!(
+            report,
+            SecretRetirementReport {
+                retired: 1,
+                remaining: 1,
+            }
+        );
+        assert_eq!(storage.secrets.key_ids().unwrap(), vec![new_id]);
+
+        let credential = storage
+            .api
+            .get_credential(&credential_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(credential.key, "retirement-key");
+
+        let repeated = storage.retire_secrets().await.unwrap();
+        assert_eq!(
+            repeated,
+            SecretRetirementReport {
+                retired: 0,
+                remaining: 1,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn retirement_keeps_a_key_referenced_by_a_manual_v2_row() {
+        let storage = Storage::connect_in_memory().await.unwrap();
+        let (consumer_id, _) = seed_keyauth(&storage, "active-key").await;
+        let old_id = storage.secrets.active_key_id().unwrap();
+        let context = secret_context("keyauth_credentials", "cred_manual", "key");
+        let pinned = storage
+            .secrets
+            .seal_with_context(b"pinned-value", &context)
+            .unwrap();
+        assert!(pinned.starts_with(&format!("enc:v2:{old_id}:")));
+
+        storage.rotate_secrets().await.unwrap();
+        let new_id = storage.secrets.active_key_id().unwrap();
+        assert_ne!(old_id, new_id);
+        insert_keyauth_row(&storage, &consumer_id, "cred_manual", &pinned).await;
+
+        let report = storage.retire_secrets().await.unwrap();
+        assert_eq!(
+            report,
+            SecretRetirementReport {
+                retired: 0,
+                remaining: 2,
+            }
+        );
+        let ids = storage.secrets.key_ids().unwrap();
+        assert!(ids.contains(&old_id));
+        assert!(ids.contains(&new_id));
+        let credential = storage
+            .api
+            .get_credential("cred_manual")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(credential.key, "pinned-value");
+    }
+
+    #[tokio::test]
+    async fn retirement_is_blocked_by_legacy_v1_rows() {
+        let storage = Storage::connect_in_memory().await.unwrap();
+        let (consumer_id, _) = seed_keyauth(&storage, "legacy-key").await;
+        let legacy = storage.secrets.seal_legacy(b"legacy-retire").unwrap();
+        assert!(legacy.starts_with("enc:v1:"));
+        insert_keyauth_row(&storage, &consumer_id, "cred_legacy_retire", &legacy).await;
+        let before = storage.secrets.key_ids().unwrap();
+
+        let error = storage.retire_secrets().await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("enc:v1"), "{message}");
+        assert!(
+            message.contains("rotation") || message.contains("backfill"),
+            "{message}"
+        );
+        assert_eq!(storage.secrets.key_ids().unwrap(), before);
     }
 
     #[cfg(unix)]

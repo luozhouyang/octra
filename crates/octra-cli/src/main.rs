@@ -555,6 +555,8 @@ enum PoliciesCommand {
 enum SecretsCommand {
     /// Rotate the master key and re-encrypt all stored secrets
     Rotate,
+    /// Retire master keys no longer referenced by stored secrets
+    Retire,
 }
 
 struct Control {
@@ -815,6 +817,7 @@ fn policies(control: &Control, command: PoliciesCommand) -> Result<()> {
 fn secrets(control: &Control, command: SecretsCommand) -> Result<()> {
     match command {
         SecretsCommand::Rotate => print_json(control.post("/admin/secrets/rotate")?),
+        SecretsCommand::Retire => print_json(control.post("/admin/secrets/retire")?),
     }
 }
 
@@ -1164,5 +1167,14 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("cannot read `--body` file"));
+    }
+
+    #[test]
+    fn parses_secrets_retire_command() {
+        let cli = Cli::try_parse_from(["octra", "secrets", "retire"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Secrets(SecretsCommand::Retire)
+        ));
     }
 }
