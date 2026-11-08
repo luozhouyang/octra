@@ -2,14 +2,15 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Form, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
@@ -153,6 +154,188 @@ pub async fn start_jwks(jwks: Value) -> JwksMock {
 async fn serve_jwks(State(state): State<JwksMockState>) -> Json<Value> {
     state.requests.fetch_add(1, Ordering::Relaxed);
     Json(state.jwks.lock().unwrap().clone())
+}
+
+#[derive(Clone)]
+pub struct DiscoveryMockState {
+    document: Arc<Mutex<Value>>,
+    requests: Arc<AtomicU64>,
+}
+
+impl DiscoveryMockState {
+    pub fn set(&self, document: Value) {
+        *self.document.lock().unwrap() = document;
+    }
+
+    pub fn requests(&self) -> u64 {
+        self.requests.load(Ordering::Relaxed)
+    }
+}
+
+/// A local OpenID Connect discovery endpoint.
+pub struct DiscoveryMock {
+    pub addr: SocketAddr,
+    pub state: DiscoveryMockState,
+    pub handle: tokio::task::JoinHandle<()>,
+}
+
+impl DiscoveryMock {
+    pub fn url(&self) -> String {
+        format!("http://{}/.well-known/openid-configuration", self.addr)
+    }
+}
+
+impl Drop for DiscoveryMock {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+/// Starts a discovery mock on `127.0.0.1:0`.
+pub async fn start_discovery(document: Value) -> DiscoveryMock {
+    let state = DiscoveryMockState {
+        document: Arc::new(Mutex::new(document)),
+        requests: Arc::new(AtomicU64::new(0)),
+    };
+    let app = Router::new()
+        .route("/.well-known/openid-configuration", get(serve_discovery))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    DiscoveryMock {
+        addr,
+        state,
+        handle,
+    }
+}
+
+async fn serve_discovery(State(state): State<DiscoveryMockState>) -> Json<Value> {
+    state.requests.fetch_add(1, Ordering::Relaxed);
+    Json(state.document.lock().unwrap().clone())
+}
+
+#[derive(Clone)]
+pub struct IntrospectionMockState {
+    responses: Arc<Mutex<HashMap<String, Value>>>,
+    requests: Arc<AtomicU64>,
+    require_form_auth: Arc<AtomicBool>,
+    last_authorization: Arc<Mutex<Option<String>>>,
+    last_form: Arc<Mutex<Option<HashMap<String, String>>>>,
+}
+
+impl IntrospectionMockState {
+    pub fn set_response(&self, token: &str, response: Value) {
+        self.responses
+            .lock()
+            .unwrap()
+            .insert(token.to_string(), response);
+    }
+
+    pub fn requests(&self) -> u64 {
+        self.requests.load(Ordering::Relaxed)
+    }
+
+    /// When enabled, Basic authentication is rejected once so the gateway
+    /// must retry with form credentials.
+    pub fn require_form_auth(&self, required: bool) {
+        self.require_form_auth.store(required, Ordering::Relaxed);
+    }
+
+    pub fn last_authorization(&self) -> Option<String> {
+        self.last_authorization.lock().unwrap().clone()
+    }
+
+    pub fn last_form(&self) -> Option<HashMap<String, String>> {
+        self.last_form.lock().unwrap().clone()
+    }
+}
+
+/// A local RFC 7662 introspection endpoint.
+pub struct IntrospectionMock {
+    pub addr: SocketAddr,
+    pub state: IntrospectionMockState,
+    pub handle: tokio::task::JoinHandle<()>,
+}
+
+impl IntrospectionMock {
+    pub fn url(&self) -> String {
+        format!("http://{}/introspect", self.addr)
+    }
+}
+
+impl Drop for IntrospectionMock {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+/// Starts an introspection mock on `127.0.0.1:0`.
+pub async fn start_introspection() -> IntrospectionMock {
+    let state = IntrospectionMockState {
+        responses: Arc::new(Mutex::new(HashMap::new())),
+        requests: Arc::new(AtomicU64::new(0)),
+        require_form_auth: Arc::new(AtomicBool::new(false)),
+        last_authorization: Arc::new(Mutex::new(None)),
+        last_form: Arc::new(Mutex::new(None)),
+    };
+    let app = Router::new()
+        .route("/introspect", post(serve_introspection))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    IntrospectionMock {
+        addr,
+        state,
+        handle,
+    }
+}
+
+async fn serve_introspection(
+    State(state): State<IntrospectionMockState>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    state.requests.fetch_add(1, Ordering::Relaxed);
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    *state.last_authorization.lock().unwrap() = authorization.clone();
+    *state.last_form.lock().unwrap() = Some(form.clone());
+
+    let basic = authorization
+        .as_deref()
+        .is_some_and(|value| value.starts_with("Basic "));
+    let form_auth = form.contains_key("client_id") && form.contains_key("client_secret");
+    let accepted = if basic {
+        !state.require_form_auth.load(Ordering::Relaxed)
+    } else {
+        form_auth
+    };
+    if !accepted {
+        let mut response = StatusCode::UNAUTHORIZED.into_response();
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Basic realm=\"introspection\""),
+        );
+        return response;
+    }
+
+    let token = form.get("token").cloned().unwrap_or_default();
+    let body = state
+        .responses
+        .lock()
+        .unwrap()
+        .get(&token)
+        .cloned()
+        .unwrap_or_else(|| json!({"active": false}));
+    Json(body).into_response()
 }
 
 /// One request observed by the OpenAPI mock API.

@@ -142,10 +142,7 @@ function ServerForm({
             <option value="http">http</option>
           </Select>
         </Field>
-        <Field
-          label="Mode"
-          hint="Kong-shaped server type. Conversion modes read config.openapi."
-        >
+        <Field label="Mode" hint="Kong-shaped server type. Conversion modes read config.openapi.">
           <Select value={mode} onChange={setMode}>
             <option value="passthrough-listener">passthrough-listener</option>
             <option value="listener">listener</option>
@@ -257,9 +254,7 @@ function ServerForm({
           />
         </Field>
       </div>
-      {errors.openapi ? (
-        <span className="text-[10px] text-danger">{errors.openapi}</span>
-      ) : null}
+      {errors.openapi ? <span className="text-[10px] text-danger">{errors.openapi}</span> : null}
       <p className="text-[9.5px] text-muted-foreground">
         stdio servers need command; HTTP servers need url. Listener sources are matched by server
         name or id and normalize to names. Conversion modes need config.openapi in the advanced
@@ -670,17 +665,35 @@ function AclForm({
 function StrategyForm({ initial, pending, onSave, onCancel, onDelete }: McpTypedFormProps) {
   const source = asRecord(initial);
   const config = isRecord(source.config) ? source.config : {};
+  const introspectionConfig = isRecord(config.introspection) ? config.introspection : {};
   const [name, setName] = useState(() => readString(source, "name"));
   const [issuer, setIssuer] = useState(() => readString(config, "issuer"));
   const [jwksUri, setJwksUri] = useState(() => readString(config, "jwks_uri"));
+  const [discoveryUrl, setDiscoveryUrl] = useState(() => readString(config, "discovery_url"));
+  const [tokenValidation, setTokenValidation] = useState(() =>
+    readString(config, "token_validation", "auto"),
+  );
+  const [introspectionEnabled, setIntrospectionEnabled] = useState(() =>
+    isRecord(config.introspection),
+  );
+  const [introspectionEndpoint, setIntrospectionEndpoint] = useState(() =>
+    readString(introspectionConfig, "endpoint"),
+  );
+  const [introspectionClientId, setIntrospectionClientId] = useState(() =>
+    readString(introspectionConfig, "client_id"),
+  );
+  const [introspectionClientSecretRef, setIntrospectionClientSecretRef] = useState(() =>
+    readString(introspectionConfig, "client_secret_ref"),
+  );
+  const [introspectionCacheSecs, setIntrospectionCacheSecs] = useState(() =>
+    readNumberText(introspectionConfig, "cache_secs", 60),
+  );
   const [audience, setAudience] = useState(() => readString(config, "audience"));
   const [scopes, setScopes] = useState(() => readCommaList(config.required_scopes));
   const [consumerClaim, setConsumerClaim] = useState(() =>
     readString(config, "consumer_claim", "sub"),
   );
-  const [usernameClaim, setUsernameClaim] = useState(() =>
-    readString(config, "username_claim"),
-  );
+  const [usernameClaim, setUsernameClaim] = useState(() => readString(config, "username_claim"));
   const [groupsClaim, setGroupsClaim] = useState(() => readString(config, "groups_claim"));
   const [algorithms, setAlgorithms] = useState(() => readCommaList(config.algorithms));
   const [cacheSecs, setCacheSecs] = useState(() => readNumberText(config, "jwks_cache_secs", 300));
@@ -695,7 +708,17 @@ function StrategyForm({ initial, pending, onSave, onCancel, onDelete }: McpTyped
     is_default: isDefault,
     config: {
       issuer: issuer.trim(),
-      jwks_uri: jwksUri.trim(),
+      jwks_uri: jwksUri.trim() === "" ? null : jwksUri.trim(),
+      discovery_url: discoveryUrl.trim() === "" ? null : discoveryUrl.trim(),
+      token_validation: tokenValidation,
+      introspection: introspectionEnabled
+        ? {
+            endpoint: introspectionEndpoint.trim(),
+            client_id: introspectionClientId.trim(),
+            client_secret_ref: introspectionClientSecretRef.trim(),
+            cache_secs: Number(introspectionCacheSecs) || 60,
+          }
+        : null,
       audience: audience.trim() === "" ? null : audience.trim(),
       required_scopes: splitCommaList(scopes),
       consumer_claim: consumerClaim.trim() || "sub",
@@ -725,8 +748,49 @@ function StrategyForm({ initial, pending, onSave, onCancel, onDelete }: McpTyped
     if (!/^https?:\/\//i.test(issuer.trim())) {
       nextErrors.issuer = "Issuer must be an absolute http(s) URL.";
     }
-    if (!/^https?:\/\//i.test(jwksUri.trim())) {
+    if (jwksUri.trim() !== "" && !/^https?:\/\//i.test(jwksUri.trim())) {
       nextErrors.jwks_uri = "JWKS URI must be an absolute http(s) URL.";
+    }
+    if (discoveryUrl.trim() !== "" && !/^https?:\/\//i.test(discoveryUrl.trim())) {
+      nextErrors.discovery_url = "Discovery URL must be an absolute http(s) URL.";
+    }
+    const hasJwtSource = jwksUri.trim() !== "" || discoveryUrl.trim() !== "";
+    const hasIntrospection =
+      introspectionEnabled &&
+      introspectionClientId.trim() !== "" &&
+      introspectionClientSecretRef.trim() !== "";
+    if (tokenValidation === "jwt" && !hasJwtSource) {
+      nextErrors.discovery_url = "JWT validation needs a JWKS URI or discovery URL.";
+    }
+    if (tokenValidation === "introspection" && !hasIntrospection) {
+      nextErrors.introspection = "Introspection needs a client id and secret reference.";
+    }
+    if (tokenValidation === "auto" && !hasJwtSource && !hasIntrospection) {
+      nextErrors.discovery_url = "Auto validation needs a JWKS or introspection source.";
+    }
+    if (introspectionEnabled) {
+      if (introspectionClientId.trim() === "") {
+        nextErrors.introspection_client_id = "Client id is required.";
+      }
+      if (!/^(env|file):/i.test(introspectionClientSecretRef.trim())) {
+        nextErrors.introspection_client_secret_ref =
+          "Client secret must be an env: or file: reference.";
+      }
+      if (
+        introspectionEndpoint.trim() !== "" &&
+        !/^https?:\/\//i.test(introspectionEndpoint.trim())
+      ) {
+        nextErrors.introspection_endpoint =
+          "Introspection endpoint must be an absolute http(s) URL.";
+      }
+      const introspectionSeconds = Number(introspectionCacheSecs);
+      if (
+        !Number.isFinite(introspectionSeconds) ||
+        introspectionSeconds < 1 ||
+        introspectionSeconds > 3600
+      ) {
+        nextErrors.introspection_cache = "Introspection cache must be between 1 and 3600 seconds.";
+      }
     }
     const seconds = Number(cacheSecs);
     if (!Number.isFinite(seconds) || seconds < 1 || seconds > 86400) {
@@ -769,7 +833,11 @@ function StrategyForm({ initial, pending, onSave, onCancel, onDelete }: McpTyped
             className="font-mono text-[11px]"
           />
         </Field>
-        <Field label="JWKS URI" required error={errors.jwks_uri}>
+        <Field
+          label="JWKS URI"
+          error={errors.jwks_uri}
+          hint="Optional when discovery supplies the JWKS document."
+        >
           <Input
             value={jwksUri}
             onChange={(event) => setJwksUri(event.target.value)}
@@ -777,6 +845,79 @@ function StrategyForm({ initial, pending, onSave, onCancel, onDelete }: McpTyped
             className="font-mono text-[11px]"
           />
         </Field>
+        <Field
+          label="Discovery URL"
+          error={errors.discovery_url}
+          hint="Defaults to the issuer's .well-known/openid-configuration."
+        >
+          <Input
+            value={discoveryUrl}
+            onChange={(event) => setDiscoveryUrl(event.target.value)}
+            placeholder="https://idp.example.com/.well-known/openid-configuration"
+            className="font-mono text-[11px]"
+          />
+        </Field>
+        <Field label="Token validation" error={errors.token_validation}>
+          <Select value={tokenValidation} onChange={(value) => setTokenValidation(value)}>
+            <option value="auto">auto</option>
+            <option value="jwt">jwt</option>
+            <option value="introspection">introspection</option>
+          </Select>
+        </Field>
+        <Field label="Introspection">
+          <div className="flex h-9 items-center">
+            <Switch
+              checked={introspectionEnabled}
+              onCheckedChange={setIntrospectionEnabled}
+              label="Introspection enabled"
+            />
+          </div>
+        </Field>
+        {introspectionEnabled ? (
+          <>
+            <Field
+              label="Introspection endpoint"
+              error={errors.introspection_endpoint}
+              hint="Optional when discovery supplies introspection_endpoint."
+            >
+              <Input
+                value={introspectionEndpoint}
+                onChange={(event) => setIntrospectionEndpoint(event.target.value)}
+                placeholder="https://idp.example.com/introspect"
+                className="font-mono text-[11px]"
+              />
+            </Field>
+            <Field label="Introspection client ID" error={errors.introspection_client_id}>
+              <Input
+                value={introspectionClientId}
+                onChange={(event) => setIntrospectionClientId(event.target.value)}
+                placeholder="octra-mcp"
+                className="font-mono text-[11px]"
+              />
+            </Field>
+            <Field
+              label="Client secret ref"
+              error={errors.introspection_client_secret_ref}
+              hint="Use an env:NAME or file:PATH reference; secrets are never stored."
+            >
+              <Input
+                value={introspectionClientSecretRef}
+                onChange={(event) => setIntrospectionClientSecretRef(event.target.value)}
+                placeholder="env:OIDC_CLIENT_SECRET"
+                className="font-mono text-[11px]"
+              />
+            </Field>
+            <Field label="Introspection cache seconds" error={errors.introspection_cache}>
+              <Input
+                type="number"
+                min={1}
+                max={3600}
+                value={introspectionCacheSecs}
+                onChange={(event) => setIntrospectionCacheSecs(event.target.value)}
+              />
+            </Field>
+          </>
+        ) : null}
         <Field label="Audience">
           <Input
             value={audience}
@@ -1087,11 +1228,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function readString(
-  source: Record<string, unknown>,
-  key: string,
-  fallback = "",
-): string {
+function readString(source: Record<string, unknown>, key: string, fallback = ""): string {
   const value = source[key];
   return typeof value === "string" ? value : fallback;
 }
@@ -1153,7 +1290,14 @@ function readLines(value: unknown): string {
 }
 
 function splitLines(value: string): string[] {
-  return [...new Set(value.split("\n").map((entry) => entry.trim()).filter(Boolean))];
+  return [
+    ...new Set(
+      value
+        .split("\n")
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 function readSources(value: unknown): string {

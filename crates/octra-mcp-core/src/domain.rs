@@ -226,6 +226,12 @@ pub const MCP_AUTH_STRATEGY_KIND_OIDC: &str = "oidc";
 /// Signature algorithms accepted for OIDC strategies.
 pub const MCP_OIDC_ALGORITHMS: &[&str] = &["RS256", "RS384", "RS512", "ES256", "ES384"];
 
+/// Token validation modes for OIDC strategies.
+pub const MCP_OIDC_TOKEN_VALIDATIONS: &[&str] = &["auto", "jwt", "introspection"];
+pub const MCP_OIDC_TOKEN_VALIDATION_AUTO: &str = "auto";
+pub const MCP_OIDC_TOKEN_VALIDATION_JWT: &str = "jwt";
+pub const MCP_OIDC_TOKEN_VALIDATION_INTROSPECTION: &str = "introspection";
+
 /// A persisted data-plane authentication strategy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpAuthStrategy {
@@ -284,8 +290,20 @@ impl McpAuthStrategy {
 pub struct McpOidcConfig {
     /// Expected `iss` claim and the identity provider identifier.
     pub issuer: String,
-    /// Absolute URL of the JWKS document with signing keys.
-    pub jwks_uri: String,
+    /// Absolute URL of the JWKS document with signing keys. Optional when a
+    /// discovery document supplies it.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+    /// Absolute URL of the OpenID Connect discovery document. Defaults to
+    /// `{issuer}/.well-known/openid-configuration` when omitted.
+    #[serde(default)]
+    pub discovery_url: Option<String>,
+    /// RFC 7662 introspection settings for opaque access tokens.
+    #[serde(default)]
+    pub introspection: Option<McpOidcIntrospection>,
+    /// How bearer tokens are validated: `auto`, `jwt`, or `introspection`.
+    #[serde(default = "default_token_validation")]
+    pub token_validation: String,
     /// Expected `aud` claim; when unset, audiences are not validated.
     #[serde(default)]
     pub audience: Option<String>,
@@ -305,16 +323,46 @@ pub struct McpOidcConfig {
     /// JWT algorithms allowed for this strategy.
     #[serde(default = "default_oidc_algorithms")]
     pub algorithms: Vec<String>,
-    /// In-process JWKS cache lifetime in seconds.
+    /// In-process JWKS and discovery cache lifetime in seconds.
     #[serde(default = "default_jwks_cache_secs")]
     pub jwks_cache_secs: u64,
+}
+
+/// RFC 7662 token introspection settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpOidcIntrospection {
+    /// Absolute introspection endpoint. When empty, the discovery document
+    /// supplies `introspection_endpoint`.
+    #[serde(default)]
+    pub endpoint: String,
+    /// OAuth client id used for HTTP Basic or form authentication.
+    pub client_id: String,
+    /// `env:` or `file:` reference resolved at request time.
+    pub client_secret_ref: String,
+    /// In-process result cache lifetime in seconds.
+    #[serde(default = "default_introspection_cache_secs")]
+    pub cache_secs: u64,
+}
+
+impl Default for McpOidcIntrospection {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            client_id: String::new(),
+            client_secret_ref: String::new(),
+            cache_secs: default_introspection_cache_secs(),
+        }
+    }
 }
 
 impl Default for McpOidcConfig {
     fn default() -> Self {
         Self {
             issuer: String::new(),
-            jwks_uri: String::new(),
+            jwks_uri: None,
+            discovery_url: None,
+            introspection: None,
+            token_validation: default_token_validation(),
             audience: None,
             required_scopes: Vec::new(),
             consumer_claim: default_consumer_claim(),
@@ -342,19 +390,100 @@ fn default_jwks_cache_secs() -> u64 {
     300
 }
 
+fn default_token_validation() -> String {
+    MCP_OIDC_TOKEN_VALIDATION_AUTO.to_string()
+}
+
+fn default_introspection_cache_secs() -> u64 {
+    60
+}
+
 impl McpOidcConfig {
     /// Parses and validates a strategy config object.
     pub fn from_value(value: &Value) -> Result<Self, String> {
-        let config: Self = serde_json::from_value(value.clone())
+        let mut config: Self = serde_json::from_value(value.clone())
             .map_err(|err| format!("invalid OIDC config: {err}"))?;
+        config.normalize();
         config.validate()?;
         Ok(config)
+    }
+
+    /// Treats blank optional URLs and endpoints as absent.
+    fn normalize(&mut self) {
+        self.jwks_uri = self
+            .jwks_uri
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        self.discovery_url = self
+            .discovery_url
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(introspection) = self.introspection.as_mut() {
+            introspection.endpoint = introspection.endpoint.trim().to_string();
+        }
     }
 
     /// Validates URLs, claim names, algorithms, scopes, and cache lifetime.
     pub fn validate(&self) -> Result<(), String> {
         validate_absolute_http_url("issuer", &self.issuer)?;
-        validate_absolute_http_url("jwks_uri", &self.jwks_uri)?;
+        if let Some(jwks_uri) = self.jwks_uri.as_deref() {
+            validate_absolute_http_url("jwks_uri", jwks_uri)?;
+        }
+        if let Some(discovery_url) = self.discovery_url.as_deref() {
+            validate_absolute_http_url("discovery_url", discovery_url)?;
+        }
+        if !MCP_OIDC_TOKEN_VALIDATIONS.contains(&self.token_validation.as_str()) {
+            return Err(format!(
+                "invalid token_validation '{}'; expected one of {}",
+                self.token_validation,
+                MCP_OIDC_TOKEN_VALIDATIONS.join(", ")
+            ));
+        }
+        if let Some(introspection) = self.introspection.as_ref() {
+            if !introspection.endpoint.is_empty() {
+                validate_absolute_http_url("introspection.endpoint", &introspection.endpoint)?;
+            }
+            if introspection.client_id.trim().is_empty() {
+                return Err("introspection.client_id must not be empty".into());
+            }
+            validate_client_secret_reference(
+                "introspection.client_secret_ref",
+                &introspection.client_secret_ref,
+            )?;
+            if !(1..=3_600).contains(&introspection.cache_secs) {
+                return Err(format!(
+                    "introspection.cache_secs must be between 1 and 3600, got {}",
+                    introspection.cache_secs
+                ));
+            }
+        }
+        match self.token_validation.as_str() {
+            MCP_OIDC_TOKEN_VALIDATION_JWT => {
+                if self.jwks_uri.is_none() && self.discovery_url.is_none() {
+                    return Err("token_validation 'jwt' requires jwks_uri or discovery_url".into());
+                }
+            }
+            MCP_OIDC_TOKEN_VALIDATION_INTROSPECTION => {
+                if self.introspection.is_none() {
+                    return Err(
+                        "token_validation 'introspection' requires introspection settings".into(),
+                    );
+                }
+            }
+            MCP_OIDC_TOKEN_VALIDATION_AUTO
+                if self.jwks_uri.is_none()
+                    && self.discovery_url.is_none()
+                    && self.introspection.is_none() =>
+            {
+                return Err(
+                    "token_validation 'auto' requires jwks_uri, discovery_url, or introspection"
+                        .into(),
+                );
+            }
+            _ => {}
+        }
         if let Some(audience) = self.audience.as_deref()
             && audience.trim().is_empty()
         {
@@ -391,6 +520,16 @@ impl McpOidcConfig {
         }
         Ok(())
     }
+}
+
+fn validate_client_secret_reference(field: &str, value: &str) -> Result<(), String> {
+    let Some((scheme, name)) = value.split_once(':') else {
+        return Err(format!("{field} must be an env: or file: reference"));
+    };
+    if !matches!(scheme, "env" | "file") || name.trim().is_empty() {
+        return Err(format!("{field} must be an env: or file: reference"));
+    }
+    Ok(())
 }
 
 fn validate_claim_name(field: &str, claim: &str) -> Result<(), String> {
@@ -1062,6 +1201,9 @@ mod tests {
         assert_eq!(config.groups_claim.as_deref(), Some("groups"));
         assert_eq!(config.algorithms, vec!["RS256", "ES256"]);
         assert_eq!(config.jwks_cache_secs, 300);
+        assert_eq!(config.token_validation, "auto");
+        assert!(config.discovery_url.is_none());
+        assert!(config.introspection.is_none());
 
         for bad in [
             json!({"issuer": "issuer.example.test", "jwks_uri": "https://example.test/jwks"}),
@@ -1106,5 +1248,120 @@ mod tests {
             is_default: false,
         };
         assert!(strategy.validate().is_err());
+    }
+
+    #[test]
+    fn oidc_config_supports_discovery_and_introspection() {
+        let config = McpOidcConfig::from_value(&json!({
+            "issuer": "https://issuer.example.test",
+            "discovery_url": "https://issuer.example.test/.well-known/openid-configuration",
+            "token_validation": "introspection",
+            "introspection": {
+                "endpoint": "https://issuer.example.test/introspect",
+                "client_id": "octra",
+                "client_secret_ref": "env:OIDC_CLIENT_SECRET",
+            },
+        }))
+        .unwrap();
+        assert!(config.jwks_uri.is_none());
+        assert_eq!(config.token_validation, "introspection");
+        let introspection = config.introspection.expect("introspection settings");
+        assert_eq!(introspection.cache_secs, 60);
+        assert_eq!(introspection.client_id, "octra");
+
+        // The discovery document may provide the introspection endpoint.
+        let config = McpOidcConfig::from_value(&json!({
+            "issuer": "https://issuer.example.test",
+            "discovery_url": "https://issuer.example.test/.well-known/openid-configuration",
+            "token_validation": "introspection",
+            "introspection": {
+                "client_id": "octra",
+                "client_secret_ref": "file:/run/secrets/oidc-client",
+            },
+        }))
+        .unwrap();
+        assert_eq!(config.introspection.unwrap().endpoint, "");
+
+        // Explicit discovery is a JWKS source for jwt-only mode.
+        let config = McpOidcConfig::from_value(&json!({
+            "issuer": "https://issuer.example.test",
+            "discovery_url": "https://issuer.example.test/.well-known/openid-configuration",
+            "token_validation": "jwt",
+        }))
+        .unwrap();
+        assert!(config.jwks_uri.is_none());
+
+        for bad in [
+            json!({
+                "issuer": "https://issuer.example.test",
+                "token_validation": "jwt",
+            }),
+            json!({
+                "issuer": "https://issuer.example.test",
+                "token_validation": "introspection",
+            }),
+            json!({
+                "issuer": "https://issuer.example.test",
+                "token_validation": "auto",
+            }),
+            json!({
+                "issuer": "https://issuer.example.test",
+                "discovery_url": "relative",
+                "token_validation": "jwt",
+            }),
+            json!({
+                "issuer": "https://issuer.example.test",
+                "token_validation": "introspection",
+                "introspection": {
+                    "endpoint": "relative",
+                    "client_id": "octra",
+                    "client_secret_ref": "env:OIDC_CLIENT_SECRET",
+                },
+            }),
+            json!({
+                "issuer": "https://issuer.example.test",
+                "token_validation": "introspection",
+                "introspection": {
+                    "client_id": "",
+                    "client_secret_ref": "env:OIDC_CLIENT_SECRET",
+                },
+            }),
+            json!({
+                "issuer": "https://issuer.example.test",
+                "token_validation": "introspection",
+                "introspection": {
+                    "client_id": "octra",
+                    "client_secret_ref": "inline:secret",
+                },
+            }),
+            json!({
+                "issuer": "https://issuer.example.test",
+                "token_validation": "introspection",
+                "introspection": {
+                    "client_id": "octra",
+                    "client_secret_ref": "env:OIDC_CLIENT_SECRET",
+                    "cache_secs": 0,
+                },
+            }),
+            json!({
+                "issuer": "https://issuer.example.test",
+                "token_validation": "introspection",
+                "introspection": {
+                    "client_id": "octra",
+                    "client_secret_ref": "env:OIDC_CLIENT_SECRET",
+                    "cache_secs": 3601,
+                },
+            }),
+            json!({
+                "issuer": "https://issuer.example.test",
+                "jwks_uri": "https://issuer.example.test/jwks",
+                "token_validation": "password",
+            }),
+        ] {
+            assert!(
+                McpOidcConfig::from_value(&bad).is_err(),
+                "config should be rejected: {bad}"
+            );
+        }
     }
 }

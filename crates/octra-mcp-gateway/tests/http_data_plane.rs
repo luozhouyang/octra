@@ -8,7 +8,8 @@ use octra_mcp_core::{NewMcpServer, Transport};
 use serde_json::json;
 use support::{
     Gateway, UpstreamMode, create_consumer_group, create_key, create_keyed_consumer,
-    sign_test_token, start_api_mock, start_jwks, start_upstream, test_jwks,
+    sign_test_token, start_api_mock, start_discovery, start_introspection, start_jwks,
+    start_upstream, test_jwks,
 };
 
 fn tool_names(body: &serde_json::Value) -> Vec<String> {
@@ -2090,11 +2091,71 @@ fn oidc_config(jwks_uri: &str, audience: Option<&str>) -> serde_json::Value {
     config
 }
 
-async fn post_oidc_strategy(
+fn discovery_oidc_config(discovery_url: &str, audience: Option<&str>) -> serde_json::Value {
+    let mut config = json!({
+        "issuer": OIDC_ISSUER,
+        "discovery_url": discovery_url,
+        "required_scopes": ["tools:call"],
+        "algorithms": ["RS256"],
+        "jwks_cache_secs": 300,
+    });
+    if let Some(audience) = audience {
+        config["audience"] = json!(audience);
+    }
+    config
+}
+
+fn introspection_oidc_config(
+    endpoint: &str,
+    client_secret_ref: &str,
+    audience: Option<&str>,
+) -> serde_json::Value {
+    let mut config = json!({
+        "issuer": OIDC_ISSUER,
+        "token_validation": "introspection",
+        "required_scopes": ["tools:call"],
+        "introspection": {
+            "endpoint": endpoint,
+            "client_id": "octra-test-client",
+            "client_secret_ref": client_secret_ref,
+            "cache_secs": 60,
+        },
+    });
+    if let Some(audience) = audience {
+        config["audience"] = json!(audience);
+    }
+    config
+}
+
+fn oidc_client_secret_ref(name: &str) -> String {
+    let path = std::env::temp_dir().join(format!(
+        "octra-phase43-{name}-{}.secret",
+        std::process::id()
+    ));
+    std::fs::write(&path, "test-client-secret").unwrap();
+    format!("file:{}", path.display())
+}
+
+fn introspection_claims(expires_at: u64, audience: Option<&str>, scope: &str) -> serde_json::Value {
+    let mut claims = json!({
+        "active": true,
+        "sub": "opaque-user",
+        "preferred_username": "Opaque User",
+        "email": "opaque.user@example.test",
+        "groups": ["team"],
+        "scope": scope,
+        "exp": expires_at,
+    });
+    if let Some(audience) = audience {
+        claims["aud"] = json!(audience);
+    }
+    claims
+}
+
+async fn post_strategy_config(
     gateway: &Gateway,
     name: &str,
-    jwks_uri: &str,
-    audience: Option<&str>,
+    config: serde_json::Value,
     is_default: bool,
     enabled: bool,
 ) -> (StatusCode, serde_json::Value) {
@@ -2105,12 +2166,30 @@ async fn post_oidc_strategy(
             json!({
                 "name": name,
                 "kind": "oidc",
-                "config": oidc_config(jwks_uri, audience),
+                "config": config,
                 "enabled": enabled,
                 "is_default": is_default,
             }),
         )
         .await
+}
+
+async fn post_oidc_strategy(
+    gateway: &Gateway,
+    name: &str,
+    jwks_uri: &str,
+    audience: Option<&str>,
+    is_default: bool,
+    enabled: bool,
+) -> (StatusCode, serde_json::Value) {
+    post_strategy_config(
+        gateway,
+        name,
+        oidc_config(jwks_uri, audience),
+        is_default,
+        enabled,
+    )
+    .await
 }
 
 fn epoch_now() -> u64 {
@@ -2204,6 +2283,59 @@ async fn auth_strategy_control_plane_crud_validates_and_keeps_one_default() {
                 },
             }),
             "consumer_claim",
+        ),
+        (
+            json!({
+                "name": "jwt-without-source",
+                "kind": "oidc",
+                "config": {"issuer": OIDC_ISSUER, "token_validation": "jwt"},
+            }),
+            "requires jwks_uri or discovery_url",
+        ),
+        (
+            json!({
+                "name": "introspection-without-config",
+                "kind": "oidc",
+                "config": {"issuer": OIDC_ISSUER, "token_validation": "introspection"},
+            }),
+            "requires introspection settings",
+        ),
+        (
+            json!({
+                "name": "auto-without-source",
+                "kind": "oidc",
+                "config": {"issuer": OIDC_ISSUER, "token_validation": "auto"},
+            }),
+            "requires jwks_uri, discovery_url, or introspection",
+        ),
+        (
+            json!({
+                "name": "bad-discovery-url",
+                "kind": "oidc",
+                "config": {
+                    "issuer": OIDC_ISSUER,
+                    "discovery_url": "relative",
+                    "token_validation": "jwt",
+                },
+            }),
+            "absolute http(s) URL",
+        ),
+        (
+            json!({
+                "name": "bad-introspection-cache",
+                "kind": "oidc",
+                "config": {
+                    "issuer": OIDC_ISSUER,
+                    "token_validation": "introspection",
+                    "introspection": {
+                        "endpoint": "http://127.0.0.1:9/introspect",
+                        "client_id": "octra",
+                        "client_secret_ref": "env:OIDC_SECRET",
+                        "cache_secs": 0,
+                    },
+                },
+            }),
+            "cache_secs",
         ),
         (
             json!({
@@ -2324,6 +2456,60 @@ async fn auth_strategy_control_plane_crud_validates_and_keeps_one_default() {
             .control_delete(&format!("/api/v1/mcp/auth-strategies/{second_id}"))
             .await,
         StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn auth_strategy_control_plane_accepts_discovery_and_introspection_configs() {
+    let jwks = start_jwks(test_jwks("test-kid")).await;
+    let discovery = start_discovery(json!({
+        "issuer": OIDC_ISSUER,
+        "jwks_uri": jwks.url(),
+        "introspection_endpoint": "https://issuer.example.test/introspect",
+    }))
+    .await;
+    let introspection = start_introspection().await;
+    let secret_ref = oidc_client_secret_ref("control-plane");
+    let gateway = Gateway::new().await;
+
+    let config = discovery_oidc_config(&discovery.url(), None);
+    let (status, created) =
+        post_strategy_config(&gateway, "discovery-sso", config.clone(), false, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["config"]["discovery_url"], discovery.url());
+    assert!(created["config"]["jwks_uri"].is_null(), "{created}");
+
+    let config = introspection_oidc_config(&introspection.url(), &secret_ref, None);
+    let (status, created) =
+        post_strategy_config(&gateway, "introspection-sso", config, false, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["config"]["token_validation"], "introspection");
+    assert_eq!(
+        created["config"]["introspection"]["client_id"],
+        "octra-test-client"
+    );
+    assert_eq!(
+        created["config"]["introspection"]["client_secret_ref"],
+        secret_ref
+    );
+
+    // An introspection strategy may omit the endpoint when discovery
+    // provides it.
+    let config = json!({
+        "issuer": OIDC_ISSUER,
+        "discovery_url": discovery.url(),
+        "token_validation": "introspection",
+        "introspection": {
+            "client_id": "octra-test-client",
+            "client_secret_ref": secret_ref,
+        },
+    });
+    let (status, created) =
+        post_strategy_config(&gateway, "discovered-introspection", config, false, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert!(
+        created["config"]["introspection"]["endpoint"].is_null(),
+        "{created}"
     );
 }
 
@@ -2853,6 +3039,401 @@ async fn oidc_jwks_failures_return_service_unavailable() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["error"]["code"], "jwks_unavailable");
     assert!(body["error"]["message"].as_str().unwrap().contains("JWKS"));
+}
+
+#[tokio::test]
+async fn oidc_discovery_supplies_jwks_and_refreshes_on_kid_miss() {
+    let jwks = start_jwks(test_jwks("test-kid")).await;
+    let discovery = start_discovery(json!({
+        "issuer": OIDC_ISSUER,
+        "jwks_uri": jwks.url(),
+    }))
+    .await;
+    let gateway = Gateway::new().await;
+    let config = discovery_oidc_config(&discovery.url(), Some(OIDC_AUDIENCE));
+    let (status, strategy) =
+        post_strategy_config(&gateway, "discovery-sso", config, true, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+
+    let token = valid_token();
+    let (status, _, body) = gateway.initialize(Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = gateway.initialize(Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        discovery.state.requests(),
+        1,
+        "the discovery document should be cached"
+    );
+
+    // A key rotation makes the cached JWKS miss; the gateway refreshes the
+    // discovery document and JWKS once.
+    jwks.state.set(test_jwks("rotated-kid"));
+    let now = epoch_now();
+    let rotated = mint_token(
+        "rotated-kid",
+        OIDC_ISSUER,
+        Some(OIDC_AUDIENCE),
+        "oidc-user",
+        json!(["team"]),
+        "tools:call",
+        now + 3600,
+        now - 10,
+    );
+    let (status, _, body) = gateway.initialize(Some(&rotated)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        discovery.state.requests(),
+        2,
+        "a failed key lookup should refresh discovery once"
+    );
+
+    let (status, _, body) = gateway.initialize(Some(&rotated)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        discovery.state.requests(),
+        2,
+        "the refreshed document should be cached again"
+    );
+}
+
+#[tokio::test]
+async fn oidc_discovery_cache_expires_after_ttl() {
+    let jwks = start_jwks(test_jwks("test-kid")).await;
+    let discovery = start_discovery(json!({
+        "issuer": OIDC_ISSUER,
+        "jwks_uri": jwks.url(),
+    }))
+    .await;
+    let gateway = Gateway::new().await;
+    let mut config = discovery_oidc_config(&discovery.url(), Some(OIDC_AUDIENCE));
+    config["jwks_cache_secs"] = json!(1);
+    let (status, strategy) =
+        post_strategy_config(&gateway, "discovery-ttl", config, true, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+
+    let token = valid_token();
+    let (status, _, body) = gateway.initialize(Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(discovery.state.requests(), 1);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    let (status, _, body) = gateway.initialize(Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        discovery.state.requests(),
+        2,
+        "an expired discovery document should be fetched again"
+    );
+}
+
+#[tokio::test]
+async fn oidc_discovery_supplies_introspection_endpoint() {
+    let discovery = start_discovery(json!({
+        "issuer": OIDC_ISSUER,
+        "introspection_endpoint": "",
+    }))
+    .await;
+    let introspection = start_introspection().await;
+    discovery.state.set(json!({
+        "issuer": OIDC_ISSUER,
+        "introspection_endpoint": introspection.url(),
+    }));
+    let secret_ref = oidc_client_secret_ref("discovered-introspection");
+    let gateway = Gateway::new().await;
+    let config = json!({
+        "issuer": OIDC_ISSUER,
+        "discovery_url": discovery.url(),
+        "token_validation": "introspection",
+        "required_scopes": ["tools:call"],
+        "audience": OIDC_AUDIENCE,
+        "introspection": {
+            "client_id": "octra-test-client",
+            "client_secret_ref": secret_ref,
+        },
+    });
+    let (status, strategy) =
+        post_strategy_config(&gateway, "discovered-introspection", config, true, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+
+    let now = epoch_now();
+    introspection.state.set_response(
+        "opaque-discovered",
+        introspection_claims(now + 3600, Some(OIDC_AUDIENCE), "tools:call"),
+    );
+    let (status, _, body) = gateway.initialize(Some("opaque-discovered")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(discovery.state.requests(), 1);
+    assert_eq!(introspection.state.requests(), 1);
+}
+
+#[tokio::test]
+async fn oidc_discovery_is_derived_from_the_issuer() {
+    let introspection = start_introspection().await;
+    let discovery = start_discovery(json!({
+        "introspection_endpoint": introspection.url(),
+    }))
+    .await;
+    let issuer = format!("http://{}", discovery.addr);
+    discovery.state.set(json!({
+        "issuer": issuer,
+        "introspection_endpoint": introspection.url(),
+    }));
+    let secret_ref = oidc_client_secret_ref("derived-discovery");
+    let gateway = Gateway::new().await;
+    let config = json!({
+        "issuer": issuer,
+        "token_validation": "introspection",
+        "required_scopes": ["tools:call"],
+        "audience": OIDC_AUDIENCE,
+        "introspection": {
+            "client_id": "octra-test-client",
+            "client_secret_ref": secret_ref,
+        },
+    });
+    let (status, strategy) =
+        post_strategy_config(&gateway, "derived-discovery", config, true, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+
+    let now = epoch_now();
+    introspection.state.set_response(
+        "opaque-derived",
+        introspection_claims(now + 3600, Some(OIDC_AUDIENCE), "tools:call"),
+    );
+    let (status, _, body) = gateway.initialize(Some("opaque-derived")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(discovery.state.requests(), 1);
+    assert_eq!(introspection.state.requests(), 1);
+}
+
+#[tokio::test]
+async fn oidc_introspection_active_token_authenticates_maps_claims_and_caches() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let introspection = start_introspection().await;
+    let secret_ref = oidc_client_secret_ref("active");
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+    let team_id = create_consumer_group(&gateway, "team", &[]).await;
+    let config = introspection_oidc_config(&introspection.url(), &secret_ref, Some(OIDC_AUDIENCE));
+    let (status, strategy) =
+        post_strategy_config(&gateway, "introspection-sso", config, true, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+
+    let now = epoch_now();
+    introspection.state.set_response(
+        "opaque-active",
+        introspection_claims(now + 3600, Some(OIDC_AUDIENCE), "tools:call tools:list"),
+    );
+
+    let echo_id = find_tool_id(&gateway, &server_id, "echo").await;
+    let (status, _) = set_acl(&gateway, json!({"tool_id": echo_id, "allowed": false})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = set_acl(
+        &gateway,
+        json!({"tool_id": echo_id, "consumer_group_id": team_id, "allowed": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let session = gateway.open_session(Some("opaque-active")).await;
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(2),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "opaque"}}),
+            Some("opaque-active"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["content"][0]["text"], "opaque");
+
+    let invocations = gateway.storage.mcp.list_invocations(5, None).await.unwrap();
+    let call = invocations
+        .iter()
+        .find(|row| row.status == "ok")
+        .expect("call is recorded");
+    assert_eq!(call.consumer_id.as_deref(), Some("opaque-user"));
+
+    // Cached introspection reuses the active result without calling the
+    // server again.
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/list",
+            json!({}),
+            Some("opaque-active"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(introspection.state.requests(), 1);
+}
+
+#[tokio::test]
+async fn oidc_introspection_rejects_inactive_expired_audience_and_scope() {
+    let gateway = Gateway::new().await;
+    let introspection = start_introspection().await;
+    let secret_ref = oidc_client_secret_ref("rejections");
+    let config = introspection_oidc_config(&introspection.url(), &secret_ref, Some(OIDC_AUDIENCE));
+    let (status, strategy) =
+        post_strategy_config(&gateway, "introspection-rejections", config, true, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+
+    let now = epoch_now();
+    introspection
+        .state
+        .set_response("opaque-inactive", json!({"active": false}));
+    introspection.state.set_response(
+        "opaque-expired",
+        introspection_claims(now - 10, Some(OIDC_AUDIENCE), "tools:call"),
+    );
+    introspection.state.set_response(
+        "opaque-wrong-audience",
+        introspection_claims(now + 3600, Some("other-audience"), "tools:call"),
+    );
+    introspection.state.set_response(
+        "opaque-missing-scope",
+        introspection_claims(now + 3600, Some(OIDC_AUDIENCE), "tools:list"),
+    );
+    introspection
+        .state
+        .set_response("opaque-malformed", json!({"sub": "opaque-user"}));
+
+    for (token, expected) in [
+        ("opaque-inactive", StatusCode::UNAUTHORIZED),
+        ("opaque-expired", StatusCode::UNAUTHORIZED),
+        ("opaque-wrong-audience", StatusCode::UNAUTHORIZED),
+        ("opaque-missing-scope", StatusCode::FORBIDDEN),
+        ("opaque-malformed", StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        let (status, _, body) = gateway.initialize(Some(token)).await;
+        assert_eq!(status, expected, "{token}: {body}");
+    }
+
+    // Inactive results are cached too.
+    let requests = introspection.state.requests();
+    let (status, _, body) = gateway.initialize(Some("opaque-inactive")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(introspection.state.requests(), requests);
+}
+
+#[tokio::test]
+async fn oidc_introspection_uses_basic_auth_and_falls_back_to_form() {
+    let gateway = Gateway::new().await;
+    let introspection = start_introspection().await;
+    let secret_ref = oidc_client_secret_ref("basic-form");
+    let config = introspection_oidc_config(&introspection.url(), &secret_ref, Some(OIDC_AUDIENCE));
+    let (status, strategy) =
+        post_strategy_config(&gateway, "introspection-auth", config, true, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+
+    let now = epoch_now();
+    introspection.state.set_response(
+        "opaque-basic",
+        introspection_claims(now + 3600, Some(OIDC_AUDIENCE), "tools:call"),
+    );
+    let (status, _, body) = gateway.initialize(Some("opaque-basic")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        introspection
+            .state
+            .last_authorization()
+            .as_deref()
+            .is_some_and(|value| value.starts_with("Basic ")),
+        "Basic auth should be preferred"
+    );
+    assert_eq!(introspection.state.requests(), 1);
+
+    // The endpoint rejects Basic, so the gateway retries with form fields.
+    introspection.state.require_form_auth(true);
+    introspection.state.set_response(
+        "opaque-form",
+        introspection_claims(now + 3600, Some(OIDC_AUDIENCE), "tools:call"),
+    );
+    let (status, _, body) = gateway.initialize(Some("opaque-form")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(introspection.state.requests(), 3);
+    let form = introspection.state.last_form().expect("form body recorded");
+    assert_eq!(
+        form.get("client_id").map(String::as_str),
+        Some("octra-test-client")
+    );
+    assert_eq!(
+        form.get("client_secret").map(String::as_str),
+        Some("test-client-secret")
+    );
+
+    let (status, _, body) = gateway.initialize(Some("opaque-form")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        introspection.state.requests(),
+        3,
+        "cached results should not call the server again"
+    );
+}
+
+#[tokio::test]
+async fn oidc_introspection_network_failure_returns_service_unavailable() {
+    let gateway = Gateway::new().await;
+    let secret_ref = oidc_client_secret_ref("network-failure");
+    let config = introspection_oidc_config(
+        "http://127.0.0.1:9/introspect",
+        &secret_ref,
+        Some(OIDC_AUDIENCE),
+    );
+    let (status, strategy) =
+        post_strategy_config(&gateway, "introspection-network", config, true, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+
+    let (status, _, body) = gateway.initialize(Some("opaque-network")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+}
+
+#[tokio::test]
+async fn oidc_auto_mode_uses_jwks_for_jwts_and_introspection_for_opaque_tokens() {
+    let gateway = Gateway::new().await;
+    let jwks = start_jwks(test_jwks("test-kid")).await;
+    let introspection = start_introspection().await;
+    let secret_ref = oidc_client_secret_ref("auto");
+    let mut config = oidc_config(&jwks.url(), Some(OIDC_AUDIENCE));
+    config["token_validation"] = json!("auto");
+    config["introspection"] = json!({
+        "endpoint": introspection.url(),
+        "client_id": "octra-test-client",
+        "client_secret_ref": secret_ref,
+        "cache_secs": 60,
+    });
+    let (status, strategy) = post_strategy_config(&gateway, "auto-sso", config, true, true).await;
+    assert_eq!(status, StatusCode::CREATED, "{strategy}");
+
+    let token = valid_token();
+    let (status, _, body) = gateway.initialize(Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        introspection.state.requests(),
+        0,
+        "JWT tokens should use JWKS in auto mode"
+    );
+
+    let now = epoch_now();
+    introspection.state.set_response(
+        "opaque-auto",
+        introspection_claims(now + 3600, Some(OIDC_AUDIENCE), "tools:call"),
+    );
+    let (status, _, body) = gateway.initialize(Some("opaque-auto")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(introspection.state.requests(), 1);
+
+    // A JWT-shaped value with an unsupported header also falls back.
+    introspection.state.set_response(
+        "not.a.jwt",
+        introspection_claims(now + 3600, Some(OIDC_AUDIENCE), "tools:call"),
+    );
+    let (status, _, body) = gateway.initialize(Some("not.a.jwt")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(introspection.state.requests(), 2);
 }
 
 // ----- OpenAPI conversion modes -----------------------------------------

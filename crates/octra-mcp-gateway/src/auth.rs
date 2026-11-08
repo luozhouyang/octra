@@ -1,29 +1,35 @@
-//! Data plane authentication: MCP API keys and OIDC bearer JWTs.
+//! Data plane authentication: MCP API keys and OIDC bearer tokens.
 //!
 //! When a server selects an OIDC strategy (or an enabled default strategy
-//! exists), every request must carry a valid JWT in `Authorization: Bearer`.
-//! Otherwise the gateway keeps the API-key behaviour: when at least one enabled
-//! key exists, every `/mcp` request must carry a valid key in
-//! `Authorization: Bearer <key>` or `X-API-Key: <key>`. With no keys the
-//! gateway is open to local clients, which is the default for a loopback-only
-//! installation. Keys are never stored: the database keeps a display prefix
-//! and the SHA-256 hex digest.
+//! exists), every request must carry a valid token in `Authorization: Bearer`.
+//! JWTs validate signatures against a JWKS document, which may come from an
+//! OpenID Connect discovery document. Opaque tokens can be validated with
+//! RFC 7662 introspection. Otherwise the gateway keeps the API-key behaviour:
+//! when at least one enabled key exists, every `/mcp` request must carry a
+//! valid key in `Authorization: Bearer <key>` or `X-API-Key: <key>`. With no
+//! keys the gateway is open to local clients, which is the default for a
+//! loopback-only installation. Keys are never stored: the database keeps a
+//! display prefix and the SHA-256 hex digest.
 //!
-//! OIDC strategies validate signatures against a JWKS document, then check
-//! `exp`, `nbf`, issuer, audience, and required scopes. Claims map to the same
-//! consumer identity and group model used by API keys. Tokens, full claims, and
-//! JWKS key material are never logged; errors may name the issuer or key id.
+//! OIDC strategies validate `exp`, `nbf`, issuer, audience, and required
+//! scopes. Claims map to the same consumer identity and group model used by
+//! API keys. Tokens, full claims, JWKS key material, client secrets, and
+//! introspection responses are never logged; errors may name the issuer or
+//! endpoint host only.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::jwk::{Jwk, JwkSet};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use octra_mcp_core::McpServer;
-use octra_mcp_core::domain::{McpAuthStrategy, McpOidcConfig};
+use octra_mcp_core::domain::{
+    MCP_OIDC_TOKEN_VALIDATION_AUTO, MCP_OIDC_TOKEN_VALIDATION_INTROSPECTION,
+    MCP_OIDC_TOKEN_VALIDATION_JWT, McpAuthStrategy, McpOidcConfig,
+};
 use octra_storage::Storage;
 use rand::{RngCore, rngs::OsRng};
 use serde_json::Value;
@@ -97,6 +103,47 @@ static JWKS_CACHE: OnceLock<Mutex<HashMap<String, CachedJwks>>> = OnceLock::new(
 
 fn jwks_cache() -> &'static Mutex<HashMap<String, CachedJwks>> {
     JWKS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The subset of the OpenID Connect discovery document the gateway uses.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct DiscoveryDocument {
+    #[serde(default)]
+    jwks_uri: Option<String>,
+    #[serde(default)]
+    introspection_endpoint: Option<String>,
+}
+
+#[derive(Clone)]
+struct CachedDiscovery {
+    document: DiscoveryDocument,
+    fetched_at: Instant,
+}
+
+static DISCOVERY_CACHE: OnceLock<Mutex<HashMap<String, CachedDiscovery>>> = OnceLock::new();
+
+fn discovery_cache() -> &'static Mutex<HashMap<String, CachedDiscovery>> {
+    DISCOVERY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Clone)]
+enum IntrospectionOutcome {
+    Active(Value),
+    Inactive,
+}
+
+#[derive(Clone)]
+struct CachedIntrospection {
+    outcome: IntrospectionOutcome,
+    expires_at: Instant,
+}
+
+/// Introspection results are cached by endpoint and SHA-256 of the token.
+static INTROSPECTION_CACHE: OnceLock<Mutex<HashMap<(String, String), CachedIntrospection>>> =
+    OnceLock::new();
+
+fn introspection_cache() -> &'static Mutex<HashMap<(String, String), CachedIntrospection>> {
+    INTROSPECTION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Extracts the API key or bearer token from the headers.
@@ -198,7 +245,8 @@ async fn authenticate_api_key(storage: &Storage, headers: &HeaderMap) -> Result<
     caller_from_key(storage, record).await
 }
 
-/// Authenticates a bearer JWT against the strategy's JWKS.
+/// Authenticates a bearer token with the strategy's configured validation
+/// mode: JWKS-backed JWT validation, RFC 7662 introspection, or both.
 async fn authenticate_oidc(
     storage: &Storage,
     http: Option<&reqwest::Client>,
@@ -210,7 +258,66 @@ async fn authenticate_oidc(
         .map_err(|err| AuthError::Jwks(format!("invalid OIDC strategy config: {err}")))?;
     let token = presented_bearer(headers).ok_or(AuthError::MissingBearer)?;
 
-    let header = decode_header(&token)
+    match config.token_validation.as_str() {
+        MCP_OIDC_TOKEN_VALIDATION_JWT => authenticate_jwt(storage, http, &token, &config).await,
+        MCP_OIDC_TOKEN_VALIDATION_INTROSPECTION => {
+            authenticate_introspection(storage, http, &token, &config).await
+        }
+        MCP_OIDC_TOKEN_VALIDATION_AUTO => authenticate_auto(storage, http, &token, &config).await,
+        other => Err(AuthError::Jwks(format!(
+            "unsupported token_validation mode '{other}'"
+        ))),
+    }
+}
+
+/// Auto mode validates JWT-shaped tokens against JWKS and falls back to
+/// introspection for opaque tokens or unsupported JWTs.
+async fn authenticate_auto(
+    storage: &Storage,
+    http: Option<&reqwest::Client>,
+    token: &str,
+    config: &McpOidcConfig,
+) -> Result<Caller, AuthError> {
+    if token.split('.').count() == 3 {
+        match authenticate_jwt(storage, http, token, config).await {
+            Ok(caller) => return Ok(caller),
+            Err(err @ (AuthError::InsufficientScope(_) | AuthError::Jwks(_))) => {
+                return Err(err);
+            }
+            Err(AuthError::InvalidToken(message)) if config.introspection.is_some() => {
+                if is_unsupported_jwt_error(&message) {
+                    return authenticate_introspection(storage, http, token, config).await;
+                }
+                return Err(AuthError::InvalidToken(message));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    if config.introspection.is_some() {
+        authenticate_introspection(storage, http, token, config).await
+    } else {
+        Err(AuthError::InvalidToken(
+            "token is not a JWT and introspection is not configured".to_string(),
+        ))
+    }
+}
+
+/// Only unsupported or otherwise opaque JWTs fall back to introspection.
+fn is_unsupported_jwt_error(message: &str) -> bool {
+    message == "malformed token header"
+        || message.starts_with("algorithm '")
+        || message.starts_with("no JWKS key for kid")
+}
+
+/// Authenticates a bearer JWT against the strategy's JWKS.
+async fn authenticate_jwt(
+    storage: &Storage,
+    http: Option<&reqwest::Client>,
+    token: &str,
+    config: &McpOidcConfig,
+) -> Result<Caller, AuthError> {
+    let header = decode_header(token)
         .map_err(|_| AuthError::InvalidToken("malformed token header".to_string()))?;
     let algorithm_name = algorithm_name(header.alg);
     if !config
@@ -224,12 +331,14 @@ async fn authenticate_oidc(
     }
 
     let kid = header.kid.as_deref();
-    let mut keys = fetch_jwks(http, &config.jwks_uri, config.jwks_cache_secs, false).await?;
+    let jwks_uri = resolve_jwks_uri(http, config, false).await?;
+    let mut keys = fetch_jwks(http, &jwks_uri, config.jwks_cache_secs, false).await?;
     let mut candidates = candidate_keys(&keys, kid);
     if candidates.is_empty() && kid.is_some() {
-        // A key rotation may have happened since the cached document was
-        // fetched; refresh once before rejecting the token.
-        keys = fetch_jwks(http, &config.jwks_uri, config.jwks_cache_secs, true).await?;
+        // A key rotation may have happened since the cached documents were
+        // fetched; refresh discovery and JWKS once before rejecting the token.
+        let jwks_uri = resolve_jwks_uri(http, config, true).await?;
+        keys = fetch_jwks(http, &jwks_uri, config.jwks_cache_secs, true).await?;
         candidates = candidate_keys(&keys, kid);
     }
     if candidates.is_empty() {
@@ -239,8 +348,17 @@ async fn authenticate_oidc(
         )));
     }
 
-    let claims = validate_token(&token, &config, &candidates)?;
-    let consumer_id = claim_string(&claims, &config.consumer_claim)
+    let claims = validate_token(token, config, &candidates)?;
+    caller_from_claims(storage, config, &claims).await
+}
+
+/// Maps validated claims to the caller identity used by the data plane.
+async fn caller_from_claims(
+    storage: &Storage,
+    config: &McpOidcConfig,
+    claims: &Value,
+) -> Result<Caller, AuthError> {
+    let consumer_id = claim_string(claims, &config.consumer_claim)
         .ok_or_else(|| {
             AuthError::InvalidToken(format!(
                 "claim '{}' must be a non-empty string",
@@ -252,14 +370,14 @@ async fn authenticate_oidc(
     let username = config
         .username_claim
         .as_deref()
-        .and_then(|claim| claim_string(&claims, claim))
-        .or_else(|| claim_string(&claims, "preferred_username"))
-        .or_else(|| claim_string(&claims, "email"))
+        .and_then(|claim| claim_string(claims, claim))
+        .or_else(|| claim_string(claims, "preferred_username"))
+        .or_else(|| claim_string(claims, "email"))
         .unwrap_or(&consumer_id)
         .to_string();
 
     let groups_claim = config.groups_claim.as_deref().unwrap_or("groups");
-    let consumer_group_names = group_names(&claims, groups_claim);
+    let consumer_group_names = group_names(claims, groups_claim);
     let mut consumer_group_ids = Vec::new();
     for name in &consumer_group_names {
         if let Some(group) = storage.api.get_consumer_group_by_name(name).await?
@@ -379,6 +497,346 @@ fn candidate_keys<'a>(keys: &'a [Jwk], kid: Option<&str>) -> Vec<&'a Jwk> {
             .collect(),
         None => keys.iter().collect(),
     }
+}
+
+/// Authenticates an opaque token with RFC 7662 introspection.
+async fn authenticate_introspection(
+    storage: &Storage,
+    http: Option<&reqwest::Client>,
+    token: &str,
+    config: &McpOidcConfig,
+) -> Result<Caller, AuthError> {
+    let introspection = config.introspection.as_ref().ok_or_else(|| {
+        AuthError::Jwks("introspection is not configured for this strategy".to_string())
+    })?;
+    let endpoint = resolve_introspection_endpoint(http, config, false).await?;
+    let cache_key = (endpoint.clone(), hash_key(token));
+
+    if let Some(outcome) = cached_introspection(&cache_key) {
+        return introspection_outcome_to_caller(storage, config, outcome).await;
+    }
+
+    let client_secret = crate::conversion::resolve_secret_reference(
+        &introspection.client_secret_ref,
+    )
+    .map_err(|_| AuthError::Jwks("cannot resolve the introspection client secret".to_string()))?;
+
+    let response = introspection_request(
+        http,
+        &endpoint,
+        token,
+        &introspection.client_id,
+        &client_secret,
+        true,
+    )
+    .await?;
+    let status = response.status();
+    let response = if matches!(
+        status,
+        StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ) {
+        // Some authorization servers reject HTTP Basic; retry once with the
+        // client credentials in the form body.
+        introspection_request(
+            http,
+            &endpoint,
+            token,
+            &introspection.client_id,
+            &client_secret,
+            false,
+        )
+        .await?
+    } else {
+        response
+    };
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AuthError::Jwks(format!(
+            "introspection endpoint returned HTTP {status}"
+        )));
+    }
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|err| AuthError::Jwks(format!("invalid introspection response: {err}")))?;
+    if !body.is_object() {
+        return Err(AuthError::Jwks(
+            "introspection response must be a JSON object".to_string(),
+        ));
+    }
+    let active = body.get("active").and_then(Value::as_bool).ok_or_else(|| {
+        AuthError::Jwks("introspection response is missing a boolean 'active' field".to_string())
+    })?;
+
+    if !active {
+        insert_introspection(
+            cache_key,
+            IntrospectionOutcome::Inactive,
+            Duration::from_secs(introspection.cache_secs),
+        );
+        return Err(AuthError::InvalidToken(
+            "access token is not active".to_string(),
+        ));
+    }
+
+    let ttl = validate_introspection_claims(&body, config, introspection.cache_secs)?;
+    let caller = caller_from_claims(storage, config, &body).await?;
+    insert_introspection(cache_key, IntrospectionOutcome::Active(body), ttl);
+    Ok(caller)
+}
+
+async fn introspection_outcome_to_caller(
+    storage: &Storage,
+    config: &McpOidcConfig,
+    outcome: IntrospectionOutcome,
+) -> Result<Caller, AuthError> {
+    match outcome {
+        IntrospectionOutcome::Active(claims) => caller_from_claims(storage, config, &claims).await,
+        IntrospectionOutcome::Inactive => Err(AuthError::InvalidToken(
+            "access token is not active".to_string(),
+        )),
+    }
+}
+
+/// POSTs an introspection request with either HTTP Basic or form credentials.
+async fn introspection_request(
+    http: Option<&reqwest::Client>,
+    endpoint: &str,
+    token: &str,
+    client_id: &str,
+    client_secret: &str,
+    basic: bool,
+) -> Result<reqwest::Response, AuthError> {
+    let client = match http {
+        Some(client) => client.clone(),
+        None => reqwest::Client::new(),
+    };
+    let mut request = client
+        .post(endpoint)
+        .form(&[("token", token), ("token_type_hint", "access_token")]);
+    if basic {
+        request = request.basic_auth(client_id, Some(client_secret));
+    } else {
+        request = request.form(&[
+            ("token", token),
+            ("token_type_hint", "access_token"),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ]);
+    }
+    request.send().await.map_err(|err| {
+        AuthError::Jwks(format!(
+            "introspection request failed: {}",
+            request_error(&err)
+        ))
+    })
+}
+
+/// Validates introspection `exp`, audience, and scopes. Returns the result
+/// cache lifetime bounded by the token expiry.
+fn validate_introspection_claims(
+    claims: &Value,
+    config: &McpOidcConfig,
+    cache_secs: u64,
+) -> Result<Duration, AuthError> {
+    let now = epoch_secs();
+    let ttl = match claims.get("exp") {
+        Some(value) => {
+            let exp = value.as_u64().ok_or_else(|| {
+                AuthError::Jwks("introspection 'exp' must be a number".to_string())
+            })?;
+            if exp <= now {
+                return Err(AuthError::InvalidToken("token is expired".to_string()));
+            }
+            (exp - now).min(cache_secs)
+        }
+        None => cache_secs,
+    };
+    if let Some(expected) = config.audience.as_deref()
+        && !audience_matches(claims.get("aud"), expected)
+    {
+        return Err(AuthError::InvalidToken(
+            "token audience does not match".to_string(),
+        ));
+    }
+    require_scopes(claims, &config.required_scopes)?;
+    Ok(Duration::from_secs(ttl))
+}
+
+fn audience_matches(value: Option<&Value>, expected: &str) -> bool {
+    match value {
+        Some(Value::String(value)) => value == expected,
+        Some(Value::Array(values)) => values.iter().any(|value| value.as_str() == Some(expected)),
+        _ => false,
+    }
+}
+
+fn cached_introspection(key: &(String, String)) -> Option<IntrospectionOutcome> {
+    let Ok(mut cache) = introspection_cache().lock() else {
+        return None;
+    };
+    match cache.get(key) {
+        Some(entry) if entry.expires_at > Instant::now() => Some(entry.outcome.clone()),
+        Some(_) => {
+            cache.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+fn insert_introspection(key: (String, String), outcome: IntrospectionOutcome, ttl: Duration) {
+    if ttl.is_zero() {
+        return;
+    }
+    if let Ok(mut cache) = introspection_cache().lock() {
+        cache.insert(
+            key,
+            CachedIntrospection {
+                outcome,
+                expires_at: Instant::now() + ttl,
+            },
+        );
+    }
+}
+
+/// Resolves the JWKS URI from config, or from the discovery document when the
+/// config omits it.
+async fn resolve_jwks_uri(
+    http: Option<&reqwest::Client>,
+    config: &McpOidcConfig,
+    force: bool,
+) -> Result<String, AuthError> {
+    if let Some(uri) = config.jwks_uri.as_deref() {
+        return Ok(uri.to_string());
+    }
+    let document = fetch_discovery(http, config, force).await?;
+    document
+        .jwks_uri
+        .ok_or_else(|| AuthError::Jwks("discovery document does not declare jwks_uri".to_string()))
+}
+
+/// Resolves the introspection endpoint from config, or from the discovery
+/// document when the config omits it.
+async fn resolve_introspection_endpoint(
+    http: Option<&reqwest::Client>,
+    config: &McpOidcConfig,
+    force: bool,
+) -> Result<String, AuthError> {
+    if let Some(introspection) = config.introspection.as_ref()
+        && !introspection.endpoint.is_empty()
+    {
+        return Ok(introspection.endpoint.clone());
+    }
+    let document = fetch_discovery(http, config, force).await?;
+    document.introspection_endpoint.ok_or_else(|| {
+        AuthError::Jwks("discovery document does not declare introspection_endpoint".to_string())
+    })
+}
+
+/// Explicit discovery URL, or the issuer-derived well-known URL.
+fn discovery_url(config: &McpOidcConfig) -> String {
+    config.discovery_url.clone().unwrap_or_else(|| {
+        format!(
+            "{}/.well-known/openid-configuration",
+            config.issuer.trim_end_matches('/')
+        )
+    })
+}
+
+/// Fetches and caches an OpenID Connect discovery document.
+async fn fetch_discovery(
+    http: Option<&reqwest::Client>,
+    config: &McpOidcConfig,
+    force: bool,
+) -> Result<DiscoveryDocument, AuthError> {
+    let url = discovery_url(config);
+    if !force {
+        let Ok(cache) = discovery_cache().lock() else {
+            return Err(AuthError::Jwks(
+                "discovery cache lock is poisoned".to_string(),
+            ));
+        };
+        if let Some(entry) = cache.get(&url)
+            && entry.fetched_at.elapsed() < Duration::from_secs(config.jwks_cache_secs)
+        {
+            return Ok(entry.document.clone());
+        }
+    }
+
+    let client = match http {
+        Some(client) => client.clone(),
+        None => reqwest::Client::new(),
+    };
+    let response = client.get(&url).send().await.map_err(|err| {
+        AuthError::Jwks(format!("discovery request failed: {}", request_error(&err)))
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AuthError::Jwks(format!(
+            "discovery endpoint returned HTTP {status}"
+        )));
+    }
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|err| AuthError::Jwks(format!("invalid discovery document: {err}")))?;
+    if !value.is_object() {
+        return Err(AuthError::Jwks(
+            "discovery document must be a JSON object".to_string(),
+        ));
+    }
+    let document: DiscoveryDocument = serde_json::from_value(value)
+        .map_err(|err| AuthError::Jwks(format!("invalid discovery document: {err}")))?;
+    for (field, value) in [
+        ("jwks_uri", document.jwks_uri.as_deref()),
+        (
+            "introspection_endpoint",
+            document.introspection_endpoint.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value
+            && !is_absolute_http_url(value)
+        {
+            return Err(AuthError::Jwks(format!(
+                "discovery {field} must be an absolute http(s) URL"
+            )));
+        }
+    }
+
+    if let Ok(mut cache) = discovery_cache().lock() {
+        cache.insert(
+            url,
+            CachedDiscovery {
+                document: document.clone(),
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+    Ok(document)
+}
+
+fn is_absolute_http_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let Some(rest) = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    !rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .is_empty()
+}
+
+fn epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Fetches a JWKS document, using the process-wide cache unless forced.
