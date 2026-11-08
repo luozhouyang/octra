@@ -23,6 +23,8 @@ pub const API_KEY_HEADER: &str = "x-api-key";
 pub struct Caller {
     pub consumer_id: Option<String>,
     pub key_id: Option<String>,
+    /// Groups the consumer belongs to, resolved once at authentication time.
+    pub consumer_group_ids: Vec<String>,
 }
 
 impl Caller {
@@ -30,6 +32,7 @@ impl Caller {
         Self {
             consumer_id: None,
             key_id: None,
+            consumer_group_ids: Vec::new(),
         }
     }
 }
@@ -93,10 +96,7 @@ pub async fn authenticate(storage: &Storage, headers: &HeaderMap) -> Result<Call
                     .find_active_api_key(&hash_key(&key))
                     .await?
                     .expect("key resolved above");
-                Ok(Caller {
-                    consumer_id: record.consumer_id,
-                    key_id: Some(record.id),
-                })
+                caller_from_key(storage, record).await
             }
             // An invalid key is rejected even in open mode: silently ignoring
             // it would hide a misconfiguration.
@@ -113,9 +113,29 @@ pub async fn authenticate(storage: &Storage, headers: &HeaderMap) -> Result<Call
         .await?
         .ok_or(AuthError::Invalid)?;
 
+    caller_from_key(storage, record).await
+}
+
+/// Builds a keyed caller and resolves the consumer's group memberships.
+async fn caller_from_key(
+    storage: &Storage,
+    record: octra_mcp_core::McpApiKey,
+) -> Result<Caller, AuthError> {
+    let consumer_group_ids = match record.consumer_id.as_deref() {
+        Some(consumer_id) => storage
+            .api
+            .list_consumer_groups_for_consumer(consumer_id)
+            .await?
+            .into_iter()
+            .map(|group| group.id)
+            .collect(),
+        None => Vec::new(),
+    };
+
     Ok(Caller {
         consumer_id: record.consumer_id,
         key_id: Some(record.id),
+        consumer_group_ids,
     })
 }
 
@@ -241,5 +261,66 @@ mod tests {
         let caller = authenticate(&storage, &headers).await.unwrap();
         assert_eq!(caller.consumer_id.as_deref(), Some("c1"));
         assert!(caller.key_id.is_some());
+        assert!(caller.consumer_group_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn keyed_callers_resolve_consumer_groups() {
+        let storage = Storage::connect_in_memory().await.unwrap();
+        storage
+            .mcp
+            .ensure_consumer("c1", "consumer-one")
+            .await
+            .unwrap();
+        let group = storage
+            .api
+            .create_consumer_group(&octra_api_core::CreateConsumerGroup {
+                name: "team".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        storage
+            .api
+            .add_consumer_group_member(&group.id, "c1")
+            .await
+            .unwrap();
+
+        let key = generate_key();
+        storage
+            .mcp
+            .insert_api_key(
+                "agent",
+                &display_prefix(&key),
+                &hash_key(&key),
+                Some("c1"),
+                None,
+            )
+            .await
+            .unwrap();
+        // A key without a consumer cannot join groups.
+        let unscoped = generate_key();
+        storage
+            .mcp
+            .insert_api_key(
+                "unscoped",
+                &display_prefix(&unscoped),
+                &hash_key(&unscoped),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(API_KEY_HEADER, HeaderValue::from_str(&key).unwrap());
+        let caller = authenticate(&storage, &headers).await.unwrap();
+        assert_eq!(caller.consumer_group_ids, vec![group.id.clone()]);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(API_KEY_HEADER, HeaderValue::from_str(&unscoped).unwrap());
+        let caller = authenticate(&storage, &headers).await.unwrap();
+        assert!(caller.consumer_id.is_none());
+        assert!(caller.consumer_group_ids.is_empty());
     }
 }

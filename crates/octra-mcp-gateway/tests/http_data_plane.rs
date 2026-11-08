@@ -4,7 +4,9 @@ mod support;
 
 use axum::http::StatusCode;
 use serde_json::json;
-use support::{Gateway, UpstreamMode, create_key, start_upstream};
+use support::{
+    Gateway, UpstreamMode, create_consumer_group, create_key, create_keyed_consumer, start_upstream,
+};
 
 fn tool_names(body: &serde_json::Value) -> Vec<String> {
     body["result"]["tools"]
@@ -492,6 +494,349 @@ async fn key_a_consumer(gateway: &Gateway, name: &str) -> String {
         .as_str()
         .unwrap()
         .to_string()
+}
+
+async fn find_tool_id(gateway: &Gateway, server_id: &str, name: &str) -> String {
+    let (_, tools) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/tools?server_id={server_id}"),
+            json!(null),
+        )
+        .await;
+    tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn set_acl(gateway: &Gateway, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    gateway.control("POST", "/api/v1/mcp/acls", body).await
+}
+
+#[tokio::test]
+async fn scoped_acl_control_plane_round_trips() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+    let (_, consumer_id) = create_keyed_consumer(&gateway, "agent-a").await;
+    let group_id = create_consumer_group(&gateway, "team", &[&consumer_id]).await;
+    let echo_id = find_tool_id(&gateway, &server_id, "echo").await;
+
+    // A rule cannot target a consumer and a group at the same time.
+    let (status, body) = set_acl(
+        &gateway,
+        json!({
+            "tool_id": echo_id,
+            "consumer_id": consumer_id,
+            "consumer_group_id": group_id,
+            "allowed": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Group ids are validated before the rule is written.
+    let (status, body) = set_acl(
+        &gateway,
+        json!({
+            "tool_id": echo_id,
+            "consumer_group_id": "missing-group",
+            "allowed": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown consumer_group_id")
+    );
+
+    let (status, group_acl) = set_acl(
+        &gateway,
+        json!({
+            "tool_id": echo_id,
+            "consumer_group_id": group_id,
+            "allowed": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{group_acl}");
+    assert!(group_acl["consumer_id"].is_null());
+    assert_eq!(
+        group_acl["consumer_group_id"].as_str(),
+        Some(group_id.as_str())
+    );
+
+    // Omitting both ids creates the tool default.
+    let (status, default_acl) =
+        set_acl(&gateway, json!({"tool_id": echo_id, "allowed": false})).await;
+    assert_eq!(status, StatusCode::CREATED, "{default_acl}");
+    assert!(default_acl["consumer_id"].is_null());
+    assert!(default_acl["consumer_group_id"].is_null());
+    assert_eq!(default_acl["allowed"], false);
+
+    let (status, listed) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/acls?tool_id={echo_id}"),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let listed = listed.as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().any(|row| {
+        row["consumer_group_id"].as_str() == Some(group_id.as_str())
+            && row["consumer_id"].is_null()
+            && row["allowed"] == true
+    }));
+    assert!(listed.iter().any(|row| {
+        row["consumer_id"].is_null()
+            && row["consumer_group_id"].is_null()
+            && row["allowed"] == false
+    }));
+
+    let (status, single) = gateway
+        .control(
+            "GET",
+            &format!("/api/v1/mcp/acls/{}", group_acl["id"].as_str().unwrap()),
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{single}");
+    assert_eq!(
+        single["consumer_group_id"].as_str(),
+        Some(group_id.as_str())
+    );
+
+    // Re-posting the default updates the existing row instead of failing.
+    let (status, updated_default) =
+        set_acl(&gateway, json!({"tool_id": echo_id, "allowed": true})).await;
+    assert_eq!(status, StatusCode::CREATED, "{updated_default}");
+    assert_eq!(updated_default["id"], default_acl["id"]);
+    assert_eq!(updated_default["allowed"], true);
+    assert_eq!(
+        gateway
+            .control(
+                "GET",
+                &format!("/api/v1/mcp/acls?tool_id={echo_id}"),
+                json!(null),
+            )
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Updates keep the scope and only change `allowed`.
+    let (status, updated) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/acls/{}", group_acl["id"].as_str().unwrap()),
+            json!({"allowed": false}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["allowed"], false);
+    assert_eq!(
+        updated["consumer_group_id"].as_str(),
+        Some(group_id.as_str())
+    );
+    assert!(updated["consumer_id"].is_null());
+}
+
+#[tokio::test]
+async fn acl_default_deny_applies_to_anonymous_and_unscoped_consumers() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+
+    // Without ACL rows the open-local default allows the call.
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(2),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "open"}}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "open");
+
+    let echo_id = find_tool_id(&gateway, &server_id, "echo").await;
+    let (status, acl) = set_acl(&gateway, json!({"tool_id": echo_id, "allowed": false})).await;
+    assert_eq!(status, StatusCode::CREATED, "{acl}");
+
+    // Anonymous callers only match the default rule.
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(&session, json!(3), "tools/list", json!({}), None)
+        .await;
+    let names = tool_names(&body);
+    assert!(!names.contains(&"remote__echo".to_string()));
+    assert!(names.contains(&"remote__boom".to_string()));
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(4),
+            "tools/call",
+            json!({"name": "remote__echo"}),
+            None,
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+
+    // A keyed consumer without a consumer or group rule is denied as well.
+    let (key, _) = create_keyed_consumer(&gateway, "agent-a").await;
+    let session = gateway.open_session(Some(&key)).await;
+    let (_, body) = gateway
+        .rpc(&session, json!(5), "tools/list", json!({}), Some(&key))
+        .await;
+    assert!(!tool_names(&body).contains(&"remote__echo".to_string()));
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(6),
+            "tools/call",
+            json!({"name": "remote__echo"}),
+            Some(&key),
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+}
+
+#[tokio::test]
+async fn consumer_and_group_acls_follow_precedence() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+    let (key_a, consumer_a) = create_keyed_consumer(&gateway, "agent-a").await;
+    let (key_b, consumer_b) = create_keyed_consumer(&gateway, "agent-b").await;
+    let allow_group = create_consumer_group(&gateway, "allow-team", &[&consumer_a]).await;
+    let deny_group = create_consumer_group(&gateway, "deny-team", &[&consumer_a]).await;
+    let echo_id = find_tool_id(&gateway, &server_id, "echo").await;
+
+    // Start from a default deny for everyone.
+    let (status, _) = set_acl(&gateway, json!({"tool_id": echo_id, "allowed": false})).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let session_a = gateway.open_session(Some(&key_a)).await;
+    let (_, body) = gateway
+        .rpc(
+            &session_a,
+            json!(2),
+            "tools/call",
+            json!({"name": "remote__echo"}),
+            Some(&key_a),
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+
+    // A matching group allow grants over the default deny.
+    let (status, _) = set_acl(
+        &gateway,
+        json!({"tool_id": echo_id, "consumer_group_id": allow_group, "allowed": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, body) = gateway
+        .rpc(
+            &session_a,
+            json!(3),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "group"}}),
+            Some(&key_a),
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "group");
+    let (_, body) = gateway
+        .rpc(&session_a, json!(4), "tools/list", json!({}), Some(&key_a))
+        .await;
+    assert!(tool_names(&body).contains(&"remote__echo".to_string()));
+
+    // Any matching group deny overrides the group allow.
+    let (status, _) = set_acl(
+        &gateway,
+        json!({"tool_id": echo_id, "consumer_group_id": deny_group, "allowed": false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, body) = gateway
+        .rpc(
+            &session_a,
+            json!(5),
+            "tools/call",
+            json!({"name": "remote__echo"}),
+            Some(&key_a),
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+
+    // An explicit consumer allow wins over the group deny.
+    let (status, _) = set_acl(
+        &gateway,
+        json!({"tool_id": echo_id, "consumer_id": consumer_a, "allowed": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, body) = gateway
+        .rpc(
+            &session_a,
+            json!(6),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "consumer"}}),
+            Some(&key_a),
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "consumer");
+
+    // An explicit consumer deny wins over the group allow as well.
+    let (status, _) = set_acl(
+        &gateway,
+        json!({"tool_id": echo_id, "consumer_id": consumer_a, "allowed": false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, body) = gateway
+        .rpc(
+            &session_a,
+            json!(7),
+            "tools/call",
+            json!({"name": "remote__echo"}),
+            Some(&key_a),
+        )
+        .await;
+    assert_eq!(body["error"]["code"], -32005);
+
+    // A consumer row is enough to allow a call while the default still denies.
+    let (status, _) = set_acl(
+        &gateway,
+        json!({"tool_id": echo_id, "consumer_id": consumer_b, "allowed": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let session_b = gateway.open_session(Some(&key_b)).await;
+    let (_, body) = gateway
+        .rpc(
+            &session_b,
+            json!(8),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "b"}}),
+            Some(&key_b),
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "b");
 }
 
 #[tokio::test]

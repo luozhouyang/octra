@@ -3872,6 +3872,7 @@ dependencies = [
  "hex",
  "http",
  "http-body-util",
+ "octra-api-core",
  "octra-config",
  "octra-core",
  "octra-data-plane",

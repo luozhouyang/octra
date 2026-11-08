@@ -156,11 +156,14 @@ pub struct McpInvocation {
     pub error: Option<String>,
 }
 
+/// One ACL rule for a tool. Exactly one scope is set: a consumer, a consumer
+/// group, or neither for the tool default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpToolAcl {
     pub id: String,
     pub tool_id: String,
-    pub consumer_id: String,
+    pub consumer_id: Option<String>,
+    pub consumer_group_id: Option<String>,
     pub allowed: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -186,6 +189,10 @@ pub struct NewApiKey {
 }
 
 /// Pure decision function for a tool invocation.
+///
+/// This is the legacy consumer-only view built from bare `allowed` flags and a
+/// single "is a consumer known" bit. Scoped decisions (consumer, consumer
+/// group, and tool default) use [`acl_allows_scoped`].
 pub fn acl_decision(rows: impl IntoIterator<Item = bool>, consumer_known: bool) -> bool {
     let mut saw_row = false;
     for allowed in rows {
@@ -195,6 +202,59 @@ pub fn acl_decision(rows: impl IntoIterator<Item = bool>, consumer_known: bool) 
         }
     }
     if saw_row { false } else { ACL_DEFAULT_ALLOW }
+}
+
+/// Scoped ACL decision for one tool.
+///
+/// Precedence, highest first:
+/// 1. No rows for the tool -> the open-local default ([`ACL_DEFAULT_ALLOW`]).
+/// 2. An explicit consumer row -> its `allowed` value.
+/// 3. Group rows matching the caller's groups -> any explicit deny wins;
+///    otherwise any allow grants.
+/// 4. The tool default row (both scope ids null) -> its `allowed` value.
+/// 5. Rows exist but none apply -> deny.
+///
+/// Anonymous callers (`consumer_id` is `None`) only match the default row.
+pub fn acl_allows_scoped(
+    rows: &[McpToolAcl],
+    consumer_id: Option<&str>,
+    group_ids: &[String],
+) -> bool {
+    if rows.is_empty() {
+        return ACL_DEFAULT_ALLOW;
+    }
+
+    if let Some(consumer_id) = consumer_id {
+        if let Some(row) = rows
+            .iter()
+            .find(|row| row.consumer_id.as_deref() == Some(consumer_id))
+        {
+            return row.allowed;
+        }
+
+        let mut saw_group = false;
+        let mut group_allows = false;
+        for row in rows {
+            let Some(group_id) = row.consumer_group_id.as_deref() else {
+                continue;
+            };
+            if !group_ids.iter().any(|id| id == group_id) {
+                continue;
+            }
+            saw_group = true;
+            if !row.allowed {
+                return false;
+            }
+            group_allows = true;
+        }
+        if saw_group {
+            return group_allows;
+        }
+    }
+
+    rows.iter()
+        .find(|row| row.consumer_id.is_none() && row.consumer_group_id.is_none())
+        .is_some_and(|row| row.allowed)
 }
 
 /// Secrets live in references (`env:NAME`, `keyring:NAME`, or `inline:` is
@@ -275,6 +335,86 @@ mod tests {
         assert!(acl_decision([false, true], true));
         assert!(!acl_decision([false], true));
         assert!(!acl_decision([true], false));
+    }
+
+    fn acl(
+        consumer_id: Option<&str>,
+        consumer_group_id: Option<&str>,
+        allowed: bool,
+    ) -> McpToolAcl {
+        McpToolAcl {
+            id: format!("acl-{consumer_id:?}-{consumer_group_id:?}-{allowed}"),
+            tool_id: "tool-1".into(),
+            consumer_id: consumer_id.map(str::to_string),
+            consumer_group_id: consumer_group_id.map(str::to_string),
+            allowed,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+        }
+    }
+
+    #[test]
+    fn scoped_acl_without_rows_follows_open_default() {
+        assert!(acl_allows_scoped(&[], Some("c1"), &["g1".into()]));
+        assert!(acl_allows_scoped(&[], None, &[]));
+    }
+
+    #[test]
+    fn scoped_acl_consumer_row_wins_over_group_and_default() {
+        let rows = [
+            acl(None, None, false),
+            acl(None, Some("g1"), false),
+            acl(Some("c1"), None, true),
+        ];
+        assert!(acl_allows_scoped(&rows, Some("c1"), &["g1".into()]));
+
+        let rows = [
+            acl(None, None, true),
+            acl(None, Some("g1"), true),
+            acl(Some("c1"), None, false),
+        ];
+        assert!(!acl_allows_scoped(&rows, Some("c1"), &["g1".into()]));
+    }
+
+    #[test]
+    fn scoped_acl_group_deny_overrides_group_allow() {
+        let rows = [acl(None, Some("g1"), true), acl(None, Some("g2"), false)];
+        let groups = ["g1".to_string(), "g2".to_string()];
+        assert!(!acl_allows_scoped(&rows, Some("c1"), &groups));
+
+        // A group the caller is not in does not deny a matching allow.
+        assert!(acl_allows_scoped(
+            &[acl(None, Some("g1"), true), acl(None, Some("g2"), false)],
+            Some("c1"),
+            &["g1".into()]
+        ));
+    }
+
+    #[test]
+    fn scoped_acl_default_row_applies_when_no_scope_matches() {
+        let rows = [acl(None, None, false), acl(None, Some("other"), true)];
+        assert!(!acl_allows_scoped(&rows, Some("c1"), &["g1".into()]));
+
+        let rows = [acl(None, None, true)];
+        assert!(acl_allows_scoped(&rows, Some("c1"), &["g1".into()]));
+    }
+
+    #[test]
+    fn scoped_acl_anonymous_only_matches_default_row() {
+        let rows = [acl(None, Some("g1"), true)];
+        assert!(!acl_allows_scoped(&rows, None, &[]));
+        // Even if group ids were supplied, an anonymous caller ignores them.
+        assert!(!acl_allows_scoped(&rows, None, &["g1".into()]));
+
+        let rows = [acl(None, None, true)];
+        assert!(acl_allows_scoped(&rows, None, &[]));
+    }
+
+    #[test]
+    fn scoped_acl_denies_when_no_row_applies() {
+        let rows = [acl(Some("c2"), None, true), acl(None, Some("g2"), true)];
+        assert!(!acl_allows_scoped(&rows, Some("c1"), &["g1".into()]));
+        assert!(!acl_allows_scoped(&rows, None, &[]));
     }
 
     #[test]

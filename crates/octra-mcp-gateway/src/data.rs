@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use futures_util::stream;
 use octra_data_plane::{body_bytes_limited, error_response, new_request_id};
-use octra_mcp_core::domain::{acl_decision, session_status, status};
+use octra_mcp_core::domain::{acl_allows_scoped, session_status, status};
 use octra_mcp_core::jsonrpc::{
     JsonRpcError, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, codes,
 };
@@ -429,21 +429,20 @@ async fn resolve_tool(
     Ok((server, tool))
 }
 
-/// Tools without ACL rows follow the open-local default (`ACL_DEFAULT_ALLOW`);
-/// tools with rows are callable only by consumers holding an allow rule.
+/// Applies the scoped ACL precedence from `acl_allows_scoped`: consumer rules
+/// win, matching group rules deny on any explicit deny, then the tool default
+/// row applies, and a tool without rows follows the open-local default.
 async fn acl_allows(
     state: &McpDataState,
     caller: &Caller,
     tool_id: &str,
 ) -> octra_core::Result<bool> {
-    let flags = state.storage.mcp.acl_flags(tool_id).await?;
-    if flags.is_empty() {
-        return Ok(acl_decision(flags, caller.consumer_id.is_some()));
-    }
-    match caller.consumer_id.as_deref() {
-        Some(consumer) => state.storage.mcp.acl_allows(tool_id, consumer).await,
-        None => Ok(false),
-    }
+    let rows = state.storage.mcp.list_acls(Some(tool_id)).await?;
+    Ok(acl_allows_scoped(
+        &rows,
+        caller.consumer_id.as_deref(),
+        &caller.consumer_group_ids,
+    ))
 }
 
 async fn record(

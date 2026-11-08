@@ -17,7 +17,6 @@ use octra_config::OctraConfig;
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
 use octra_storage::Storage;
 use serde_json::{Value, json};
-
 pub struct Upstream {
     pub addr: SocketAddr,
     pub state: MockState,
@@ -401,4 +400,42 @@ pub async fn create_key(gateway: &Gateway, name: &str) -> String {
         .await;
     assert_eq!(status, StatusCode::CREATED, "create key failed: {body}");
     body["key_value"].as_str().unwrap().to_string()
+}
+
+/// Creates a keyed consumer through the control plane and returns the key
+/// plaintext together with the new consumer id.
+pub async fn create_keyed_consumer(gateway: &Gateway, name: &str) -> (String, String) {
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/keys",
+            json!({"name": name, "consumer_name": name}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "create key failed: {body}");
+    let key = body["key_value"].as_str().unwrap().to_string();
+    let consumer_id = body["consumer_id"].as_str().unwrap().to_string();
+    (key, consumer_id)
+}
+
+/// Creates a consumer group with the given consumer ids as members.
+pub async fn create_consumer_group(gateway: &Gateway, name: &str, members: &[&str]) -> String {
+    let group = gateway
+        .storage
+        .api
+        .create_consumer_group(&octra_api_core::CreateConsumerGroup {
+            name: name.to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for consumer_id in members {
+        gateway
+            .storage
+            .api
+            .add_consumer_group_member(&group.id, consumer_id)
+            .await
+            .unwrap();
+    }
+    group.id
 }

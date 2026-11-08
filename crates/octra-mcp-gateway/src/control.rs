@@ -888,7 +888,10 @@ async fn delete_key(
 #[serde(default)]
 pub struct AclRequest {
     pub tool_id: String,
-    pub consumer_id: String,
+    /// Exactly one of `consumer_id` and `consumer_group_id` may be set; with
+    /// neither, the rule is the tool default.
+    pub consumer_id: Option<String>,
+    pub consumer_group_id: Option<String>,
     pub allowed: bool,
 }
 
@@ -896,7 +899,8 @@ impl Default for AclRequest {
     fn default() -> Self {
         Self {
             tool_id: String::new(),
-            consumer_id: String::new(),
+            consumer_id: None,
+            consumer_group_id: None,
             allowed: true,
         }
     }
@@ -957,23 +961,46 @@ async fn create_acl(
             request.tool_id
         )));
     }
-    if !state
-        .storage
-        .mcp
-        .consumer_exists(&request.consumer_id)
-        .await
-        .map_err(storage)?
+    if request.consumer_id.is_some() && request.consumer_group_id.is_some() {
+        return Err(ApiError::bad_request(
+            "pass either consumer_id or consumer_group_id, not both",
+        ));
+    }
+    if let Some(consumer_id) = request.consumer_id.as_deref()
+        && !state
+            .storage
+            .mcp
+            .consumer_exists(consumer_id)
+            .await
+            .map_err(storage)?
     {
         return Err(ApiError::bad_request(format!(
-            "unknown consumer_id: {}",
-            request.consumer_id
+            "unknown consumer_id: {consumer_id}"
+        )));
+    }
+    if let Some(consumer_group_id) = request.consumer_group_id.as_deref()
+        && state
+            .storage
+            .api
+            .get_consumer_group(consumer_group_id)
+            .await
+            .map_err(storage)?
+            .is_none()
+    {
+        return Err(ApiError::bad_request(format!(
+            "unknown consumer_group_id: {consumer_group_id}"
         )));
     }
 
     let acl = state
         .storage
         .mcp
-        .upsert_acl(&request.tool_id, &request.consumer_id, request.allowed)
+        .upsert_acl(
+            &request.tool_id,
+            request.consumer_id.as_deref(),
+            request.consumer_group_id.as_deref(),
+            request.allowed,
+        )
         .await
         .map_err(storage)?;
     state.runtime.reload_after_mutation().await;
@@ -1012,7 +1039,12 @@ async fn update_acl(
     let acl = state
         .storage
         .mcp
-        .upsert_acl(&existing.tool_id, &existing.consumer_id, allowed)
+        .upsert_acl(
+            &existing.tool_id,
+            existing.consumer_id.as_deref(),
+            existing.consumer_group_id.as_deref(),
+            allowed,
+        )
         .await
         .map_err(storage)?;
     state.runtime.reload_after_mutation().await;

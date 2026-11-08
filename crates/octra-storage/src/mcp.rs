@@ -20,7 +20,8 @@ const SESSION_COLUMNS: &str = "id, server_id, status, created_at, updated_at";
 const INVOCATION_COLUMNS: &str = "id, server_id, tool_id, consumer_id, request_id, status, \
      duration_ms, started_at, finished_at, error";
 
-const ACL_COLUMNS: &str = "id, tool_id, consumer_id, allowed, created_at, updated_at";
+const ACL_COLUMNS: &str =
+    "id, tool_id, consumer_id, consumer_group_id, allowed, created_at, updated_at";
 
 const KEY_COLUMNS: &str = "id, name, key_prefix, consumer_id, enabled, expires_at, created_at";
 
@@ -337,38 +338,82 @@ impl McpStore {
 
     // ----- ACLs ----------------------------------------------------------
 
-    /// Inserts or updates the (tool, consumer) rule and stores `allowed`.
+    /// Inserts or updates the rule for one scope and stores `allowed`.
+    ///
+    /// The scope is a consumer, a consumer group, or the tool default when both
+    /// ids are `None`. Pass exactly one scope; passing both ids is an error.
+    /// The update runs before the insert because SQLite partial unique indexes
+    /// cannot be used as `ON CONFLICT` targets.
     pub async fn upsert_acl(
         &self,
         tool_id: &str,
-        consumer_id: &str,
+        consumer_id: Option<&str>,
+        consumer_group_id: Option<&str>,
         allowed: bool,
     ) -> Result<McpToolAcl> {
-        let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO mcp_tool_acls (id, tool_id, consumer_id, allowed)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (tool_id, consumer_id) DO UPDATE
-                SET allowed = excluded.allowed,
-                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-        )
-        .bind(&id)
-        .bind(tool_id)
-        .bind(consumer_id)
-        .bind(i64::from(allowed))
-        .execute(self.mcp_pool())
-        .await
-        .map_err(|err| storage_error("cannot upsert mcp acl", err))?;
+        if consumer_id.is_some() && consumer_group_id.is_some() {
+            return Err(Error::Storage(
+                "mcp acl scope must target at most one of consumer_id and consumer_group_id"
+                    .to_string(),
+            ));
+        }
 
-        sqlx::query(&format!(
-            "SELECT {ACL_COLUMNS} FROM mcp_tool_acls WHERE tool_id = ?1 AND consumer_id = ?2"
+        // Matches exactly one scope: the requested ids, with the other scope
+        // column required to be null.
+        let scope = "tool_id = ?1 \
+             AND ((?2 IS NULL AND consumer_id IS NULL) OR consumer_id = ?2) \
+             AND ((?3 IS NULL AND consumer_group_id IS NULL) OR consumer_group_id = ?3)";
+
+        let mut tx = self
+            .mcp_pool()
+            .begin()
+            .await
+            .map_err(|err| storage_error("cannot begin mcp acl upsert", err))?;
+
+        let updated = sqlx::query(&format!(
+            "UPDATE mcp_tool_acls
+                SET allowed = ?4,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE {scope}"
         ))
         .bind(tool_id)
         .bind(consumer_id)
-        .fetch_one(self.mcp_pool())
+        .bind(consumer_group_id)
+        .bind(i64::from(allowed))
+        .execute(&mut *tx)
         .await
-        .map(|row| decode_acl(&row))
-        .map_err(|err| storage_error("cannot load mcp acl", err))
+        .map_err(|err| storage_error("cannot update mcp acl", err))?;
+
+        if updated.rows_affected() == 0 {
+            sqlx::query(
+                "INSERT INTO mcp_tool_acls (id, tool_id, consumer_id, consumer_group_id, allowed)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(tool_id)
+            .bind(consumer_id)
+            .bind(consumer_group_id)
+            .bind(i64::from(allowed))
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| storage_error("cannot insert mcp acl", err))?;
+        }
+
+        let row = sqlx::query(&format!(
+            "SELECT {ACL_COLUMNS} FROM mcp_tool_acls WHERE {scope}"
+        ))
+        .bind(tool_id)
+        .bind(consumer_id)
+        .bind(consumer_group_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| storage_error("cannot load mcp acl", err))?;
+
+        tx.commit()
+            .await
+            .map_err(|err| storage_error("cannot commit mcp acl upsert", err))?;
+
+        Ok(decode_acl(&row))
     }
 
     pub async fn get_acl(&self, id: &str) -> Result<Option<McpToolAcl>> {
@@ -768,6 +813,7 @@ fn decode_acl(row: &SqliteRow) -> McpToolAcl {
         id: row.get("id"),
         tool_id: row.get("tool_id"),
         consumer_id: row.get("consumer_id"),
+        consumer_group_id: row.get("consumer_group_id"),
         allowed: row.get::<i64, _>("allowed") != 0,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -879,7 +925,11 @@ mod tests {
             .ensure_consumer("c1", "consumer-one")
             .await
             .unwrap();
-        storage.mcp.upsert_acl(&read.id, "c1", false).await.unwrap();
+        storage
+            .mcp
+            .upsert_acl(&read.id, Some("c1"), None, false)
+            .await
+            .unwrap();
         storage.mcp.set_tool_enabled(&read.id, false).await.unwrap();
 
         // Refresh keeps ids and enablement of surviving tools, so ACLs live on.
@@ -903,7 +953,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acl_upsert_is_idempotent_per_pair() {
+    async fn acl_upsert_is_idempotent_per_scope() {
         let storage = storage().await;
         let server = storage
             .mcp
@@ -917,16 +967,81 @@ mod tests {
             .unwrap()
             .remove(0);
         storage.mcp.ensure_consumer("c1", "one").await.unwrap();
+        let group = storage
+            .api
+            .create_consumer_group(&octra_api_core::CreateConsumerGroup {
+                name: "team".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
 
-        let acl = storage.mcp.upsert_acl(&tool.id, "c1", true).await.unwrap();
+        let acl = storage
+            .mcp
+            .upsert_acl(&tool.id, Some("c1"), None, true)
+            .await
+            .unwrap();
         assert!(acl.allowed);
-        let acl = storage.mcp.upsert_acl(&tool.id, "c1", false).await.unwrap();
+        assert_eq!(acl.consumer_id.as_deref(), Some("c1"));
+        assert!(acl.consumer_group_id.is_none());
+
+        // A second upsert on the same scope updates the row in place.
+        let acl = storage
+            .mcp
+            .upsert_acl(&tool.id, Some("c1"), None, false)
+            .await
+            .unwrap();
         assert!(!acl.allowed);
         assert_eq!(storage.mcp.list_acls(None).await.unwrap().len(), 1);
         assert_eq!(storage.mcp.acl_flags(&tool.id).await.unwrap(), vec![false]);
         assert!(!storage.mcp.acl_allows(&tool.id, "c1").await.unwrap());
+
+        // Group scope round-trips and is independent of the consumer row.
+        let group_acl = storage
+            .mcp
+            .upsert_acl(&tool.id, None, Some(&group.id), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            group_acl.consumer_group_id.as_deref(),
+            Some(group.id.as_str())
+        );
+        assert!(group_acl.consumer_id.is_none());
+        assert!(group_acl.allowed);
+
+        // The tool default has both ids null and updates in place too.
+        let default_acl = storage
+            .mcp
+            .upsert_acl(&tool.id, None, None, false)
+            .await
+            .unwrap();
+        assert!(default_acl.consumer_id.is_none());
+        assert!(default_acl.consumer_group_id.is_none());
+        assert!(!default_acl.allowed);
+        let default_acl = storage
+            .mcp
+            .upsert_acl(&tool.id, None, None, true)
+            .await
+            .unwrap();
+        assert!(default_acl.allowed);
+        assert_eq!(storage.mcp.list_acls(None).await.unwrap().len(), 3);
+        assert_eq!(
+            storage.mcp.list_acls(Some(&tool.id)).await.unwrap().len(),
+            3
+        );
+
+        // Both ids at once is rejected before touching SQL.
+        assert!(
+            storage
+                .mcp
+                .upsert_acl(&tool.id, Some("c1"), Some(&group.id), true)
+                .await
+                .is_err()
+        );
+        assert_eq!(storage.mcp.list_acls(None).await.unwrap().len(), 3);
+
         storage.mcp.delete_acl(&acl.id).await.unwrap();
-        assert!(storage.mcp.acl_flags(&tool.id).await.unwrap().is_empty());
+        assert_eq!(storage.mcp.list_acls(None).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
