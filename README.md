@@ -126,7 +126,7 @@ shows a sandbox banner, and preview never writes anything.
 - LLM Gateway: canonical IR, OpenAI Chat/Responses, Anthropic, and Gemini request/response/SSE conversion, virtual models, routing groups with priority/weight fallback and `order`/`rotate`/`smart`/`usage`/`quota`/`pace`/`intent`/`semantic` strategies, provider accounts with static or OAuth credentials, provider query/header configuration, quota/cooldown/pacing, virtual keys hashed in SQLite, consumer policies that restrict allowed models and providers, usage/cost rollups, `count_tokens`, and opt-in PII redaction.
 - MCP Gateway: Streamable HTTP and stdio upstreams, tool discovery and aggregation with a `<server>__<tool>` namespace, `/mcp` JSON-RPC endpoint with sessions, per-consumer tool ACLs, API keys, and invocation audit rows.
 - Plugins: native and WASM (API and LLM) plugin runtimes, plugin-owned SQLite storage, config schemas, per-instance metrics and latency percentiles, durable plugin events, scheduled jobs, and shared rate-limit/budget counters.
-- AI-native LLM control plane (Phase 12, AI-native only): `ai_*` schema, `octra-ai-config` compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, per-target model metadata (context, capabilities, pricing), built-in policy execution for every policy type (rate limit, budget guard, PII, model map, param override, system prompt, request audit, think tags, PromptGuard, PromptCompress, SemanticCache), `semantic` target routing over AI-native descriptions, provider `config_json.query` parameters, streaming cache population and SSE replay, AI-native account OAuth with exposed status and desktop controls, request-audit `cache_status` and cache/routing logs, full CRUD CLI with inline/stdin/file JSON bodies, and a desktop AI Control page with typed forms for providers, accounts, models, targets, policies, and attachments. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed without backward compatibility.
+- AI-native LLM control plane (Phase 14, AI-native only): `ai_*` schema, `octra-ai-config` compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, per-target model metadata (context, capabilities, pricing), built-in policy execution for every policy type (rate limit, budget guard, PII, model map, param override, system prompt, request audit, think tags, PromptGuard, PromptCompress, SemanticCache), `semantic` target routing over AI-native descriptions with optional OpenAI-compatible embeddings and lexical fallback, provider `config_json.query` parameters, streaming cache population and SSE replay, AI-native account OAuth with exposed status and desktop controls, request-audit `cache_status` and cache/routing logs, full CRUD CLI with inline/stdin/file JSON bodies, and a desktop AI Control page with typed forms for providers, accounts, models, targets, policies, and attachments. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed without backward compatibility.
 - Agent integration: detects Claude Code, Codex and OpenCode, previews and applies the Octra provider into their native config files, and restores backups atomically.
 - CLI: `status`, `services`, `routes`, `reload`, `doctor`, `keys`, `usage`, and `ai` status/actions plus full CRUD for providers, accounts, models, targets, policies, and attachments.
 - Tauri 2 + React desktop app with a shadcn-style component set and Tailwind CSS v4 design tokens for dark and light modes; every console page reads the local control plane.
@@ -147,18 +147,17 @@ shows a sandbox banner, and preview never writes anything.
 - Full reference-model parity where justified: magpie strategies such as
   `free`/`drain`/`expiring`, and Kong MCP consumer-group/default/CEL
   ACLs or conversion modes.
-- Complete the AI-native LLM control plane (ADR 0018): neural embeddings for
-  semantic routing (the cache already supports an optional embedding endpoint),
-  new wire-protocol adapters beyond OpenAI, Anthropic, OpenAI Responses, and
-  Gemini, and improved OAuth callback handling in the desktop webview. The Phase 12 control API,
+- Complete the AI-native LLM control plane (ADR 0018): new wire-protocol
+  adapters beyond OpenAI, Anthropic, OpenAI Responses, and Gemini, and improved
+  OAuth callback handling in the desktop webview. The Phase 14 control API,
   rollback, full policy execution including PromptGuard, PromptCompress, and
-  SemanticCache, `semantic` target routing, provider query parameters,
-  streaming cache population/SSE replay, AI-native account OAuth endpoints and
-  desktop controls, cache/routing observability, full CRUD CLI, and desktop
-  typed forms for all AI entities already exist. The legacy model tables,
-  endpoints, modes, and import path are removed; `ai_*` is the only model
-  control plane. Semantic cache/routing use exact keys plus local lexical
-  similarity by default.
+  SemanticCache, `semantic` target routing with optional embeddings, provider
+  query parameters, streaming cache population/SSE replay, AI-native account
+  OAuth endpoints and desktop controls, cache/routing observability, full CRUD
+  CLI, and desktop typed forms for all AI entities already exist. The legacy
+  model tables, endpoints, modes, and import path are removed; `ai_*` is the
+  only model control plane. Semantic cache/routing use exact keys plus local
+  lexical similarity by default.
 - Desktop-side daemon lifecycle management (start, stop, health supervision).
 - OS Keychain integration for secrets and OAuth-token encryption.
 - Cross-platform packaging, signing, and notarization.

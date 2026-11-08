@@ -66,13 +66,14 @@ The data listener routes these paths to the LLM gateway:
 The `semantic` balancer strategy ranks non-fallback targets by the request text and the target's AI-native `semantic_description`:
 
 - the request text is system blocks, message text, assistant text, and tool-result text, truncated to 8,000 characters,
-- similarity uses the local 256-dimension lexical vector (lowercase words plus character trigrams) from `crates/octra-llm-gateway/src/similarity.rs`,
+- when `llm.semantic_embedding` is configured, prompt and target-description vectors come from an OpenAI-compatible `/embeddings` endpoint; successful vectors are cached with a TTL and the endpoint gets a 30-second failure cooldown,
+- when embeddings are unavailable, unconfigured, or the circuit is open, routing falls back to the local 256-dimension lexical vector (lowercase words plus character trigrams) from `crates/octra-llm-gateway/src/similarity.rs`,
 - the score is `health + cosine * 100`, so a matching description dominates latency/failure/usage/price signals,
 - descriptions are carried into `LlmRuntimeData::target_semantic_descriptions` only in AI-native mode; nested groups inherit a description unless a leaf overrides it,
-- targets without a description score by health, so `semantic` degrades to `smart` for them,
+- when embedding vectors are active, targets without a description/vector score by health rather than mixing embedding and lexical spaces,
 - targets are never removed and the fallback stays last.
 
-This is a local lexical approximation, not a neural embedding. An embedding-backed ranker is future work.
+Embedding configuration is optional and local-first: `[llm.semantic_embedding]` accepts `base_url`, `model`, optional `auth_ref`, `timeout_ms`, and `cache_entries`. The default remains the local lexical approximation, and the embedding client never logs prompt text or vectors.
 
 ## Provider configuration
 

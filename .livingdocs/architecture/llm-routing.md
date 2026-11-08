@@ -45,7 +45,7 @@ flowchart TB
 | `pace` | Shortest pacing wait |
 | `smart` | Latency EWMA, failure EWMA, usage, and price |
 | `intent` | Smart score plus client intent (`x-octra-intent`) and model capability flags |
-| `semantic` | Smart score plus local lexical similarity between the request text and the target's AI-native `semantic_description` |
+| `semantic` | Smart score plus embedding cosine when `llm.semantic_embedding` is configured, otherwise local lexical similarity, against the target's AI-native `semantic_description` |
 | `order` | Priority and position only |
 | `manual` | Exact configured priority/position/id order, no rotation |
 | `weight` | Priority rounds with the existing weighted cycle behavior |
@@ -54,7 +54,7 @@ flowchart TB
 | `rotate` / `round_robin` | Rotate the flat list by the group tick |
 | `priority` / default | Priority rounds and weighted cycles |
 
-Semantic descriptions come from `ai_model_targets.semantic_description` and are carried into the runtime only in AI-native mode; nested model targets pass a description down to their leaves unless a leaf overrides it. Targets without a description receive the health score only, so `semantic` degrades to `smart` for them. Targets are never removed by the strategy, and the fallback stays last.
+Semantic descriptions come from `ai_model_targets.semantic_description` and are carried into the runtime only in AI-native mode; nested model targets pass a description down to their leaves unless a leaf overrides it. When `llm.semantic_embedding` is configured, routing uses OpenAI-compatible embeddings with caches and a failure cooldown; otherwise it uses the local lexical vector. Targets without a description/vector receive the health score only. Targets are never removed by the strategy, and the fallback stays last.
 
 `free`, `drain`, and `expiring` are not implemented; an unrecognized strategy is rejected by the AI-native control API. This is a deliberate v0.1 boundary, not full magpie parity.
 

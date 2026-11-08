@@ -122,7 +122,7 @@ This table is the authoritative progress summary for v0.1. "Implemented" means t
 |---|---|---|
 | R1 Local runtime | Implemented | `crates/octra-daemon/src/main.rs`, health/config/overview/reload routes |
 | R2 API gateway | Implemented core | Matcher, balancer, health checks, plugins, Admin API; `least-connections`/`latency` accepted but fall back to round-robin; no UI/CLI CRUD for API entities |
-| R3 LLM gateway | Implemented core | Four protocols, IR, routing, accounts, OAuth, virtual-key/consumer policies, usage/cost, PII; several magpie strategies are not implemented; the AI-native control plane is the only model source with CRUD/validate/preview/apply/rollback, built-in policy execution for every policy type including PromptGuard, PromptCompress, and SemanticCache, semantic target routing, provider query parameters, streaming cache population/replay, full CRUD CLI with stdin/file bodies, and typed desktop forms; neural semantic routing and new wire protocols are pending |
+| R3 LLM gateway | Implemented core | Four protocols, IR, routing, accounts, OAuth, virtual-key/consumer policies, usage/cost, PII; several magpie strategies are not implemented; the AI-native control plane is the only model source with CRUD/validate/preview/apply/rollback, built-in policy execution for every policy type including PromptGuard, PromptCompress, and SemanticCache, semantic target routing with optional embeddings, provider query parameters, streaming cache population/replay, full CRUD CLI with stdin/file bodies, and typed desktop forms; new wire protocols are pending |
 | R4 MCP gateway | Implemented core | `/mcp`, stdio/HTTP, sessions, namespace, keys, ACL, audit; no consumer-group/default/CEL ACL, conversion modes, notifications, or unanchored sessions |
 | R5 Agent integration | Implemented | Three adapters, atomic apply/restore, backups; sandbox end-to-end test covers Claude Code only, not Codex/OpenCode |
 | R6 Plugins | Implemented | Native/WASM, capabilities, storage, events, jobs; event bus lacks delivery/retry/job integration tests; no delivery-lag operational view |
@@ -135,13 +135,13 @@ This table is the authoritative progress summary for v0.1. "Implemented" means t
 
 - `cargo fmt --all --check` passes.
 - `cargo clippy --workspace --exclude octra-desktop --all-targets -- -D warnings` passes.
-- `cargo test --workspace --exclude octra-desktop` passes: 896 passed, 0 failed, 17 ignored.
+- `cargo test --workspace --exclude octra-desktop` passes: 905 passed, 0 failed, 17 ignored.
 - WASM integration tests are ignored by default and require `cargo-component`; `scripts/test-wasm.sh` runs them in CI.
 - `pnpm typecheck`, `pnpm test`, and `pnpm build` pass (5 frontend tests across the shared packages).
 
 ### Planned evolution (not part of v0.1 acceptance)
 
-ADR 0018 replaced the legacy route/group LLM control plane with AI-native entities: AI Provider, AI Provider Account, AI Model, AI Model Target, AI Policy, AI Policy Attachment, config revisions, and a local compiler. Phase 11 completed the migration without backward compatibility: the `ai_*` tables are the only model/routing/account/policy source, the legacy model tables and `/admin/llm/*` model endpoints are removed, and `legacy`/`shadow`/`on` modes plus import-legacy are gone. The AI-native control plane supports CRUD, validate/preview/apply/revisions/rollback, per-target context/capability/pricing metadata, built-in policy execution for every policy type, semantic target routing, provider query parameters, streaming cache population/replay, full CRUD CLI, and typed desktop forms. Remaining `llm_*` tables are virtual-key, usage, counter, plugin-state, PII-engine, and OAuth-token state. Neural embedding-based semantic routing and new wire-protocol adapters remain future work. See [LLM Control Plane](../architecture/llm-control-plane.md).
+ADR 0018 replaced the legacy route/group LLM control plane with AI-native entities: AI Provider, AI Provider Account, AI Model, AI Model Target, AI Policy, AI Policy Attachment, config revisions, and a local compiler. Phase 14 completed the migration without backward compatibility: the `ai_*` tables are the only model/routing/account/policy source, the legacy model tables and `/admin/llm/*` model endpoints are removed, and `legacy`/`shadow`/`on` modes plus import-legacy are gone. The AI-native control plane supports CRUD, validate/preview/apply/revisions/rollback, per-target context/capability/pricing metadata, built-in policy execution for every policy type, semantic target routing with optional embedding vectors and lexical fallback, provider query parameters, streaming cache population/replay, full CRUD CLI, and typed desktop forms. Remaining `llm_*` tables are virtual-key, usage, counter, plugin-state, PII-engine, and OAuth-token state. New wire-protocol adapters remain future work. See [LLM Control Plane](../architecture/llm-control-plane.md).
 
 ## Acceptance criteria
 
@@ -180,7 +180,7 @@ Open acceptance gaps, in priority order:
 - Should the desktop console become a full CRUD console, or remain a live observability console with the Admin API as the management surface? If full CRUD, which entities come first?
 - When do consumer policies get a control-plane CRUD API and desktop editor?
 - Which magpie strategy should be added next: `manual`, `weight`, `fast`, `cheap`, or `expiring`?
-- Which embedding provider should back semantic cache/routing, and should it be configured per provider, per model, or globally?
+- Which embedding provider preset should be recommended for local-first installs, and should semantic cache reuse the global `llm.semantic_embedding` config instead of its per-policy embedding block?
 - Should the remaining non-model `llm_*` tables (`virtual_keys`, usage, counters, plugin state, PII engines) be renamed in a follow-up cleanup?
 - Which OAuth providers should get first-class presets instead of raw `config_json.oauth` documents?
 - Which Kong MCP capability should be added next: consumer-group ACLs, default/CEL ACLs, conversion modes, or notifications?
