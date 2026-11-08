@@ -11,11 +11,29 @@ import {
   cn,
 } from "@octra/ui";
 import type { PiiModelAction, PiiModelStatus } from "@octra/types";
-import { Database, HardDrive, ShieldCheck, SlidersHorizontal, type LucideIcon } from "lucide-react";
+import {
+  Database,
+  HardDrive,
+  Play,
+  RotateCcw,
+  ServerCog,
+  ShieldCheck,
+  SlidersHorizontal,
+  Square,
+  type LucideIcon,
+} from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 
 import { PageHeader } from "../../components/page-header";
-import { actOnPiiModel, fetchPiiModels, isTauri } from "../../lib/control-api";
+import {
+  actOnPiiModel,
+  fetchDaemonStatus,
+  fetchPiiModels,
+  isTauri,
+  restartDaemon,
+  startDaemon,
+  stopDaemon,
+} from "../../lib/control-api";
 import { useControlSettings } from "../../lib/store";
 
 function formatBytes(bytes: number): string {
@@ -30,6 +48,7 @@ function formatBytes(bytes: number): string {
 
 const sections: Array<{ id: string; label: string; icon: LucideIcon }> = [
   { id: "connection", label: "Control plane", icon: SlidersHorizontal },
+  { id: "daemon", label: "Daemon lifecycle", icon: ServerCog },
   { id: "pii", label: "Local PII model", icon: ShieldCheck },
   { id: "data", label: "Local data", icon: HardDrive },
 ];
@@ -196,6 +215,17 @@ function PiiModelCard({
   );
 }
 
+function DaemonField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-0.5 rounded-lg border border-border bg-surface px-3 py-2">
+      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</span>
+      <span className="truncate font-mono text-[10.5px] text-secondary" title={value}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const queryClient = useQueryClient();
   const baseUrl = useControlSettings((state) => state.baseUrl);
@@ -219,6 +249,36 @@ export function SettingsPage() {
       actOnPiiModel(id, action),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["pii-models"] }),
   });
+  const daemonLifecycle = useQuery({
+    queryKey: ["daemon-status"],
+    queryFn: fetchDaemonStatus,
+    enabled: desktop,
+    refetchInterval: desktop ? 2_000 : false,
+    retry: false,
+  });
+  const daemonAction = useMutation({
+    mutationFn: (action: "start" | "stop" | "restart") => {
+      if (action === "start") {
+        return startDaemon();
+      }
+      if (action === "stop") {
+        return stopDaemon();
+      }
+      return restartDaemon();
+    },
+    onSuccess: (status) => {
+      queryClient.setQueryData(["daemon-status"], status);
+      void queryClient.invalidateQueries({ queryKey: ["health"] });
+    },
+    onError: () => {
+      void queryClient.invalidateQueries({ queryKey: ["daemon-status"] });
+      void queryClient.invalidateQueries({ queryKey: ["health"] });
+    },
+  });
+  const daemonStatus = daemonLifecycle.data;
+  const daemonBusy = daemonAction.isPending;
+  const daemonError = daemonAction.error ?? daemonLifecycle.error;
+  const daemonControlUrl = daemonStatus?.control_url ?? baseUrl;
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -336,6 +396,100 @@ export function SettingsPage() {
                   </Button>
                 </div>
               </form>
+            )}
+          </Card>
+
+          <Card id="daemon">
+            <CardHeader>
+              <div className="flex flex-col gap-1">
+                <CardTitle>Daemon lifecycle</CardTitle>
+                <CardDescription>Supervise the local gateway process from this app</CardDescription>
+              </div>
+              {desktop ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant={daemonStatus?.running ? "accent" : "neutral"}>
+                    {daemonStatus?.running ? "Running" : "Stopped"}
+                  </Badge>
+                  <Badge
+                    variant={
+                      daemonStatus?.healthy
+                        ? "accent"
+                        : daemonStatus?.running
+                          ? "warning"
+                          : "neutral"
+                    }
+                  >
+                    {daemonStatus?.healthy
+                      ? "Healthy"
+                      : daemonStatus?.running
+                        ? "Unhealthy"
+                        : "No health"}
+                  </Badge>
+                </div>
+              ) : (
+                <Badge variant="neutral">Browser</Badge>
+              )}
+            </CardHeader>
+            <CardSeparator />
+            {desktop ? (
+              <div className="flex flex-col gap-3 p-4">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <DaemonField
+                    label="PID"
+                    value={daemonStatus?.pid ? String(daemonStatus.pid) : "Not owned"}
+                  />
+                  <DaemonField label="Binary" value={daemonStatus?.binary ?? "Not found"} />
+                  <DaemonField label="Control URL" value={daemonControlUrl} />
+                  <DaemonField label="Log" value="$OCTRA_HOME/daemon.log" />
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    disabled={daemonBusy || daemonStatus?.running}
+                    onClick={() => daemonAction.mutate("start")}
+                  >
+                    <Play className="h-3 w-3" />
+                    Start
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={daemonBusy || !daemonStatus?.running}
+                    onClick={() => daemonAction.mutate("stop")}
+                  >
+                    <Square className="h-3 w-3" />
+                    Stop
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={daemonBusy || !daemonStatus?.running}
+                    onClick={() => daemonAction.mutate("restart")}
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    Restart
+                  </Button>
+                  {daemonLifecycle.isFetching && !daemonBusy ? (
+                    <span className="text-[10.5px] text-muted-foreground">Checking…</span>
+                  ) : null}
+                </div>
+                {daemonError ? (
+                  <p className="text-[10.5px] text-danger">
+                    {daemonError instanceof Error ? daemonError.message : String(daemonError)}
+                  </p>
+                ) : null}
+                {daemonStatus?.error ? (
+                  <p className="text-[10.5px] text-danger">{daemonStatus.error}</p>
+                ) : null}
+              </div>
+            ) : (
+              <div className="px-5 py-4 text-xs leading-5 text-secondary">
+                Daemon is managed outside this browser session. Current control URL:{" "}
+                <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-[11px]">
+                  {daemonControlUrl}
+                </code>
+                .
+              </div>
             )}
           </Card>
 

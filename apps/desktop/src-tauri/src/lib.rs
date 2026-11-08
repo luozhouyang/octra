@@ -5,7 +5,12 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use octra_desktop_daemon::{DaemonManager, DaemonStatus};
 use serde::Deserialize;
+use tauri::Manager;
+use tokio::sync::Mutex;
+
+type DaemonState = Mutex<DaemonManager>;
 
 #[derive(Debug, Deserialize)]
 struct FileConfig {
@@ -24,14 +29,16 @@ fn octra_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".octra"))
 }
 
-fn control_base_url() -> String {
-    let bind = fs::read_to_string(octra_home().join("config.toml"))
+fn control_bind() -> String {
+    fs::read_to_string(octra_home().join("config.toml"))
         .ok()
         .and_then(|raw| toml::from_str::<FileConfig>(&raw).ok())
         .and_then(|config| config.daemon.and_then(|daemon| daemon.control_bind))
-        .unwrap_or_else(|| "127.0.0.1:8081".to_string());
+        .unwrap_or_else(|| "127.0.0.1:8081".to_string())
+}
 
-    format!("http://{bind}")
+fn control_base_url() -> String {
+    format!("http://{}", control_bind())
 }
 
 fn control_token() -> Result<String, String> {
@@ -337,12 +344,56 @@ async fn oauth_wait_callback(
     .map_err(|err| format!("OAuth callback task failed: {err}"))?
 }
 
+/// Reports the lifecycle state of the local daemon.
+#[tauri::command]
+async fn daemon_status(state: tauri::State<'_, DaemonState>) -> Result<DaemonStatus, String> {
+    let mut manager = state.lock().await;
+    Ok(manager.status())
+}
+
+/// Starts the daemon when no healthy instance is already running.
+#[tauri::command]
+async fn daemon_start(state: tauri::State<'_, DaemonState>) -> Result<DaemonStatus, String> {
+    let mut manager = state.lock().await;
+    manager.start().await
+}
+
+/// Stops a daemon child owned by this desktop host.
+#[tauri::command]
+async fn daemon_stop(state: tauri::State<'_, DaemonState>) -> Result<DaemonStatus, String> {
+    let mut manager = state.lock().await;
+    manager.stop().await
+}
+
+/// Restarts the daemon child owned by this desktop host.
+#[tauri::command]
+async fn daemon_restart(state: tauri::State<'_, DaemonState>) -> Result<DaemonStatus, String> {
+    let mut manager = state.lock().await;
+    manager.restart().await
+}
+
 pub fn run() {
-    tauri::Builder::default()
+    let manager = DaemonManager::new(octra_home(), control_bind());
+    let app = tauri::Builder::default()
+        .manage(Mutex::new(manager))
         .invoke_handler(tauri::generate_handler![
             daemon_request,
-            oauth_wait_callback
+            oauth_wait_callback,
+            daemon_status,
+            daemon_start,
+            daemon_stop,
+            daemon_restart
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the Octra desktop app");
+        .build(tauri::generate_context!())
+        .expect("error while building the Octra desktop app");
+
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let state = app_handle.state::<DaemonState>();
+            tauri::async_runtime::block_on(async {
+                let mut manager = state.lock().await;
+                let _ = manager.stop().await;
+            });
+        }
+    });
 }

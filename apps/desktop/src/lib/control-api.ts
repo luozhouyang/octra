@@ -62,3 +62,28 @@ export function fetchPiiModels(): Promise<PiiModelStatus[]> {
 export function actOnPiiModel(id: string, action: PiiModelAction): Promise<PiiModelStatus> {
   return controlClient().piiModelAction(id, action);
 }
+
+export interface DaemonLifecycleStatus {
+  running: boolean;
+  pid: number | null;
+  binary: string | null;
+  control_url: string;
+  healthy: boolean;
+  error: string | null;
+}
+
+export function fetchDaemonStatus(): Promise<DaemonLifecycleStatus> {
+  return invoke<DaemonLifecycleStatus>("daemon_status");
+}
+
+export function startDaemon(): Promise<DaemonLifecycleStatus> {
+  return invoke<DaemonLifecycleStatus>("daemon_start");
+}
+
+export function stopDaemon(): Promise<DaemonLifecycleStatus> {
+  return invoke<DaemonLifecycleStatus>("daemon_stop");
+}
+
+export function restartDaemon(): Promise<DaemonLifecycleStatus> {
+  return invoke<DaemonLifecycleStatus>("daemon_restart");
+}

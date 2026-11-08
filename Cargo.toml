@@ -87,6 +87,7 @@ octra-api-gateway = { path = "crates/octra-api-gateway" }
 octra-config = { path = "crates/octra-config" }
 octra-core = { path = "crates/octra-core" }
 octra-data-plane = { path = "crates/octra-data-plane" }
+octra-desktop-daemon = { path = "crates/octra-desktop-daemon" }
 octra-types = { path = "crates/octra-types" }
 octra-runtime = { path = "crates/octra-runtime" }
 octra-llm-core = { path = "crates/octra-llm-core" }

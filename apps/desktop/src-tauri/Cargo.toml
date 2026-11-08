@@ -14,10 +14,12 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 dirs.workspace = true
+octra-desktop-daemon.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }
+tokio.workspace = true
 toml.workspace = true
 
 [lints]
