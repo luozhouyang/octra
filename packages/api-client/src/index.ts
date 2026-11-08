@@ -141,6 +141,54 @@ export class ControlApiClient {
     });
   }
 
+  apiCreateService(body: unknown): Promise<unknown> {
+    return this.postJson<unknown>("/admin/services", body);
+  }
+
+  apiUpdateService(id: string, body: unknown): Promise<unknown> {
+    return this.putJson<unknown>(`/admin/services/${encodeURIComponent(id)}`, body);
+  }
+
+  apiDeleteService(id: string): Promise<void> {
+    return this.deleteEmpty(`/admin/services/${encodeURIComponent(id)}`);
+  }
+
+  apiCreateRoute(body: unknown): Promise<unknown> {
+    return this.postJson<unknown>("/admin/routes", body);
+  }
+
+  apiUpdateRoute(id: string, body: unknown): Promise<unknown> {
+    return this.putJson<unknown>(`/admin/routes/${encodeURIComponent(id)}`, body);
+  }
+
+  apiDeleteRoute(id: string): Promise<void> {
+    return this.deleteEmpty(`/admin/routes/${encodeURIComponent(id)}`);
+  }
+
+  apiCreateUpstream(body: unknown): Promise<unknown> {
+    return this.postJson<unknown>("/admin/upstreams", body);
+  }
+
+  apiUpdateUpstream(id: string, body: unknown): Promise<unknown> {
+    return this.putJson<unknown>(`/admin/upstreams/${encodeURIComponent(id)}`, body);
+  }
+
+  apiDeleteUpstream(id: string): Promise<void> {
+    return this.deleteEmpty(`/admin/upstreams/${encodeURIComponent(id)}`);
+  }
+
+  apiCreateTarget(body: unknown): Promise<unknown> {
+    return this.postJson<unknown>("/admin/targets", body);
+  }
+
+  apiUpdateTarget(id: string, body: unknown): Promise<unknown> {
+    return this.putJson<unknown>(`/admin/targets/${encodeURIComponent(id)}`, body);
+  }
+
+  apiDeleteTarget(id: string): Promise<void> {
+    return this.deleteEmpty(`/admin/targets/${encodeURIComponent(id)}`);
+  }
+
   apiMetrics(signal?: AbortSignal): Promise<ApiMetricsSnapshot> {
     return this.request<ApiMetricsSnapshot>("/admin/metrics", { signal });
   }

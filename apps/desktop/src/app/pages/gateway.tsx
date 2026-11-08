@@ -1,6 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Badge,
+  Button,
   Card,
   CardDescription,
   CardFooter,
@@ -17,8 +18,8 @@ import {
   TableRow,
   cn,
 } from "@octra/ui";
-import { Search } from "lucide-react";
-import { useState } from "react";
+import { Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
 import { StatStrip, type StatItem } from "../../components/stat-strip";
@@ -27,10 +28,40 @@ import { formatNumber } from "../../lib/format";
 import { toneDot, toneText } from "../../lib/tone";
 
 type StatusFilter = "all" | "enabled" | "disabled";
+type GatewayEntityKind = "service" | "route" | "upstream" | "target";
+
+interface GatewayEditorState {
+  kind: GatewayEntityKind;
+  id: string | null;
+  title: string;
+  initial: unknown;
+}
+
+interface Notice {
+  text: string;
+  error: boolean;
+}
+
+interface EntityChoice {
+  id: string;
+  label: string;
+  entity: unknown;
+}
+
+const ENTITY_KINDS: ReadonlyArray<{ value: GatewayEntityKind; label: string }> = [
+  { value: "service", label: "Service" },
+  { value: "route", label: "Route" },
+  { value: "upstream", label: "Upstream" },
+  { value: "target", label: "Target" },
+];
 
 export function GatewayPage() {
+  const queryClient = useQueryClient();
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [query, setQuery] = useState("");
+  const [editor, setEditor] = useState<GatewayEditorState>(() => newEditor("service"));
+  const [text, setText] = useState("{}");
+  const [notice, setNotice] = useState<Notice | null>(null);
 
   const servicesQuery = useQuery({
     queryKey: ["api-services"],
@@ -116,6 +147,143 @@ export function GatewayPage() {
     return matchesStatus && matchesQuery;
   });
 
+  const parsed = useMemo(() => parseBody(text), [text]);
+
+  function invalidateGateway() {
+    for (const key of [
+      "api-services",
+      "api-routes",
+      "api-upstreams",
+      "api-targets",
+      "api-metrics",
+    ]) {
+      void queryClient.invalidateQueries({ queryKey: [key] });
+    }
+  }
+
+  const save = useMutation({
+    mutationFn: ({ target, body }: { target: GatewayEditorState; body: Record<string, unknown> }) =>
+      saveGatewayEntity(target, body),
+    onSuccess: (_result, variables) => {
+      setNotice({
+        text: `${kindLabel(variables.target.kind)} ${variables.target.id ? "updated" : "created"}.`,
+        error: false,
+      });
+      setEditor(newEditor(variables.target.kind));
+      setText("{}");
+      invalidateGateway();
+    },
+    onError: (error) => setNotice({ text: errorMessage(error), error: true }),
+  });
+
+  const remove = useMutation({
+    mutationFn: ({ kind, id }: { kind: GatewayEntityKind; id: string }) =>
+      deleteGatewayEntity(kind, id),
+    onSuccess: (_result, variables) => {
+      setNotice({ text: `${kindLabel(variables.kind)} deleted.`, error: false });
+      if (editor.kind === variables.kind && editor.id === variables.id) {
+        setEditor(newEditor(variables.kind));
+        setText("{}");
+      }
+      invalidateGateway();
+    },
+    onError: (error) => setNotice({ text: errorMessage(error), error: true }),
+  });
+
+  const busy = save.isPending || remove.isPending;
+  const choices = entityChoices(editor.kind);
+  const selectedChoice = choices.find((choice) => choice.id === editor.id) ?? null;
+
+  function entityChoices(kind: GatewayEntityKind): EntityChoice[] {
+    switch (kind) {
+      case "service":
+        return services.map((service) => ({
+          id: service.id,
+          label: `${service.name} · ${service.id}`,
+          entity: service,
+        }));
+      case "route":
+        return routes.map((route) => ({
+          id: route.id,
+          label: `${routeLabel(route)} · ${route.id}`,
+          entity: route,
+        }));
+      case "upstream":
+        return upstreams.map((upstream) => ({
+          id: upstream.id,
+          label: `${upstream.name} · ${upstream.id}`,
+          entity: upstream,
+        }));
+      case "target":
+        return targets.map((target) => ({
+          id: target.id,
+          label: `${target.target} → ${target.upstream_id} · ${target.id}`,
+          entity: target,
+        }));
+    }
+  }
+
+  function openCreate(kind: GatewayEntityKind) {
+    setEditor(newEditor(kind));
+    setText("{}");
+    setNotice(null);
+    focusEditor();
+  }
+
+  function openEdit(kind: GatewayEntityKind, id: string) {
+    const choice = entityChoices(kind).find((item) => item.id === id);
+    if (!choice) {
+      return;
+    }
+    const initial = editableEntity(kind, choice.entity);
+    setEditor({
+      kind,
+      id: choice.id,
+      title: `Edit ${kindLabel(kind).toLowerCase()} ${choice.id}`,
+      initial,
+    });
+    setText(JSON.stringify(initial, null, 2));
+    setNotice(null);
+    focusEditor();
+  }
+
+  function changeKind(kind: GatewayEntityKind) {
+    setEditor(newEditor(kind));
+    setText("{}");
+    setNotice(null);
+  }
+
+  function changeEntity(value: string) {
+    if (value === "new") {
+      openCreate(editor.kind);
+      return;
+    }
+    openEdit(editor.kind, value);
+  }
+
+  function submitEditor() {
+    if (!parsed.body) {
+      return;
+    }
+    save.mutate({ target: editor, body: parsed.body });
+  }
+
+  function deleteWithConfirm(kind: GatewayEntityKind, id: string, label: string) {
+    const confirmed = window.confirm(
+      `Delete ${kindLabel(kind).toLowerCase()} "${label}"? This cannot be undone.`,
+    );
+    if (confirmed) {
+      remove.mutate({ kind, id });
+    }
+  }
+
+  function deleteCurrent() {
+    if (!editor.id) {
+      return;
+    }
+    deleteWithConfirm(editor.kind, editor.id, selectedChoice?.label ?? editor.id);
+  }
+
   return (
     <div className="flex flex-col gap-5">
       <PageHeader
@@ -125,6 +293,118 @@ export function GatewayPage() {
       />
 
       <StatStrip items={stats} />
+
+      <Card id="gateway-entity-editor" className="flex flex-col">
+        <CardHeader>
+          <div className="flex flex-col gap-1">
+            <CardTitle>Manage entity</CardTitle>
+            <CardDescription>
+              Create or edit services, routes, upstreams and targets as JSON. Writes reload the data
+              plane.
+            </CardDescription>
+          </div>
+          <Badge variant={editor.id ? "accent" : "neutral"}>{editor.id ? "editing" : "new"}</Badge>
+        </CardHeader>
+        <CardSeparator />
+        <div className="grid gap-4 p-4 lg:grid-cols-[minmax(190px,250px)_1fr]">
+          <div className="flex flex-col gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-[10.5px] text-muted-foreground">Kind</span>
+              <select
+                value={editor.kind}
+                onChange={(event) => changeKind(readKind(event.target.value))}
+                className="h-9 w-full rounded-lg border border-border bg-surface px-2 font-mono text-[11px] text-secondary outline-none transition-colors focus:border-primary/40 focus:ring-2 focus:ring-primary/15"
+              >
+                {ENTITY_KINDS.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10.5px] text-muted-foreground">Entity</span>
+              <select
+                value={editor.id ?? "new"}
+                onChange={(event) => changeEntity(event.target.value)}
+                className="h-9 w-full rounded-lg border border-border bg-surface px-2 font-mono text-[11px] text-secondary outline-none transition-colors focus:border-primary/40 focus:ring-2 focus:ring-primary/15"
+              >
+                <option value="new">New {kindLabel(editor.kind).toLowerCase()}…</option>
+                {editor.id !== null && !selectedChoice ? (
+                  <option value={editor.id}>{editor.id} (missing)</option>
+                ) : null}
+                {choices.map((choice) => (
+                  <option key={choice.id} value={choice.id}>
+                    {choice.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="text-[9.5px] leading-relaxed text-muted-foreground">
+              {editor.kind === "target"
+                ? "Editing prefills the API entity, including upstream_id. New targets must supply upstream_id in the JSON body."
+                : "Saving sends the JSON body to the Admin API and reloads the data plane."}
+            </p>
+          </div>
+          <div className="flex min-w-0 flex-col gap-2">
+            <label className="flex flex-col gap-1">
+              <span className="text-[10.5px] text-muted-foreground">{editor.title} (JSON)</span>
+              <textarea
+                value={text}
+                onChange={(event) => setText(event.target.value)}
+                spellCheck={false}
+                rows={10}
+                aria-invalid={parsed.error !== null}
+                className="min-h-[180px] w-full resize-y rounded-lg border border-border bg-surface p-3 font-mono text-[10.5px] leading-relaxed text-secondary outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/40 focus:ring-2 focus:ring-primary/15"
+              />
+            </label>
+            {parsed.error ? <span className="text-[10px] text-danger">{parsed.error}</span> : null}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                onClick={() => submitEditor()}
+                disabled={busy || parsed.error !== null}
+              >
+                {save.isPending ? "Saving…" : "Save"}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => openCreate(editor.kind)}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                className="ml-auto"
+                onClick={() => deleteCurrent()}
+                disabled={busy || editor.id === null}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {remove.isPending ? "Deleting…" : "Delete"}
+              </Button>
+            </div>
+            {notice ? (
+              <span
+                className={cn("text-[10.5px]", notice.error ? "text-danger" : "text-secondary")}
+              >
+                {notice.text}
+              </span>
+            ) : null}
+          </div>
+        </div>
+        <CardFooter>
+          <span className="text-[11px] text-muted-foreground">
+            {services.length} services · {routes.length} routes · {upstreams.length} upstreams ·{" "}
+            {targets.length} targets
+          </span>
+          <span className="font-mono text-[10.5px] text-muted-foreground">
+            {editor.id ? `editing ${editor.id}` : "new entity"}
+          </span>
+        </CardFooter>
+      </Card>
 
       <div className="grid gap-4 xl:grid-cols-3">
         <Card className="flex flex-col xl:col-span-2">
@@ -156,6 +436,15 @@ export function GatewayPage() {
                   { value: "disabled", label: "Disabled" },
                 ]}
               />
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => openCreate("route")}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                New route
+              </Button>
             </div>
           </CardHeader>
           <CardSeparator />
@@ -167,25 +456,26 @@ export function GatewayPage() {
                 <TableHead>Hosts</TableHead>
                 <TableHead>Strip</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {routesQuery.isPending ? (
                 <TableRow className="h-14">
-                  <TableCell colSpan={5} className="text-center text-[11px] text-muted-foreground">
+                  <TableCell colSpan={6} className="text-center text-[11px] text-muted-foreground">
                     Loading routes…
                   </TableCell>
                 </TableRow>
               ) : routesQuery.isError ? (
                 <TableRow className="h-14">
-                  <TableCell colSpan={5} className="text-center text-[11px] text-muted-foreground">
+                  <TableCell colSpan={6} className="text-center text-[11px] text-muted-foreground">
                     Cannot reach the control plane.{" "}
                     <span className="text-danger">{routesQuery.error.message}</span>
                   </TableCell>
                 </TableRow>
               ) : visibleRoutes.length === 0 ? (
                 <TableRow className="h-14">
-                  <TableCell colSpan={5} className="text-center text-[11px] text-muted-foreground">
+                  <TableCell colSpan={6} className="text-center text-[11px] text-muted-foreground">
                     No routes registered.
                   </TableCell>
                 </TableRow>
@@ -228,6 +518,29 @@ export function GatewayPage() {
                           </span>
                         </div>
                       </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-1.5">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={busy}
+                            onClick={() => openEdit("route", route.id)}
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            Edit
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-danger hover:text-danger"
+                            disabled={busy}
+                            onClick={() => deleteWithConfirm("route", route.id, routeLabel(route))}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            Delete
+                          </Button>
+                        </div>
+                      </TableCell>
                     </TableRow>
                   );
                 })
@@ -242,12 +555,23 @@ export function GatewayPage() {
         </Card>
 
         <Card className="flex flex-col">
-          <CardHeader>
+          <CardHeader className="flex-wrap gap-3">
             <div className="flex flex-col gap-1">
               <CardTitle>Upstream pools</CardTitle>
               <CardDescription>Algorithms and pooled target weights</CardDescription>
             </div>
-            <Badge variant="accent">{upstreams.length} pools</Badge>
+            <div className="ml-auto flex items-center gap-2">
+              <Badge variant="accent">{upstreams.length} pools</Badge>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => openCreate("upstream")}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                New upstream
+              </Button>
+            </div>
           </CardHeader>
           <CardSeparator />
           <div className="flex flex-1 flex-col gap-2.5 p-4">
@@ -280,6 +604,27 @@ export function GatewayPage() {
                         {formatNumber(pool?.weight ?? 0)} weight
                       </span>
                     </div>
+                    <div className="mt-2 flex justify-end gap-1.5 border-t border-border/60 pt-2">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() => openEdit("upstream", upstream.id)}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-danger hover:text-danger"
+                        disabled={busy}
+                        onClick={() => deleteWithConfirm("upstream", upstream.id, upstream.name)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Delete
+                      </Button>
+                    </div>
                   </div>
                 );
               })
@@ -292,4 +637,117 @@ export function GatewayPage() {
       </div>
     </div>
   );
+}
+
+function newEditor(kind: GatewayEntityKind): GatewayEditorState {
+  return {
+    kind,
+    id: null,
+    title: `New ${kindLabel(kind).toLowerCase()}`,
+    initial: {},
+  };
+}
+
+function kindLabel(kind: GatewayEntityKind): string {
+  switch (kind) {
+    case "service":
+      return "Service";
+    case "route":
+      return "Route";
+    case "upstream":
+      return "Upstream";
+    case "target":
+      return "Target";
+  }
+}
+
+function readKind(value: string): GatewayEntityKind {
+  return ENTITY_KINDS.some((item) => item.value === value)
+    ? (value as GatewayEntityKind)
+    : "service";
+}
+
+/**
+ * The Admin API expands relations into `{ id }` objects on reads and prefers
+ * them over the flat foreign keys on writes. Drop the relation object so edits
+ * to `service_id` / `upstream_id` are honored.
+ */
+function editableEntity(kind: GatewayEntityKind, entity: unknown): unknown {
+  if (entity === null || typeof entity !== "object" || Array.isArray(entity)) {
+    return entity;
+  }
+  const copy = { ...(entity as Record<string, unknown>) };
+  if (kind === "route") {
+    delete copy.service;
+  }
+  if (kind === "target") {
+    delete copy.upstream;
+  }
+  return copy;
+}
+
+function routeLabel(route: { methods: string[]; paths: string[] }): string {
+  return `${route.methods[0] ?? "ANY"} ${route.paths[0] ?? "*"}`;
+}
+
+function saveGatewayEntity(
+  editor: GatewayEditorState,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  const client = controlClient();
+  switch (editor.kind) {
+    case "service":
+      return editor.id ? client.apiUpdateService(editor.id, body) : client.apiCreateService(body);
+    case "route":
+      return editor.id ? client.apiUpdateRoute(editor.id, body) : client.apiCreateRoute(body);
+    case "upstream":
+      return editor.id ? client.apiUpdateUpstream(editor.id, body) : client.apiCreateUpstream(body);
+    case "target":
+      return editor.id ? client.apiUpdateTarget(editor.id, body) : client.apiCreateTarget(body);
+  }
+}
+
+function deleteGatewayEntity(kind: GatewayEntityKind, id: string): Promise<void> {
+  const client = controlClient();
+  switch (kind) {
+    case "service":
+      return client.apiDeleteService(id);
+    case "route":
+      return client.apiDeleteRoute(id);
+    case "upstream":
+      return client.apiDeleteUpstream(id);
+    case "target":
+      return client.apiDeleteTarget(id);
+  }
+}
+
+function parseBody(text: string): { body: Record<string, unknown> | null; error: string | null } {
+  const trimmed = text.trim();
+  if (trimmed === "") {
+    return { body: null, error: "Body is required." };
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(trimmed);
+  } catch (error) {
+    return {
+      body: null,
+      error: `Invalid JSON: ${error instanceof Error ? error.message : "unable to parse"}`,
+    };
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { body: null, error: "Body must be a JSON object." };
+  }
+  return { body: value as Record<string, unknown>, error: null };
+}
+
+function focusEditor() {
+  const node = document.getElementById("gateway-entity-editor");
+  if (node && typeof node.scrollIntoView === "function") {
+    node.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "request failed";
 }
