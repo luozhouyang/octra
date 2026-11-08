@@ -380,6 +380,8 @@ pub fn wire(protocol: Protocol) -> UpstreamProtocol {
         Protocol::OpenaiResponses => UpstreamProtocol::OpenAiResponses,
         Protocol::Anthropic => UpstreamProtocol::Anthropic,
         Protocol::Gemini => UpstreamProtocol::Gemini,
+        Protocol::Vertex => UpstreamProtocol::Vertex,
+        Protocol::Bedrock => UpstreamProtocol::Bedrock,
     }
 }
 
@@ -511,6 +513,41 @@ mod tests {
             upstream.endpoint(&anthropic, "claude", false).unwrap(),
             "https://api.anthropic.com/v1/messages"
         );
+        let vertex = provider(
+            "vertex",
+            "none",
+            None,
+            Some("https://aiplatform.googleapis.com/v1"),
+        );
+        assert_eq!(
+            upstream
+                .endpoint(&vertex, "gemini-2.0-flash", false)
+                .unwrap(),
+            "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.0-flash:generateContent"
+        );
+        assert_eq!(
+            upstream
+                .endpoint(&vertex, "gemini-2.0-flash", true)
+                .unwrap(),
+            "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.0-flash:streamGenerateContent?alt=sse"
+        );
+        let bedrock = provider(
+            "bedrock",
+            "none",
+            None,
+            Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+        );
+        let model = "anthropic.claude-3-5-sonnet-20241022-v2:0";
+        assert_eq!(
+            upstream.endpoint(&bedrock, model, false).unwrap(),
+            format!("https://bedrock-runtime.us-east-1.amazonaws.com/model/{model}/converse")
+        );
+        assert_eq!(
+            upstream.endpoint(&bedrock, model, true).unwrap(),
+            format!(
+                "https://bedrock-runtime.us-east-1.amazonaws.com/model/{model}/converse-stream"
+            )
+        );
         let bad = provider("openai", "none", None, Some("ftp://x"));
         assert_eq!(
             upstream.endpoint(&bad, "m", false).unwrap_err().kind,
@@ -567,6 +604,25 @@ mod tests {
         assert_eq!(
             upstream.endpoint(&gemini, "gemini-pro", true).unwrap(),
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:streamGenerateContent?alt=sse&key=abc"
+        );
+
+        let vertex = provider_with_config(
+            "vertex",
+            "none",
+            Some("https://aiplatform.googleapis.com/v1"),
+            r#"{"query":{"key":"abc"}}"#,
+        );
+        assert_eq!(
+            upstream
+                .endpoint(&vertex, "gemini-2.0-flash", true)
+                .unwrap(),
+            "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key=abc"
+        );
+        assert_eq!(
+            upstream
+                .endpoint(&vertex, "gemini-2.0-flash", false)
+                .unwrap(),
+            "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.0-flash:generateContent?key=abc"
         );
     }
 

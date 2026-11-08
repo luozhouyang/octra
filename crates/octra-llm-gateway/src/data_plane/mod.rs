@@ -1470,7 +1470,10 @@ async fn try_attempt(
     }
 
     let mut body = translate::encode_request(target.protocol, &ir)?;
-    if target.protocol != Protocol::Gemini {
+    if !matches!(
+        target.protocol,
+        Protocol::Gemini | Protocol::Vertex | Protocol::Bedrock
+    ) {
         body["model"] = json!(target.model_id);
     }
 

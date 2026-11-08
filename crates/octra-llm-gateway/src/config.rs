@@ -34,7 +34,9 @@ impl AuthType {
 
     pub fn default_for(protocol: Protocol) -> Self {
         match protocol {
-            Protocol::Openai | Protocol::OpenaiResponses => AuthType::Bearer,
+            Protocol::Openai | Protocol::OpenaiResponses | Protocol::Vertex | Protocol::Bedrock => {
+                AuthType::Bearer
+            }
             Protocol::Anthropic => AuthType::AnthropicApiKey,
             Protocol::Gemini => AuthType::Header,
         }
@@ -214,7 +216,10 @@ impl ProviderConfig {
             auth = AuthType::Header;
             auth_header = Some(value.trim().to_string());
         }
-        if auth == AuthType::Header && auth_header.is_none() && protocol == Protocol::Gemini {
+        if auth == AuthType::Header
+            && auth_header.is_none()
+            && matches!(protocol, Protocol::Gemini | Protocol::Vertex)
+        {
             auth_header = Some("x-goog-api-key".to_string());
         }
 
@@ -320,10 +325,12 @@ pub fn default_base_url(protocol: Protocol) -> &'static str {
         Protocol::Openai | Protocol::OpenaiResponses => "https://api.openai.com/v1",
         Protocol::Anthropic => "https://api.anthropic.com/v1",
         Protocol::Gemini => "https://generativelanguage.googleapis.com/v1beta",
+        Protocol::Vertex => "https://aiplatform.googleapis.com/v1",
+        Protocol::Bedrock => "https://bedrock-runtime.us-east-1.amazonaws.com",
     }
 }
 
-/// Maps provider presets and aliases onto the four wire protocols.
+/// Maps provider presets and aliases onto the wire protocols.
 ///
 /// The optional second item is the default base URL for a provider whose
 /// record does not set one; aliases without a preset use the protocol default.
@@ -334,6 +341,13 @@ fn protocol_alias(name: &str) -> Option<(&'static str, Option<&'static str>)> {
         "openai-responses" | "responses" => Some(("openai_responses", None)),
         "anthropic" | "claude" => Some(("anthropic", None)),
         "gemini" | "google" => Some(("gemini", None)),
+        "vertex" | "google-vertex" | "vertex-ai" => {
+            Some(("vertex", Some("https://aiplatform.googleapis.com/v1")))
+        }
+        "bedrock" | "aws-bedrock" | "bedrock-runtime" | "bedrock-converse" => Some((
+            "bedrock",
+            Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+        )),
         "ollama" => Some(("openai", Some("http://127.0.0.1:11434/v1"))),
         "vllm" => Some(("openai", Some("http://127.0.0.1:8000/v1"))),
         "lmstudio" | "lm-studio" => Some(("openai", Some("http://127.0.0.1:1234/v1"))),
@@ -441,6 +455,12 @@ mod tests {
         let config = ProviderConfig::from_record(&record("anthropic", "", None, "")).unwrap();
         assert_eq!(config.base_url, "https://api.anthropic.com/v1");
         assert_eq!(config.auth, AuthType::AnthropicApiKey);
+
+        assert_eq!(
+            default_base_url(Protocol::Bedrock),
+            "https://bedrock-runtime.us-east-1.amazonaws.com"
+        );
+        assert_eq!(AuthType::default_for(Protocol::Bedrock), AuthType::Bearer);
     }
 
     #[test]
@@ -571,6 +591,40 @@ mod tests {
         let responses =
             ProviderConfig::from_record(&record("responses", "bearer", None, "")).unwrap();
         assert_eq!(responses.protocol, Protocol::OpenaiResponses);
+
+        let vertex = ProviderConfig::from_record(&record("vertex", "", None, "")).unwrap();
+        assert_eq!(vertex.protocol, Protocol::Vertex);
+        assert_eq!(vertex.base_url, "https://aiplatform.googleapis.com/v1");
+        assert_eq!(vertex.auth, AuthType::Bearer);
+
+        let vertex_key =
+            ProviderConfig::from_record(&record("vertex", "header", None, "")).unwrap();
+        assert_eq!(vertex_key.auth, AuthType::Header);
+        assert_eq!(vertex_key.auth_header.as_deref(), Some("x-goog-api-key"));
+
+        let wire_vertex =
+            ProviderConfig::from_record(&record("gemini", "", None, r#"{"wire":"vertex"}"#))
+                .unwrap();
+        assert_eq!(wire_vertex.protocol, Protocol::Vertex);
+        assert_eq!(wire_vertex.base_url, "https://aiplatform.googleapis.com/v1");
+
+        for protocol in ["bedrock", "aws-bedrock", "bedrock-runtime"] {
+            let bedrock = ProviderConfig::from_record(&record(protocol, "", None, "")).unwrap();
+            assert_eq!(bedrock.protocol, Protocol::Bedrock, "protocol {protocol}");
+            assert_eq!(
+                bedrock.base_url, "https://bedrock-runtime.us-east-1.amazonaws.com",
+                "protocol {protocol}"
+            );
+            assert_eq!(bedrock.auth, AuthType::Bearer, "protocol {protocol}");
+        }
+
+        let converse =
+            ProviderConfig::from_record(&record("bedrock_converse", "", None, "")).unwrap();
+        assert_eq!(converse.protocol, Protocol::Bedrock);
+        assert_eq!(
+            converse.base_url,
+            "https://bedrock-runtime.us-east-1.amazonaws.com"
+        );
     }
 
     #[test]
@@ -597,6 +651,17 @@ mod tests {
             message.contains("not-a-wire"),
             "unexpected message: {message}"
         );
+
+        let bedrock = ProviderConfig::from_record(&record(
+            "openai",
+            "",
+            Some("https://bedrock-proxy.test"),
+            r#"{"wire":"bedrock"}"#,
+        ))
+        .unwrap();
+        assert_eq!(bedrock.protocol, Protocol::Bedrock);
+        assert_eq!(bedrock.base_url, "https://bedrock-proxy.test");
+        assert_eq!(bedrock.auth, AuthType::Bearer);
     }
 
     #[test]

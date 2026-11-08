@@ -377,7 +377,9 @@ impl ToolCall {
             }
             crate::protocol::Protocol::Openai
             | crate::protocol::Protocol::OpenaiResponses
-            | crate::protocol::Protocol::Gemini => &self.id,
+            | crate::protocol::Protocol::Gemini
+            | crate::protocol::Protocol::Vertex
+            | crate::protocol::Protocol::Bedrock => &self.id,
         }
     }
 }
@@ -611,6 +613,8 @@ mod tests {
         };
         assert_eq!(call.id_for(crate::protocol::Protocol::Anthropic), "toolu_1");
         assert_eq!(call.id_for(crate::protocol::Protocol::Openai), "call_1");
+        assert_eq!(call.id_for(crate::protocol::Protocol::Vertex), "call_1");
+        assert_eq!(call.id_for(crate::protocol::Protocol::Bedrock), "call_1");
     }
 
     #[test]

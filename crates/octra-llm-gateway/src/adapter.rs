@@ -1,8 +1,8 @@
 //! Provider adapters: endpoint shape and auth headers per wire protocol.
 //!
-//! Built-in adapters cover OpenAI Chat, OpenAI Responses, Anthropic Messages
-//! and Gemini. A future Provider Plugin implements the same trait and
-//! registers itself without gateway changes.
+//! Built-in adapters cover OpenAI Chat, OpenAI Responses, Anthropic Messages,
+//! Gemini, Vertex and AWS Bedrock. A future Provider Plugin implements the
+//! same trait and registers itself without gateway changes.
 
 use http::{HeaderName, HeaderValue, header};
 
@@ -73,6 +73,8 @@ struct OpenAiChat;
 struct OpenAiResponses;
 struct Anthropic;
 struct Gemini;
+struct Vertex;
+struct Bedrock;
 
 impl ProviderAdapter for OpenAiChat {
     fn protocol(&self) -> Protocol {
@@ -147,6 +149,55 @@ impl ProviderAdapter for Gemini {
     }
 }
 
+/// Vertex reuses the Gemini payload shape; only the endpoint and auth differ.
+/// Auth defaults to bearer (OAuth access tokens); operators using an API key
+/// set `config_json.auth_header = "x-goog-api-key"`.
+impl ProviderAdapter for Vertex {
+    fn protocol(&self) -> Protocol {
+        Protocol::Vertex
+    }
+
+    fn endpoint(
+        &self,
+        provider: &ProviderConfig,
+        model: &str,
+        stream: bool,
+    ) -> Result<String, GatewayError> {
+        let action = if stream {
+            ":streamGenerateContent?alt=sse"
+        } else {
+            ":generateContent"
+        };
+        checked_url(
+            provider,
+            &format!("/publishers/google/models/{model}{action}"),
+        )
+    }
+}
+
+/// Bedrock Converse keeps the model in the URL, including its colon and dots.
+/// Authentication defaults to a bearer Bedrock API key; SigV4 is a later
+/// transport concern and does not change these endpoints.
+impl ProviderAdapter for Bedrock {
+    fn protocol(&self) -> Protocol {
+        Protocol::Bedrock
+    }
+
+    fn endpoint(
+        &self,
+        provider: &ProviderConfig,
+        model: &str,
+        stream: bool,
+    ) -> Result<String, GatewayError> {
+        let action = if stream {
+            "converse-stream"
+        } else {
+            "converse"
+        };
+        checked_url(provider, &format!("/model/{model}/{action}"))
+    }
+}
+
 fn checked_url(provider: &ProviderConfig, path: &str) -> Result<String, GatewayError> {
     let url = provider.url(path);
     if url.starts_with("http://") || url.starts_with("https://") {
@@ -164,10 +215,14 @@ pub fn for_protocol(protocol: Protocol) -> &'static dyn ProviderAdapter {
     static RESPONSES: OpenAiResponses = OpenAiResponses;
     static ANTHROPIC: Anthropic = Anthropic;
     static GEMINI: Gemini = Gemini;
+    static VERTEX: Vertex = Vertex;
+    static BEDROCK: Bedrock = Bedrock;
     match protocol {
         Protocol::Openai => &OPENAI,
         Protocol::OpenaiResponses => &RESPONSES,
         Protocol::Anthropic => &ANTHROPIC,
         Protocol::Gemini => &GEMINI,
+        Protocol::Vertex => &VERTEX,
+        Protocol::Bedrock => &BEDROCK,
     }
 }

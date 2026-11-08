@@ -75,6 +75,10 @@ pub enum UpstreamProtocol {
     OpenAiResponses,
     Anthropic,
     Gemini,
+    /// Vertex streams use the Gemini SSE shape.
+    Vertex,
+    /// Bedrock uses AWS event-stream framing, not SSE.
+    Bedrock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

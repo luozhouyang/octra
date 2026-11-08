@@ -5,6 +5,7 @@
 //! re-encoded for the ingress protocol, so cross-protocol streaming shares
 //! the same codecs as the rest of the gateway.
 
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,7 +49,7 @@ pub fn start(
     let idle = Duration::from_secs(config.llm.stream_idle_timeout_secs.max(1));
     let state = BridgeState {
         upstream,
-        decoder: SseDecoder::new(),
+        framing: Framing::for_protocol(upstream_protocol),
         protocol_decoder: octra_llm_protocol::stream_decoder(upstream_protocol),
         encoder: octra_llm_protocol::stream_encoder_with_usage(ingress, include_usage),
         ingress,
@@ -104,10 +105,22 @@ pub fn start(
 
             let mut out = Vec::new();
             let mut failed = None;
-            for event in state.decoder.push(&bytes) {
-                let payload = match event.event {
-                    Some(name) => format!("{name}\n{}", event.data),
-                    None => event.data,
+            for framed in state.framing.push(&bytes) {
+                let payload = match framed {
+                    Ok(framed) => match framed.event {
+                        Some(name) => format!("{name}\n{}", framed.data),
+                        None => framed.data,
+                    },
+                    Err(error) => {
+                        failed = Some(
+                            GatewayError::upstream(
+                                502,
+                                format!("invalid upstream stream frame: {error}"),
+                            )
+                            .with_code("upstream_stream_error"),
+                        );
+                        break;
+                    }
                 };
                 let events = match state.protocol_decoder.decode_chunk(&payload) {
                     Ok(events) => events,
@@ -510,9 +523,75 @@ async fn apply_error_chain(
     }
 }
 
+/// Upstream streaming framing: SSE for most providers, AWS event-stream for
+/// Bedrock ConverseStream.
+enum Framing {
+    Sse(SseDecoder),
+    Bedrock(octra_llm_protocol::bedrock::eventstream::Framer),
+}
+
+/// One upstream frame normalized to the `event\npayload` convention consumed
+/// by the protocol decoders.
+struct FramedPayload {
+    event: Option<String>,
+    data: String,
+}
+
+impl Framing {
+    fn for_protocol(protocol: Protocol) -> Self {
+        match protocol {
+            Protocol::Bedrock => {
+                Framing::Bedrock(octra_llm_protocol::bedrock::eventstream::Framer::new())
+            }
+            _ => Framing::Sse(SseDecoder::new()),
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> Vec<Result<FramedPayload, String>> {
+        match self {
+            Framing::Sse(decoder) => decoder
+                .push(bytes)
+                .into_iter()
+                .map(|event| {
+                    Ok(FramedPayload {
+                        event: event.event,
+                        data: event.data,
+                    })
+                })
+                .collect(),
+            Framing::Bedrock(framer) => match framer.push(bytes) {
+                Ok(frames) => frames
+                    .into_iter()
+                    .map(|frame| {
+                        Ok(FramedPayload {
+                            event: Some(frame.event_type),
+                            data: frame.payload,
+                        })
+                    })
+                    .collect(),
+                Err(error) => vec![Err(error)],
+            },
+        }
+    }
+}
+
+/// Replaces an empty streamed model with the client-facing model so Bedrock
+/// clients never see the synthetic empty model from `messageStart`.
+fn with_requested_model<'a>(event: &'a StreamEvent, requested_model: &str) -> Cow<'a, StreamEvent> {
+    match event {
+        StreamEvent::MessageStart { id, model } if model.is_empty() => {
+            Cow::Owned(StreamEvent::MessageStart {
+                id: id.clone(),
+                model: requested_model.to_string(),
+            })
+        }
+        _ => Cow::Borrowed(event),
+    }
+}
+
 struct BridgeState {
     upstream: UpstreamResponse,
-    decoder: SseDecoder,
+    framing: Framing,
     protocol_decoder: Box<dyn StreamDecoder + Send>,
     encoder: Box<dyn StreamEncoder + Send>,
     ingress: Protocol,
@@ -531,6 +610,8 @@ struct BridgeState {
 
 impl BridgeState {
     fn encode(&mut self, event: &StreamEvent, out: &mut Vec<u8>) {
+        let event = with_requested_model(event, &self.meta.requested_model);
+        let event = event.as_ref();
         if let StreamEvent::Usage(usage) = event {
             self.usage = usage.clone();
         }
@@ -860,6 +941,8 @@ impl EventBridgeState {
     }
 
     fn encode(&mut self, event: &StreamEvent, out: &mut Vec<u8>) {
+        let event = with_requested_model(event, &self.meta.requested_model);
+        let event = event.as_ref();
         if let StreamEvent::Usage(usage) = event {
             self.usage = usage.clone();
         }
@@ -1158,6 +1241,89 @@ mod tests {
                 is_error: false,
             }]
         );
+    }
+
+    #[test]
+    fn sse_framing_keeps_event_and_data() {
+        let mut framing = Framing::for_protocol(Protocol::Anthropic);
+        let frames = framing.push(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+        assert_eq!(frames.len(), 1);
+        let frame = frames.into_iter().next().unwrap().unwrap();
+        assert_eq!(frame.event.as_deref(), Some("message_stop"));
+        assert_eq!(frame.data, r#"{"type":"message_stop"}"#);
+    }
+
+    #[test]
+    fn bedrock_framing_yields_event_and_payload() {
+        let mut framing = Framing::for_protocol(Protocol::Bedrock);
+        let frames = framing.push(&bedrock_frame(
+            "contentBlockDelta",
+            r#"{"contentBlockIndex":0,"delta":{"text":"hi"}}"#,
+        ));
+        assert_eq!(frames.len(), 1);
+        let frame = frames.into_iter().next().unwrap().unwrap();
+        assert_eq!(frame.event.as_deref(), Some("contentBlockDelta"));
+        assert_eq!(
+            frame.data,
+            r#"{"contentBlockIndex":0,"delta":{"text":"hi"}}"#
+        );
+    }
+
+    fn bedrock_frame(event: &str, payload: &str) -> Vec<u8> {
+        let mut headers = Vec::new();
+        headers.push(":event-type".len() as u8);
+        headers.extend_from_slice(b":event-type");
+        headers.push(7);
+        headers.extend_from_slice(&(event.len() as u16).to_be_bytes());
+        headers.extend_from_slice(event.as_bytes());
+
+        let total = 12 + headers.len() + payload.len() + 4;
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&(total as u32).to_be_bytes());
+        out.extend_from_slice(&(headers.len() as u32).to_be_bytes());
+        let prelude = crc32(&out);
+        out.extend_from_slice(&prelude.to_be_bytes());
+        out.extend_from_slice(&headers);
+        out.extend_from_slice(payload.as_bytes());
+        let message = crc32(&out);
+        out.extend_from_slice(&message.to_be_bytes());
+        out
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn empty_message_start_uses_the_requested_model() {
+        let event = StreamEvent::MessageStart {
+            id: "bedrock".to_string(),
+            model: String::new(),
+        };
+        let patched = with_requested_model(&event, "client-model");
+        assert_eq!(
+            patched.as_ref(),
+            &StreamEvent::MessageStart {
+                id: "bedrock".to_string(),
+                model: "client-model".to_string(),
+            }
+        );
+
+        let text = StreamEvent::TextDelta {
+            text: "hi".to_string(),
+        };
+        assert_eq!(with_requested_model(&text, "client-model").as_ref(), &text);
     }
 
     #[test]

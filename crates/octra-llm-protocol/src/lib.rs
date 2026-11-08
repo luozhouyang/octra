@@ -9,6 +9,7 @@
 //! and approximated when crossing protocols.
 
 pub mod anthropic;
+pub mod bedrock;
 pub mod common;
 pub mod gemini;
 pub mod openai;
@@ -38,12 +39,15 @@ pub trait StreamEncoder {
     fn finish(&mut self) -> ProtocolResult<Vec<SseFrame>>;
 }
 
+// Vertex `generateContent` shares the Gemini JSON shape; only the endpoint
+// and auth differ, so every Vertex arm dispatches to the Gemini codec.
 pub fn decode_request(protocol: Protocol, value: serde_json::Value) -> ProtocolResult<ChatRequest> {
     match protocol {
         Protocol::Openai => openai::request::decode_request(value),
         Protocol::OpenaiResponses => openai_responses::request::decode_request(value),
         Protocol::Anthropic => anthropic::request::decode_request(value),
-        Protocol::Gemini => gemini::request::decode_request(value),
+        Protocol::Gemini | Protocol::Vertex => gemini::request::decode_request(value),
+        Protocol::Bedrock => bedrock::request::decode_request(value),
     }
 }
 
@@ -55,7 +59,8 @@ pub fn encode_request(
         Protocol::Openai => openai::request::encode_request(request),
         Protocol::OpenaiResponses => openai_responses::request::encode_request(request),
         Protocol::Anthropic => anthropic::request::encode_request(request),
-        Protocol::Gemini => gemini::request::encode_request(request),
+        Protocol::Gemini | Protocol::Vertex => gemini::request::encode_request(request),
+        Protocol::Bedrock => bedrock::request::encode_request(request),
     }
 }
 
@@ -67,7 +72,8 @@ pub fn decode_response(
         Protocol::Openai => openai::response::decode_response(value),
         Protocol::OpenaiResponses => openai_responses::response::decode_response(value),
         Protocol::Anthropic => anthropic::response::decode_response(value),
-        Protocol::Gemini => gemini::response::decode_response(value),
+        Protocol::Gemini | Protocol::Vertex => gemini::response::decode_response(value),
+        Protocol::Bedrock => bedrock::response::decode_response(value),
     }
 }
 
@@ -79,7 +85,8 @@ pub fn encode_response(
         Protocol::Openai => openai::response::encode_response(response),
         Protocol::OpenaiResponses => openai_responses::response::encode_response(response),
         Protocol::Anthropic => anthropic::response::encode_response(response),
-        Protocol::Gemini => gemini::response::encode_response(response),
+        Protocol::Gemini | Protocol::Vertex => gemini::response::encode_response(response),
+        Protocol::Bedrock => bedrock::response::encode_response(response),
     }
 }
 
@@ -89,7 +96,8 @@ pub fn stream_decoder(protocol: Protocol) -> Box<dyn StreamDecoder + Send> {
         Protocol::Openai => Box::new(openai::stream::Decoder::new()),
         Protocol::OpenaiResponses => Box::new(openai_responses::stream::Decoder::new()),
         Protocol::Anthropic => Box::new(anthropic::stream::Decoder::new()),
-        Protocol::Gemini => Box::new(gemini::stream::Decoder::new()),
+        Protocol::Gemini | Protocol::Vertex => Box::new(gemini::stream::Decoder::new()),
+        Protocol::Bedrock => Box::new(bedrock::stream::Decoder::new()),
     }
 }
 
@@ -110,7 +118,8 @@ pub fn stream_encoder_with_usage(
         Protocol::Openai => Box::new(openai::stream::Encoder::new().with_usage(include_usage)),
         Protocol::OpenaiResponses => Box::new(openai_responses::stream::Encoder::new()),
         Protocol::Anthropic => Box::new(anthropic::stream::Encoder::new()),
-        Protocol::Gemini => Box::new(gemini::stream::Encoder::new()),
+        Protocol::Gemini | Protocol::Vertex => Box::new(gemini::stream::Encoder::new()),
+        Protocol::Bedrock => Box::new(bedrock::stream::Encoder::new()),
     }
 }
 
@@ -120,7 +129,8 @@ pub fn encode_error(protocol: Protocol, error: &GatewayError) -> serde_json::Val
         Protocol::Openai => openai::response::error_body(error),
         Protocol::OpenaiResponses => openai_responses::response::error_body(error),
         Protocol::Anthropic => anthropic::response::error_body(error),
-        Protocol::Gemini => gemini::response::error_body(error),
+        Protocol::Gemini | Protocol::Vertex => gemini::response::error_body(error),
+        Protocol::Bedrock => bedrock::response::error_body(error),
     }
 }
 
@@ -130,7 +140,8 @@ pub fn encode_stream_error(protocol: Protocol, error: &GatewayError) -> Vec<SseF
         Protocol::Openai => openai::response::error_frames(error),
         Protocol::OpenaiResponses => openai_responses::response::error_frames(error),
         Protocol::Anthropic => anthropic::response::error_frames(error),
-        Protocol::Gemini => gemini::response::error_frames(error),
+        Protocol::Gemini | Protocol::Vertex => gemini::response::error_frames(error),
+        Protocol::Bedrock => bedrock::response::error_frames(error),
     }
 }
 
@@ -154,5 +165,19 @@ mod tests {
         });
         let req = decode_request(Protocol::Anthropic, anthropic).unwrap();
         assert_eq!(req.max_tokens, Some(16));
+    }
+
+    #[test]
+    fn vertex_dispatches_to_the_gemini_codec() {
+        let vertex = serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "generationConfig": {"maxOutputTokens": 64}
+        });
+        let req = decode_request(Protocol::Vertex, vertex).unwrap();
+        assert_eq!(req.model, "gemini");
+        assert_eq!(req.max_tokens, Some(64));
+
+        let encoded = encode_request(Protocol::Vertex, &req).unwrap();
+        assert_eq!(encoded["generationConfig"]["maxOutputTokens"], 64);
     }
 }

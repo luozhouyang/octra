@@ -8,6 +8,8 @@ pub enum Protocol {
     OpenaiResponses,
     Anthropic,
     Gemini,
+    Vertex,
+    Bedrock,
 }
 
 impl Protocol {
@@ -17,6 +19,8 @@ impl Protocol {
             Protocol::OpenaiResponses => "openai_responses",
             Protocol::Anthropic => "anthropic",
             Protocol::Gemini => "gemini",
+            Protocol::Vertex => "vertex",
+            Protocol::Bedrock => "bedrock",
         }
     }
 
@@ -26,6 +30,10 @@ impl Protocol {
             "openai_responses" | "responses" => Some(Protocol::OpenaiResponses),
             "anthropic" | "messages" | "anthropic_messages" => Some(Protocol::Anthropic),
             "gemini" | "google" | "generate_content" => Some(Protocol::Gemini),
+            "vertex" | "google-vertex" | "vertex-ai" | "vertex_ai" => Some(Protocol::Vertex),
+            "bedrock" | "aws-bedrock" | "bedrock-runtime" | "bedrock_converse" => {
+                Some(Protocol::Bedrock)
+            }
             _ => None,
         }
     }
@@ -248,8 +256,18 @@ mod tests {
         assert_eq!(Protocol::parse("chat_completions"), Some(Protocol::Openai));
         assert_eq!(Protocol::parse("anthropic"), Some(Protocol::Anthropic));
         assert_eq!(Protocol::parse("messages"), Some(Protocol::Anthropic));
+        assert_eq!(Protocol::parse("vertex"), Some(Protocol::Vertex));
+        assert_eq!(Protocol::parse("google-vertex"), Some(Protocol::Vertex));
+        assert_eq!(Protocol::parse("vertex-ai"), Some(Protocol::Vertex));
+        assert_eq!(Protocol::parse("vertex_ai"), Some(Protocol::Vertex));
+        assert_eq!(Protocol::parse("bedrock"), Some(Protocol::Bedrock));
+        assert_eq!(Protocol::parse("aws-bedrock"), Some(Protocol::Bedrock));
+        assert_eq!(Protocol::parse("bedrock-runtime"), Some(Protocol::Bedrock));
+        assert_eq!(Protocol::parse("bedrock_converse"), Some(Protocol::Bedrock));
         assert_eq!(Protocol::parse("grpc"), None);
         assert_eq!(Protocol::Anthropic.to_string(), "anthropic");
+        assert_eq!(Protocol::Vertex.to_string(), "vertex");
+        assert_eq!(Protocol::Bedrock.to_string(), "bedrock");
     }
 
     #[test]

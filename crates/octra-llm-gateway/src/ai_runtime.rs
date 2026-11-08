@@ -336,7 +336,8 @@ fn auth_type_for(protocol: &str) -> &'static str {
         "anthropic" | "claude" => "anthropic",
         "gemini" | "google" => "header",
         "ollama" | "vllm" | "lmstudio" | "lm-studio" | "groq" | "openrouter" | "deepseek"
-        | "together" | "fireworks" | "openai-compatible" | "openai-chat" => "bearer",
+        | "together" | "fireworks" | "openai-compatible" | "openai-chat" | "bedrock"
+        | "aws-bedrock" | "bedrock-runtime" | "bedrock-converse" | "bedrock_converse" => "bearer",
         _ => "bearer",
     }
 }
