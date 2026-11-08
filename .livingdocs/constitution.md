@@ -38,16 +38,13 @@ The product has three protocol surfaces and one management surface:
 - PostgreSQL, MySQL, Redis, Elasticsearch, or any required external database or broker.
 - Complete Kong Lua plugin compatibility, Kong PDK compatibility, or a drop-in Kong Admin API replacement.
 - magpie's signed-in subscription discovery, menu-bar app, remote sharing, Docker/NAS mode, or Bun/JavaScript plugin runtime.
-- OpenAPI-to-MCP conversion modes in v0.1.
-- Complete Kong MCP ACL parity (CEL expressions) in v0.1.
 - Rust dynamic-library plugin loading or unsandboxed third-party native code.
-- OS keychain integration in the current phase; secret references are the implemented boundary.
 - Apple signing/notarization credentials are operator-provided; packaging workflows produce unsigned bundles without them.
 
 **Phase boundaries:**
 
 - Phase 1 (current): single-node daemon, API/LLM/MCP gateways, SQLite persistence, native and WASM plugins, agent integration, desktop console, and CLI.
-- Phase 2: production hardening, signing and notarization, key rotation and AAD-bound secret formats, additional protocol adapters, broader agent coverage, and full reference-model parity where justified.
+- Phase 2: signed/notarized release execution, key-retirement confirmation/audit, full OpenAPI serialization parity, additional protocol adapters, broader agent coverage, and remaining reference-model parity where justified.
 
 ## Data Model / Schema Foundation
 

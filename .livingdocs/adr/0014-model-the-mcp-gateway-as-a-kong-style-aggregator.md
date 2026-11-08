@@ -23,7 +23,7 @@ We will model the MCP gateway as a Kong-style aggregator with Octra's local-firs
 
 - Expose the global `/mcp` endpoint plus per-server endpoints at `/mcp/<name>` or a configured `route_path`; a scoped endpoint aggregates only that server (or a listener's sources) and anchors sessions to it. POST carries JSON-RPC requests and notifications; GET holds an SSE keepalive channel; DELETE terminates the session.
 - Evaluate Kong-style CEL `allow_when`/`deny_when` expressions at the server tier: deny wins, allow requires a match, non-matching or failed evaluation fails closed, and per-tool static ACL rows override the server tier.
-- Support OIDC auth strategies per server or as a default: validate Bearer JWTs against a configured JWKS with issuer/audience/expiry/scope checks and map claims to consumer identity, username, and group names. Fall back to MCP API keys when no strategy is selected.
+- Support OIDC auth strategies per server or as a default: validate Bearer JWTs against a configured JWKS or OIDC discovery document, validate opaque tokens through RFC 7662 introspection, enforce issuer/audience/expiry/scope checks, and map claims to consumer identity, username, and group names. Fall back to MCP API keys when no strategy is selected.
 - Support upstream transports `http` (Streamable HTTP) and `stdio` (one child process per server, newline-delimited JSON-RPC, request-id correlation through oneshot channels, kill-on-drop).
 - Model each server with a Kong-shaped `type`: `passthrough-listener`, `listener`, `upstream-server`, `conversion-listener`, or `conversion-only`. A listener may list `sources`; an empty list means every enabled upstream/passthrough server. Conversion servers generate HTTP tools from an inline or fetched OpenAPI 3.x JSON/YAML document.
 - Implement the MCP JSON-RPC methods `initialize`, `ping`, `tools/list`, and `tools/call`; accept notifications and return `202` when no reply is required. Negotiate protocol versions `2025-06-18`, `2025-03-26`, and `2024-11-05`.
@@ -38,7 +38,7 @@ We will model the MCP gateway as a Kong-style aggregator with Octra's local-firs
 **Not adopted in v0.1:**
 
 - Cookie parameters, multipart/form bodies, external `$ref`s, full OpenAPI serialization styles (`explode`, `deepObject`), and 3.1-only schema constructs in the conversion subset.
-- Kong auth plugins beyond OIDC Bearer JWKS validation and Octra MCP API keys; no introspection, revocation, or token acquisition.
+- Kong auth plugins beyond OIDC JWKS/discovery/introspection and Octra MCP API keys; no private_key_jwt, mTLS, revocation, or token acquisition.
 - Kong's plugin-based MCP proxy model. Octra's MCP gateway is a first-class router; API and LLM plugin chains do not run on MCP traffic.
 - CEL-based ACL expressions. Octra supports consumer, consumer-group, and tool-default scopes.
 - Server-initiated notifications, tool-list change notifications, session sharing between gateway instances, and structured output.
@@ -67,13 +67,13 @@ We will model the MCP gateway as a Kong-style aggregator with Octra's local-firs
 - A session is anchored to the first registered server because `mcp_sessions.server_id` is non-null; a gateway session can span servers but the schema cannot yet express that cleanly.
 - The gateway does not push notifications, so GET is only a keepalive channel.
 - CEL expressions use the cel-interpreter built-ins; Kong-specific extensions and request headers/body are not exposed. Expressions are recompiled per evaluation.
-- OIDC uses explicit `issuer`/`jwks_uri`; there is no discovery endpoint, introspection, or auto-provisioning of consumer rows. Group claims map only to existing consumer groups by name.
+- OIDC discovery and introspection caches are in-process; introspection validates `active`/`exp`/`aud`/scope but not `iss`/`nbf`/`iat`, and there is no auto-provisioning of consumer rows. Group claims map only to existing consumer groups by name.
 - The gateway exposes one global `/mcp` endpoint plus scoped `/mcp/<name|route_path>` endpoints; listener `sources` filter the catalog.
 - stdio child processes are a local code-execution boundary; operators must trust the commands they register.
 
 **Follow-ups:**
 
-- Add OIDC discovery and introspection if a deployment needs them.
+- Add private_key_jwt/mTLS client authentication for introspection if a deployment needs it.
 - Add a session model that does not require a server anchor.
 - Add tool-list change notifications and server-initiated notifications when clients need them.
 - Add full OpenAPI serialization styles and external `$ref` support if a product requirement justifies them.
