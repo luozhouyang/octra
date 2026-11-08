@@ -48,6 +48,9 @@ enum Command {
     /// Inspect and activate the AI-native LLM control plane
     #[command(subcommand)]
     Ai(AiCommand),
+    /// Manage consumer (LLM access) policies
+    #[command(subcommand)]
+    Policies(PoliciesCommand),
 }
 
 #[derive(Subcommand)]
@@ -520,6 +523,31 @@ enum KeysCommand {
     Delete { id: String },
 }
 
+#[derive(Subcommand)]
+enum PoliciesCommand {
+    /// List consumer policies
+    List,
+    /// Create a consumer policy from a JSON body
+    Create {
+        /// JSON object with the policy fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Update a consumer policy from a JSON body (PUT upsert)
+    Update {
+        /// Policy id
+        id: String,
+        /// JSON object with the policy fields, `-` for stdin, or `@path` for a file
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete a consumer policy
+    Delete {
+        /// Policy id
+        id: String,
+    },
+}
+
 struct Control {
     workspace: Workspace,
     base_url: String,
@@ -543,6 +571,7 @@ fn main() -> Result<()> {
         }
         Command::Keys(command) => keys(&control, command)?,
         Command::Ai(command) => ai(&control, command)?,
+        Command::Policies(command) => policies(&control, command)?,
     }
 
     Ok(())
@@ -754,6 +783,23 @@ fn keys(control: &Control, command: KeysCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn policies(control: &Control, command: PoliciesCommand) -> Result<()> {
+    match command {
+        PoliciesCommand::List => print_json(control.get("/admin/policies")?),
+        PoliciesCommand::Create { body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.post_json("/admin/policies", &body)?)
+        }
+        PoliciesCommand::Update { id, body } => {
+            let body = parse_json_body(&body)?;
+            print_json(control.put(&format!("/admin/policies/{id}"), &body)?)
+        }
+        PoliciesCommand::Delete { id } => {
+            print_json(control.delete(&format!("/admin/policies/{id}"))?)
+        }
+    }
 }
 
 fn ai(control: &Control, command: AiCommand) -> Result<()> {
