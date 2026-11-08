@@ -323,6 +323,19 @@ export interface LlmPluginMetrics {
 }
 
 // ---------------------------------------------------------------------------
+// Consumer policies
+
+export interface ConsumerPolicy {
+  id: string;
+  name: string;
+  scope: string;
+  consumer_id: string | null;
+  document: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
 // MCP gateway
 
 export interface McpServer {

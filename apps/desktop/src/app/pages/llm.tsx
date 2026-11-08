@@ -1,7 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
-import type { AiProvider, LlmUsage } from "@octra/types";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { AiProvider, ConsumerPolicy, LlmUsage } from "@octra/types";
 import {
   Badge,
+  Button,
   Card,
   CardDescription,
   CardFooter,
@@ -16,6 +17,8 @@ import {
   TableRow,
   cn,
 } from "@octra/ui";
+import { Pencil, Plus, Trash2 } from "lucide-react";
+import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
 import { StatStrip, type StatItem } from "../../components/stat-strip";
@@ -75,6 +78,8 @@ export function LlmPage() {
           No LLM requests recorded yet.
         </Card>
       )}
+
+      <ConsumerPolicyCard />
     </div>
   );
 }
@@ -247,4 +252,278 @@ function UsageOverview({ usage, providers }: { usage: LlmUsage; providers: AiPro
       </div>
     </>
   );
+}
+
+interface PolicyNotice {
+  text: string;
+  error: boolean;
+}
+
+function ConsumerPolicyCard() {
+  const queryClient = useQueryClient();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [text, setText] = useState("{}");
+  const [notice, setNotice] = useState<PolicyNotice | null>(null);
+
+  const policiesQuery = useQuery({
+    queryKey: ["consumer-policies"],
+    queryFn: () => controlClient().consumerPolicies(),
+    retry: 1,
+  });
+
+  const policies = policiesQuery.data ?? [];
+  const editing = policies.find((policy) => policy.id === editingId) ?? null;
+  const parsed = useMemo(() => parsePolicyBody(text), [text]);
+
+  const save = useMutation({
+    mutationFn: ({ id, body }: { id: string | null; body: Record<string, unknown> }) =>
+      id
+        ? controlClient().updateConsumerPolicy(id, body)
+        : controlClient().createConsumerPolicy(body),
+    onSuccess: (_result, variables) => {
+      setNotice({ text: `Policy ${variables.id ? "updated" : "created"}.`, error: false });
+      setEditingId(null);
+      setText("{}");
+      void queryClient.invalidateQueries({ queryKey: ["consumer-policies"] });
+    },
+    onError: (error) => setNotice({ text: describeError(error), error: true }),
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => controlClient().deleteConsumerPolicy(id),
+    onSuccess: () => {
+      setNotice({ text: "Policy deleted.", error: false });
+      setEditingId(null);
+      setText("{}");
+      void queryClient.invalidateQueries({ queryKey: ["consumer-policies"] });
+    },
+    onError: (error) => setNotice({ text: describeError(error), error: true }),
+  });
+
+  const busy = save.isPending || remove.isPending;
+
+  function startNew() {
+    setEditingId(null);
+    setText("{}");
+    setNotice(null);
+  }
+
+  function startEdit(policy: ConsumerPolicy) {
+    setEditingId(policy.id);
+    setText(JSON.stringify(editablePolicy(policy), null, 2));
+    setNotice(null);
+  }
+
+  function submit() {
+    if (parsed.body === null) {
+      return;
+    }
+    save.mutate({ id: editingId, body: parsed.body });
+  }
+
+  function removePolicy(policy: ConsumerPolicy) {
+    const confirmed = window.confirm(`Delete policy "${policy.name}"? This cannot be undone.`);
+    if (confirmed) {
+      remove.mutate(policy.id);
+    }
+  }
+
+  return (
+    <Card className="flex flex-col">
+      <CardHeader className="flex-wrap gap-3">
+        <div className="flex flex-col gap-1">
+          <CardTitle>Consumer policies</CardTitle>
+          <CardDescription>
+            Model and provider allowlists enforced before an LLM request leaves the gateway.
+          </CardDescription>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <Badge variant="accent">{policies.length} policies</Badge>
+          <Button size="sm" variant="secondary" disabled={busy} onClick={startNew}>
+            <Plus className="h-3.5 w-3.5" />
+            New policy
+          </Button>
+        </div>
+      </CardHeader>
+      <CardSeparator />
+      <div className="grid gap-4 p-4 lg:grid-cols-[minmax(260px,1fr)_minmax(300px,1.1fr)]">
+        <div className="min-w-0">
+          <Table className="[&_td]:px-3 [&_th]:px-3">
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead>Policy</TableHead>
+                <TableHead>Scope</TableHead>
+                <TableHead>Consumer</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {policiesQuery.isPending ? (
+                <TableRow className="h-12">
+                  <TableCell colSpan={4} className="text-center text-[11px] text-muted-foreground">
+                    Loading policies…
+                  </TableCell>
+                </TableRow>
+              ) : policiesQuery.isError ? (
+                <TableRow className="h-12">
+                  <TableCell colSpan={4} className="text-center text-[11px] text-muted-foreground">
+                    Cannot load policies.{" "}
+                    <span className="text-danger">{describeError(policiesQuery.error)}</span>
+                  </TableCell>
+                </TableRow>
+              ) : policies.length === 0 ? (
+                <TableRow className="h-12">
+                  <TableCell colSpan={4} className="text-center text-[11px] text-muted-foreground">
+                    No consumer policies yet.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                policies.map((policy) => (
+                  <TableRow key={policy.id} className="h-12">
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={cn(
+                            "h-[5px] w-[5px] rounded-full",
+                            policy.id === editingId ? toneDot.primary : toneDot.muted,
+                          )}
+                        />
+                        <span className="font-mono text-[11.5px]">{policy.name}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <span className="font-mono text-[11px] text-secondary">{policy.scope}</span>
+                    </TableCell>
+                    <TableCell>
+                      <span className="font-mono text-[11px] text-muted-foreground">
+                        {policy.consumer_id ?? "—"}
+                      </span>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={busy}
+                          onClick={() => startEdit(policy)}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-danger hover:text-danger"
+                          disabled={busy}
+                          onClick={() => removePolicy(policy)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Delete
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </div>
+        <div className="flex min-w-0 flex-col gap-2">
+          <label className="flex flex-col gap-1">
+            <span className="text-[10.5px] text-muted-foreground">
+              {editing ? `Edit policy ${editing.name} (JSON)` : "New policy (JSON)"}
+            </span>
+            <textarea
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+              spellCheck={false}
+              rows={10}
+              aria-invalid={parsed.error !== null}
+              className="min-h-[180px] w-full resize-y rounded-lg border border-border bg-surface p-3 font-mono text-[10.5px] leading-relaxed text-secondary outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/40 focus:ring-2 focus:ring-primary/15"
+            />
+          </label>
+          <p className="text-[9.5px] leading-relaxed text-muted-foreground">
+            Set <span className="font-mono text-secondary">consumer_id</span> when scope is{" "}
+            <span className="font-mono text-secondary">consumer</span>. The{" "}
+            <span className="font-mono text-secondary">document</span> supports{" "}
+            <span className="font-mono text-secondary">allowed_models</span> and{" "}
+            <span className="font-mono text-secondary">allowed_providers</span>; use{" "}
+            <span className="font-mono text-secondary">*</span> to allow everything.
+          </p>
+          {parsed.error ? <span className="text-[10px] text-danger">{parsed.error}</span> : null}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" onClick={submit} disabled={busy || parsed.error !== null}>
+              {save.isPending ? "Saving…" : "Save"}
+            </Button>
+            <Button size="sm" variant="secondary" disabled={busy} onClick={startNew}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              className="ml-auto"
+              disabled={busy || editing === null}
+              onClick={() => {
+                if (editing) {
+                  removePolicy(editing);
+                }
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              {remove.isPending ? "Deleting…" : "Delete"}
+            </Button>
+          </div>
+          {notice ? (
+            <span className={cn("text-[10.5px]", notice.error ? "text-danger" : "text-secondary")}>
+              {notice.text}
+            </span>
+          ) : null}
+        </div>
+      </div>
+      <CardFooter>
+        <span className="text-[11px] text-muted-foreground">
+          {policies.length} policies · global and consumer scope
+        </span>
+        <span className="font-mono text-[10.5px] text-muted-foreground">
+          {editingId ? `editing ${editingId}` : "new policy"}
+        </span>
+      </CardFooter>
+    </Card>
+  );
+}
+
+function editablePolicy(policy: ConsumerPolicy): Record<string, unknown> {
+  return {
+    name: policy.name,
+    scope: policy.scope,
+    consumer_id: policy.consumer_id,
+    document: policy.document ?? {},
+  };
+}
+
+function parsePolicyBody(text: string): {
+  body: Record<string, unknown> | null;
+  error: string | null;
+} {
+  const trimmed = text.trim();
+  if (trimmed === "") {
+    return { body: null, error: "Policy body is required." };
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(trimmed);
+  } catch (error) {
+    return {
+      body: null,
+      error: `Invalid JSON: ${error instanceof Error ? error.message : "unable to parse"}`,
+    };
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { body: null, error: "Policy body must be a JSON object." };
+  }
+  return { body: value as Record<string, unknown>, error: null };
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : "request failed";
 }

@@ -24,6 +24,7 @@ import type {
   AiStatus,
   ApiMetricsSnapshot,
   ApiPluginStats,
+  ConsumerPolicy,
   ControlConfig,
   CreatedLlmVirtualKey,
   CreatedMcpApiKey,
@@ -254,6 +255,31 @@ export class ControlApiClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
     });
+  }
+
+  // ----- Consumer policies -----------------------------------------------
+
+  async consumerPolicies(signal?: AbortSignal): Promise<ConsumerPolicy[]> {
+    const response = await this.request<ConsumerPolicy[] | { data: ConsumerPolicy[] }>(
+      "/admin/policies",
+      { signal },
+    );
+    if (Array.isArray(response)) {
+      return response;
+    }
+    return Array.isArray(response?.data) ? response.data : [];
+  }
+
+  createConsumerPolicy(body: unknown): Promise<ConsumerPolicy> {
+    return this.postJson<ConsumerPolicy>("/admin/policies", body);
+  }
+
+  updateConsumerPolicy(id: string, body: unknown): Promise<ConsumerPolicy> {
+    return this.putJson<ConsumerPolicy>(`/admin/policies/${encodeURIComponent(id)}`, body);
+  }
+
+  deleteConsumerPolicy(id: string): Promise<void> {
+    return this.deleteEmpty(`/admin/policies/${encodeURIComponent(id)}`);
   }
 
   // ----- MCP gateway -----------------------------------------------------
