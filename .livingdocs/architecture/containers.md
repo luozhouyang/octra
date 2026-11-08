@@ -75,7 +75,7 @@ flowchart TB
 
 **API runtime.** An immutable snapshot of services, routes, upstreams, targets, consumers, credentials, ACLs, and plugin chains. The matcher, target pools, health state, and auth maps are compiled once and swapped on reload (ADR 0017).
 
-**LLM runtime.** An immutable snapshot compiled from the AI-native control plane: providers, accounts, models, targets, virtual keys, policies, and plugin chains. The account pool keeps live quota/cooldown/pacing state across reloads (ADR 0013). ADR 0018 Phase 26 makes `ai_*` the only model control plane, adds per-target model metadata, built-in AI policy execution through the LLM plugin chains (including prompt compression and semantic response caching for JSON and streaming responses), semantic target routing, provider query parameters and presets, Vertex and Bedrock Converse adapters, and all documented routing strategies. Applying or rolling back a revision reloads the runtime and plugin chains. See [LLM Control Plane](llm-control-plane.md).
+**LLM runtime.** An immutable snapshot compiled from the AI-native control plane: providers, accounts, models, targets, virtual keys, policies, and plugin chains. The account pool keeps live quota/cooldown/pacing state across reloads (ADR 0013). ADR 0018 Phase 35 makes `ai_*` the only model control plane, adds per-target model metadata, built-in AI policy execution through the LLM plugin chains (including prompt compression and semantic response caching for JSON and streaming responses), semantic target routing, provider query parameters and presets, Vertex and Bedrock Converse adapters with optional SigV4, encrypted stored secrets, and all documented routing strategies. Applying or rolling back a revision reloads the runtime and plugin chains. See [LLM Control Plane](llm-control-plane.md).
 
 **MCP runtime.** Server definitions, lazy stdio/HTTP connections keyed by the full definition, tool discovery, session storage, API keys, ACLs, and invocation audit (ADR 0014).
 
@@ -89,7 +89,7 @@ flowchart TB
 
 ## Why the daemon is independent
 
-The gateway must keep serving while the GUI reloads, crashes, or is closed, and the CLI must work without a WebView. The Tauri host therefore contains no gateway logic and the daemon has no GUI dependency (ADR 0003). The cost is that the desktop requires an operator-started daemon and packaging must eventually add lifecycle supervision.
+The gateway must keep serving while the GUI reloads, crashes, or is closed, and the CLI must work without a WebView. The Tauri host therefore contains no gateway logic and the daemon has no GUI dependency (ADR 0003). The desktop can attach to an operator-started daemon or supervise a bundled sidecar through `crates/octra-desktop-daemon`; packaged builds ship the sidecar via `bundle.externalBin`.
 
 ## Drift instrument
 

@@ -38,7 +38,7 @@ Octra is a local-first composite of three external models. The detailed adopt/no
 - The data listener is unauthenticated at the transport level; the API gateway, LLM gateway, and MCP gateway each enforce their own credential (API key, virtual key, or MCP key) depending on configuration. All bind loopback by default.
 - The control listener requires the Bearer control token on every request. The token is admin-only and is never issued to an agent.
 - The desktop webview never holds the control token in packaged mode; the Tauri host bridges allow-listed requests (ADR 0015).
-- Provider secrets are references, not values. OAuth tokens and agent backups rely on the database's `0600` permissions (ADR 0007).
+- Provider secrets are references, not values. OAuth tokens, KeyAuth keys, BasicAuth passwords, and JWT secrets are sealed with AES-256-GCM under an OS-keychain-backed master key (ADR 0007).
 - Third-party plugins run as WASM components with approved capabilities; native plugins are first-party and compiled in (ADR 0005, ADR 0006).
 
 ## Drift instrument

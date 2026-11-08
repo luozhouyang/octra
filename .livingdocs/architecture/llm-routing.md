@@ -12,9 +12,8 @@ The LLM data plane separates two decisions: which virtual model to use (route an
 
 ```mermaid
 flowchart TB
-    VM[virtual_model_id] --> Route[llm_routes]
-    Route --> Group[llm_routing_groups]
-    Group --> Targets[llm_routing_targets]
+    VM[virtual model] --> Model[ai_models]
+    Model --> Targets[ai_model_targets]
     Targets --> Rounds[Priority rounds]
     Rounds --> Cycles[Weighted cycle per round]
     Cycles --> Strategy[Strategy ranking]

@@ -11,11 +11,11 @@ timestamp: 2026-11-06T15:44:39Z
 
 ## Context
 
-Octra ships a Tauri desktop app, a CLI, and a daemon, and the gateway must keep serving while the GUI reloads, crashes, or is closed. Embedding the gateway in the Tauri process would tie network service lifetime to the WebView and make headless testing and CLI reuse difficult. The daemon also needs to run on operating systems where Tauri is not present. The desktop currently connects to an operator-started daemon; automatic sidecar supervision is planned but not implemented.
+Octra ships a Tauri desktop app, a CLI, and a daemon, and the gateway must keep serving while the GUI reloads, crashes, or is closed. Embedding the gateway in the Tauri process would tie network service lifetime to the WebView and make headless testing and CLI reuse difficult. The daemon also needs to run on operating systems where Tauri is not present. The desktop can attach to an operator-started daemon or supervise a bundled sidecar.
 
 ## Decision
 
-We will run the gateway as a standalone daemon process with separate control and data listeners. The Tauri host is a control-plane client: it reads the configured endpoint and token, forwards requests through one allow-listed command, and never hosts gateway logic itself. The CLI uses the same control plane. Starting, stopping, and health-supervising the daemon from the desktop remains a future packaging concern rather than a prerequisite for the runtime boundary.
+We will run the gateway as a standalone daemon process with separate control and data listeners. The Tauri host is a control-plane client: it reads the configured endpoint and token, forwards requests through one allow-listed command, and never hosts gateway logic itself. The CLI uses the same control plane. The desktop may also start, stop, restart, and health-check a daemon child discovered from `OCTRA_DAEMON_BIN`, a bundled sidecar, or a development target binary; it never kills a daemon it did not start.
 
 Rejected alternatives:
 - **Embedding the gateway in the Tauri main process** — a GUI crash would stop traffic, headless operation would be impossible, and tests would need a WebView.
@@ -30,20 +30,21 @@ Rejected alternatives:
 - A GUI reload does not interrupt proxied traffic.
 
 **Harder / accepted trade-offs:**
-- The desktop currently requires the daemon to be started separately (`pnpm daemon`); a production package must add sidecar lifecycle management.
-- Packaging must eventually ship and reconcile two processes and their versions.
+- The desktop can supervise a sidecar, but an externally started daemon is never killed by the GUI.
+- Packaging ships and reconciles two processes and their versions.
 - Cross-process communication adds an authenticated HTTP boundary inside the local machine.
 
 **Follow-ups:**
-- Add desktop-side daemon start/stop/health supervision and an explicit version handshake during packaging work.
+- Add an explicit daemon/desktop version handshake during upgrade and signing/notarization work.
 
 ## Verification
 
-**Implementation impact:** `crates/octra-daemon/src/main.rs`, `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src/lib/control-api.ts`.
+**Implementation impact:** `crates/octra-daemon/src/main.rs`, `crates/octra-desktop-daemon/`, `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src/lib/control-api.ts`, `apps/desktop/src/app/pages/settings.tsx`, `scripts/build-desktop-sidecar.sh`.
 
 **Verification criteria:**
 - The daemon starts standalone and serves both listeners without the desktop app.
-- The Tauri host exposes only the allow-listed `daemon_request` bridge; no gateway runtime code lives in `apps/desktop/src-tauri`.
+- The Tauri host exposes only allow-listed bridge/lifecycle commands; no gateway runtime code lives in `apps/desktop/src-tauri`.
+- The lifecycle crate discovers a binary, starts/health-checks/stops an owned child, refuses to kill an external daemon, and reports early exits with a log tail.
 - Daemon integration tests exercise the control and data planes without a WebView.
 
 # References

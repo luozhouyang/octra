@@ -11,17 +11,17 @@ timestamp: 2026-11-06T15:44:40Z
 
 ## Context
 
-Provider API keys and OAuth tokens are the most valuable secrets in the system, while coding agents are clients that users install and upgrade independently. Agent configuration files are user-owned, may be backed up or synced, and are not a safe place for provider credentials. The control plane is an administrative surface, not a client data-plane credential. OS keychain integration is planned but not implemented, so the current mechanism must limit what is persisted in ordinary tables.
+Provider API keys and OAuth tokens are the most valuable secrets in the system, while coding agents are clients that users install and upgrade independently. Agent configuration files are user-owned, may be backed up or synced, and are not a safe place for provider credentials. The control plane is an administrative surface, not a client data-plane credential. A copied database must not expose reusable tokens or passwords even when the attacker has the database file but not the OS keychain.
 
 ## Decision
 
-We will store static provider secrets as references (`env:` or `file:`) and resolve the value inside the daemon at request time. Agents receive Octra virtual keys, never provider keys; virtual keys are hashed in SQLite and carry model/provider permissions. The control-plane Bearer token is admin-only and is never handed to agents. The control API never returns secret values. OAuth access and refresh tokens are the deliberate exception: the daemon must refresh sessions, so they persist in the dedicated `llm_provider_oauth_tokens` table and inherit the database's file-permission protection. Because OAuth tokens and agent config backups may contain credentials, the SQLite database and its WAL/SHM sidecars are restricted to `0600` on Unix.
+We will store static provider secrets as references (`env:` or `file:`) and resolve the value inside the daemon at request time. Agents receive Octra virtual keys, never provider keys; virtual keys are hashed in SQLite and carry model/provider permissions. The control-plane Bearer token is admin-only and is never handed to agents. The control API never returns secret values. Values that must survive restarts are sealed at rest with AES-256-GCM under a 32-byte master key: OAuth access/refresh/extra values, KeyAuth keys, BasicAuth passwords, and JWT secrets. Sealed values use the `enc:v1:` prefix and legacy plaintext is read once and backfilled. The master key resolves from `OCTRA_MASTER_KEY`, an existing `master.key`, or the OS keychain (`dev.octra` / `master-key`); if the database exists but no key is available, startup fails instead of generating a new key. The SQLite database and its WAL/SHM sidecars remain `0600` on Unix as defense in depth.
 
 Rejected alternatives:
 - **Plaintext provider secrets in SQLite** — exposes them to database backups, copies, and any file reader.
 - **Putting provider keys in agent configuration** — distributes the highest-value credential to every client and its backup.
 - **Using the control token as the agent credential** — grants administrative access to a data-plane client.
-- **Encryption at rest now** — would add key-management work without solving the local file-permission boundary; it remains a future hardening step.
+- **Plaintext OAuth tokens and credential passwords at rest** — a copied database would expose reusable sessions.
 
 ## Consequences
 
@@ -32,21 +32,23 @@ Rejected alternatives:
 
 **Harder / accepted trade-offs:**
 - Operators must provision `env:` or `file:` references and protect those sources themselves.
-- Key rotation is manual for the referenced secret files.
-- OAuth tokens are stored in plaintext inside the protected database, so a copied database exposes them; encryption or keychain storage is still pending.
+- Key rotation is manual for referenced secret files.
+- The fallback `master.key` sits next to the database; backups that include both expose secrets. Prefer the OS keychain or `OCTRA_MASTER_KEY` for portable backups.
+- The master key is per OS user/installation, not per database; there is no key rotation or re-encryption workflow yet.
 - A local attacker with the same OS permissions can still read process memory or environment; the boundary is OS-level.
 
 **Follow-ups:**
-- Add OS keychain-backed secret references without changing the reference-based contract.
-- Encrypt or keychain-back the OAuth token table.
+- Add key rotation and re-encryption, ideally with a key id stored in the database and OS-level signing/notarization for packaged apps.
+- Bind ciphertext to its table/row with AAD in a future format version.
 
 ## Verification
 
-**Implementation impact:** `crates/octra-llm-gateway/src/`, `crates/octra-storage/src/llm.rs`, `crates/octra-storage/src/lib.rs`, `crates/octra-types/src/auth.rs`.
+**Implementation impact:** `crates/octra-secrets/`, `crates/octra-llm-gateway/src/`, `crates/octra-storage/src/llm.rs`, `crates/octra-storage/src/api/`, `crates/octra-storage/src/lib.rs`, `crates/octra-types/src/auth.rs`.
 
 **Verification criteria:**
 - Static provider secret resolution accepts only reference forms and never writes the resolved value to SQLite.
-- OAuth tokens persist only in `llm_provider_oauth_tokens`, inherit the database's `0600` protection, and are never returned by the control API.
+- OAuth tokens, KeyAuth keys, BasicAuth passwords, and JWT secrets are sealed as `enc:v1:` values; reads return plaintext to callers.
+- Legacy plaintext is readable and backfilled idempotently; an existing database with an unavailable or wrong master key fails startup.
 - Control-plane responses mask or omit secrets and virtual-key material.
 - Storage tests assert `0600` on the database and its WAL/SHM sidecars on Unix.
 - Data-plane credentials cannot call control-plane endpoints.

@@ -22,7 +22,7 @@ Octra is a local-first composite of three external models. The full adopt/not-ad
 |---|---|---|---|
 | API gateway | Kong Gateway | Service/route/upstream/target, route priority, plugin phases and 12-level scopes, round-robin/weighted/consistent hashing/least-connections/latency, active/passive health checks, Kong-shaped Admin API, consumer groups, key/basic/JWT/ACL auth | Nginx/Lua runtime, PDK, workspaces, RBAC, Dev Portal, full Admin API compatibility, sticky-session cookies |
 | LLM gateway | yetone/magpie | One local endpoint for OpenAI Chat/Responses, Anthropic, Gemini, Vertex, and Bedrock Converse; canonical IR; virtual models and routing groups; provider accounts with static/OAuth credentials, quota, cooldown, pacing; virtual-key/consumer policies; usage/cost; opt-in PII masking; agent config adapters; all documented routing strategies; Bedrock SigV4 | Signed-in subscription discovery, menu-bar app, remote sharing, Docker/NAS mode, Bun/JS plugin runtime, classifier intent routing |
-| MCP gateway | Kong AI MCP Proxy | One `/mcp` endpoint, Streamable HTTP ingress, stdio/HTTP upstreams, sessions, tool aggregation with `<server>__<tool>` names, MCP API keys, per-consumer/group/default tool ACLs, invocation audit | OpenAPI conversion modes, tag-based listener, `upstream-server` mode, Kong auth plugins, CEL ACLs, server-initiated notifications, session sharing |
+| MCP gateway | Kong AI MCP Proxy | One `/mcp` endpoint, Streamable HTTP ingress, stdio/HTTP upstreams, sessions, tool aggregation with `<server>__<tool>` names, Kong-shaped server `type`/`sources`, server-default + per-tool ACLs, MCP API keys, invocation audit | OpenAPI conversion modes, per-server routes, Kong auth strategies, CEL ACLs, server-initiated notifications, session sharing |
 
 ## Goals
 
@@ -42,8 +42,7 @@ Octra is a local-first composite of three external models. The full adopt/not-ad
 - A general-purpose agent runtime, magpie's signed-in subscription discovery, or magpie's remote sharing/menu-bar product surface.
 - OpenAPI-to-MCP conversion modes in v0.1.
 - Unsandboxed third-party native code or Rust dynamic-library plugin loading.
-- OS keychain integration and OAuth-token encryption in v0.1; static secret references and `0600` database permissions are the current boundary.
-- Desktop-side daemon lifecycle supervision, signed installers, and notarized packages in v0.1.
+- Signed installers and notarized packages in v0.1; the packaging workflow produces unsigned bundles and documents signing placeholders.
 
 ## Requirements
 
@@ -102,13 +101,13 @@ SQLite is the only persistence engine, with SQLx migrations, WAL, foreign keys, 
 
 ### R8 Console and CLI
 
-Every desktop page reads the live control plane. The desktop has eight pages: Overview, API Gateway, LLM Gateway, MCP Gateway, AI Control, Agents, Plugins, and Settings. The Tauri host holds the control token and exposes one path- and method-allow-listed bridge command; the webview never holds the token in packaged mode.
+Every desktop page reads the live control plane. The desktop has eight pages: Overview, API Gateway, LLM Gateway, MCP Gateway, AI Control, Agents, Plugins, and Settings. The Tauri host holds the control token, exposes one path- and method-allow-listed bridge command plus daemon lifecycle commands, and can start/stop/restart a bundled daemon sidecar.
 
 The CLI exposes `status`, API Gateway services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, consumer-policy CRUD, `reload`, `doctor`, `keys`, `usage`, and `ai` control-plane commands over the same API.
 
 ### R9 Security boundary
 
-Static provider secrets resolve from `env:` or `file:` references at request time; virtual keys, API keys, and MCP keys are hashed; the control token is admin-only; the database and WAL/SHM sidecars are `0600` on Unix; the control API never returns secret values or backup content. OAuth tokens are the deliberate plaintext-at-rest exception and inherit the database's file permissions.
+Static provider secrets resolve from `env:` or `file:` references at request time; virtual keys, API keys, and MCP keys are hashed; the control token is admin-only; the database and WAL/SHM sidecars are `0600` on Unix; the control API never returns secret values or backup content. OAuth tokens, KeyAuth keys, BasicAuth passwords, and JWT secrets are sealed with AES-256-GCM under an OS-keychain-backed master key, with `OCTRA_MASTER_KEY` and a `0600` key file as fallbacks.
 
 ### R10 Observability and retention
 
@@ -123,25 +122,25 @@ This table is the authoritative progress summary for v0.1. "Implemented" means t
 | R1 Local runtime | Implemented | `crates/octra-daemon/src/main.rs`, health/config/overview/reload routes |
 | R2 API gateway | Implemented core | Matcher, balancer (round-robin/weighted/consistent hashing/least-connections/latency), health checks, plugins, Admin API, CLI and desktop typed-form CRUD |
 | R3 LLM gateway | Implemented core | Six wire protocols (OpenAI Chat/Responses, Anthropic, Gemini, Vertex, Bedrock Converse with API-key or SigV4 auth), IR, routing with all magpie strategies, accounts, OAuth with loopback callbacks, virtual-key/consumer policies, usage/cost, PII; the AI-native control plane is the only model source with CRUD/validate/preview/apply/rollback, built-in policy execution for every policy type including PromptGuard, PromptCompress, and SemanticCache, semantic target routing with optional embeddings, provider query parameters and protocol presets, streaming cache population/replay, full CRUD CLI with stdin/file bodies, and typed desktop forms |
-| R4 MCP gateway | Implemented core | `/mcp`, stdio/HTTP, sessions, namespace, keys, consumer/group/default ACL scopes, audit; no CEL ACL, conversion modes, notifications, or unanchored sessions |
+| R4 MCP gateway | Implemented core | `/mcp`, stdio/HTTP, sessions, namespace, keys, Kong-shaped server type/sources, server-default + per-tool ACL scopes, audit; no CEL ACL, conversion modes, per-server routes, or unanchored sessions |
 | R5 Agent integration | Implemented | Three adapters, atomic apply/restore, backups; sandbox end-to-end test covers Claude Code only, not Codex/OpenCode |
 | R6 Plugins | Implemented | Native/WASM, capabilities, storage, events, jobs; delivery/retry/no-subscriber/job tests cover the bus; no delivery-lag operational view |
-| R7 Persistence | Implemented | 27 migrations, WAL, retention, `0600`; write-contention benchmark not done |
-| R8 Console/CLI | Partial | Eight live pages: AI Control, API Gateway, MCP, and consumer policies have typed forms for their core entities, and the MCP ACL form has a consumer-group picker; CLI covers status, API services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, consumer-policy CRUD, keys/usage, full AI entity CRUD, and AI activation actions |
-| R9 Security | Implemented with accepted exceptions | Secret references, hashed keys, control token boundary, `0600`, masked control responses; OAuth tokens are plaintext in the protected database; browser mode stores a token in settings |
+| R7 Persistence | Implemented | 29 migrations, WAL, retention, `0600`; write-contention benchmark not done |
+| R8 Console/CLI | Partial | Eight live pages: AI Control, API Gateway, MCP, and consumer policies have typed forms for their core entities, the MCP ACL form has a consumer-group picker, and Settings can start/stop/restart a bundled daemon; CLI covers status, API services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, consumer-policy CRUD, keys/usage, full AI entity CRUD, and AI activation actions |
+| R9 Security | Implemented with accepted exceptions | Secret references, hashed keys, control token boundary, `0600`, masked control responses, OS-keychain-backed AES-256-GCM encryption for stored secrets; browser mode stores a token in settings; no key rotation yet |
 | R10 Observability/retention | Implemented core | Logs, usage, metrics, events, retention; API metrics are in-memory; no OTLP; no delivery-lag metric |
 
 ### Verification snapshot
 
 - `cargo fmt --all --check` passes.
 - `cargo clippy --workspace --exclude octra-desktop --all-targets -- -D warnings` passes.
-- `cargo test --workspace --exclude octra-desktop` passes: 980 passed, 0 failed, 17 ignored.
+- `cargo test --workspace --exclude octra-desktop` passes: 1017 passed, 0 failed, 17 ignored.
 - WASM integration tests are ignored by default and require `cargo-component`; `scripts/test-wasm.sh` runs them in CI.
 - `pnpm typecheck`, `pnpm test`, and `pnpm build` pass (5 frontend tests across the shared packages).
 
 ### Planned evolution (not part of v0.1 acceptance)
 
-ADR 0018 replaced the legacy route/group LLM control plane with AI-native entities: AI Provider, AI Provider Account, AI Model, AI Model Target, AI Policy, AI Policy Attachment, config revisions, and a local compiler. Phase 26 completed the migration without backward compatibility: the `ai_*` tables are the only model/routing/account/policy source, the legacy model tables and `/admin/llm/*` model endpoints are removed, and `legacy`/`shadow`/`on` modes plus import-legacy are gone. The AI-native control plane supports CRUD, validate/preview/apply/revisions/rollback, per-target context/capability/pricing metadata, built-in policy execution for every policy type, semantic target routing with optional embedding vectors and lexical fallback, provider query parameters and protocol presets, Vertex and Bedrock Converse adapters, streaming cache population/replay, OAuth desktop controls with loopback callbacks, full CRUD CLI, and typed desktop forms for AI, API Gateway, and MCP entities. Remaining `llm_*` tables are virtual-key, usage, counter, plugin-state, PII-engine, and OAuth-token state. Production hardening such as OAuth-token encryption and packaging remains future work. See [LLM Control Plane](../architecture/llm-control-plane.md).
+ADR 0018 replaced the legacy route/group LLM control plane with AI-native entities: AI Provider, AI Provider Account, AI Model, AI Model Target, AI Policy, AI Policy Attachment, config revisions, and a local compiler. The migration is complete without backward compatibility: the `ai_*` tables are the only model/routing/account/policy source, the legacy model tables and `/admin/llm/*` model endpoints are removed, and `legacy`/`shadow`/`on` modes plus import-legacy are gone. The AI-native control plane supports CRUD, validate/preview/apply/revisions/rollback, per-target context/capability/pricing metadata, built-in policy execution for every policy type, semantic target routing with optional embedding vectors and lexical fallback, provider query parameters and protocol presets, Vertex and Bedrock Converse adapters with optional SigV4, streaming cache population/replay, OAuth desktop controls with loopback callbacks, full CRUD CLI, and typed desktop forms for AI, API Gateway, MCP, and consumer-policy entities. Non-model state was renamed to `virtual_keys`, `ai_usage`, `ai_usage_rollup`, `budget_windows`, `shared_counters`, `plugin_state`, and `pii_engines`. OAuth tokens, KeyAuth keys, BasicAuth passwords, and JWT secrets are encrypted under an OS-keychain-backed master key; MCP servers expose Kong-shaped `type`/`sources` and two-tier ACLs; the desktop can supervise a bundled daemon sidecar. Signed installers and key rotation remain future work. See [LLM Control Plane](../architecture/llm-control-plane.md).
 
 ## Acceptance criteria
 
@@ -179,11 +178,8 @@ Open acceptance gaps, in priority order:
 - What p95 proxy-overhead budget should R2 hold, and which benchmark enforces it? Resolve with an ADR before publishing a performance claim.
 - Should the desktop console grow more operational views, or remain a live console with targeted typed-form editors plus the Admin API as the management surface?
 - Which embedding provider preset should be recommended for local-first installs, and should semantic cache reuse the global `llm.semantic_embedding` config instead of its per-policy embedding block?
-- Should the remaining non-model `llm_*` tables (`virtual_keys`, usage, counters, plugin state, PII engines) be renamed in a follow-up cleanup?
 - Which OAuth providers should get first-class presets instead of raw `config_json.oauth` documents?
-- Which Kong MCP capability should be added next: consumer-group ACLs, default/CEL ACLs, conversion modes, or notifications?
-- When do OS keychain storage and OAuth-token encryption land? The current boundary is recorded in ADR 0007.
-- When does desktop-side daemon supervision replace the current operator-started daemon? The current boundary is recorded in ADR 0003.
+- Which Kong MCP capability should be added next: CEL ACLs, OpenAPI conversion modes, per-server routes, or notifications?
 - Should the v0.1 PRD be accepted once the acceptance criteria are demonstrated, or amended per capability?
 
 ## Related

@@ -23,18 +23,19 @@ We will model the MCP gateway as a Kong-style aggregator with Octra's local-firs
 
 - Expose one Streamable HTTP endpoint at `/mcp` (and `/mcp/`) for MCP clients. POST carries JSON-RPC requests and notifications; GET holds an SSE keepalive channel; DELETE terminates the session.
 - Support upstream transports `http` (Streamable HTTP) and `stdio` (one child process per server, newline-delimited JSON-RPC, request-id correlation through oneshot channels, kill-on-drop).
+- Model each server with a Kong-shaped `type`: `passthrough-listener`, `listener`, or `upstream-server`. A listener may list `sources`; an empty list means every enabled upstream/passthrough server. `conversion-listener` and `conversion-only` are recognized but rejected until OpenAPI conversion lands.
 - Implement the MCP JSON-RPC methods `initialize`, `ping`, `tools/list`, and `tools/call`; accept notifications and return `202` when no reply is required. Negotiate protocol versions `2025-06-18`, `2025-03-26`, and `2024-11-05`.
 - Create an Octra session on `initialize`, return it in `Mcp-Session-Id`, and require the header on every later request except `initialize`. The session row is persisted so a restart can still answer `DELETE`.
 - Namespace every upstream tool as `<server>__<tool>`. `tools/list` returns only enabled tools whose server is enabled and whose ACL allows the caller. `tools/call` parses the namespace, resolves the server and tool, re-checks enablement and ACL, then calls the upstream.
 - Authenticate data-plane callers with MCP API keys (`Authorization: Bearer` or `X-API-Key`); keys are stored as a display prefix plus SHA-256 hash. When no keys exist, the loopback-local default remains open.
-- Enforce tool ACLs by scope: an explicit consumer row wins, then matching consumer-group rows with deny-wins, then the tool default row. A tool with no rows follows the open-local default. Callers resolve their consumer groups at authentication time.
+- Enforce two-tier ACLs: non-empty per-tool rows override the server default, otherwise server-default rows apply, otherwise the open-local default remains. Within a tier, an explicit consumer row wins, then matching consumer-group rows with deny-wins, then the tier default row. Callers resolve their consumer groups at authentication time.
 - Persist one invocation row per tool call, including denials and unknown tools when the owning server can be identified, with request id, status, duration, consumer, and error.
 - Manage upstream connections lazily, keyed by the full server definition; retry a retryable failed call once after restarting the connection; drop every live connection on runtime reload.
 - Expose control endpoints under `/api/v1/mcp/*` for servers, tools, sessions, invocations, keys, and ACLs, plus a refresh action that re-runs discovery.
 
 **Not adopted in v0.1:**
 
-- Kong's `conversion-listener`, `conversion-only`, `listener` tag aggregation, and `upstream-server` modes. Octra does not convert OpenAPI operations into MCP tools.
+- Kong's `conversion-listener` and `conversion-only` modes. Octra does not convert OpenAPI operations into MCP tools; `listener` and `upstream-server` aggregation are implemented.
 - Kong auth plugins (Key Auth, OIDC, etc.) as the MCP auth mechanism. Octra uses its own MCP API keys and consumer identity.
 - Kong's plugin-based MCP proxy model. Octra's MCP gateway is a first-class router; API and LLM plugin chains do not run on MCP traffic.
 - CEL-based ACL expressions. Octra supports consumer, consumer-group, and tool-default scopes.
@@ -63,7 +64,8 @@ We will model the MCP gateway as a Kong-style aggregator with Octra's local-firs
 - The tool namespace limits server and tool names (the separator is reserved) and requires validation on discovery.
 - A session is anchored to the first registered server because `mcp_sessions.server_id` is non-null; a gateway session can span servers but the schema cannot yet express that cleanly.
 - The gateway does not push notifications, so GET is only a keepalive channel.
-- ACL scopes are limited to consumer, consumer group, and tool default; there is no expression language or per-tool CEL policy.
+- The gateway exposes one global `/mcp` endpoint; listener `sources` filter the catalog but do not create per-server routes.
+- ACL scopes are limited to consumer, consumer group, and default; there is no expression language or CEL policy.
 - stdio child processes are a local code-execution boundary; operators must trust the commands they register.
 
 **Follow-ups:**

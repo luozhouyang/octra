@@ -79,12 +79,12 @@ flowchart LR
 | Virtual models and routing groups | Implemented | `routing.rs`, `migrations/0003_llm_gateway.sql` |
 | Priority/order/manual/weight/rotate/fast/cheap/free/drain/expiring/smart/usage/quota/pace/intent | Implemented | `routing.rs`, `data_plane/mod.rs` |
 | Provider accounts, quota, cooldown, pacing | Implemented | `accounts.rs` |
-| OAuth refresh | Implemented, plaintext at rest | `credentials/`, `migrations/0017_oauth_credentials.sql` |
+| OAuth refresh | Implemented, encrypted at rest | `credentials/`, `octra-secrets/`, `migrations/0026_drop_legacy_llm_models.sql` |
 | Virtual-key and consumer policies | Implemented, with consumer-policy Admin API, CLI, and desktop editor | `vk_policy.rs`, `runtime.rs`, `/admin/policies` |
 | Usage, cost, rollups, retention | Implemented | `usage.rs`, `cost.rs`, `migrations/0014_usage_analytics.sql` |
 | PII masking | Implemented, opt-in | `llm-pii-redaction`, `pii/` |
 | Agent config adapters | Implemented | `crates/octra-agent-core`, ADR 0008 |
-| AI-native LLM control plane | Phase 26 AI-native only: control API + full policy execution + semantic routing + streaming cache + all routing strategies + Vertex/Bedrock adapters + typed forms | `ai_*` schema, compiler, store, `/api/v1/ai/*` CRUD, apply/revisions/rollback, transactional replace, AI-native runtime mapping, per-target model metadata, built-in policy execution for every policy type including PromptGuard, PromptCompress, and SemanticCache, semantic target routing over AI-native descriptions, provider query parameters and presets, Vertex and Bedrock Converse adapters with optional SigV4, streaming cache population and SSE replay, OAuth desktop controls and loopback callback, full CLI CRUD with stdin/file bodies, and typed desktop forms for all AI/API/MCP entities and consumer policies exist; the legacy model tables, endpoints, modes, and import path are removed without backward compatibility; see ADR 0018 and [LLM Control Plane](llm-control-plane.md) |
+| AI-native LLM control plane | Phase 35 AI-native only: control API + full policy execution + semantic routing + streaming cache + all routing strategies + Vertex/Bedrock adapters with SigV4 + encrypted secrets + typed forms + Kong-shaped MCP + daemon lifecycle | `ai_*` schema, compiler, store, `/api/v1/ai/*` CRUD, apply/revisions/rollback, transactional replace, AI-native runtime mapping, per-target model metadata, built-in policy execution for every policy type including PromptGuard, PromptCompress, and SemanticCache, semantic target routing over AI-native descriptions, provider query parameters and presets, Vertex and Bedrock Converse adapters with optional SigV4, streaming cache population and SSE replay, OAuth desktop controls and loopback callback, full CLI CRUD with stdin/file bodies, and typed desktop forms for all AI/API/MCP entities and consumer policies exist; the legacy model tables, endpoints, modes, and import path are removed without backward compatibility; see ADR 0018 and [LLM Control Plane](llm-control-plane.md) |
 
 ### Secondary architecture reference — Kong AI Gateway 2.x
 
@@ -105,7 +105,7 @@ magpie remains the primary LLM product reference. Kong AI Gateway 2.x contribute
 - Kong AI Gateway 2.x's A2A `AI Agent` entity; Octra's coding-agent configuration remains a separate `coding_agents` domain.
 - Enterprise workspaces, RBAC, and multi-tenant control-plane semantics.
 
-**Current status:** Phase 26 is AI-native only: control API, full policy execution, all magpie routing strategies, semantic routing with optional embeddings, streaming cache, Vertex and Bedrock Converse adapters, AI-native account OAuth with desktop controls and loopback callbacks, cache/routing observability, provider query parameters and protocol presets, full CRUD CLI, and typed forms for AI, API Gateway, and MCP entities. The `ai_*` schema, compiler, storage store, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, AI-native runtime mapping, per-target context/capability/pricing metadata, built-in policy execution for every policy type including PromptGuard, PromptCompress, and SemanticCache, semantic target routing over AI-native descriptions with embedding vectors and lexical fallback, provider query parameters and presets, Vertex and Bedrock Converse adapters with optional SigV4, streaming cache population and SSE replay, account OAuth endpoints, complete CLI CRUD, and the AI Control page are implemented and tested. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed. Production hardening such as OAuth-token encryption and packaging remains future work. See ADR 0018 and [LLM Control Plane](llm-control-plane.md).
+**Current status:** Phase 35 is AI-native only: control API, full policy execution, all magpie routing strategies, semantic routing with optional embeddings, streaming cache, Vertex and Bedrock Converse adapters with optional SigV4, AI-native account OAuth with encrypted tokens, desktop controls and loopback callbacks, cache/routing observability, provider query parameters and protocol presets, full CRUD CLI, and typed forms for AI, API Gateway, MCP, and consumer-policy entities. The `ai_*` schema, compiler, storage store, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, AI-native runtime mapping, per-target context/capability/pricing metadata, built-in policy execution for every policy type including PromptGuard, PromptCompress, and SemanticCache, semantic target routing over AI-native descriptions with embedding vectors and lexical fallback, provider query parameters and presets, streaming cache population and SSE replay, account OAuth endpoints, complete CLI CRUD, and the AI Control page are implemented and tested. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed. Key rotation, signed installers, and CEL MCP ACLs remain future work. See ADR 0018 and [LLM Control Plane](llm-control-plane.md).
 
 ## MCP gateway — Kong AI MCP Proxy
 
@@ -136,6 +136,8 @@ magpie remains the primary LLM product reference. Kong AI Gateway 2.x contribute
 | Tool discovery and aggregation | Implemented | `servers.rs`, `mcp_tools` |
 | `<server>__<tool>` namespace | Implemented | `octra-mcp-core/src/protocol.rs` |
 | MCP API keys | Implemented | `auth.rs`, `mcp_api_keys` |
+| Kong-shaped server type/sources | Implemented | `mcp_servers.mode/sources_json`, listener aggregation |
+| Server-default + per-tool ACL | Implemented | `mcp_server_acls`, `mcp_tool_acls`, two-tier precedence |
 | Consumer/group/default tool ACL | Implemented | `mcp_tool_acls`, `acl_allows_scoped` |
 | CEL ACL | Not implemented | Scope rules only; no expression language |
 | Invocation audit | Implemented | `mcp_invocations` |
@@ -143,7 +145,7 @@ magpie remains the primary LLM product reference. Kong AI Gateway 2.x contribute
 
 ## Desktop and control plane
 
-The UI is a live control-plane console with targeted editors. Overview, API Gateway, LLM Gateway, MCP Gateway, Agents, Plugins, and Settings all read live data. AI Control, API Gateway, and MCP expose typed-form CRUD; the LLM page edits consumer policies; agents, LLM plugin enable/disable, and PII model actions retain their mutation surfaces. The Tauri host holds the control token, exposes one path- and method-allow-listed bridge command, and adds a narrow loopback OAuth callback listener (ADR 0015).
+The UI is a live control-plane console with targeted editors. Overview, API Gateway, LLM Gateway, MCP Gateway, Agents, Plugins, and Settings all read live data. AI Control, API Gateway, MCP, and consumer policies expose typed-form CRUD; agents, LLM plugin enable/disable, and PII model actions retain their mutation surfaces. The Tauri host holds the control token, exposes one path- and method-allow-listed bridge command plus daemon lifecycle commands, adds a narrow loopback OAuth callback listener, and can supervise a bundled daemon sidecar (ADR 0015).
 
 ## Sources
 

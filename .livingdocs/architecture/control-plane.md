@@ -44,14 +44,14 @@ flowchart TB
 |---|---|---|---|
 | Overview | `/` | health, overview range, config, traffic chart | reload snapshot |
 | API Gateway | `/gateway` | services, routes, upstreams, targets, metrics | Typed forms for services/routes/upstreams/targets, with advanced JSON for headers/healthchecks |
-| LLM Gateway | `/llm` | usage, providers | none |
+| LLM Gateway | `/llm` | usage, providers, consumer policies | typed consumer-policy CRUD |
 | AI Control | `/ai-control` | AI status, providers, accounts, models, targets, policies, attachments, revisions | typed forms for all six entity types, OAuth start/complete/refresh/clear, validate, apply, rollback |
 | Agents | `/agents` | agents, mode, profiles, routes, virtual keys, backups | create/update/delete profile, preview, apply, restore |
-| MCP Gateway | `/mcp` | servers, tools, keys, ACLs, invocations, sessions | Typed forms for servers/tools/keys/ACLs, with advanced JSON for config/schema |
+| MCP Gateway | `/mcp` | servers, tools, keys, ACLs, invocations, sessions | Typed forms for servers/tools/keys/ACLs, including server `type`/`sources` and ACL scopes, with advanced JSON for config/schema |
 | Plugins | `/plugins` | LLM plugins and stage metrics | enable/disable |
-| Settings | `/settings` | control connection, local PII model, local data | PII model on/off/download/cancel/remove/score |
+| Settings | `/settings` | control connection, daemon lifecycle, local PII model, local data | daemon start/stop/restart; PII model on/off/download/cancel/remove/score |
 
-The UI is therefore a **live console plus targeted editors**. AI Control has typed forms for all six AI entity types plus activation/rollback and OAuth start/complete/refresh/clear with a loopback callback listener, the API Gateway and MCP pages have typed forms for their core entities with advanced JSON for free-form fields, and the LLM page has a typed consumer-policy form with an advanced document JSON fallback. The Kong-shaped Admin API, the `/api/v1/ai/*` control API, and the CLI cover part of that gap; the CLI exposes `status`, API Gateway services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, consumer-policy CRUD, `reload`, `doctor`, `keys`, `usage`, and full AI entity CRUD plus activation actions.
+The UI is therefore a **live console plus targeted editors**. AI Control has typed forms for all six AI entity types plus activation/rollback and OAuth start/complete/refresh/clear with a loopback callback listener, the API Gateway and MCP pages have typed forms for their core entities with advanced JSON for free-form fields, the LLM page has a typed consumer-policy form, and Settings can start/stop/restart a bundled daemon sidecar. The Kong-shaped Admin API, the `/api/v1/ai/*` control API, and the CLI cover part of that gap; the CLI exposes `status`, API Gateway services/routes/upstreams/targets CRUD, MCP servers/tools/keys/ACLs CRUD, consumer-policy CRUD, `reload`, `doctor`, `keys`, `usage`, and full AI entity CRUD plus activation actions.
 
 ## AI control plane
 

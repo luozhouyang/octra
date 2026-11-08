@@ -42,12 +42,12 @@ The product has three protocol surfaces and one management surface:
 - Complete Kong MCP ACL parity (CEL expressions) in v0.1.
 - Rust dynamic-library plugin loading or unsandboxed third-party native code.
 - OS keychain integration in the current phase; secret references are the implemented boundary.
-- Desktop-side daemon lifecycle supervision, signed installers, and notarized packages in v0.1.
+- Signed installers and notarized packages in v0.1; packaging workflows produce unsigned bundles.
 
 **Phase boundaries:**
 
 - Phase 1 (current): single-node daemon, API/LLM/MCP gateways, SQLite persistence, native and WASM plugins, agent integration, desktop console, and CLI.
-- Phase 2: production hardening, packaging and signing, OS keychain-backed secrets, additional protocol adapters, broader agent coverage, full reference-model parity where justified, and desktop daemon supervision.
+- Phase 2: production hardening, signing and notarization, key rotation and AAD-bound secret formats, additional protocol adapters, broader agent coverage, and full reference-model parity where justified.
 
 ## Data Model / Schema Foundation
 
@@ -89,7 +89,7 @@ The diagram shows enforced foreign keys; usage rows and agent profile/backup row
 - Octra requires no cloud control plane or external database: with `$OCTRA_HOME` set, the daemon starts and serves both planes using SQLite alone.
 - SQLite is the only persistence engine; the workspace has no PostgreSQL, MySQL, or Redis client dependency.
 - The control plane binds loopback by default and rejects unauthenticated requests; the control token is never issued to an agent and never enters the desktop webview in packaged mode.
-- Static provider credentials are stored only as `env:`/`file:` references; persisted credential material (OAuth tokens, agent config backups) is protected by the database's `0600` permissions and is never returned by the control API. OAuth tokens are plaintext at rest until keychain or encryption work lands.
+- Static provider credentials are stored only as `env:`/`file:` references; persisted credential material (OAuth tokens, KeyAuth keys, BasicAuth passwords, JWT secrets) is sealed with AES-256-GCM under an OS-keychain-backed master key and is never returned by the control API. Agent config backups remain protected by the database's `0600` permissions.
 - Third-party plugin code runs only in the WASM sandbox with operator-approved capabilities; native plugins are first-party and compiled into the daemon.
 - Every agent config mutation is backed up before it is applied and is applied atomically; restore reproduces the original file.
 - PII redaction is opt-in and fail-closed when a detector engine is configured. PII values and placeholder maps are not persisted and are not sent to a cloud detector.

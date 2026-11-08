@@ -8,7 +8,7 @@ timestamp: 2026-11-08T01:19:43Z
 
 # LLM Control Plane
 
-> **Status: Phase 26 landed; AI-native only. Optional hardening pending.** The `ai_*` schema, compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, the AI-native runtime mapping, built-in policy execution for every policy type (including PromptGuard, PromptCompress, and SemanticCache), semantic target routing with optional embedding vectors and lexical fallback, Vertex and Bedrock Converse adapters, provider query parameters, streaming cache population and SSE replay, AI-native account OAuth with exposed status/expiry, desktop controls and loopback callbacks, cache/routing observability, full CRUD CLI with stdin/file bodies, and typed desktop forms for AI, API Gateway, and MCP entities exist and are tested. The legacy `llm_*` model control plane, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, `auto_import_legacy`, and import-legacy compatibility path have been removed without backward compatibility. Remaining `llm_*` tables are auth, usage, counters, plugin state, PII-engine, and OAuth-token state, not model control plane. Optional table renames and production hardening remain future work.
+> **Status: Phase 35 landed; AI-native only. Signing and key rotation pending.** The `ai_*` schema, compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, the AI-native runtime mapping, built-in policy execution for every policy type (including PromptGuard, PromptCompress, and SemanticCache), semantic target routing with optional embedding vectors and lexical fallback, Vertex and Bedrock Converse adapters with optional SigV4, provider query parameters, streaming cache population and SSE replay, AI-native account OAuth with encrypted tokens, exposed status/expiry, desktop controls and loopback callbacks, cache/routing observability, full CRUD CLI with stdin/file bodies, and typed desktop forms for AI, API Gateway, MCP, and consumer-policy entities exist and are tested. The legacy `llm_*` model control plane, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, `auto_import_legacy`, and import-legacy compatibility path have been removed without backward compatibility. Non-model state was renamed to `virtual_keys`, `ai_usage`, `ai_usage_rollup`, `budget_windows`, `shared_counters`, `plugin_state`, and `pii_engines`; OAuth tokens, KeyAuth keys, BasicAuth passwords, and JWT secrets are encrypted. Master-key rotation, signed/notarized installers, and CEL MCP ACLs remain future work.
 
 The LLM control plane separates three concerns that are currently mixed:
 
@@ -65,7 +65,7 @@ flowchart TB
 | `ai_policies` | Typed policy | type, validated config, enabled |
 | `ai_policy_attachments` | Bind policy to scope | scope type/id, order, enabled |
 | `consumers` / `consumer_groups` | Existing identity model | reused as AI consumer/group |
-| `llm_virtual_keys` | Hashed client key | model/provider/account allowlists, token/cost limits |
+| `virtual_keys` | Hashed client key | model/provider/account allowlists, token/cost limits |
 | `ai_config_revisions` | Config generation | actor, diff, status, rollback target |
 | `coding_agents` / `agent_profiles` / `agent_config_backups` | Claude Code / Codex / OpenCode integration | separate from A2A `ai_agents` |
 
@@ -129,7 +129,7 @@ The control API supports `validate`, `preview`, `apply`, and `rollback`. A faile
 | Account failover / quota / cooldown | account pool + target selection |
 | Session affinity | session header + `ai_sessions` or account affinity state |
 | Privacy masking | `pii-redaction` policy |
-| Usage / cost / quota | `llm_usage` + rollups + virtual-key limits |
+| Usage / cost / quota | `ai_usage` + rollups + virtual-key limits |
 | Coding-agent config | `coding_agents` domain, not `ai_agents` |
 | JS middleware / plugins | typed policies; native/WASM for custom code |
 | Remote sharing / Docker | optional deployment mode, not core |
@@ -148,7 +148,7 @@ The migration is complete and intentionally not backward compatible. The legacy 
 | `llm_provider_oauth_tokens` | `ai_provider_oauth_tokens` |
 | `llm_*` model control endpoints | removed; `/api/v1/ai/*` is the only model control API |
 
-Remaining `llm_*` tables are deliberately outside the model control plane: `llm_virtual_keys` (LLM authentication and allowlists), `llm_usage`/rollups (telemetry), `llm_budget_windows`/`llm_counters` (runtime counters), `llm_plugin_state` (plugin state), and `llm_pii_engines` (local detection engines). They may be renamed in a later cleanup, but they do not define models or routing.
+Remaining non-model tables were renamed in `migrations/0028_rename_non_model_llm_tables.sql`: `virtual_keys` (LLM authentication and allowlists), `ai_usage`/`ai_usage_rollup` (telemetry), `budget_windows`/`shared_counters` (runtime counters), `plugin_state` (plugin state), and `pii_engines` (local detection engines). They do not define models or routing. Sealed secrets use `enc:v1:` values under a master key resolved from the OS keychain, `OCTRA_MASTER_KEY`, or a `0600` file.
 
 ## Current status
 
@@ -158,7 +158,7 @@ Remaining `llm_*` tables are deliberately outside the model control plane: `llm_
 | AI Model / Target entities | Schema, storage, compiler, CRUD API, AI-native runtime mapping, nested groups, and per-target context/capability/pricing metadata implemented |
 | AI Policy / Attachment CRUD | Schema, storage, compiler validation, CRUD API, Allowlist mapping, and built-in plugin execution for every policy type |
 | Prompt policy execution | PromptGuard blocks or masks matching prompts; PromptCompress normalizes whitespace, deduplicates adjacent text, and truncates under a character budget |
-| Semantic response cache | Exact canonical keys plus local lexical similarity, optional OpenAI-compatible embeddings with fallback, TTL/LRU bounds, consumer/virtual-key scoping, non-streaming JSON and streaming SSE cache hits, stream reconstruction through `on_final_response`, `X-Octra-Cache` headers, request-audit `cache_status`, and `llm_plugin_state` persistence |
+| Semantic response cache | Exact canonical keys plus local lexical similarity, optional OpenAI-compatible embeddings with fallback, TTL/LRU bounds, consumer/virtual-key scoping, non-streaming JSON and streaming SSE cache hits, stream reconstruction through `on_final_response`, `X-Octra-Cache` headers, request-audit `cache_status`, and `plugin_state` persistence |
 | Semantic target routing | `semantic` balancer ranks targets by OpenAI-compatible embedding cosine when `llm.semantic_embedding` is configured, with cached vectors, a failure cooldown, and local lexical fallback; nested groups inherit descriptions and targets without vectors score by health |
 | Provider configuration breadth | `config_json` supports `wire`, `headers`, `auth_header`, `query`, OAuth, and CLI providers; protocol presets cover Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Claude, Google, Vertex, Bedrock, and OpenAI-compatible endpoints; Bedrock supports bearer API keys or `config_json.sigv4`; query pairs are appended to every upstream endpoint |
 | Config compiler + revisions | Compiler, revision snapshots, apply, rollback, and transactional replace implemented |
@@ -169,7 +169,7 @@ Remaining `llm_*` tables are deliberately outside the model control plane: `llm_
 | magpie routing strategies | `order`/`manual`/`weight`/`rotate`/`fast`/`cheap`/`free`/`drain`/`expiring`/`usage`/`quota`/`pace`/`smart`/`intent` plus an Octra-native `semantic` strategy; see ADR 0013 |
 | Coding-agent integration | Implemented separately from the LLM control plane; keep separate |
 
-Phase 26 evidence:
+Phase 35 evidence:
 
 - `migrations/0023_ai_control_plane.sql` creates the seven `ai_*` tables; `0024_ai_revision_snapshot.sql` adds revision snapshots; `0025_ai_target_model_metadata.sql` adds target context/capability/pricing metadata; `0026_drop_legacy_llm_models.sql` creates `ai_provider_oauth_tokens` and drops the legacy model tables.
 - `crates/octra-ai-config/` contains the entity types, compiler, and validation tests.
@@ -180,7 +180,7 @@ Phase 26 evidence:
 - `crates/octra-llm-plugin-runtime` supports `reload_with_extra` so AI policies join the normal plugin chains without being persisted.
 - `crates/octra-llm-plugin-builtin/src/prompt_guard.rs` implements `llm-prompt-guard` with block/mask modes, regex and keyword rules, and configurable scan flags.
 - `crates/octra-llm-plugin-builtin/src/prompt_compress.rs` implements `llm-prompt-compress` with whitespace normalization, adjacent line/paragraph dedupe, and middle-out truncation under a character budget.
-- `crates/octra-llm-plugin-builtin/src/semantic_cache.rs` implements `llm-semantic-cache` with exact keys, local lexical similarity, optional embeddings with fallback, TTL/LRU bounds, consumer/virtual-key scoping, and `llm_plugin_state` persistence.
+- `crates/octra-llm-plugin-builtin/src/semantic_cache.rs` implements `llm-semantic-cache` with exact keys, local lexical similarity, optional embeddings with fallback, TTL/LRU bounds, consumer/virtual-key scoping, and `plugin_state` persistence.
 - `crates/octra-llm-plugin-types` adds `LlmAction::Respond` and the `on_final_response` hook; `crates/octra-llm-plugin-runtime` adds `LlmRequestOutcome`/`on_request_outcome` and the `final_response` metric stage.
 - `crates/octra-llm-gateway/src/control.rs` exposes AI-native account OAuth start/complete/refresh/status/delete under `/api/v1/ai/accounts/{id}/oauth/*`; account responses expose `oauth_status`/`oauth_expires_at`, and tokens live in `ai_provider_oauth_tokens`.
 - `crates/octra-llm-gateway/src/data_plane/mod.rs` serves non-streaming JSON and streaming SSE cache hits after model policy checks; `stream.rs` accumulates streamed events into a canonical response, stores it through `on_final_response`, and replays cached responses as protocol-native SSE. Cached responses set request-audit `cache_status`, and the cache/routing plugins emit structured debug logs.
@@ -195,7 +195,7 @@ Phase 26 evidence:
 - `crates/octra-daemon/src/main.rs` compiles `ai_*` at startup and reloads it after activation endpoints.
 - `crates/octra-cli` exposes `ai` status/actions plus full CRUD, with `--body '<json>'`, `--body -`, and `--body @path`; legacy `accounts` and `ai import-legacy` commands are removed.
 - `apps/desktop/src/app/pages/ai-control.tsx` exposes live status, entity lists, typed forms for providers, accounts, models, targets, policies, and attachments, compile reports, apply, and revision rollback; LLM/Agents pages read AI providers/models.
-- `cargo test --workspace --exclude octra-desktop` reports 980 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass. The Tauri host crate needs GTK/WebKit/DBus development packages that this environment lacks; the callback helper is covered by scratch-crate tests.
+- `cargo test --workspace --exclude octra-desktop` reports 1017 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass. The Tauri host crate needs GTK/WebKit/DBus development packages that this environment lacks; the lifecycle crate and callback helper are covered by ordinary crate tests.
 
 ## Drift instrument
 

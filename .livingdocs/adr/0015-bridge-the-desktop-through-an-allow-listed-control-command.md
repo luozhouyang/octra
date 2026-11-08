@@ -23,16 +23,17 @@ We will keep the control token in the Tauri host and bridge the console through 
 - `daemon_request` accepts only paths starting with `/api/v1/` or `/admin/` and only the methods `GET`, `POST`, `PUT`, and `DELETE`. It attaches the Bearer token and returns the status and parsed JSON body.
 - The webview never receives the token in Tauri mode. It uses the shared `ControlApiClient` with a `desktopFetch` adapter that calls `invoke("daemon_request", ...)`.
 - The host also exposes one narrow `oauth_wait_callback(redirect_uri, state, timeout_secs)` command. It accepts only loopback `http` redirect URIs with an explicit port, binds that port, accepts one request, validates the returned `state`, returns the authorization code to the webview, and writes a self-contained success/failure page. It does not expose a general socket or IPC surface.
+- The host exposes `daemon_status`, `daemon_start`, `daemon_stop`, and `daemon_restart` commands backed by `crates/octra-desktop-daemon`. The manager discovers `OCTRA_DAEMON_BIN`, a bundled `octra-daemon` sidecar, or a development target binary; it only kills a child it started.
 - In browser-only mode, the console reads the base URL and token from the local settings store and uses the same `ControlApiClient` with the browser `fetch`.
-- The React app is a live console with targeted editors over the control plane: Overview, API Gateway, LLM Gateway, MCP Gateway, Agents, Plugins, and Settings. AI Control, API Gateway, and MCP expose typed-form CRUD; the LLM page edits consumer policies; agents, LLM plugin enable/disable, and PII model actions retain their existing mutation surfaces.
-- The Tauri host contains no gateway logic. It is a token-holding, path-filtering adapter plus the loopback OAuth callback listener.
+- The React app is a live console with targeted editors over the control plane: Overview, API Gateway, LLM Gateway, MCP Gateway, Agents, Plugins, and Settings. AI Control, API Gateway, MCP, and consumer policies expose typed-form CRUD; agents, LLM plugin enable/disable, and PII model actions retain their existing mutation surfaces.
+- The Tauri host contains no gateway logic. It is a token-holding, path-filtering adapter, the loopback OAuth callback listener, and the daemon lifecycle supervisor.
 
 **Not adopted:**
 
 - Token injection into the webview, a token in `localStorage`, or direct `fetch` from the Tauri webview to the control plane.
 - Embedding the daemon in the Tauri process.
-- An IPC surface that mirrors every control endpoint one-for-one. The single generic bridge is smaller and easier to audit; the loopback OAuth listener is the only additional, narrowly scoped command.
-- Desktop-side daemon lifecycle supervision in v0.1; the operator starts the daemon separately (ADR 0003).
+- An IPC surface that mirrors every control endpoint one-for-one. The single generic bridge is smaller and easier to audit; the OAuth and lifecycle commands are narrowly scoped exceptions.
+- Killing a daemon that the desktop did not start.
 
 ## Rejected alternatives
 

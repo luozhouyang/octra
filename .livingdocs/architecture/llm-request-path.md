@@ -55,7 +55,7 @@ Vertex and Bedrock are upstream-only adapters; clients keep using the four ingre
 2. **Authorize.** Consumer policies and virtual-key permissions are additive: both must permit the requested model and provider. Virtual-key token/cost limits are checked against persisted usage before any upstream call. A malformed virtual-key permission document is treated as deny-all.
 3. **Decode.** The ingress adapter decodes the vendor payload into the canonical `ChatRequest`. Unknown fields are preserved for same-protocol forwarding where possible.
 4. **Request plugins.** The LLM plugin chain runs `on_request` for the request scope (virtual key, consumer, model, provider, global). A plugin can reject, rewrite the IR, short-circuit with a cached canonical response, or add response headers. If a plugin rewrites the model, the model/provider allow-lists are re-checked against the effective model. A cached response is served only after those policy checks; JSON clients receive a JSON body and streaming clients receive protocol-native SSE replayed from the same canonical response.
-5. **Resolve the virtual model.** `llm_routes.virtual_model_id` resolves to a routing group. A missing route or an empty group is a `model_not_found` error.
+5. **Resolve the virtual model.** `ai_models` and `ai_model_targets` resolve the client-facing name to a model or routing group. A missing model or an empty group is a `model_not_found` error.
 6. **Plan.** The routing plan orders priority rounds; within a round, weighted targets form a cycle. A strategy (`priority`, `order`, `rotate`, `smart`, `usage`, `quota`, `pace`, `intent`, `semantic`) can re-rank the non-fallback attempts. The fallback target is always last.
 7. **Select a provider account.** The account pool filters disabled, cooled-down, quota-exhausted, and paced accounts. The strategy and session affinity choose a candidate. A virtual key can restrict allowed accounts.
 8. **Provider plugin.** The provider-scoped plugin chain runs `on_provider_request` before the upstream call.
@@ -135,7 +135,7 @@ The `semantic_cache` AI policy maps to the built-in `llm-semantic-cache` plugin 
 - optionally compares a local 256-dimension lexical vector (lowercase words plus character trigrams) against entries in the same scope,
 - can call an OpenAI-compatible `/embeddings` endpoint when configured, falling back to the local vector on any failure,
 - scopes entries by the effective model and, by default, the consumer and virtual key,
-- stores final JSON responses and reconstructed streamed responses in a bounded TTL/LRU cache and persists the entry list in `llm_plugin_state`,
+- stores final JSON responses and reconstructed streamed responses in a bounded TTL/LRU cache and persists the entry list in `plugin_state`,
 - returns `X-Octra-Cache: hit` or `X-Octra-Cache: miss`; streaming hits are replayed as protocol-native SSE.
 
 The default local vector is a lexical near-duplicate approximation, not a neural embedding; exact matching is the safe default (`similarity_threshold: 1.0`). Streamed responses are reconstructed from the events that reached the client, so failed or truncated streams are never cached, and no prompt text is persisted.

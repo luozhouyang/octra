@@ -15,8 +15,8 @@ flowchart LR
     APIData[API data plane] --> ReqLogs[(request_logs)]
     APIData --> Metrics[ApiMetrics JSON/Prometheus]
     Control[Control mutations] --> Audit[(audit_logs)]
-    LLMData[LLM data plane] --> Usage[(llm_usage)]
-    Usage --> Rollup[(llm_usage_rollup)]
+    LLMData[LLM data plane] --> Usage[(ai_usage)]
+    Usage --> Rollup[(ai_usage_rollup)]
     MCPData[MCP data plane] --> Invocations[(mcp_invocations)]
     Plugins[Plugin runtime] --> PluginMetrics[plugin metrics / latency]
     Events[Event bus] --> EventRows[(events + event_deliveries)]
@@ -46,11 +46,11 @@ The default policy is enabled with hourly runs and a batch size of 5000:
 
 | Data | Default retention |
 |---|---|
-| `llm_usage` | 90 days |
+| `ai_usage` | 90 days |
 | `request_logs` | 30 days |
 | `mcp_invocations` | 90 days |
 | `audit_logs` | 365 days |
-| `llm_usage_rollup` | 400 days |
+| `ai_usage_rollup` | 400 days |
 | completed/failed `events` | 7 days |
 | pending events | never pruned |
 

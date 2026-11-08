@@ -21,7 +21,7 @@ We will make PII redaction an opt-in LLM gateway capability with a fail-closed d
 
 - `llm-pii-redaction` runs in the LLM request, provider-request, response, and stream stages. It can mask the system prompt, assistant messages, tool results, and (when configured) tool definitions.
 - Two modes are supported: `reversible` (placeholder-to-value map kept in memory for the request and restored in the response and stream) and `irreversible` (values stay masked).
-- Detection combines deterministic rules (secrets, private keys, tokens, emails, card/ID checksums, and user-supplied patterns) with an optional local or loopback PII engine. Engine definitions live in `llm_pii_engines`; the host can spawn a managed engine or call an external loopback endpoint.
+- Detection combines deterministic rules (secrets, private keys, tokens, emails, card/ID checksums, and user-supplied patterns) with an optional local or loopback PII engine. Engine definitions live in `pii_engines`; the host can spawn a managed engine or call an external loopback endpoint.
 - The placeholder map is kept in memory only. The usage and audit rows record counts and kinds, not the original values or the placeholder map.
 - When a detector engine is configured and unavailable, the default is to reject the request (`fail_closed: true` / `on_unavailable: reject`). An operator can explicitly choose `rules_only` to continue with deterministic rules.
 - Masking is off until a plugin instance is configured. The settings page exposes the local model and its readiness; the plugin configuration remains an explicit control-plane action.
