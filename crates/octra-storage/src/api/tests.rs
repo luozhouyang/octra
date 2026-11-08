@@ -317,3 +317,110 @@ async fn consumer_groups_and_membership() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn credentials_are_sealed_at_rest_and_plaintext_to_callers() {
+    let storage = setup().await;
+    let consumer = storage
+        .api
+        .create_consumer(&CreateConsumer {
+            username: Some("secrets".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let keyauth = storage
+        .api
+        .create_credential(&CreateKeyauthCredential {
+            consumer_id: consumer.id.clone(),
+            key: Some("key-plaintext".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(keyauth.key, "key-plaintext");
+    let raw_key: String = sqlx::query_scalar("SELECT key FROM keyauth_credentials WHERE id = ?")
+        .bind(&keyauth.id)
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+    assert!(raw_key.starts_with("enc:v1:"));
+
+    let basicauth = storage
+        .api
+        .create_basicauth(&CreateBasicauthCredential {
+            consumer_id: consumer.id.clone(),
+            username: "alice".into(),
+            password: "password-plaintext".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(basicauth.password, "password-plaintext");
+    let raw_password: String =
+        sqlx::query_scalar("SELECT password FROM basicauth_credentials WHERE id = ?")
+            .bind(&basicauth.id)
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+    assert!(raw_password.starts_with("enc:v1:"));
+
+    let jwt = storage
+        .api
+        .create_jwt(&CreateJwtSecret {
+            consumer_id: consumer.id.clone(),
+            key: "jwt-key".into(),
+            secret: "jwt-secret-plaintext".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(jwt.secret, "jwt-secret-plaintext");
+    let raw_jwt: String = sqlx::query_scalar("SELECT secret FROM jwt_secrets WHERE id = ?")
+        .bind(&jwt.id)
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+    assert!(raw_jwt.starts_with("enc:v1:"));
+    let raw_jwt_key: String = sqlx::query_scalar("SELECT key FROM jwt_secrets WHERE id = ?")
+        .bind(&jwt.id)
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+    assert_eq!(raw_jwt_key, "jwt-key", "JWT key is not a secret");
+
+    let updated = storage
+        .api
+        .update_credential(
+            &keyauth.id,
+            &UpdateKeyauthCredential {
+                key: Some("key-rotated".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.key, "key-rotated");
+    let raw_key: String = sqlx::query_scalar("SELECT key FROM keyauth_credentials WHERE id = ?")
+        .bind(&keyauth.id)
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+    assert!(raw_key.starts_with("enc:v1:"));
+
+    let data = storage.api.load_runtime_data().await.unwrap();
+    assert_eq!(data.keyauth[0].key, "key-rotated");
+    assert_eq!(data.basicauth[0].password, "password-plaintext");
+    assert_eq!(data.jwt[0].secret, "jwt-secret-plaintext");
+
+    let wrong = ApiStore::new(
+        storage.pool().clone(),
+        Arc::new(SecretBox::new(octra_secrets::MasterKey::ephemeral())),
+    );
+    let error = wrong.get_credential(&keyauth.id).await.unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("keyauth_credentials"));
+    assert!(message.contains(&keyauth.id));
+    assert!(!message.contains("enc:v1:"));
+}

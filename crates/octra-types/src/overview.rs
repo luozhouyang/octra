@@ -157,7 +157,7 @@ async fn build(pool: &SqlitePool, range: Range) -> Result<Overview, sqlx::Error>
     .await?;
     let llm = gateway_buckets(
         pool,
-        "llm_usage",
+        "ai_usage",
         "created_at",
         "(status_code IS NOT NULL AND status_code >= 400) OR error IS NOT NULL",
         window_start,
@@ -228,7 +228,7 @@ async fn build(pool: &SqlitePool, range: Range) -> Result<Overview, sqlx::Error>
         .await?,
         llm_avg_ms: average(
             pool,
-            "SELECT AVG(latency_ms) FROM llm_usage
+            "SELECT AVG(latency_ms) FROM ai_usage
               WHERE latency_ms IS NOT NULL AND strftime('%s', created_at) >= ?1",
             window_start,
         )
@@ -258,7 +258,7 @@ async fn build(pool: &SqlitePool, range: Range) -> Result<Overview, sqlx::Error>
         llm: destinations(
             pool,
             "SELECT COALESCE(NULLIF(provider_id, ''), 'unassigned') AS label, COUNT(*) AS count
-               FROM llm_usage
+               FROM ai_usage
               WHERE strftime('%s', created_at) >= ?1
               GROUP BY label
               ORDER BY count DESC

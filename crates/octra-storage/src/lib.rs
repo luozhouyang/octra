@@ -1,4 +1,5 @@
-//! SQLite persistence layer. Secrets are stored as references only.
+//! SQLite persistence layer. Sensitive credential values are sealed with
+//! `octra-secrets`; configuration references remain plaintext identifiers.
 
 pub mod agents;
 pub mod ai;
@@ -27,9 +28,11 @@ pub use plugins::{
 };
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use octra_core::{Error, Result, RouteSummary, ServiceSummary, SnapshotCounts};
+use octra_secrets::{MasterKey, SecretBox};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
@@ -42,6 +45,7 @@ pub struct RuntimeData {
 
 pub struct Storage {
     pool: SqlitePool,
+    secrets: Arc<SecretBox>,
     pub agents: agents::AgentStore,
     pub ai: ai::AiStore,
     pub api: api::ApiStore,
@@ -68,9 +72,20 @@ impl Storage {
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
 
-        let storage = Self::from_options(options, 5).await?;
+        let key_file = path
+            .parent()
+            .map(|parent| parent.join("master.key"))
+            .unwrap_or_else(|| PathBuf::from("master.key"));
+        let existed = path.exists();
+        let key = MasterKey::load_or_create(&key_file, true, !existed)
+            .map_err(|err| Error::Storage(format!("cannot load master key: {err}")))?;
+        let secrets = Arc::new(SecretBox::new(key));
+
+        let storage = Self::from_options(options, 5, secrets).await?;
         storage.migrate().await?;
         storage.ensure_usage_rollup().await?;
+        storage.verify_secrets().await?;
+        storage.backfill_secrets().await?;
         restrict_database_permissions(path)?;
         Ok(storage)
     }
@@ -80,13 +95,19 @@ impl Storage {
             .filename(":memory:")
             .foreign_keys(true);
 
-        let storage = Self::from_options(options, 1).await?;
+        let secrets = Arc::new(SecretBox::new(MasterKey::ephemeral()));
+        let storage = Self::from_options(options, 1, secrets).await?;
         storage.migrate().await?;
         storage.ensure_usage_rollup().await?;
+        storage.backfill_secrets().await?;
         Ok(storage)
     }
 
-    async fn from_options(options: SqliteConnectOptions, max_connections: u32) -> Result<Self> {
+    async fn from_options(
+        options: SqliteConnectOptions,
+        max_connections: u32,
+        secrets: Arc<SecretBox>,
+    ) -> Result<Self> {
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections)
             .connect_with(options)
@@ -96,12 +117,203 @@ impl Storage {
         Ok(Self {
             agents: agents::AgentStore::new(pool.clone()),
             ai: ai::AiStore::new(pool.clone()),
-            api: api::ApiStore::new(pool.clone()),
-            llm: llm::LlmStore::new(pool.clone()),
+            api: api::ApiStore::new(pool.clone(), secrets.clone()),
+            llm: llm::LlmStore::new(pool.clone(), secrets.clone()),
             mcp: mcp::McpStore::new(pool.clone()),
             logs: logs::LogStore::new(pool.clone()),
+            secrets,
             pool,
         })
+    }
+
+    /// Seals legacy plaintext credential values in place. The operation is
+    /// idempotent: values that already carry the sealed prefix are skipped.
+    /// Proves that the resolved master key can open the existing sealed rows.
+    ///
+    /// This prevents a changed keychain entry or key file from silently
+    /// serving a database whose secrets can no longer be decrypted.
+    pub async fn verify_secrets(&self) -> Result<()> {
+        for (table, column) in [
+            ("ai_provider_oauth_tokens", "access_token"),
+            ("keyauth_credentials", "key"),
+            ("basicauth_credentials", "password"),
+            ("jwt_secrets", "secret"),
+        ] {
+            let sql =
+                format!("SELECT {column} FROM {table} WHERE {column} LIKE 'enc:v1:%' LIMIT 1");
+            let stored = sqlx::query_scalar::<_, String>(&sql)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(|err| {
+                    Error::Storage(format!("cannot read sealed secrets from {table}: {err}"))
+                })?;
+            if let Some(stored) = stored {
+                self.secrets.open(&stored).map_err(|_| {
+                    Error::Storage(format!(
+                        "cannot decrypt stored secrets in {table}; the master key does not match the database"
+                    ))
+                })?;
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn backfill_secrets(&self) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| Error::Storage(format!("cannot start secret backfill: {err}")))?;
+        let mut updated = 0u64;
+
+        let oauth_rows = sqlx::query(
+            "SELECT account_id, access_token, refresh_token, extra_json
+             FROM ai_provider_oauth_tokens",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|err| Error::Storage(format!("cannot read oauth tokens: {err}")))?;
+        for row in oauth_rows {
+            let account_id: String = row.get("account_id");
+            let access_token: String = row.get("access_token");
+            let refresh_token: Option<String> = row.get("refresh_token");
+            let extra_json: String = row.get("extra_json");
+            let sealed_access = self.seal_if_needed(
+                &access_token,
+                "ai_provider_oauth_tokens",
+                "access_token",
+                &account_id,
+            )?;
+            let sealed_refresh = match refresh_token.as_deref() {
+                Some(value) => self.seal_if_needed(
+                    value,
+                    "ai_provider_oauth_tokens",
+                    "refresh_token",
+                    &account_id,
+                )?,
+                None => None,
+            };
+            let sealed_extra = self.seal_if_needed(
+                &extra_json,
+                "ai_provider_oauth_tokens",
+                "extra_json",
+                &account_id,
+            )?;
+            if sealed_access.is_none() && sealed_refresh.is_none() && sealed_extra.is_none() {
+                continue;
+            }
+            sqlx::query(
+                "UPDATE ai_provider_oauth_tokens
+                 SET access_token = COALESCE(?, access_token),
+                     refresh_token = COALESCE(?, refresh_token),
+                     extra_json = COALESCE(?, extra_json),
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE account_id = ?",
+            )
+            .bind(sealed_access)
+            .bind(sealed_refresh)
+            .bind(sealed_extra)
+            .bind(&account_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| {
+                Error::Storage(format!(
+                    "cannot seal ai_provider_oauth_tokens for row '{account_id}': {err}"
+                ))
+            })?;
+            updated += 1;
+        }
+
+        let keyauth_rows = sqlx::query("SELECT id, key FROM keyauth_credentials")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|err| Error::Storage(format!("cannot read keyauth credentials: {err}")))?;
+        for row in keyauth_rows {
+            let id: String = row.get("id");
+            let key: String = row.get("key");
+            if let Some(sealed) = self.seal_if_needed(&key, "keyauth_credentials", "key", &id)? {
+                sqlx::query("UPDATE keyauth_credentials SET key = ? WHERE id = ?")
+                    .bind(sealed)
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|err| {
+                        Error::Storage(format!(
+                            "cannot seal keyauth_credentials for row '{id}': {err}"
+                        ))
+                    })?;
+                updated += 1;
+            }
+        }
+
+        let basicauth_rows = sqlx::query("SELECT id, password FROM basicauth_credentials")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|err| Error::Storage(format!("cannot read basicauth credentials: {err}")))?;
+        for row in basicauth_rows {
+            let id: String = row.get("id");
+            let password: String = row.get("password");
+            if let Some(sealed) =
+                self.seal_if_needed(&password, "basicauth_credentials", "password", &id)?
+            {
+                sqlx::query("UPDATE basicauth_credentials SET password = ? WHERE id = ?")
+                    .bind(sealed)
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|err| {
+                        Error::Storage(format!(
+                            "cannot seal basicauth_credentials for row '{id}': {err}"
+                        ))
+                    })?;
+                updated += 1;
+            }
+        }
+
+        let jwt_rows = sqlx::query("SELECT id, secret FROM jwt_secrets")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|err| Error::Storage(format!("cannot read JWT secrets: {err}")))?;
+        for row in jwt_rows {
+            let id: String = row.get("id");
+            let secret: String = row.get("secret");
+            if let Some(sealed) = self.seal_if_needed(&secret, "jwt_secrets", "secret", &id)? {
+                sqlx::query("UPDATE jwt_secrets SET secret = ? WHERE id = ?")
+                    .bind(sealed)
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|err| {
+                        Error::Storage(format!("cannot seal jwt_secrets for row '{id}': {err}"))
+                    })?;
+                updated += 1;
+            }
+        }
+
+        tx.commit()
+            .await
+            .map_err(|err| Error::Storage(format!("cannot commit secret backfill: {err}")))?;
+        if updated > 0 {
+            tracing::info!(rows = updated, "sealed legacy stored secrets");
+        }
+        Ok(())
+    }
+
+    fn seal_if_needed(
+        &self,
+        value: &str,
+        table: &str,
+        column: &str,
+        id: &str,
+    ) -> Result<Option<String>> {
+        if value.is_empty() || SecretBox::is_sealed(value) {
+            return Ok(None);
+        }
+        self.secrets
+            .seal(value.as_bytes())
+            .map(Some)
+            .map_err(|_| Error::Storage(format!("cannot encrypt {table}.{column} for row '{id}'")))
     }
 
     async fn migrate(&self) -> Result<()> {
@@ -263,7 +475,7 @@ mod tests {
         assert_eq!(ai_tables, 3, "AI-native tables must exist");
 
         let rollup: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'llm_usage_rollup'",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'ai_usage_rollup'",
         )
         .fetch_one(storage.pool())
         .await
@@ -305,6 +517,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(kept, 1);
+    }
+
+    #[tokio::test]
+    async fn in_memory_storage_uses_an_ephemeral_key() {
+        let storage = Storage::connect_in_memory().await.unwrap();
+        let sealed = storage.secrets.seal(b"ephemeral").unwrap();
+        assert!(SecretBox::is_sealed(&sealed));
+        assert_eq!(storage.secrets.open(&sealed).unwrap(), b"ephemeral");
     }
 
     #[cfg(unix)]

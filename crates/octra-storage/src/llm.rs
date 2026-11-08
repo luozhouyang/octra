@@ -2,20 +2,24 @@
 //! shared counters. Model and routing configuration lives in the AI-native
 //! control plane (`ai.rs`); only the runtime record types are kept here.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use octra_api_core::Policy;
 use octra_core::{Error, Result};
 use octra_llm_plugin_types::{BudgetWindowView, CounterOutcome, CounterWindow};
+use octra_secrets::SecretBox;
 use sqlx::{Row, SqlitePool};
 
 #[derive(Clone)]
 pub struct LlmStore {
     pub(crate) pool: SqlitePool,
+    secrets: Arc<SecretBox>,
 }
 
 impl LlmStore {
-    pub(crate) fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub(crate) fn new(pool: SqlitePool, secrets: Arc<SecretBox>) -> Self {
+        Self { pool, secrets }
     }
 
     pub(crate) fn pool(&self) -> &SqlitePool {
@@ -322,6 +326,41 @@ fn conflict(err: sqlx::Error) -> LlmStorageError {
     backend(err)
 }
 
+fn seal_secret(
+    secrets: &SecretBox,
+    value: &str,
+    table: &str,
+    id: &str,
+    column: &str,
+) -> LlmResult<String> {
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    secrets.seal(value.as_bytes()).map_err(|_| {
+        LlmStorageError::Backend(format!("cannot encrypt {table}.{column} for row '{id}'"))
+    })
+}
+
+fn open_secret(
+    secrets: &SecretBox,
+    stored: &str,
+    table: &str,
+    id: &str,
+    column: &str,
+) -> LlmResult<String> {
+    if stored.is_empty() {
+        return Ok(String::new());
+    }
+    let bytes = secrets.open(stored).map_err(|_| {
+        LlmStorageError::Backend(format!("cannot decrypt {table}.{column} for row '{id}'"))
+    })?;
+    String::from_utf8(bytes).map_err(|_| {
+        LlmStorageError::Backend(format!(
+            "decrypted {table}.{column} for row '{id}' is not UTF-8"
+        ))
+    })
+}
+
 fn not_found(kind: &str, id: &str) -> LlmStorageError {
     LlmStorageError::Missing(format!("{kind} {id} does not exist"))
 }
@@ -390,7 +429,7 @@ impl LlmStore {
             "SELECT COUNT(*) AS requests,
                  SUM(input_tokens + output_tokens) AS tokens,
                  SUM(COALESCE(cost_micros, 0)) AS cost_micros
-             FROM llm_usage
+             FROM ai_usage
              WHERE account_id = ? AND (? IS NULL OR created_at >= ?)",
         )
         .bind(account_id)
@@ -415,7 +454,7 @@ impl LlmStore {
         let row = sqlx::query(
             "SELECT COALESCE(SUM(input_tokens + output_tokens + cache_write_tokens), 0) AS tokens,
                  COALESCE(SUM(cost_micros), 0) AS cost_micros
-             FROM llm_usage_rollup
+             FROM ai_usage_rollup
              WHERE api_key_id = ? AND bucket_start >= ?",
         )
         .bind(api_key_id)
@@ -439,8 +478,8 @@ impl LlmStore {
         let row = sqlx::query(
             "SELECT COALESCE(SUM(r.input_tokens + r.output_tokens + r.cache_write_tokens), 0) AS tokens,
                  COALESCE(SUM(r.cost_micros), 0) AS cost_micros
-             FROM llm_usage_rollup r
-             JOIN llm_virtual_keys k ON k.id = r.api_key_id
+             FROM ai_usage_rollup r
+             JOIN virtual_keys k ON k.id = r.api_key_id
              WHERE COALESCE(k.key_family, k.id) = ? AND r.bucket_start >= ?",
         )
         .bind(key_family)
@@ -458,7 +497,7 @@ impl LlmStore {
 
     pub async fn list_virtual_keys(&self) -> LlmResult<Vec<LlmVirtualKeyRecord>> {
         let sql = format!(
-            "SELECT {VIRTUAL_KEY_COLUMNS} FROM llm_virtual_keys ORDER BY created_at DESC, rowid DESC"
+            "SELECT {VIRTUAL_KEY_COLUMNS} FROM virtual_keys ORDER BY created_at DESC, rowid DESC"
         );
         let rows = sqlx::query(&sql)
             .fetch_all(self.pool())
@@ -468,7 +507,7 @@ impl LlmStore {
     }
 
     pub async fn get_virtual_key(&self, id: &str) -> LlmResult<Option<LlmVirtualKeyRecord>> {
-        let sql = format!("SELECT {VIRTUAL_KEY_COLUMNS} FROM llm_virtual_keys WHERE id = ?");
+        let sql = format!("SELECT {VIRTUAL_KEY_COLUMNS} FROM virtual_keys WHERE id = ?");
         let row = sqlx::query(&sql)
             .bind(id)
             .fetch_optional(self.pool())
@@ -481,7 +520,7 @@ impl LlmStore {
         &self,
         key_hash: &str,
     ) -> LlmResult<Option<LlmVirtualKeyRecord>> {
-        let sql = format!("SELECT {VIRTUAL_KEY_COLUMNS} FROM llm_virtual_keys WHERE key_hash = ?");
+        let sql = format!("SELECT {VIRTUAL_KEY_COLUMNS} FROM virtual_keys WHERE key_hash = ?");
         let row = sqlx::query(&sql)
             .bind(key_hash)
             .fetch_optional(self.pool())
@@ -511,7 +550,7 @@ impl LlmStore {
             .filter(|family| !family.trim().is_empty())
             .unwrap_or_else(|| id.clone());
         sqlx::query(
-            "INSERT INTO llm_virtual_keys (id, name, key_prefix, key_hash, consumer_id, enabled, expires_at, permissions_json, key_family)
+            "INSERT INTO virtual_keys (id, name, key_prefix, key_hash, consumer_id, enabled, expires_at, permissions_json, key_family)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
@@ -537,7 +576,7 @@ impl LlmStore {
         input: &LlmVirtualKeyInput,
     ) -> LlmResult<LlmVirtualKeyRecord> {
         let affected = sqlx::query(
-            "UPDATE llm_virtual_keys SET name = ?, consumer_id = ?, enabled = ?, expires_at = ?, permissions_json = ?
+            "UPDATE virtual_keys SET name = ?, consumer_id = ?, enabled = ?, expires_at = ?, permissions_json = ?
              WHERE id = ?",
         )
         .bind(&input.name)
@@ -567,7 +606,7 @@ impl LlmStore {
         rotation: &LlmVirtualKeyRotation,
     ) -> LlmResult<LlmVirtualKeyRotationResult> {
         let mut tx = self.pool().begin().await.map_err(backend)?;
-        let select = format!("SELECT {VIRTUAL_KEY_COLUMNS} FROM llm_virtual_keys WHERE id = ?");
+        let select = format!("SELECT {VIRTUAL_KEY_COLUMNS} FROM virtual_keys WHERE id = ?");
         let row = sqlx::query(&select)
             .bind(old_id)
             .fetch_optional(&mut *tx)
@@ -601,7 +640,7 @@ impl LlmStore {
             .clone()
             .unwrap_or_else(|| old.permissions_json.clone());
         sqlx::query(
-            "INSERT INTO llm_virtual_keys
+            "INSERT INTO virtual_keys
                 (id, name, key_prefix, key_hash, consumer_id, enabled, expires_at,
                  permissions_json, key_family, rotated_from)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -621,13 +660,13 @@ impl LlmStore {
         .map_err(conflict)?;
 
         if rotation.grace_seconds == 0 {
-            sqlx::query("UPDATE llm_virtual_keys SET enabled = 0 WHERE id = ?")
+            sqlx::query("UPDATE virtual_keys SET enabled = 0 WHERE id = ?")
                 .bind(&old.id)
                 .execute(&mut *tx)
                 .await
                 .map_err(backend)?;
         } else {
-            sqlx::query("UPDATE llm_virtual_keys SET expires_at = ? WHERE id = ?")
+            sqlx::query("UPDATE virtual_keys SET expires_at = ? WHERE id = ?")
                 .bind(old_expiry.map(|value| value.to_rfc3339()))
                 .bind(&old.id)
                 .execute(&mut *tx)
@@ -648,7 +687,7 @@ impl LlmStore {
     }
 
     pub async fn delete_virtual_key(&self, id: &str) -> LlmResult<bool> {
-        let affected = sqlx::query("DELETE FROM llm_virtual_keys WHERE id = ?")
+        let affected = sqlx::query("DELETE FROM virtual_keys WHERE id = ?")
             .bind(id)
             .execute(self.pool())
             .await
@@ -658,7 +697,7 @@ impl LlmStore {
     }
 
     pub async fn touch_virtual_key(&self, id: &str) -> LlmResult<()> {
-        sqlx::query("UPDATE llm_virtual_keys SET last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
+        sqlx::query("UPDATE virtual_keys SET last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
             .bind(id)
             .execute(self.pool())
             .await
@@ -679,7 +718,7 @@ impl LlmStore {
         );
         let mut tx = self.pool().begin().await.map_err(backend)?;
         sqlx::query(
-            "INSERT INTO llm_usage (request_id, virtual_model_id, provider_id, model_id,
+            "INSERT INTO ai_usage (request_id, virtual_model_id, provider_id, model_id,
                  account_id, account_name, api_key_id, protocol, status_code, latency_ms,
                  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
                  reasoning_tokens, cost_micros, cost_currency, finish_reason, error, created_at)
@@ -709,7 +748,7 @@ impl LlmStore {
         .await
         .map_err(backend)?;
         sqlx::query(
-            "INSERT INTO llm_usage_rollup (bucket_start, api_key_id, account_id, provider_id,
+            "INSERT INTO ai_usage_rollup (bucket_start, api_key_id, account_id, provider_id,
                  model_id, virtual_model_id, requests, errors, input_tokens, output_tokens,
                  cache_write_tokens, cost_micros)
              VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
@@ -746,7 +785,7 @@ impl LlmStore {
                  account_name, api_key_id, protocol, status_code, latency_ms, input_tokens,
                  output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
                  cost_micros, cost_currency, finish_reason, error, created_at
-             FROM llm_usage ORDER BY id DESC LIMIT ?",
+             FROM ai_usage ORDER BY id DESC LIMIT ?",
         )
         .bind(limit.clamp(1, 1000))
         .fetch_all(self.pool())
@@ -760,7 +799,7 @@ impl LlmStore {
             "SELECT virtual_model_id, SUM(requests) AS requests, SUM(errors) AS errors,
                  SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
                  SUM(cost_micros) AS cost_micros
-             FROM llm_usage_rollup GROUP BY virtual_model_id ORDER BY requests DESC",
+             FROM ai_usage_rollup GROUP BY virtual_model_id ORDER BY requests DESC",
         )
         .fetch_all(self.pool())
         .await
@@ -783,7 +822,7 @@ impl LlmStore {
             "SELECT provider_id, SUM(requests) AS requests, SUM(errors) AS errors,
                  SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
                  SUM(cost_micros) AS cost_micros
-             FROM llm_usage_rollup GROUP BY provider_id ORDER BY requests DESC",
+             FROM ai_usage_rollup GROUP BY provider_id ORDER BY requests DESC",
         )
         .fetch_all(self.pool())
         .await
@@ -808,7 +847,7 @@ impl LlmStore {
                  COALESCE(SUM(input_tokens), 0) AS input_tokens,
                  COALESCE(SUM(output_tokens), 0) AS output_tokens,
                  COALESCE(SUM(cost_micros), 0) AS cost_micros
-             FROM llm_usage_rollup",
+             FROM ai_usage_rollup",
         )
         .fetch_one(self.pool())
         .await
@@ -852,18 +891,75 @@ impl LlmStore {
         .fetch_optional(self.pool())
         .await
         .map_err(backend)?;
-        Ok(row.map(|row| LlmOAuthTokenRecord {
-            account_id: row.get("account_id"),
-            access_token: row.get("access_token"),
-            refresh_token: row.get("refresh_token"),
-            token_type: row.get("token_type"),
-            scope: row.get("scope"),
-            expires_at: row.get("expires_at"),
-            extra_json: row.get("extra_json"),
-        }))
+        row.map(|row| {
+            let account_id: String = row.get("account_id");
+            let access_token: String = row.get("access_token");
+            let refresh_token: Option<String> = row.get("refresh_token");
+            let extra_json: String = row.get("extra_json");
+            Ok(LlmOAuthTokenRecord {
+                access_token: open_secret(
+                    &self.secrets,
+                    &access_token,
+                    "ai_provider_oauth_tokens",
+                    &account_id,
+                    "access_token",
+                )?,
+                refresh_token: refresh_token
+                    .as_deref()
+                    .map(|value| {
+                        open_secret(
+                            &self.secrets,
+                            value,
+                            "ai_provider_oauth_tokens",
+                            &account_id,
+                            "refresh_token",
+                        )
+                    })
+                    .transpose()?,
+                token_type: row.get("token_type"),
+                scope: row.get("scope"),
+                expires_at: row.get("expires_at"),
+                extra_json: open_secret(
+                    &self.secrets,
+                    &extra_json,
+                    "ai_provider_oauth_tokens",
+                    &account_id,
+                    "extra_json",
+                )?,
+                account_id,
+            })
+        })
+        .transpose()
     }
 
     pub async fn upsert_oauth_token(&self, token: &LlmOAuthTokenRecord) -> LlmResult<()> {
+        let access_token = seal_secret(
+            &self.secrets,
+            &token.access_token,
+            "ai_provider_oauth_tokens",
+            &token.account_id,
+            "access_token",
+        )?;
+        let refresh_token = token
+            .refresh_token
+            .as_deref()
+            .map(|value| {
+                seal_secret(
+                    &self.secrets,
+                    value,
+                    "ai_provider_oauth_tokens",
+                    &token.account_id,
+                    "refresh_token",
+                )
+            })
+            .transpose()?;
+        let extra_json = seal_secret(
+            &self.secrets,
+            &token.extra_json,
+            "ai_provider_oauth_tokens",
+            &token.account_id,
+            "extra_json",
+        )?;
         let mut tx = self.pool.begin().await.map_err(backend)?;
         sqlx::query(
             "INSERT INTO ai_provider_oauth_tokens
@@ -881,12 +977,12 @@ impl LlmStore {
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
         )
         .bind(&token.account_id)
-        .bind(&token.access_token)
-        .bind(&token.refresh_token)
+        .bind(&access_token)
+        .bind(&refresh_token)
         .bind(&token.token_type)
         .bind(&token.scope)
         .bind(&token.expires_at)
-        .bind(&token.extra_json)
+        .bind(&extra_json)
         .execute(&mut *tx)
         .await
         .map_err(backend)?;
@@ -1005,8 +1101,7 @@ fn pii_engine_from_row(row: &sqlx::sqlite::SqliteRow) -> LlmPiiEngineRecord {
 
 impl LlmStore {
     pub async fn list_pii_engines(&self) -> LlmResult<Vec<LlmPiiEngineRecord>> {
-        let sql =
-            format!("SELECT {PII_ENGINE_COLUMNS} FROM llm_pii_engines ORDER BY name ASC, id ASC");
+        let sql = format!("SELECT {PII_ENGINE_COLUMNS} FROM pii_engines ORDER BY name ASC, id ASC");
         let rows = sqlx::query(&sql)
             .fetch_all(self.pool())
             .await
@@ -1015,7 +1110,7 @@ impl LlmStore {
     }
 
     pub async fn get_pii_engine(&self, id: &str) -> LlmResult<Option<LlmPiiEngineRecord>> {
-        let sql = format!("SELECT {PII_ENGINE_COLUMNS} FROM llm_pii_engines WHERE id = ?");
+        let sql = format!("SELECT {PII_ENGINE_COLUMNS} FROM pii_engines WHERE id = ?");
         let row = sqlx::query(&sql)
             .bind(id)
             .fetch_optional(self.pool())
@@ -1028,7 +1123,7 @@ impl LlmStore {
         &self,
         name: &str,
     ) -> LlmResult<Option<LlmPiiEngineRecord>> {
-        let sql = format!("SELECT {PII_ENGINE_COLUMNS} FROM llm_pii_engines WHERE name = ?");
+        let sql = format!("SELECT {PII_ENGINE_COLUMNS} FROM pii_engines WHERE name = ?");
         let row = sqlx::query(&sql)
             .bind(name)
             .fetch_optional(self.pool())
@@ -1043,7 +1138,7 @@ impl LlmStore {
     ) -> LlmResult<LlmPiiEngineRecord> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO llm_pii_engines
+            "INSERT INTO pii_engines
                 (id, name, mode, transport, endpoint, command, args_json, env_allow_json,
                  model_dir, config_json, enabled)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1080,7 +1175,7 @@ impl LlmStore {
     ) -> LlmResult<LlmPiiEngineRecord> {
         let result =
             sqlx::query(
-                "UPDATE llm_pii_engines SET
+                "UPDATE pii_engines SET
                 name = ?, mode = ?, transport = ?, endpoint = ?, command = ?,
                 args_json = ?, env_allow_json = ?, model_dir = ?, config_json = ?,
                 enabled = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -1113,7 +1208,7 @@ impl LlmStore {
     }
 
     pub async fn delete_pii_engine(&self, id: &str) -> LlmResult<()> {
-        let result = sqlx::query("DELETE FROM llm_pii_engines WHERE id = ?")
+        let result = sqlx::query("DELETE FROM pii_engines WHERE id = ?")
             .bind(id)
             .execute(self.pool())
             .await
@@ -1217,7 +1312,7 @@ impl LlmStore {
     /// Removes expired calendar-window counters. Rolling budget windows are
     /// reused in place and need no pruning.
     pub async fn prune_llm_counters(&self, now_unix: i64) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM llm_counters WHERE window_end < ?1")
+        let result = sqlx::query("DELETE FROM shared_counters WHERE window_end < ?1")
             .bind(now_unix)
             .execute(self.pool())
             .await
@@ -1234,7 +1329,7 @@ async fn admit_windows_in(
     let mut accepted = true;
     for window in windows {
         let current: Option<i64> = sqlx::query_scalar(
-            "SELECT value FROM llm_counters WHERE key = ?1 AND window_start = ?2",
+            "SELECT value FROM shared_counters WHERE key = ?1 AND window_start = ?2",
         )
         .bind(window.key)
         .bind(window.window_start)
@@ -1251,7 +1346,7 @@ async fn admit_windows_in(
             *count = count.saturating_add(1);
             let value = i64::try_from(*count).unwrap_or(i64::MAX);
             sqlx::query(
-                "INSERT INTO llm_counters (key, window_start, value, window_end)
+                "INSERT INTO shared_counters (key, window_start, value, window_end)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(key, window_start) DO UPDATE SET
                     value = excluded.value,
@@ -1325,12 +1420,11 @@ async fn load_budget(
     now_ms: i64,
     period_ms: i64,
 ) -> std::result::Result<(i64, u64, u64), sqlx::Error> {
-    let row: Option<(i64, i64, i64)> = sqlx::query_as(
-        "SELECT ends_at_ms, requests, tokens FROM llm_budget_windows WHERE key = ?1",
-    )
-    .bind(key)
-    .fetch_optional(&mut *connection)
-    .await?;
+    let row: Option<(i64, i64, i64)> =
+        sqlx::query_as("SELECT ends_at_ms, requests, tokens FROM budget_windows WHERE key = ?1")
+            .bind(key)
+            .fetch_optional(&mut *connection)
+            .await?;
     let (mut ends_at_ms, mut requests, mut tokens) = row
         .map(|(ends, requests, tokens)| {
             (
@@ -1358,7 +1452,7 @@ async fn store_budget(
     tokens: u64,
 ) -> std::result::Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO llm_budget_windows (key, ends_at_ms, requests, tokens)
+        "INSERT INTO budget_windows (key, ends_at_ms, requests, tokens)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(key) DO UPDATE SET
             ends_at_ms = excluded.ends_at_ms,
@@ -1528,7 +1622,7 @@ mod tests {
         let rows = sqlx::query(
             "SELECT bucket_start, requests, errors, input_tokens, output_tokens,
                  cache_write_tokens, cost_micros
-             FROM llm_usage_rollup ORDER BY bucket_start",
+             FROM ai_usage_rollup ORDER BY bucket_start",
         )
         .fetch_all(storage.pool())
         .await
@@ -1672,7 +1766,7 @@ mod tests {
             })
             .await
             .unwrap();
-        sqlx::query("UPDATE llm_virtual_keys SET key_family = NULL WHERE id = ?")
+        sqlx::query("UPDATE virtual_keys SET key_family = NULL WHERE id = ?")
             .bind(&key.id)
             .execute(storage.pool())
             .await
@@ -1700,7 +1794,7 @@ mod tests {
         }
 
         let requests: i64 = sqlx::query_scalar(
-            "SELECT requests FROM llm_usage_rollup
+            "SELECT requests FROM ai_usage_rollup
              WHERE api_key_id = '' AND bucket_start = '2026-10-01T05:00:00.000Z'",
         )
         .fetch_one(storage.pool())
@@ -1770,6 +1864,21 @@ mod tests {
             extra_json: "{}".into(),
         };
         storage.llm.upsert_oauth_token(&token).await.unwrap();
+        let raw: (String, Option<String>, String) = sqlx::query_as(
+            "SELECT access_token, refresh_token, extra_json
+             FROM ai_provider_oauth_tokens WHERE account_id = ?",
+        )
+        .bind(&account.id)
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert!(raw.0.starts_with("enc:v1:"), "access token must be sealed");
+        assert!(
+            raw.1.as_deref().unwrap().starts_with("enc:v1:"),
+            "refresh token must be sealed"
+        );
+        assert!(raw.2.starts_with("enc:v1:"), "extra JSON must be sealed");
+
         let loaded = storage
             .llm
             .get_oauth_token(&account.id)
@@ -1778,6 +1887,7 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.access_token, "access");
         assert_eq!(loaded.refresh_token.as_deref(), Some("refresh"));
+        assert_eq!(loaded.extra_json, "{}");
         let updated: (String, String, Option<String>) = sqlx::query_as(
             "SELECT credential_kind, oauth_status, oauth_expires_at
              FROM ai_provider_accounts WHERE id = ?",
@@ -1823,6 +1933,174 @@ mod tests {
         .await
         .unwrap();
         assert!(orphaned.is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_oauth_tokens_are_read_and_backfilled_idempotently() {
+        use octra_ai_config::{AiProvider, AiProviderAccount};
+        use serde_json::json;
+
+        let storage = storage().await;
+        let provider = AiProvider {
+            id: "provider-legacy".into(),
+            name: "legacy".into(),
+            protocol: "openai".into(),
+            base_url: "https://api.example.com".into(),
+            auth_ref: None,
+            capabilities: Vec::new(),
+            config: json!({}),
+            enabled: true,
+            created_at: 100,
+            updated_at: 100,
+        };
+        storage.ai.upsert_provider(&provider).await.unwrap();
+        storage
+            .ai
+            .upsert_account(&AiProviderAccount {
+                id: "account-legacy".into(),
+                provider_id: provider.id.clone(),
+                name: "legacy".into(),
+                credential_kind: "oauth".into(),
+                secret_ref: None,
+                oauth_ref: None,
+                weight: 1,
+                priority: 0,
+                quota_limit: None,
+                quota_unit: "requests".into(),
+                quota_period: "none".into(),
+                quota_used: 0,
+                cooldown_until: None,
+                enabled: true,
+                oauth_status: "authorized".into(),
+                oauth_expires_at: None,
+                config: json!({}),
+                created_at: 100,
+                updated_at: 100,
+            })
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO ai_provider_oauth_tokens
+                (account_id, access_token, refresh_token, token_type, scope, extra_json)
+             VALUES ('account-legacy', 'legacy-access', 'legacy-refresh', 'Bearer', 'chat',
+                     '{\"region\":\"eu\"}')",
+        )
+        .execute(storage.pool())
+        .await
+        .unwrap();
+
+        let loaded = storage
+            .llm
+            .get_oauth_token("account-legacy")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.access_token, "legacy-access");
+        assert_eq!(loaded.refresh_token.as_deref(), Some("legacy-refresh"));
+        assert_eq!(loaded.extra_json, "{\"region\":\"eu\"}");
+
+        storage.backfill_secrets().await.unwrap();
+        let sealed: (String, Option<String>, String) = sqlx::query_as(
+            "SELECT access_token, refresh_token, extra_json
+             FROM ai_provider_oauth_tokens WHERE account_id = 'account-legacy'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert!(sealed.0.starts_with("enc:v1:"));
+        assert!(sealed.1.as_deref().unwrap().starts_with("enc:v1:"));
+        assert!(sealed.2.starts_with("enc:v1:"));
+
+        storage.backfill_secrets().await.unwrap();
+        let after_second: (String, Option<String>, String) = sqlx::query_as(
+            "SELECT access_token, refresh_token, extra_json
+             FROM ai_provider_oauth_tokens WHERE account_id = 'account-legacy'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(sealed, after_second);
+
+        let loaded = storage
+            .llm
+            .get_oauth_token("account-legacy")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.access_token, "legacy-access");
+        assert_eq!(loaded.refresh_token.as_deref(), Some("legacy-refresh"));
+    }
+
+    #[tokio::test]
+    async fn oauth_token_decryption_with_wrong_key_reports_row() {
+        use octra_ai_config::{AiProvider, AiProviderAccount};
+        use serde_json::json;
+
+        let storage = storage().await;
+        storage
+            .ai
+            .upsert_provider(&AiProvider {
+                id: "provider-wrong".into(),
+                name: "wrong".into(),
+                protocol: "openai".into(),
+                base_url: "https://api.example.com".into(),
+                auth_ref: None,
+                capabilities: Vec::new(),
+                config: json!({}),
+                enabled: true,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .await
+            .unwrap();
+        storage
+            .ai
+            .upsert_account(&AiProviderAccount {
+                id: "account-wrong".into(),
+                provider_id: "provider-wrong".into(),
+                name: "wrong".into(),
+                credential_kind: "oauth".into(),
+                secret_ref: None,
+                oauth_ref: None,
+                weight: 1,
+                priority: 0,
+                quota_limit: None,
+                quota_unit: "requests".into(),
+                quota_period: "none".into(),
+                quota_used: 0,
+                cooldown_until: None,
+                enabled: true,
+                oauth_status: "authorized".into(),
+                oauth_expires_at: None,
+                config: json!({}),
+                created_at: 100,
+                updated_at: 100,
+            })
+            .await
+            .unwrap();
+        storage
+            .llm
+            .upsert_oauth_token(&LlmOAuthTokenRecord {
+                account_id: "account-wrong".into(),
+                access_token: "access".into(),
+                refresh_token: None,
+                token_type: "Bearer".into(),
+                scope: "chat".into(),
+                expires_at: None,
+                extra_json: "{}".into(),
+            })
+            .await
+            .unwrap();
+
+        let wrong = LlmStore::new(
+            storage.pool().clone(),
+            Arc::new(SecretBox::new(octra_secrets::MasterKey::ephemeral())),
+        );
+        let error = wrong.get_oauth_token("account-wrong").await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("ai_provider_oauth_tokens"));
+        assert!(message.contains("account-wrong"));
+        assert!(!message.contains("enc:v1:"));
     }
 
     #[tokio::test]

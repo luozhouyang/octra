@@ -13,6 +13,7 @@ octra-core.workspace = true
 octra-llm-core.workspace = true
 octra-mcp-core.workspace = true
 octra-api-plugin-types.workspace = true
+octra-secrets.workspace = true
 octra-llm-plugin-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true

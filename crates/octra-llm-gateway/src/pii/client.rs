@@ -1,4 +1,4 @@
-//! PII engine clients built from `llm_pii_engines` records.
+//! PII engine clients built from `pii_engines` records.
 //!
 //! External engines are user-managed services reachable over loopback HTTP or
 //! a Unix domain socket. The host owns construction; plugins only receive the

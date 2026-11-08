@@ -14,6 +14,8 @@ mod services;
 mod tests;
 mod upstreams;
 
+use std::sync::Arc;
+
 use self::rows::*;
 
 use octra_api_core::{
@@ -26,6 +28,7 @@ use octra_api_core::{
     UpdateTarget, UpdateUpstream, Upstream,
 };
 use octra_core::{Error, Result};
+use octra_secrets::SecretBox;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
 
@@ -187,15 +190,31 @@ fn text_now() -> &'static str {
 #[derive(Clone)]
 pub struct ApiStore {
     pool: SqlitePool,
+    secrets: Arc<SecretBox>,
 }
 
 impl ApiStore {
-    pub(crate) fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub(crate) fn new(pool: SqlitePool, secrets: Arc<SecretBox>) -> Self {
+        Self { pool, secrets }
     }
 
     fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub(crate) fn seal_secret(
+        &self,
+        value: &str,
+        table: &str,
+        id: &str,
+        column: &str,
+    ) -> Result<String> {
+        if value.is_empty() {
+            return Ok(String::new());
+        }
+        self.secrets
+            .seal(value.as_bytes())
+            .map_err(|_| Error::Storage(format!("cannot encrypt {table}.{column} for row '{id}'")))
     }
 }
 
@@ -235,17 +254,20 @@ impl ApiStore {
             &mut tx,
             "keyauth_credentials",
             KEYAUTH_COLUMNS,
-            map_keyauth,
+            |row| map_keyauth(row, &self.secrets),
         )
         .await?;
         let basicauth = fetch_rows::<BasicauthCredential>(
             &mut tx,
             "basicauth_credentials",
             BASICAUTH_COLUMNS,
-            map_basicauth,
+            |row| map_basicauth(row, &self.secrets),
         )
         .await?;
-        let jwt = fetch_rows::<JwtSecret>(&mut tx, "jwt_secrets", JWT_COLUMNS, map_jwt).await?;
+        let jwt = fetch_rows::<JwtSecret>(&mut tx, "jwt_secrets", JWT_COLUMNS, |row| {
+            map_jwt(row, &self.secrets)
+        })
+        .await?;
         let acls = fetch_rows::<Acl>(&mut tx, "acls", ACL_COLUMNS, map_acl).await?;
 
         let counts = sqlx::query(
@@ -319,7 +341,7 @@ async fn fetch_rows<T>(
     tx: &mut Transaction<'_, Sqlite>,
     table: &str,
     columns: &str,
-    mapper: fn(&SqliteRow) -> Result<T>,
+    mapper: impl Fn(&SqliteRow) -> Result<T>,
 ) -> Result<Vec<T>> {
     let rows = sqlx::query(&format!(
         "SELECT {columns} FROM {table} ORDER BY created_at ASC, id ASC"
@@ -341,7 +363,7 @@ impl ApiStore {
         parent: Option<(&str, &str)>,
         extra: Option<(&str, &str, &str)>,
         page: &ListPage,
-        mapper: fn(&SqliteRow) -> Result<T>,
+        mapper: impl Fn(&SqliteRow) -> Result<T>,
         cursor_of: impl Fn(&T) -> (i64, String),
     ) -> Result<Page<T>> {
         let limit = page.limit.clamp(1, 1000);

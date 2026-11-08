@@ -37,7 +37,7 @@ impl Storage {
     pub async fn prune(&self, policy: &RetentionPolicy) -> Result<PruneReport> {
         let llm_usage = self
             .prune_table(
-                "llm_usage",
+                "ai_usage",
                 "created_at",
                 policy.llm_usage_days,
                 policy.batch_size,
@@ -103,17 +103,17 @@ impl Storage {
         Ok(report)
     }
 
-    /// Rebuilds the hourly usage rollup from `llm_usage` in one transaction.
+    /// Rebuilds the hourly usage rollup from `ai_usage` in one transaction.
     /// This is the backfill path for databases created before the rollup.
     pub async fn rebuild_usage_rollup(&self) -> Result<u64> {
         let started = std::time::Instant::now();
         let mut tx = self.pool().begin().await.map_err(backend)?;
-        sqlx::query("DELETE FROM llm_usage_rollup")
+        sqlx::query("DELETE FROM ai_usage_rollup")
             .execute(&mut *tx)
             .await
             .map_err(backend)?;
         let result = sqlx::query(
-            "INSERT INTO llm_usage_rollup (bucket_start, api_key_id, account_id, provider_id,
+            "INSERT INTO ai_usage_rollup (bucket_start, api_key_id, account_id, provider_id,
                  model_id, virtual_model_id, requests, errors, input_tokens, output_tokens,
                  cache_write_tokens, cost_micros)
              SELECT substr(created_at, 1, 13) || ':00:00.000Z',
@@ -124,7 +124,7 @@ impl Storage {
                           THEN 1 ELSE 0 END),
                  SUM(input_tokens), SUM(output_tokens),
                  SUM(COALESCE(cache_write_tokens, 0)), SUM(COALESCE(cost_micros, 0))
-             FROM llm_usage
+             FROM ai_usage
              GROUP BY 1, 2, 3, 4, 5, 6",
         )
         .execute(&mut *tx)
@@ -190,7 +190,7 @@ impl Storage {
             return Ok(0);
         }
         let cutoff = cutoff_timestamp(days);
-        let result = sqlx::query("DELETE FROM llm_usage_rollup WHERE bucket_start < ?")
+        let result = sqlx::query("DELETE FROM ai_usage_rollup WHERE bucket_start < ?")
             .bind(&cutoff)
             .execute(self.pool())
             .await
@@ -355,11 +355,11 @@ mod tests {
         assert_eq!(report.usage_rollup, 1);
         assert_eq!(report.plugin_events, 2);
 
-        assert_eq!(row_count(&storage, "llm_usage").await, 1);
+        assert_eq!(row_count(&storage, "ai_usage").await, 1);
         assert_eq!(row_count(&storage, "request_logs").await, 1);
         assert_eq!(row_count(&storage, "audit_logs").await, 1);
         assert_eq!(row_count(&storage, "mcp_invocations").await, 1);
-        assert_eq!(row_count(&storage, "llm_usage_rollup").await, 1);
+        assert_eq!(row_count(&storage, "ai_usage_rollup").await, 1);
         assert_eq!(row_count(&storage, "events").await, 2);
         assert_eq!(row_count(&storage, "event_deliveries").await, 0);
     }
@@ -381,8 +381,8 @@ mod tests {
 
         let report = storage.prune(&policy(0, 100)).await.unwrap();
         assert_eq!(report, PruneReport::default());
-        assert_eq!(row_count(&storage, "llm_usage").await, 1);
-        assert_eq!(row_count(&storage, "llm_usage_rollup").await, 1);
+        assert_eq!(row_count(&storage, "ai_usage").await, 1);
+        assert_eq!(row_count(&storage, "ai_usage_rollup").await, 1);
         assert_eq!(row_count(&storage, "events").await, 1);
     }
 
@@ -393,7 +393,7 @@ mod tests {
         insert_usage(&storage, "two", "2026-10-01T05:42:00.000Z").await;
         insert_usage(&storage, "three", "2026-10-01T06:01:00.000Z").await;
 
-        sqlx::query("DELETE FROM llm_usage_rollup")
+        sqlx::query("DELETE FROM ai_usage_rollup")
             .execute(storage.pool())
             .await
             .unwrap();
@@ -404,7 +404,7 @@ mod tests {
             "SELECT COUNT(*) AS requests,
                  COALESCE(SUM(input_tokens + output_tokens + COALESCE(cache_write_tokens, 0)), 0)
                      AS tokens
-             FROM llm_usage",
+             FROM ai_usage",
         )
         .fetch_one(storage.pool())
         .await
@@ -412,7 +412,7 @@ mod tests {
         let rollup = sqlx::query(
             "SELECT COALESCE(SUM(requests), 0) AS requests,
                  COALESCE(SUM(input_tokens + output_tokens + cache_write_tokens), 0) AS tokens
-             FROM llm_usage_rollup",
+             FROM ai_usage_rollup",
         )
         .fetch_one(storage.pool())
         .await

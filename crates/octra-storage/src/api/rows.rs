@@ -185,11 +185,33 @@ pub(super) fn map_plugin(row: &SqliteRow) -> Result<PluginInstance> {
     })
 }
 
-pub(super) fn map_keyauth(row: &SqliteRow) -> Result<KeyauthCredential> {
+pub(super) fn open_secret(
+    secrets: &SecretBox,
+    stored: &str,
+    table: &str,
+    id: &str,
+    column: &str,
+) -> Result<String> {
+    if stored.is_empty() {
+        return Ok(String::new());
+    }
+    let bytes = secrets
+        .open(stored)
+        .map_err(|_| Error::Storage(format!("cannot decrypt {table}.{column} for row '{id}'")))?;
+    String::from_utf8(bytes).map_err(|_| {
+        Error::Storage(format!(
+            "decrypted {table}.{column} for row '{id}' is not UTF-8"
+        ))
+    })
+}
+
+pub(super) fn map_keyauth(row: &SqliteRow, secrets: &SecretBox) -> Result<KeyauthCredential> {
+    let id: String = decode(row.try_get("id"), "credential")?;
+    let key: String = decode(row.try_get("key"), "credential")?;
     Ok(KeyauthCredential {
-        id: decode(row.try_get("id"), "credential")?,
+        key: open_secret(secrets, &key, "keyauth_credentials", &id, "key")?,
+        id,
         consumer_id: decode(row.try_get("consumer_id"), "credential")?,
-        key: decode(row.try_get("key"), "credential")?,
         ttl: decode(row.try_get("ttl"), "credential")?,
         tags: decode_json_or_default(
             row.try_get::<Option<String>, _>("tags").ok().flatten(),
@@ -199,12 +221,14 @@ pub(super) fn map_keyauth(row: &SqliteRow) -> Result<KeyauthCredential> {
     })
 }
 
-pub(super) fn map_basicauth(row: &SqliteRow) -> Result<BasicauthCredential> {
+pub(super) fn map_basicauth(row: &SqliteRow, secrets: &SecretBox) -> Result<BasicauthCredential> {
+    let id: String = decode(row.try_get("id"), "credential")?;
+    let password: String = decode(row.try_get("password"), "credential")?;
     Ok(BasicauthCredential {
-        id: decode(row.try_get("id"), "credential")?,
+        password: open_secret(secrets, &password, "basicauth_credentials", &id, "password")?,
+        id,
         consumer_id: decode(row.try_get("consumer_id"), "credential")?,
         username: decode(row.try_get("username"), "credential")?,
-        password: decode(row.try_get("password"), "credential")?,
         tags: decode_json_or_default(
             row.try_get::<Option<String>, _>("tags").ok().flatten(),
             "tags",
@@ -213,12 +237,14 @@ pub(super) fn map_basicauth(row: &SqliteRow) -> Result<BasicauthCredential> {
     })
 }
 
-pub(super) fn map_jwt(row: &SqliteRow) -> Result<JwtSecret> {
+pub(super) fn map_jwt(row: &SqliteRow, secrets: &SecretBox) -> Result<JwtSecret> {
+    let id: String = decode(row.try_get("id"), "credential")?;
+    let secret: String = decode(row.try_get("secret"), "credential")?;
     Ok(JwtSecret {
-        id: decode(row.try_get("id"), "credential")?,
+        secret: open_secret(secrets, &secret, "jwt_secrets", &id, "secret")?,
+        id,
         consumer_id: decode(row.try_get("consumer_id"), "credential")?,
         key: decode(row.try_get("key"), "credential")?,
-        secret: decode(row.try_get("secret"), "credential")?,
         algorithm: decode(row.try_get("algorithm"), "credential")?,
         rsa_public_key: decode(row.try_get("rsa_public_key"), "credential")?,
         tags: decode_json_or_default(

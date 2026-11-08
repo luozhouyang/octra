@@ -599,7 +599,7 @@ impl LlmStore {
     /// Rows with invalid JSON are skipped so one bad value cannot block
     /// bootstrap.
     pub async fn load_plugin_state(&self) -> Result<Vec<(String, serde_json::Value)>> {
-        let rows = sqlx::query("SELECT key, value FROM llm_plugin_state")
+        let rows = sqlx::query("SELECT key, value FROM plugin_state")
             .fetch_all(self.pool())
             .await
             .map_err(|error| Error::Storage(format!("cannot load plugin state: {error}")))?;
@@ -621,7 +621,7 @@ impl LlmStore {
 
     pub async fn upsert_plugin_state(&self, key: &str, value: &str) -> Result<()> {
         sqlx::query(
-            "INSERT INTO llm_plugin_state (key, value, updated_at)
+            "INSERT INTO plugin_state (key, value, updated_at)
              VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT(key) DO UPDATE SET
                 value = excluded.value,

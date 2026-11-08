@@ -1,0 +1,18 @@
+[package]
+name = "octra-secrets"
+description = "OS-keychain-backed master key and AES-256-GCM secret sealing for Octra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+keyring.workspace = true
+ring.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

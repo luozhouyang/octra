@@ -183,7 +183,7 @@ fn permits(allowed: &Option<Vec<String>>, candidates: &[&str]) -> bool {
     }
 }
 
-/// Start of the UTC calendar window as the `llm_usage.created_at` format.
+/// Start of the UTC calendar window as the `ai_usage.created_at` format.
 pub fn window_start(window: LimitWindow, now: DateTime<Utc>) -> String {
     let date = now.date_naive();
     let naive = match window {

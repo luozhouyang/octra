@@ -435,7 +435,7 @@ impl LlmRuntime {
 /// Loads the routing data from the AI-native control plane.
 ///
 /// The compiler maps `ai_*` entities onto the internal `LlmRuntimeData`
-/// snapshot. Virtual keys remain in `llm_virtual_keys` and are passed through.
+/// snapshot. Virtual keys remain in `virtual_keys` and are passed through.
 /// Any failure leaves the caller's previous snapshot intact.
 async fn load_runtime_data(storage: &Arc<Storage>) -> Result<LlmRuntimeData> {
     let data = storage.ai.load_control_plane().await?;
