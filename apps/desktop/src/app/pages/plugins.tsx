@@ -17,7 +17,15 @@ import { controlClient } from "../../lib/control-api";
 import { formatNumber } from "../../lib/format";
 import { toneDot, toneText, type Tone } from "../../lib/tone";
 
-const stageOrder = ["request", "response", "stream_event", "error", "log"] as const;
+const stageOrder = [
+  "request",
+  "provider_request",
+  "response",
+  "final_response",
+  "stream_event",
+  "error",
+  "log",
+] as const;
 
 function formatLatency(calls: number, micros: number): string {
   return calls === 0 ? "—" : `${(micros / 1000).toFixed(1)} ms`;

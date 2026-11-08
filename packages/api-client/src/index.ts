@@ -9,18 +9,25 @@ import type {
   AgentRenderInput,
   AgentRestored,
   AgentView,
+  AiApplyResult,
+  AiCompileReport,
+  AiModel,
+  AiModelTarget,
+  AiPolicy,
+  AiPolicyAttachment,
+  AiProvider,
+  AiProviderAccount,
+  AiRevision,
+  AiRollbackResult,
+  AiStatus,
   ApiMetricsSnapshot,
   ApiPluginStats,
   ControlConfig,
   CreatedLlmVirtualKey,
   HealthResponse,
   ListResponse,
-  LlmModel,
   LlmPlugin,
   LlmPluginMetrics,
-  LlmProvider,
-  LlmRoute,
-  LlmRoutingGroup,
   LlmUsage,
   LlmVirtualKey,
   McpInvocation,
@@ -159,22 +166,6 @@ export class ControlApiClient {
   }
 
   // ----- LLM gateway -----------------------------------------------------
-
-  llmProviders(signal?: AbortSignal): Promise<LlmProvider[]> {
-    return this.request<LlmProvider[]>("/admin/llm/providers", { signal });
-  }
-
-  llmModels(signal?: AbortSignal): Promise<LlmModel[]> {
-    return this.request<LlmModel[]>("/admin/llm/models", { signal });
-  }
-
-  llmRoutingGroups(signal?: AbortSignal): Promise<LlmRoutingGroup[]> {
-    return this.request<LlmRoutingGroup[]>("/admin/llm/routing-groups", { signal });
-  }
-
-  llmRoutes(signal?: AbortSignal): Promise<LlmRoute[]> {
-    return this.request<LlmRoute[]>("/admin/llm/routes", { signal });
-  }
 
   llmVirtualKeys(signal?: AbortSignal): Promise<LlmVirtualKey[]> {
     return this.request<LlmVirtualKey[]>("/admin/llm/virtual-keys", { signal });
@@ -342,6 +333,170 @@ export class ControlApiClient {
       body: JSON.stringify(action),
       signal,
     });
+  }
+
+  // ----- AI control plane ------------------------------------------------
+
+  aiStatus(signal?: AbortSignal): Promise<AiStatus> {
+    return this.request<AiStatus>("/api/v1/ai/status", { signal });
+  }
+
+  aiProviders(signal?: AbortSignal): Promise<AiProvider[]> {
+    return this.request<AiProvider[]>("/api/v1/ai/providers", { signal });
+  }
+
+  aiCreateProvider(body: unknown): Promise<AiProvider> {
+    return this.postJson<AiProvider>("/api/v1/ai/providers", body);
+  }
+
+  aiUpdateProvider(id: string, body: unknown): Promise<AiProvider> {
+    return this.putJson<AiProvider>(`/api/v1/ai/providers/${encodeURIComponent(id)}`, body);
+  }
+
+  aiDeleteProvider(id: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/ai/providers/${encodeURIComponent(id)}`);
+  }
+
+  aiListAccounts(providerId: string): Promise<AiProviderAccount[]> {
+    return this.request<AiProviderAccount[]>(
+      `/api/v1/ai/providers/${encodeURIComponent(providerId)}/accounts`,
+    );
+  }
+
+  aiCreateAccount(providerId: string, body: unknown): Promise<AiProviderAccount> {
+    return this.postJson<AiProviderAccount>(
+      `/api/v1/ai/providers/${encodeURIComponent(providerId)}/accounts`,
+      body,
+    );
+  }
+
+  aiUpdateAccount(id: string, body: unknown): Promise<AiProviderAccount> {
+    return this.putJson<AiProviderAccount>(`/api/v1/ai/accounts/${encodeURIComponent(id)}`, body);
+  }
+
+  aiDeleteAccount(id: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/ai/accounts/${encodeURIComponent(id)}`);
+  }
+
+  aiModels(signal?: AbortSignal): Promise<AiModel[]> {
+    return this.request<AiModel[]>("/api/v1/ai/models", { signal });
+  }
+
+  aiCreateModel(body: unknown): Promise<AiModel> {
+    return this.postJson<AiModel>("/api/v1/ai/models", body);
+  }
+
+  aiUpdateModel(id: string, body: unknown): Promise<AiModel> {
+    return this.putJson<AiModel>(`/api/v1/ai/models/${encodeURIComponent(id)}`, body);
+  }
+
+  aiDeleteModel(id: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/ai/models/${encodeURIComponent(id)}`);
+  }
+
+  aiTargets(modelId: string, signal?: AbortSignal): Promise<AiModelTarget[]> {
+    return this.request<AiModelTarget[]>(
+      `/api/v1/ai/models/${encodeURIComponent(modelId)}/targets`,
+      { signal },
+    );
+  }
+
+  aiCreateTarget(modelId: string, body: unknown): Promise<AiModelTarget> {
+    return this.postJson<AiModelTarget>(
+      `/api/v1/ai/models/${encodeURIComponent(modelId)}/targets`,
+      body,
+    );
+  }
+
+  aiUpdateTarget(id: string, body: unknown): Promise<AiModelTarget> {
+    return this.putJson<AiModelTarget>(`/api/v1/ai/targets/${encodeURIComponent(id)}`, body);
+  }
+
+  aiDeleteTarget(id: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/ai/targets/${encodeURIComponent(id)}`);
+  }
+
+  aiPolicies(signal?: AbortSignal): Promise<AiPolicy[]> {
+    return this.request<AiPolicy[]>("/api/v1/ai/policies", { signal });
+  }
+
+  aiCreatePolicy(body: unknown): Promise<AiPolicy> {
+    return this.postJson<AiPolicy>("/api/v1/ai/policies", body);
+  }
+
+  aiUpdatePolicy(id: string, body: unknown): Promise<AiPolicy> {
+    return this.putJson<AiPolicy>(`/api/v1/ai/policies/${encodeURIComponent(id)}`, body);
+  }
+
+  aiDeletePolicy(id: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/ai/policies/${encodeURIComponent(id)}`);
+  }
+
+  aiAttachments(policyId: string, signal?: AbortSignal): Promise<AiPolicyAttachment[]> {
+    return this.request<AiPolicyAttachment[]>(
+      `/api/v1/ai/policies/${encodeURIComponent(policyId)}/attachments`,
+      { signal },
+    );
+  }
+
+  aiCreateAttachment(policyId: string, body: unknown): Promise<AiPolicyAttachment> {
+    return this.postJson<AiPolicyAttachment>(
+      `/api/v1/ai/policies/${encodeURIComponent(policyId)}/attachments`,
+      body,
+    );
+  }
+
+  aiUpdateAttachment(id: string, body: unknown): Promise<AiPolicyAttachment> {
+    return this.putJson<AiPolicyAttachment>(
+      `/api/v1/ai/attachments/${encodeURIComponent(id)}`,
+      body,
+    );
+  }
+
+  aiDeleteAttachment(id: string): Promise<void> {
+    return this.deleteEmpty(`/api/v1/ai/attachments/${encodeURIComponent(id)}`);
+  }
+
+  aiRevisions(signal?: AbortSignal): Promise<AiRevision[]> {
+    return this.request<AiRevision[]>("/api/v1/ai/revisions", { signal });
+  }
+
+  aiValidate(): Promise<AiCompileReport> {
+    return this.postEmpty<AiCompileReport>("/api/v1/ai/validate");
+  }
+
+  aiApply(): Promise<AiApplyResult> {
+    return this.postEmpty<AiApplyResult>("/api/v1/ai/apply");
+  }
+
+  aiRollback(id: string): Promise<AiRollbackResult> {
+    return this.postEmpty<AiRollbackResult>(
+      `/api/v1/ai/revisions/${encodeURIComponent(id)}/rollback`,
+    );
+  }
+
+  private async postJson<T>(path: string, body: unknown): Promise<T> {
+    return this.request<T>(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  private async putJson<T>(path: string, body: unknown): Promise<T> {
+    return this.request<T>(path, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  private async deleteEmpty(path: string): Promise<void> {
+    await this.request<void>(path, { method: "DELETE" });
+  }
+
+  private async postEmpty<T>(path: string): Promise<T> {
+    return this.postJson<T>(path, {});
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {

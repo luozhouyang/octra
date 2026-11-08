@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import type { LlmProvider, LlmUsage } from "@octra/types";
+import type { AiProvider, LlmUsage } from "@octra/types";
 import {
   Badge,
   Card,
@@ -29,7 +29,7 @@ function toneAt(index: number): Tone {
   return rowTones[index % rowTones.length] ?? "muted";
 }
 
-function providerLabel(providers: LlmProvider[], id: string): string {
+function providerLabel(providers: AiProvider[], id: string): string {
   if (id.length === 0) {
     return "unassigned";
   }
@@ -44,8 +44,8 @@ export function LlmPage() {
   });
 
   const providersQuery = useQuery({
-    queryKey: ["llm-providers"],
-    queryFn: () => controlClient().llmProviders(),
+    queryKey: ["ai-providers"],
+    queryFn: () => controlClient().aiProviders(),
     retry: 1,
   });
 
@@ -79,7 +79,7 @@ export function LlmPage() {
   );
 }
 
-function UsageOverview({ usage, providers }: { usage: LlmUsage; providers: LlmProvider[] }) {
+function UsageOverview({ usage, providers }: { usage: LlmUsage; providers: AiProvider[] }) {
   const { totals, by_model, by_provider, recent } = usage;
   const enabledProviders = providers.filter((provider) => provider.enabled).length;
 

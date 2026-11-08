@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "../components/app-shell";
 import { AgentsPage } from "./pages/agents";
+import { AiControlPage } from "./pages/ai-control";
 import { Dashboard } from "./pages/dashboard";
 import { GatewayPage } from "./pages/gateway";
 import { LlmPage } from "./pages/llm";
@@ -17,6 +18,7 @@ export function App() {
         <Route path="gateway" element={<GatewayPage />} />
         <Route path="llm" element={<LlmPage />} />
         <Route path="agents" element={<AgentsPage />} />
+        <Route path="ai-control" element={<AiControlPage />} />
         <Route path="mcp" element={<McpPage />} />
         <Route path="plugins" element={<PluginsPage />} />
         <Route path="settings" element={<SettingsPage />} />

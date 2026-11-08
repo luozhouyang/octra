@@ -54,9 +54,9 @@ export function AgentsPage() {
     refetchInterval: 10_000,
     retry: 1,
   });
-  const routes = useQuery({
-    queryKey: ["llm-routes"],
-    queryFn: () => controlClient().llmRoutes(),
+  const models = useQuery({
+    queryKey: ["ai-models"],
+    queryFn: () => controlClient().aiModels(),
     retry: 1,
   });
   const keys = useQuery({
@@ -86,11 +86,11 @@ export function AgentsPage() {
     }
     setProfileName(selected.profile?.name ?? "default");
     setBaseUrl(selected.profile?.base_url ?? selected.config.base_url ?? "http://127.0.0.1:8080");
-    setModel(selected.profile?.virtual_model_id ?? routes.data?.[0]?.virtual_model_id ?? "");
+    setModel(selected.profile?.virtual_model_id ?? models.data?.[0]?.name ?? "");
     setKeyId(selected.profile?.virtual_key_id ?? "");
     // Sync saved profile values without discarding an in-progress preview.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id, selected?.profile?.updated_at, routes.data?.[0]?.virtual_model_id]);
+  }, [selected?.id, selected?.profile?.updated_at, models.data?.[0]?.name]);
 
   useEffect(() => {
     setPlaintextKey("");
@@ -428,16 +428,16 @@ export function AgentsPage() {
                 />
               </Field>
               <Field label="Virtual model">
-                {routes.data && routes.data.length > 0 ? (
+                {models.data && models.data.length > 0 ? (
                   <select
                     value={model}
                     onChange={(event) => setModel(event.target.value)}
                     className="h-8 w-full rounded-md border border-border bg-surface px-2 font-mono text-[11px] text-foreground"
                   >
-                    <option value="">Select a model route…</option>
-                    {routes.data.map((route) => (
-                      <option key={route.id} value={route.virtual_model_id}>
-                        {route.virtual_model_id}
+                    <option value="">Select an AI model…</option>
+                    {models.data.map((aiModel) => (
+                      <option key={aiModel.id} value={aiModel.name}>
+                        {aiModel.name}
                       </option>
                     ))}
                   </select>

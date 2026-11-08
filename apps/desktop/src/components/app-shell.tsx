@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { cn } from "@octra/ui";
 import {
   Bot,
+  BrainCircuit,
   CircleHelp,
   Hexagon,
   LayoutDashboard,
@@ -48,6 +49,13 @@ const navigation: NavItem[] = [
   { to: "/llm", label: "LLM Gateway", section: "Operate", icon: Sparkles, signal: "bg-violet" },
   { to: "/mcp", label: "MCP Gateway", section: "Operate", icon: Plug, signal: "bg-amber" },
   { to: "/agents", label: "Agents", section: "Control", icon: Bot, signal: "bg-coral" },
+  {
+    to: "/ai-control",
+    label: "AI Control",
+    section: "Control",
+    icon: BrainCircuit,
+    signal: "bg-violet",
+  },
   {
     to: "/plugins",
     label: "Plugins",

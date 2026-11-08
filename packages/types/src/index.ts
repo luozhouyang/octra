@@ -219,64 +219,6 @@ export interface ApiPluginStats {
 // ---------------------------------------------------------------------------
 // LLM gateway
 
-export interface LlmProvider {
-  id: string;
-  name: string;
-  kind: string;
-  protocol: string;
-  auth_type: string;
-  base_url: string | null;
-  secret_ref: string | null;
-  priority: number;
-  config: unknown;
-  enabled: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface LlmModel {
-  id: string;
-  provider_id: string;
-  model_id: string;
-  display_name: string | null;
-  protocol: string | null;
-  context_window: number | null;
-  max_output_tokens: number | null;
-  capabilities: unknown;
-  pricing: unknown;
-  enabled: boolean;
-  created_at: string;
-}
-
-export interface LlmRoutingTarget {
-  id: string;
-  group_id: string;
-  provider_id: string;
-  model_id: string;
-  account_id: string | null;
-  weight: number;
-  priority: number;
-  position: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface LlmRoutingGroup {
-  id: string;
-  name: string;
-  strategy: string;
-  created_at: string;
-  targets: LlmRoutingTarget[];
-}
-
-export interface LlmRoute {
-  id: string;
-  virtual_model_id: string;
-  routing_group_id: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface LlmVirtualKey {
   id: string;
   name: string;
@@ -370,7 +312,7 @@ export interface LlmStageMetrics {
 }
 
 export type LlmStageName =
-  "request" | "provider_request" | "response" | "stream_event" | "error" | "log";
+  "request" | "provider_request" | "response" | "final_response" | "stream_event" | "error" | "log";
 
 export interface LlmPluginMetrics {
   name: string;
@@ -588,4 +530,244 @@ export interface AgentRenderInput {
   config_path?: string | null;
   expected_sha256?: string;
   force?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// AI control plane
+
+export interface AiCompileError {
+  code: string;
+  message: string;
+}
+
+export interface AiEntityCounts {
+  providers: number;
+  accounts: number;
+  models: number;
+  targets: number;
+  policies: number;
+  attachments: number;
+}
+
+export interface AiCompileReport {
+  ok: boolean;
+  errors: AiCompileError[];
+  counts: AiEntityCounts;
+}
+
+export interface AiStatus {
+  counts: AiEntityCounts;
+  last_compile: AiCompileReport | null;
+  revisions: number;
+}
+
+export interface AiProvider {
+  id: string;
+  name: string;
+  protocol: string;
+  base_url: string;
+  auth_ref: string | null;
+  capabilities: string[];
+  config: unknown;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AiProviderAccount {
+  id: string;
+  provider_id: string;
+  name: string;
+  credential_kind: string;
+  secret_ref: string | null;
+  oauth_ref: string | null;
+  weight: number;
+  priority: number;
+  quota_limit: number | null;
+  quota_unit: string;
+  quota_period: string;
+  quota_used: number;
+  cooldown_until: string | null;
+  enabled: boolean;
+  config: unknown;
+  created_at: number;
+  updated_at: number;
+}
+
+export type AiModelKind = "model" | "group";
+
+export interface AiBalancer {
+  strategy: string;
+  retries: number;
+  failover_criteria: string[];
+}
+
+export interface AiModel {
+  id: string;
+  name: string;
+  kind: AiModelKind;
+  capabilities: string[];
+  formats: string[];
+  route_paths: string[];
+  balancer: AiBalancer;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AiModelTarget {
+  id: string;
+  model_id: string;
+  target_model_id: string | null;
+  provider_id: string | null;
+  upstream_model: string | null;
+  account_id: string | null;
+  weight: number;
+  priority: number;
+  position: number;
+  config: unknown;
+  context_window: number | null;
+  max_output_tokens: number | null;
+  capabilities: unknown;
+  pricing: unknown;
+  semantic_description: string | null;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export type AiPolicyType =
+  | "allowlist"
+  | "rate_limit"
+  | "budget_guard"
+  | "pii_redaction"
+  | "prompt_guard"
+  | "prompt_compress"
+  | "semantic_cache"
+  | "model_map"
+  | "param_override"
+  | "system_prompt"
+  | "request_audit"
+  | "think_tags";
+
+export interface AiPolicy {
+  id: string;
+  name: string;
+  policy_type: AiPolicyType;
+  config: unknown;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export type AiPolicyScope =
+  "global" | "provider" | "model" | "target" | "consumer_group" | "consumer" | "virtual_key";
+
+export interface AiPolicyAttachment {
+  id: string;
+  policy_id: string;
+  scope: AiPolicyScope;
+  scope_id: string | null;
+  order: number;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AiRevision {
+  id: string;
+  created_at: number;
+  actor: string;
+  status: string;
+  diff: unknown;
+  applied_at: number | null;
+  has_snapshot: boolean;
+}
+
+export interface AiApplyResult {
+  ok: boolean;
+  revision_id: string;
+  report: AiCompileReport;
+}
+
+export interface AiRollbackResult {
+  ok: boolean;
+  revision_id: string;
+  report: AiCompileReport;
+}
+
+// ---------------------------------------------------------------------------
+// AI control-plane create/update payloads
+
+export interface AiProviderInput {
+  id?: string;
+  name: string;
+  protocol: string;
+  base_url?: string;
+  auth_ref?: string | null;
+  capabilities?: string[];
+  config?: unknown;
+  enabled?: boolean;
+}
+
+export interface AiProviderAccountInput {
+  id?: string;
+  name: string;
+  credential_kind?: string;
+  secret_ref?: string | null;
+  oauth_ref?: string | null;
+  weight?: number;
+  priority?: number;
+  quota_limit?: number | null;
+  quota_unit?: string;
+  quota_period?: string;
+  quota_used?: number;
+  cooldown_until?: string | null;
+  config?: unknown;
+  enabled?: boolean;
+}
+
+export interface AiModelInput {
+  id?: string;
+  name: string;
+  kind?: AiModelKind;
+  capabilities?: string[];
+  formats?: string[];
+  route_paths?: string[];
+  balancer?: AiBalancer;
+  enabled?: boolean;
+}
+
+export interface AiModelTargetInput {
+  id?: string;
+  target_model_id?: string | null;
+  provider_id?: string | null;
+  upstream_model?: string | null;
+  account_id?: string | null;
+  weight?: number;
+  priority?: number;
+  position?: number;
+  config?: unknown;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+  capabilities?: unknown;
+  pricing?: unknown;
+  semantic_description?: string | null;
+  enabled?: boolean;
+}
+
+export interface AiPolicyInput {
+  id?: string;
+  name: string;
+  policy_type: AiPolicyType;
+  config?: unknown;
+  enabled?: boolean;
+}
+
+export interface AiPolicyAttachmentInput {
+  id?: string;
+  scope: AiPolicyScope;
+  scope_id?: string | null;
+  order?: number;
+  enabled?: boolean;
 }
