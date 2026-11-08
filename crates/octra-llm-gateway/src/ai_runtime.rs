@@ -333,8 +333,10 @@ fn flatten_targets(
 
 fn auth_type_for(protocol: &str) -> &'static str {
     match protocol.trim().to_ascii_lowercase().as_str() {
-        "anthropic" => "anthropic",
-        "gemini" => "header",
+        "anthropic" | "claude" => "anthropic",
+        "gemini" | "google" => "header",
+        "ollama" | "vllm" | "lmstudio" | "lm-studio" | "groq" | "openrouter" | "deepseek"
+        | "together" | "fireworks" | "openai-compatible" | "openai-chat" => "bearer",
         _ => "bearer",
     }
 }

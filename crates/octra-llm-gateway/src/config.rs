@@ -178,16 +178,23 @@ impl ProviderConfig {
         };
 
         // `config_json.wire` lets a local OpenAI-compatible server be driven
-        // with the Anthropic wire format (and vice versa).
-        let protocol_name = match config.get("wire").and_then(Value::as_str) {
-            Some("anthropic") => "anthropic",
-            Some("openai") => "openai",
-            _ => record.protocol.as_str(),
+        // with the Anthropic wire format (and vice versa). Provider names may
+        // also be presets such as `ollama`, `groq`, or `claude`.
+        let requested_protocol = match config.get("wire").and_then(Value::as_str) {
+            Some(wire) => wire,
+            None => record.protocol.as_str(),
         };
+        let (protocol_name, preset_base_url) =
+            protocol_alias(requested_protocol).ok_or_else(|| {
+                ProviderConfigError::Invalid(format!(
+                    "provider {}: unknown protocol '{}'",
+                    record.name, requested_protocol
+                ))
+            })?;
         let protocol = Protocol::parse(protocol_name).ok_or_else(|| {
             ProviderConfigError::Invalid(format!(
                 "provider {}: unknown protocol '{}'",
-                record.name, record.protocol
+                record.name, requested_protocol
             ))
         })?;
 
@@ -213,7 +220,9 @@ impl ProviderConfig {
 
         let base_url = match record.base_url.as_deref().map(str::trim) {
             Some(url) if !url.is_empty() => normalize_base_url(url),
-            _ => default_base_url(protocol).to_string(),
+            _ => preset_base_url
+                .map(str::to_string)
+                .unwrap_or_else(|| default_base_url(protocol).to_string()),
         };
 
         let oauth = match config.get("oauth") {
@@ -311,6 +320,29 @@ pub fn default_base_url(protocol: Protocol) -> &'static str {
         Protocol::Openai | Protocol::OpenaiResponses => "https://api.openai.com/v1",
         Protocol::Anthropic => "https://api.anthropic.com/v1",
         Protocol::Gemini => "https://generativelanguage.googleapis.com/v1beta",
+    }
+}
+
+/// Maps provider presets and aliases onto the four wire protocols.
+///
+/// The optional second item is the default base URL for a provider whose
+/// record does not set one; aliases without a preset use the protocol default.
+fn protocol_alias(name: &str) -> Option<(&'static str, Option<&'static str>)> {
+    let lower = name.trim().to_ascii_lowercase().replace('_', "-");
+    match lower.as_str() {
+        "openai" | "openai-chat" | "openai-compatible" => Some(("openai", None)),
+        "openai-responses" | "responses" => Some(("openai_responses", None)),
+        "anthropic" | "claude" => Some(("anthropic", None)),
+        "gemini" | "google" => Some(("gemini", None)),
+        "ollama" => Some(("openai", Some("http://127.0.0.1:11434/v1"))),
+        "vllm" => Some(("openai", Some("http://127.0.0.1:8000/v1"))),
+        "lmstudio" | "lm-studio" => Some(("openai", Some("http://127.0.0.1:1234/v1"))),
+        "groq" => Some(("openai", Some("https://api.groq.com/openai/v1"))),
+        "openrouter" => Some(("openai", Some("https://openrouter.ai/api/v1"))),
+        "deepseek" => Some(("openai", Some("https://api.deepseek.com/v1"))),
+        "together" => Some(("openai", Some("https://api.together.xyz/v1"))),
+        "fireworks" => Some(("openai", Some("https://api.fireworks.ai/inference/v1"))),
+        _ => None,
     }
 }
 
@@ -514,6 +546,57 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(config.url("/models"), "https://example.test/v1/models");
+    }
+
+    #[test]
+    fn provider_presets_map_to_openai_and_default_base_urls() {
+        for (protocol, expected) in [
+            ("ollama", "http://127.0.0.1:11434/v1"),
+            ("vllm", "http://127.0.0.1:8000/v1"),
+            ("lmstudio", "http://127.0.0.1:1234/v1"),
+            ("groq", "https://api.groq.com/openai/v1"),
+            ("openrouter", "https://openrouter.ai/api/v1"),
+            ("deepseek", "https://api.deepseek.com/v1"),
+            ("together", "https://api.together.xyz/v1"),
+            ("fireworks", "https://api.fireworks.ai/inference/v1"),
+        ] {
+            let config =
+                ProviderConfig::from_record(&record(protocol, "bearer", None, "")).unwrap();
+            assert_eq!(config.protocol, Protocol::Openai, "protocol {protocol}");
+            assert_eq!(config.base_url, expected, "protocol {protocol}");
+        }
+
+        let claude = ProviderConfig::from_record(&record("claude", "", None, "")).unwrap();
+        assert_eq!(claude.protocol, Protocol::Anthropic);
+        let responses =
+            ProviderConfig::from_record(&record("responses", "bearer", None, "")).unwrap();
+        assert_eq!(responses.protocol, Protocol::OpenaiResponses);
+    }
+
+    #[test]
+    fn wire_aliases_override_the_recorded_protocol() {
+        let config = ProviderConfig::from_record(&record(
+            "ollama",
+            "bearer",
+            Some("http://127.0.0.1:9000/v1"),
+            r#"{"wire":"openai-compatible"}"#,
+        ))
+        .unwrap();
+        assert_eq!(config.protocol, Protocol::Openai);
+        assert_eq!(config.base_url, "http://127.0.0.1:9000/v1");
+
+        let error = ProviderConfig::from_record(&record(
+            "openai",
+            "bearer",
+            None,
+            r#"{"wire":"not-a-wire"}"#,
+        ))
+        .unwrap_err();
+        let ProviderConfigError::Invalid(message) = error;
+        assert!(
+            message.contains("not-a-wire"),
+            "unexpected message: {message}"
+        );
     }
 
     #[test]
