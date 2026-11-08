@@ -124,14 +124,14 @@ sandbox_path = "/tmp/octra-agent-bin"
 - AI 原生 LLM 控制面（Phase 26，仅 AI-native）：`ai_*` schema、`octra-ai-config` 编译器、`AiStore`、`/api/v1/ai/*` CRUD、validate/preview/apply/revisions/rollback、revision snapshot、事务化 replace、target 级模型元数据（context、capabilities、pricing）、所有 policy 类型的内置执行（rate limit、budget guard、PII、model map、param override、system prompt、request audit、think tags、PromptGuard、PromptCompress、SemanticCache）、基于 AI 原生 description 的 `semantic` target routing（可选 OpenAI-compatible embedding，失败回退本地词法）、Provider `config_json.query` 参数与 protocol presets（Ollama、vLLM、LM Studio、Groq、OpenRouter、DeepSeek、Together、Fireworks、Claude、Google、Vertex、Bedrock、OpenAI-compatible）、streaming cache 写入与 SSE 回放、AI-native account OAuth 状态、桌面控制与 loopback callback 监听、request audit `cache_status` 与 cache/routing 日志、支持 inline/stdin/file JSON body 的完整 CRUD CLI，以及 providers/accounts/models/targets/policies/attachments 全部使用 typed forms 的桌面端 AI Control 页面。legacy 模型表、`/admin/llm/*` 模型端点、`legacy`/`shadow`/`on` 模式和 import-legacy 路径已移除，不考虑向后兼容。
 - Agent 集成：探测 Claude Code、Codex、OpenCode，预览并把 Octra Provider 写入其原生配置，支持原子写入与备份恢复。
 - CLI：`status`、API Gateway `services`/`routes`/`upstreams`/`targets` CRUD、MCP `servers`/`tools`/`keys`/`acls` CRUD、consumer policy CRUD、`reload`、`doctor`、`keys`、`usage`，以及 `ai` status/actions 与 providers/accounts/models/targets/policies/attachments 的完整 CRUD。
-- Tauri 2 + React 桌面端，使用统一设计 Token，所有页面直接读取本地控制面；AI Control、API Gateway 与 MCP 页面使用 typed forms，LLM 页面的 consumer policy 使用 JSON editor。
+- Tauri 2 + React 桌面端，使用统一设计 Token，所有页面直接读取本地控制面；AI Control、API Gateway、MCP 与 consumer policy 页面使用 typed forms。
 - 双 Workspace、CI（Rust fmt/clippy/test；前端 typecheck/test/build）。
 
 ## 尚未实现（按路线图推进）
 
-- Bedrock SigV4 认证，以及 OpenAI/Anthropic/OpenAI Responses/Gemini/Vertex/Bedrock Converse 之外的更多 vendor-specific protocol adapter 与 Agent 适配器/Agent Bridge。Bedrock 当前使用 Bedrock API key。
+- OpenAI/Anthropic/OpenAI Responses/Gemini/Vertex/Bedrock Converse 之外的更多 vendor-specific protocol adapter 与 Agent 适配器/Agent Bridge。Bedrock 同时支持 API-key bearer 与可选 SigV4。
 - 有明确产品价值的参考模型补齐：Kong MCP 的 CEL ACL 或转换模式。
-- 剩余生产加固：OS Keychain Secrets、OAuth Token 加密、桌面端 Daemon 生命周期管理、跨平台打包/签名/公证。Phase 29 的控制 API、rollback、含 PromptGuard/PromptCompress/SemanticCache 的完整 policy 执行、带可选 embedding 的 `semantic` target routing、Provider query 参数与 protocol presets、streaming cache 写入/SSE 回放、Vertex/Bedrock adapter、AI-native account OAuth 与桌面 loopback callback、cache/routing 可观测性、完整 CRUD CLI，以及 AI/API/MCP 全部实体使用 typed forms 的桌面端已经存在。legacy 模型表、端点、模式和 import 路径已移除；`ai_*` 是唯一的模型控制面。SemanticCache/Routing 默认使用精确 key 加本地词法相似度。
+- 剩余生产加固：OS Keychain Secrets、OAuth Token 加密、桌面端 Daemon 生命周期管理、跨平台打包/签名/公证。Phase 32 的控制 API、rollback、含 PromptGuard/PromptCompress/SemanticCache 的完整 policy 执行、带可选 embedding 的 `semantic` target routing、Provider query 参数与 protocol presets、streaming cache 写入/SSE 回放、Vertex/Bedrock adapter（含 SigV4）、AI-native account OAuth 与桌面 loopback callback、cache/routing 可观测性、完整 CRUD CLI，以及 AI/API/MCP/consumer policy 全部实体使用 typed forms 的桌面端已经存在。legacy 模型表、端点、模式和 import 路径已移除；`ai_*` 是唯一的模型控制面。SemanticCache/Routing 默认使用精确 key 加本地词法相似度。
 
 ## 安全边界
 

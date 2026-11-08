@@ -129,21 +129,21 @@ shows a sandbox banner, and preview never writes anything.
 - AI-native LLM control plane (Phase 26, AI-native only): `ai_*` schema, `octra-ai-config` compiler, `AiStore`, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, per-target model metadata (context, capabilities, pricing), built-in policy execution for every policy type (rate limit, budget guard, PII, model map, param override, system prompt, request audit, think tags, PromptGuard, PromptCompress, SemanticCache), `semantic` target routing over AI-native descriptions with optional OpenAI-compatible embeddings and lexical fallback, provider `config_json.query` parameters and protocol presets (Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Claude, Google, Vertex, Bedrock, OpenAI-compatible), streaming cache population and SSE replay, AI-native account OAuth with exposed status, desktop controls, and a loopback callback listener, request-audit `cache_status` and cache/routing logs, full CRUD CLI with inline/stdin/file JSON bodies, and a desktop AI Control page with typed forms for providers, accounts, models, targets, policies, and attachments. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed without backward compatibility.
 - Agent integration: detects Claude Code, Codex and OpenCode, previews and applies the Octra provider into their native config files, and restores backups atomically.
 - CLI: `status`, `services`/`routes`/`upstreams`/`targets` CRUD, `mcp` servers/tools/keys/ACLs CRUD, `policies` consumer-policy CRUD, `reload`, `doctor`, `keys`, `usage`, and `ai` status/actions plus full CRUD for providers, accounts, models, targets, policies, and attachments.
-- Tauri 2 + React desktop app with a shadcn-style component set and Tailwind CSS v4 design tokens for dark and light modes; AI Control, API Gateway, and MCP use typed forms, the LLM page uses a JSON editor for consumer policies, and every console page reads the local control plane.
+- Tauri 2 + React desktop app with a shadcn-style component set and Tailwind CSS v4 design tokens for dark and light modes; AI Control, API Gateway, MCP, and consumer policies use typed forms, and every console page reads the local control plane.
 - Dual workspace and CI (Rust fmt/clippy/test; frontend typecheck/test/build).
 
 ## Not yet implemented (tracked on the roadmap)
 
-- Bedrock SigV4 authentication and additional vendor-specific protocol adapters
-  beyond OpenAI, Anthropic, OpenAI Responses, Gemini, Vertex, and Bedrock
-  Converse. Bedrock currently authenticates with a Bedrock API key.
+- Additional vendor-specific protocol adapters beyond OpenAI, Anthropic,
+  OpenAI Responses, Gemini, Vertex, and Bedrock Converse. Bedrock supports
+  API-key bearer auth and optional SigV4.
 - Agent discovery / config adapter / bridge for agents beyond the three
   supported adapters.
 - Full reference-model parity where justified: Kong MCP CEL ACLs or conversion
   modes.
 - Remaining hardening: OS Keychain secret storage, OAuth-token encryption,
   desktop daemon lifecycle management, and cross-platform packaging/signing.
-  The Phase 29 control API, rollback, full policy execution including
+  The Phase 32 control API, rollback, full policy execution including
   PromptGuard, PromptCompress, and SemanticCache, `semantic` target routing
   with optional embeddings, provider query parameters and presets, streaming
   cache population/SSE replay, Vertex/Bedrock adapters, AI-native account OAuth

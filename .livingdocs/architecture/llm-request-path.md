@@ -109,7 +109,23 @@ Provider protocol presets map to the six wire protocols and fill a default base 
 | `bedrock` / `aws-bedrock` / `bedrock-runtime` | Bedrock Converse | `https://bedrock-runtime.us-east-1.amazonaws.com` |
 | `responses` | OpenAI Responses | OpenAI default |
 
-`config_json.wire` can override the recorded protocol, including the aliases above. Vertex reuses the Gemini payload with publisher paths; Bedrock uses the Converse API and a bearer Bedrock API key. SigV4 and other vendor-specific event streams still require dedicated work.
+`config_json.wire` can override the recorded protocol, including the aliases above. Vertex reuses the Gemini payload with publisher paths; Bedrock uses the Converse API with either a bearer Bedrock API key or SigV4 static credentials. Other vendor-specific event streams still require dedicated work.
+
+Bedrock SigV4 is configured per provider with reference-only credentials:
+
+```json
+{
+  "sigv4": {
+    "region": "us-east-1",
+    "service": "bedrock",
+    "access_key_ref": "env:AWS_ACCESS_KEY_ID",
+    "secret_key_ref": "env:AWS_SECRET_ACCESS_KEY",
+    "session_token_ref": "env:AWS_SESSION_TOKEN"
+  }
+}
+```
+
+`access_key_ref` and `secret_key_ref` are required; `session_token_ref` is optional. SigV4 signs the exact serialized request body and does not send a bearer token. The default remains a Bedrock API key.
 
 ## Response cache
 
