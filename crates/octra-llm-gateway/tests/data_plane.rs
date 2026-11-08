@@ -458,6 +458,44 @@ async fn routing_falls_back_to_the_next_priority_target() {
 }
 
 #[tokio::test]
+async fn free_strategy_prefers_zero_price_target() {
+    let harness = Harness::new().await;
+    let free_upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let paid_upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let free = harness
+        .provider("free", "openai", &free_upstream.base_url, "bearer", 0)
+        .await;
+    let paid = harness
+        .provider("paid", "openai", &paid_upstream.base_url, "bearer", 0)
+        .await;
+    harness.model_priced(&free, "m", "{}").await;
+    harness
+        .model_priced(&paid, "m", r#"{"currency":"USD","input_per_million":10.0}"#)
+        .await;
+    harness
+        .route_to_strategy(
+            "octra-default",
+            "free",
+            &[
+                (paid.clone(), "m".to_string(), 0, 1),
+                (free.clone(), "m".to_string(), 0, 1),
+            ],
+        )
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(free_upstream.request_count(), 1);
+    assert_eq!(paid_upstream.request_count(), 0);
+}
+
+#[tokio::test]
 async fn missing_secret_is_a_502_and_falls_through() {
     let harness = Harness::new().await;
     let healthy = MockUpstream::start(&harness.config, openai_upstream_text).await;

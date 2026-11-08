@@ -77,6 +77,21 @@ impl AccountRuntime {
         Some((limit - self.used()).max(0))
     }
 
+    /// Milliseconds until this account's quota period resets. Only accounts
+    /// with a quota limit and a future reset expose a signal.
+    pub fn quota_reset_in_ms(&self, now_ms: i64) -> Option<i64> {
+        self.record.quota_limit?;
+        let end = self.period_end_ms.load(Ordering::Relaxed);
+        (end > now_ms).then_some(end - now_ms)
+    }
+
+    /// Milliseconds until this account's OAuth credential expires, parsed from
+    /// `oauth_expires_at`. Expired or missing credentials expose no signal.
+    pub fn credential_expires_in_ms(&self, now_ms: i64) -> Option<i64> {
+        let expires = self.record.oauth_expires_at.as_deref().and_then(parse_ms)?;
+        (expires > now_ms).then_some(expires - now_ms)
+    }
+
     pub fn is_available(&self, now_ms: i64) -> bool {
         self.record.enabled
             && now_ms >= self.cooldown_until_ms.load(Ordering::Relaxed)
@@ -652,6 +667,26 @@ mod tests {
         assert_eq!(reset.account_id, "a");
         assert_eq!(entry.used(), 0);
         assert!(entry.is_available(now.timestamp_millis()));
+    }
+
+    #[test]
+    fn quota_reset_and_credential_expiry_signals() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let now_ms = now.timestamp_millis();
+        let mut record = account("a", 0, 1, Some(100), 0);
+        record.quota_period = "day".into();
+        record.quota_reset_at = Some("2026-01-02T00:00:00Z".into());
+        record.oauth_expires_at = Some("2026-01-01T01:00:00Z".into());
+        let entry = runtime(record);
+        assert_eq!(entry.quota_reset_in_ms(now_ms), Some(86_400_000));
+        assert_eq!(entry.credential_expires_in_ms(now_ms), Some(3_600_000));
+
+        let past = now_ms + 90_000_000;
+        assert_eq!(entry.quota_reset_in_ms(past), None);
+        assert_eq!(entry.credential_expires_in_ms(past), None);
+
+        let unlimited = runtime(account("b", 0, 1, None, 0));
+        assert_eq!(unlimited.quota_reset_in_ms(now_ms), None);
     }
 
     #[test]

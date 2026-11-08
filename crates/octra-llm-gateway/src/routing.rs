@@ -88,6 +88,8 @@ pub struct TargetSignal {
     pub failures: u64,
     pub price_per_million: f64,
     pub pace_wait_ms: u64,
+    pub quota_reset_in_ms: Option<i64>,
+    pub credential_expires_in_ms: Option<i64>,
 }
 
 /// Reorders the non-fallback attempt list by strategy. The fallback entry is
@@ -108,6 +110,9 @@ pub fn rank_targets(
             | "weight"
             | "fast"
             | "cheap"
+            | "free"
+            | "drain"
+            | "expiring"
             | "usage"
             | "quota"
             | "smart"
@@ -194,6 +199,31 @@ fn score_target(
             -signal.price_per_million * 100.0
                 - (signal.latency_ms as f64) * 0.01
                 - (signal.failures as f64) * 100.0
+        }
+        "free" => {
+            let free = if signal.price_per_million == 0.0 {
+                1e9
+            } else {
+                0.0
+            };
+            free + signal.quota_remaining.min(1_000_000) as f64 * 0.01 + health
+        }
+        "drain" => {
+            -(signal.quota_remaining.min(1_000_000) as f64) * 0.01
+                + signal.usage as f64 * 0.001
+                + health
+        }
+        "expiring" => {
+            let expiry = [signal.quota_reset_in_ms, signal.credential_expires_in_ms]
+                .into_iter()
+                .flatten()
+                .filter(|expiry| *expiry > 0)
+                .min();
+            // Sooner expiry means larger score. The absence of any expiry is
+            // always worse than a distant one, and the finite floor keeps the
+            // health term able to break ties.
+            let urgency = expiry.map_or(-1.0e15, |expiry| -(expiry as f64));
+            urgency + health * 0.1
         }
         "usage" => -(signal.usage as f64),
         "quota" => signal.quota_remaining as f64,
@@ -888,6 +918,186 @@ mod tests {
             }
         });
         assert_eq!(targets[0].model_id, "fast");
+    }
+
+    #[test]
+    fn free_prefers_zero_price_then_most_remaining_quota() {
+        let mut targets = vec![compiled("paid"), compiled("self-hosted")];
+        rank_targets(&mut targets, "free", None, 0, "", None, |target| {
+            TargetSignal {
+                price_per_million: if target.model_id == "self-hosted" {
+                    0.0
+                } else {
+                    1.5
+                },
+                quota_remaining: if target.model_id == "self-hosted" {
+                    100
+                } else {
+                    900_000
+                },
+                latency_ms: if target.model_id == "self-hosted" {
+                    500
+                } else {
+                    20
+                },
+                failures: if target.model_id == "self-hosted" {
+                    2
+                } else {
+                    0
+                },
+                ..TargetSignal::default()
+            }
+        });
+        assert_eq!(targets[0].model_id, "self-hosted");
+
+        let mut targets = vec![compiled("low"), compiled("high")];
+        rank_targets(&mut targets, "free", None, 0, "", None, |target| {
+            TargetSignal {
+                quota_remaining: if target.model_id == "high" { 900 } else { 10 },
+                ..TargetSignal::default()
+            }
+        });
+        assert_eq!(targets[0].model_id, "high");
+    }
+
+    #[test]
+    fn drain_prefers_low_remaining_quota() {
+        let mut targets = vec![compiled("fresh"), compiled("nearly-drained")];
+        rank_targets(&mut targets, "drain", None, 0, "", None, |target| {
+            TargetSignal {
+                quota_remaining: if target.model_id == "nearly-drained" {
+                    100
+                } else {
+                    900_000
+                },
+                usage: if target.model_id == "nearly-drained" {
+                    250
+                } else {
+                    0
+                },
+                ..TargetSignal::default()
+            }
+        });
+        assert_eq!(targets[0].model_id, "nearly-drained");
+
+        let mut targets = vec![compiled("unlimited"), compiled("limited")];
+        rank_targets(&mut targets, "drain", None, 0, "", None, |target| {
+            TargetSignal {
+                quota_remaining: if target.model_id == "unlimited" {
+                    i64::MAX
+                } else {
+                    500_000
+                },
+                ..TargetSignal::default()
+            }
+        });
+        assert_eq!(targets[0].model_id, "limited");
+    }
+
+    #[test]
+    fn expiring_prefers_the_soonest_quota_reset_or_credential_expiry() {
+        let mut targets = vec![compiled("later-reset"), compiled("soon-reset")];
+        rank_targets(&mut targets, "expiring", None, 0, "", None, |target| {
+            TargetSignal {
+                quota_reset_in_ms: Some(if target.model_id == "soon-reset" {
+                    60_000
+                } else {
+                    600_000
+                }),
+                ..TargetSignal::default()
+            }
+        });
+        assert_eq!(targets[0].model_id, "soon-reset");
+
+        let mut targets = vec![compiled("quota-only"), compiled("credential-sooner")];
+        rank_targets(&mut targets, "expiring", None, 0, "", None, |target| {
+            TargetSignal {
+                quota_reset_in_ms: Some(if target.model_id == "quota-only" {
+                    60_000
+                } else {
+                    600_000
+                }),
+                credential_expires_in_ms: (target.model_id == "credential-sooner")
+                    .then_some(20_000),
+                ..TargetSignal::default()
+            }
+        });
+        assert_eq!(targets[0].model_id, "credential-sooner");
+
+        let mut targets = vec![compiled("no-expiry"), compiled("near-expiry")];
+        rank_targets(&mut targets, "expiring", None, 0, "", None, |target| {
+            TargetSignal {
+                credential_expires_in_ms: (target.model_id == "near-expiry").then_some(30_000),
+                ..TargetSignal::default()
+            }
+        });
+        assert_eq!(targets[0].model_id, "near-expiry");
+
+        let mut targets = vec![compiled("no-expiry"), compiled("far-expiry")];
+        rank_targets(&mut targets, "expiring", None, 0, "", None, |target| {
+            TargetSignal {
+                credential_expires_in_ms: (target.model_id == "far-expiry")
+                    .then_some(30 * 24 * 60 * 60 * 1000),
+                ..TargetSignal::default()
+            }
+        });
+        assert_eq!(targets[0].model_id, "far-expiry");
+    }
+
+    #[test]
+    fn fallback_remains_last_for_free_drain_and_expiring() {
+        for strategy in ["free", "drain", "expiring"] {
+            let (mut data, providers) = setup(
+                vec![target("t1", "low", 10, 100), target("t2", "high", 0, 1)],
+                vec![provider("low", "openai"), provider("high", "openai")],
+            );
+            data.groups[0].strategy = strategy.into();
+            let plan = RoutePlan::compile(&data, &route(), &providers).unwrap();
+            let (mut attempts, fallback) = plan.parts(3);
+            rank_targets(&mut attempts, &plan.strategy, None, 0, "", None, |target| {
+                TargetSignal {
+                    price_per_million: if target.provider_id == "low" {
+                        0.0
+                    } else {
+                        20.0
+                    },
+                    quota_remaining: if target.provider_id == "low" {
+                        10
+                    } else {
+                        500_000
+                    },
+                    quota_reset_in_ms: Some(if target.provider_id == "low" {
+                        60_000
+                    } else {
+                        600_000
+                    }),
+                    ..TargetSignal::default()
+                }
+            });
+            attempts.extend(fallback.clone());
+            assert_eq!(fallback.len(), 1, "strategy {strategy}");
+            assert_eq!(fallback[0].provider_id, "high", "strategy {strategy}");
+            assert_eq!(
+                attempts.last().unwrap().provider_id,
+                "high",
+                "strategy {strategy}"
+            );
+        }
+    }
+
+    #[test]
+    fn free_drain_and_expiring_keep_stable_order_when_signals_are_equal() {
+        for strategy in ["free", "drain", "expiring"] {
+            let mut targets = vec![compiled("a"), compiled("b"), compiled("c")];
+            rank_targets(&mut targets, strategy, None, 0, "", None, |_| {
+                TargetSignal::default()
+            });
+            let order: Vec<&str> = targets
+                .iter()
+                .map(|target| target.model_id.as_str())
+                .collect();
+            assert_eq!(order, ["a", "b", "c"], "strategy {strategy}");
+        }
     }
 
     #[test]

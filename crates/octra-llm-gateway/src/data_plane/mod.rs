@@ -896,7 +896,15 @@ async fn execute(
     );
     if matches!(
         plan.strategy.as_str(),
-        "smart" | "intent" | "pace" | "usage" | "quota" | "semantic"
+        "smart"
+            | "intent"
+            | "pace"
+            | "usage"
+            | "quota"
+            | "semantic"
+            | "free"
+            | "drain"
+            | "expiring"
     ) {
         tracing::debug!(
             strategy = %plan.strategy,
@@ -1251,6 +1259,8 @@ fn target_signal(snapshot: &RuntimeSnapshot, target: &Target, now_ms: i64) -> Ta
     let mut pace_wait_ms = 0u64;
     let mut quota: Option<i64> = None;
     let mut unlimited = false;
+    let mut quota_reset_in_ms: Option<i64> = None;
+    let mut credential_expires_in_ms: Option<i64> = None;
     let mut accounts = 0usize;
     for account in snapshot.accounts_for(&target.provider_id) {
         if let Some(pinned) = target.account_id.as_deref()
@@ -1263,6 +1273,13 @@ fn target_signal(snapshot: &RuntimeSnapshot, target: &Target, now_ms: i64) -> Ta
         latency_ms = latency_ms.max(account.latency_ewma_ms());
         failures = failures.saturating_add(account.failure_ewma());
         pace_wait_ms = pace_wait_ms.max(account.pace_wait_ms(now_ms));
+        if let Some(reset) = account.quota_reset_in_ms(now_ms) {
+            quota_reset_in_ms = Some(quota_reset_in_ms.map_or(reset, |current| current.min(reset)));
+        }
+        if let Some(expires) = account.credential_expires_in_ms(now_ms) {
+            credential_expires_in_ms =
+                Some(credential_expires_in_ms.map_or(expires, |current| current.min(expires)));
+        }
         match account.quota_remaining() {
             Some(remaining) => {
                 *quota.get_or_insert(0) += remaining.max(0);
@@ -1294,6 +1311,8 @@ fn target_signal(snapshot: &RuntimeSnapshot, target: &Target, now_ms: i64) -> Ta
         failures,
         price_per_million,
         pace_wait_ms,
+        quota_reset_in_ms,
+        credential_expires_in_ms,
     }
 }
 

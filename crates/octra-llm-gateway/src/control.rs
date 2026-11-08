@@ -218,8 +218,7 @@ fn json_object(raw: Option<String>, field: &str) -> ApiResult<String> {
     Ok(value.to_string())
 }
 
-/// Routing-group strategies accepted by the control plane. `free` and
-/// `expiring` remain unimplemented and are intentionally rejected.
+/// Routing-group strategies accepted by the control plane.
 pub const ROUTING_STRATEGIES: &[&str] = &[
     "priority",
     "weighted",
@@ -230,6 +229,9 @@ pub const ROUTING_STRATEGIES: &[&str] = &[
     "weight",
     "fast",
     "cheap",
+    "free",
+    "drain",
+    "expiring",
     "usage",
     "quota",
     "smart",
@@ -244,7 +246,7 @@ pub fn validate_routing_strategy(strategy: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(
-            "strategy must be priority, weighted, order, rotate, round_robin, manual, weight, fast, cheap, usage, quota, smart, pace, intent or semantic"
+            "strategy must be priority, weighted, order, rotate, round_robin, manual, weight, fast, cheap, free, drain, expiring, usage, quota, smart, pace, intent or semantic"
                 .to_string(),
         )
     }
