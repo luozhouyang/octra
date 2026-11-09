@@ -55,4 +55,4 @@ A new endpoint belongs to the gateway that owns the protocol, not to the daemon.
 
 ## Drift instrument
 
-Drift caught by: inspection of the router merge order in `crates/octra-daemon/src/main.rs`, the LLM route provisioning in `crates/octra-daemon/src/llm_upstream.rs`, the in-process branch in `crates/api_gateway/octra-api-gateway/src/data.rs`, and the route tables in `crates/octra-llm-gateway/src/data_plane/mod.rs` and `crates/octra-mcp-gateway/src/data.rs`. `crates/octra-daemon/tests/llm_routes.rs` and `crates/api_gateway/octra-api-gateway/tests/internal_upstream.rs` assert the front-door behavior.
+Drift caught by: inspection of the router merge order in `crates/octra-daemon/src/main.rs`, the LLM route provisioning in `crates/octra-daemon/src/llm_upstream.rs`, the in-process branch in `crates/api_gateway/octra-api-gateway/src/data.rs`, and the route tables in `crates/llm_gateway/octra-llm-gateway/src/data_plane/mod.rs` and `crates/octra-mcp-gateway/src/data.rs`. `crates/octra-daemon/tests/llm_routes.rs` and `crates/api_gateway/octra-api-gateway/tests/internal_upstream.rs` assert the front-door behavior.

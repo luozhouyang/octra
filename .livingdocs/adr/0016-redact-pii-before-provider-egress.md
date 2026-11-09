@@ -67,7 +67,7 @@ We will make PII redaction an opt-in LLM gateway capability with a fail-closed d
 
 ## Verification
 
-**Implementation impact:** `crates/octra-llm-plugin-builtin/src/redaction.rs`, `crates/octra-pii-types/src/`, `crates/octra-llm-gateway/src/pii/`, `crates/octra-llm-gateway/src/control.rs`, `migrations/0016_pii_engines.sql`, `apps/desktop/src/app/pages/settings.tsx`.
+**Implementation impact:** `crates/llm_gateway/octra-llm-plugin-builtin/src/redaction.rs`, `crates/llm_gateway/octra-pii-types/src/`, `crates/llm_gateway/octra-llm-gateway/src/pii/`, `crates/llm_gateway/octra-llm-gateway/src/control.rs`, `migrations/0016_pii_engines.sql`, `apps/desktop/src/app/pages/settings.tsx`.
 
 **Verification criteria:**
 
@@ -82,4 +82,4 @@ We will make PII redaction an opt-in LLM gateway capability with a fail-closed d
 
 [1] magpie, "Privacy masking." https://github.com/yetone/magpie#privacy-masking
 [2] Octra ADR 0007, "Keep secrets out of storage and agents." `0007-keep-secrets-out-of-storage-and-agents.md`
-[3] Octra repository, `crates/octra-llm-plugin-builtin/src/redaction.rs` and `crates/octra-llm-gateway/src/pii/`. https://github.com/luozhouyang/octra
+[3] Octra repository, `crates/llm_gateway/octra-llm-plugin-builtin/src/redaction.rs` and `crates/llm_gateway/octra-llm-gateway/src/pii/`. https://github.com/luozhouyang/octra

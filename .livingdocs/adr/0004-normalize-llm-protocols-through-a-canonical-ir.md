@@ -39,7 +39,7 @@ Rejected alternatives:
 
 ## Verification
 
-**Implementation impact:** `crates/octra-llm-core/src/`, `crates/octra-llm-protocol/src/`, `crates/octra-llm-gateway/src/`.
+**Implementation impact:** `crates/llm_gateway/octra-llm-core/src/`, `crates/llm_gateway/octra-llm-protocol/src/`, `crates/llm_gateway/octra-llm-gateway/src/`.
 
 **Verification criteria:**
 - OpenAI and Anthropic request, response, and SSE conversions round-trip through the IR in fixture tests.

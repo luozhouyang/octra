@@ -67,7 +67,7 @@ We will model the LLM gateway on magpie's local-gateway shape and keep the imple
 
 ## Verification
 
-**Implementation impact:** `crates/octra-llm-core/`, `crates/octra-llm-protocol/`, `crates/octra-llm-gateway/src/routing.rs`, `crates/octra-llm-gateway/src/accounts.rs`, `crates/octra-llm-gateway/src/credentials/`, `crates/octra-llm-gateway/src/vk_policy.rs`, `crates/octra-llm-gateway/src/data_plane/`, `crates/octra-llm-gateway/src/usage.rs`, `crates/octra-llm-gateway/src/cost.rs`, `crates/octra-llm-plugin-builtin/src/redaction.rs`, `migrations/0003_llm_gateway.sql`, `migrations/0007_llm_accounts.sql`, `migrations/0014_usage_analytics.sql`, `migrations/0016_pii_engines.sql`, `migrations/0017_oauth_credentials.sql`, `migrations/0018_llm_virtual_key_family.sql`, `migrations/0019_llm_counters.sql`.
+**Implementation impact:** `crates/llm_gateway/octra-llm-core/`, `crates/llm_gateway/octra-llm-protocol/`, `crates/llm_gateway/octra-llm-gateway/src/routing.rs`, `crates/llm_gateway/octra-llm-gateway/src/accounts.rs`, `crates/llm_gateway/octra-llm-gateway/src/credentials/`, `crates/llm_gateway/octra-llm-gateway/src/vk_policy.rs`, `crates/llm_gateway/octra-llm-gateway/src/data_plane/`, `crates/llm_gateway/octra-llm-gateway/src/usage.rs`, `crates/llm_gateway/octra-llm-gateway/src/cost.rs`, `crates/llm_gateway/octra-llm-plugin-builtin/src/redaction.rs`, `migrations/0003_llm_gateway.sql`, `migrations/0007_llm_accounts.sql`, `migrations/0014_usage_analytics.sql`, `migrations/0016_pii_engines.sql`, `migrations/0017_oauth_credentials.sql`, `migrations/0018_llm_virtual_key_family.sql`, `migrations/0019_llm_counters.sql`.
 
 **Verification criteria:**
 
@@ -87,4 +87,4 @@ We will model the LLM gateway on magpie's local-gateway shape and keep the imple
 [3] magpie, "Reference." https://github.com/yetone/magpie/blob/main/docs/reference.md
 [4] Octra ADR 0004, "Normalize LLM protocols through a canonical IR." `0004-normalize-llm-protocols-through-a-canonical-ir.md`
 [5] Octra ADR 0007, "Keep secrets out of storage and agents." `0007-keep-secrets-out-of-storage-and-agents.md`
-[6] Octra repository, `crates/octra-llm-*`. https://github.com/luozhouyang/octra
+[6] Octra repository, `crates/llm_gateway/octra-llm-*`. https://github.com/luozhouyang/octra

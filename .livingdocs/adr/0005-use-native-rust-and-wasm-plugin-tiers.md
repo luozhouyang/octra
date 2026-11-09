@@ -41,7 +41,7 @@ Rejected alternatives:
 
 ## Verification
 
-**Implementation impact:** `crates/api_gateway/octra-api-plugin-types/`, `crates/api_gateway/octra-api-plugin-runtime/`, `crates/api_gateway/octra-api-plugin-wasm/`, `crates/octra-llm-plugin-*`, `crates/api_gateway/octra-api-plugin-sdk/`, `crates/api_gateway/octra-api-plugin-wasm/wit/plugin.wit`.
+**Implementation impact:** `crates/api_gateway/octra-api-plugin-types/`, `crates/api_gateway/octra-api-plugin-runtime/`, `crates/api_gateway/octra-api-plugin-wasm/`, `crates/llm_gateway/octra-llm-plugin-*`, `crates/api_gateway/octra-api-plugin-sdk/`, `crates/api_gateway/octra-api-plugin-wasm/wit/plugin.wit`.
 
 **Verification criteria:**
 - Built-in plugins register through gateway-specific traits and require no WASM runtime.

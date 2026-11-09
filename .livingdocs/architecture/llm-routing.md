@@ -78,4 +78,4 @@ The data plane caps upstream attempts (`MAX_ATTEMPTS = 3`). Each attempt consume
 
 ## Drift instrument
 
-Drift caught by: the routing and account tests in `crates/octra-llm-gateway/src/routing.rs`, `crates/octra-llm-gateway/src/similarity.rs`, `crates/octra-llm-gateway/src/accounts.rs`, `crates/octra-llm-gateway/tests/ai_runtime.rs`, and `crates/octra-llm-gateway/tests/data_plane.rs`. A future fixture should assert the full attempt order for each strategy with a mixed account state.
+Drift caught by: the routing and account tests in `crates/llm_gateway/octra-llm-gateway/src/routing.rs`, `crates/llm_gateway/octra-llm-gateway/src/similarity.rs`, `crates/llm_gateway/octra-llm-gateway/src/accounts.rs`, `crates/llm_gateway/octra-llm-gateway/tests/ai_runtime.rs`, and `crates/llm_gateway/octra-llm-gateway/tests/data_plane.rs`. A future fixture should assert the full attempt order for each strategy with a mixed account state.

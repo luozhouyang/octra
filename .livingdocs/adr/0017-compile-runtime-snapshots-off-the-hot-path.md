@@ -65,7 +65,7 @@ We will keep request routing and authorization on immutable in-memory snapshots 
 
 ## Verification
 
-**Implementation impact:** `crates/octra-runtime/src/lib.rs`, `crates/octra-runtime/src/matcher.rs`, `crates/octra-runtime/src/balancer.rs`, `crates/octra-llm-gateway/src/runtime.rs`, `crates/octra-llm-gateway/src/routing.rs`, `crates/octra-llm-gateway/src/accounts.rs`, `crates/octra-mcp-gateway/src/servers.rs`, `crates/octra-daemon/src/main.rs`.
+**Implementation impact:** `crates/octra-runtime/src/lib.rs`, `crates/octra-runtime/src/matcher.rs`, `crates/octra-runtime/src/balancer.rs`, `crates/llm_gateway/octra-llm-gateway/src/runtime.rs`, `crates/llm_gateway/octra-llm-gateway/src/routing.rs`, `crates/llm_gateway/octra-llm-gateway/src/accounts.rs`, `crates/octra-mcp-gateway/src/servers.rs`, `crates/octra-daemon/src/main.rs`.
 
 **Verification criteria:**
 
@@ -79,4 +79,4 @@ We will keep request routing and authorization on immutable in-memory snapshots 
 
 [1] Octra ADR 0002, "Use SQLite as the only persistence layer." `0002-use-sqlite-as-the-only-persistence-layer.md`
 [2] Octra ADR 0003, "Run the gateway as an independent daemon." `0003-run-the-gateway-as-an-independent-daemon.md`
-[3] Octra repository, `crates/octra-runtime`, `crates/octra-llm-gateway/src/runtime.rs`, `crates/octra-mcp-gateway/src/servers.rs`. https://github.com/luozhouyang/octra
+[3] Octra repository, `crates/octra-runtime`, `crates/llm_gateway/octra-llm-gateway/src/runtime.rs`, `crates/octra-mcp-gateway/src/servers.rs`. https://github.com/luozhouyang/octra

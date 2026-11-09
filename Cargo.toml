@@ -4,6 +4,7 @@ members = [
     "apps/desktop/src-tauri",
     "crates/octra-*",
     "crates/api_gateway/*",
+    "crates/llm_gateway/*",
 ]
 
 [workspace.package]
@@ -85,7 +86,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 octra-agent-core = { path = "crates/octra-agent-core" }
-octra-ai-config = { path = "crates/octra-ai-config" }
+octra-ai-config = { path = "crates/llm_gateway/octra-ai-config" }
 octra-api-core = { path = "crates/api_gateway/octra-api-core" }
 octra-api-gateway = { path = "crates/api_gateway/octra-api-gateway" }
 octra-config = { path = "crates/octra-config" }
@@ -94,14 +95,14 @@ octra-data-plane = { path = "crates/octra-data-plane" }
 octra-desktop-daemon = { path = "crates/octra-desktop-daemon" }
 octra-types = { path = "crates/octra-types" }
 octra-runtime = { path = "crates/octra-runtime" }
-octra-llm-core = { path = "crates/octra-llm-core" }
-octra-pii-types = { path = "crates/octra-pii-types" }
-octra-llm-gateway = { path = "crates/octra-llm-gateway" }
-octra-llm-plugin-types = { path = "crates/octra-llm-plugin-types" }
-octra-llm-plugin-builtin = { path = "crates/octra-llm-plugin-builtin" }
-octra-llm-plugin-runtime = { path = "crates/octra-llm-plugin-runtime" }
-octra-llm-plugin-wasm = { path = "crates/octra-llm-plugin-wasm" }
-octra-llm-protocol = { path = "crates/octra-llm-protocol" }
+octra-llm-core = { path = "crates/llm_gateway/octra-llm-core" }
+octra-pii-types = { path = "crates/llm_gateway/octra-pii-types" }
+octra-llm-gateway = { path = "crates/llm_gateway/octra-llm-gateway" }
+octra-llm-plugin-types = { path = "crates/llm_gateway/octra-llm-plugin-types" }
+octra-llm-plugin-builtin = { path = "crates/llm_gateway/octra-llm-plugin-builtin" }
+octra-llm-plugin-runtime = { path = "crates/llm_gateway/octra-llm-plugin-runtime" }
+octra-llm-plugin-wasm = { path = "crates/llm_gateway/octra-llm-plugin-wasm" }
+octra-llm-protocol = { path = "crates/llm_gateway/octra-llm-protocol" }
 octra-mcp-core = { path = "crates/octra-mcp-core" }
 octra-mcp-gateway = { path = "crates/octra-mcp-gateway" }
 octra-observability = { path = "crates/octra-observability" }

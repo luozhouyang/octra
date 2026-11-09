@@ -43,7 +43,7 @@ Rejected alternatives:
 
 ## Verification
 
-**Implementation impact:** `crates/octra-secrets/`, `crates/octra-llm-gateway/src/`, `crates/octra-storage/src/llm.rs`, `crates/octra-storage/src/api/`, `crates/octra-storage/src/lib.rs`, `crates/octra-types/src/auth.rs`.
+**Implementation impact:** `crates/octra-secrets/`, `crates/llm_gateway/octra-llm-gateway/src/`, `crates/octra-storage/src/llm.rs`, `crates/octra-storage/src/api/`, `crates/octra-storage/src/lib.rs`, `crates/octra-types/src/auth.rs`.
 
 **Verification criteria:**
 - Static provider secret resolution accepts only reference forms and never writes the resolved value to SQLite.

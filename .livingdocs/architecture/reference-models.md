@@ -73,9 +73,9 @@ flowchart LR
 
 | Capability | Status | Evidence / gap |
 |---|---|---|
-| Four ingress protocols + IR | Implemented | `crates/octra-llm-protocol`, `crates/octra-llm-core` |
+| Four ingress protocols + IR | Implemented | `crates/llm_gateway/octra-llm-protocol`, `crates/llm_gateway/octra-llm-core` |
 | Vertex and Bedrock Converse upstream adapters | Implemented | `adapter.rs`, `octra-llm-protocol/src/bedrock/`, `data_plane/stream.rs` |
-| Streaming, tool calls, usage | Implemented | `crates/octra-llm-gateway/src/data_plane/` |
+| Streaming, tool calls, usage | Implemented | `crates/llm_gateway/octra-llm-gateway/src/data_plane/` |
 | Virtual models and routing groups | Implemented | `routing.rs`, `migrations/0003_llm_gateway.sql` |
 | Priority/order/manual/weight/rotate/fast/cheap/free/drain/expiring/smart/usage/quota/pace/intent | Implemented | `routing.rs`, `data_plane/mod.rs` |
 | Provider accounts, quota, cooldown, pacing | Implemented | `accounts.rs` |
