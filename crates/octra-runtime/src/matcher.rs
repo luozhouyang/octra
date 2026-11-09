@@ -459,8 +459,6 @@ mod tests {
             headers: BTreeMap::new(),
             strip_path: false,
             preserve_host: false,
-            request_buffering: true,
-            response_buffering: true,
             regex_priority: 0,
             service_id: service_id.map(str::to_string),
             enabled: true,

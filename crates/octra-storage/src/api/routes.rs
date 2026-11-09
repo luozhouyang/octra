@@ -57,9 +57,9 @@ impl ApiStore {
 
         sqlx::query(&format!(
             "INSERT INTO routes (id, name, protocols, methods, hosts, paths, headers, \
-             strip_path, preserve_host, request_buffering, response_buffering, regex_priority, \
+             strip_path, preserve_host, regex_priority, \
              service_id, enabled, tags, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now}, {now})",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now}, {now})",
             now = epoch_now()
         ))
         .bind(&id)
@@ -71,8 +71,6 @@ impl ApiStore {
         .bind(encode_optional_json(input.headers.as_ref())?)
         .bind(input.strip_path.unwrap_or(true))
         .bind(input.preserve_host.unwrap_or(false))
-        .bind(input.request_buffering.unwrap_or(true))
-        .bind(input.response_buffering.unwrap_or(true))
         .bind(input.regex_priority.unwrap_or(0))
         .bind(&input.service_id)
         .bind(input.enabled.unwrap_or(true))
@@ -102,8 +100,6 @@ impl ApiStore {
                 headers = COALESCE(?, headers), \
                 strip_path = COALESCE(?, strip_path), \
                 preserve_host = COALESCE(?, preserve_host), \
-                request_buffering = COALESCE(?, request_buffering), \
-                response_buffering = COALESCE(?, response_buffering), \
                 regex_priority = COALESCE(?, regex_priority), \
                 service_id = CASE WHEN ? THEN ? ELSE service_id END, \
                 enabled = COALESCE(?, enabled), \
@@ -121,8 +117,6 @@ impl ApiStore {
         .bind(input.headers.as_ref().map(encode_json).transpose()?)
         .bind(input.strip_path)
         .bind(input.preserve_host)
-        .bind(input.request_buffering)
-        .bind(input.response_buffering)
         .bind(input.regex_priority)
         .bind(service_set)
         .bind(service_id)

@@ -132,48 +132,6 @@ async fn streaming_response_plugins_are_applied_without_buffering() {
 }
 
 #[tokio::test]
-async fn route_response_buffering_false_skips_body_plugins() {
-    let (addr, _calls) = spawn_mock("a").await;
-    let gateway = gateway().await;
-    seed_service(
-        &gateway.storage,
-        "svc-stream",
-        &format!("http://{addr}"),
-        false,
-        "/api",
-        true,
-    )
-    .await;
-    service_plugin(
-        &gateway.storage,
-        "svc-stream",
-        "response-transformer",
-        serde_json::json!({"add": {"json": ["injected:true"]}}),
-    )
-    .await;
-    gateway
-        .storage
-        .api
-        .update_route(
-            "svc-stream-route",
-            &octra_api_core::UpdateRoute {
-                response_buffering: Some(false),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    gateway.reload().await;
-
-    let (status, _, json) = gateway.send(request("GET", "/api/buffering")).await;
-    assert_eq!(status, StatusCode::CREATED, "{json}");
-    assert!(
-        json.get("injected").is_none(),
-        "response-body plugin must not run when route buffering is disabled: {json}"
-    );
-}
-
-#[tokio::test]
 async fn non_idempotent_requests_retry_a_connect_failure() {
     let (addr, _calls) = spawn_mock("live").await;
     let gateway = gateway().await;

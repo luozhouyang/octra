@@ -115,8 +115,6 @@ export interface RouteView {
   headers: Record<string, string[]>;
   strip_path: boolean;
   preserve_host: boolean;
-  request_buffering: boolean;
-  response_buffering: boolean;
   regex_priority: number;
   service_id: string | null;
   enabled: boolean;

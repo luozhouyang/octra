@@ -14,13 +14,11 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header}
 use axum::response::Response;
 use bytes::Bytes;
 use futures_util::StreamExt;
-use http_body::Body as _;
 use octra_api_core::{Route, Service};
 use octra_api_plugin_runtime::PluginChain;
 use octra_api_plugin_types::{
-    AuthBasic, AuthJwt, AuthKey, BodyContext, ConsumerInfo, ErrorContext, GatewayState, LogContext,
-    PluginError, RequestBodyContext, RequestContext, ResponseBodyContext, ResponseContext,
-    UpstreamRequestContext,
+    AuthBasic, AuthJwt, AuthKey, ConsumerInfo, GatewayState, HeaderFilterContext, LogContext,
+    PluginError, RequestContext, ResponseContext,
 };
 use octra_data_plane::{
     HEADER_REQUEST_ID, apply_forwarded_headers, error_response, new_request_id,
@@ -205,14 +203,10 @@ pub async fn proxy(
 
     let max_body = state.config.gateway.max_body_bytes;
     let mut body = Some(body);
-    let mut early_body = None;
-    if pre_chain.needs_request_body() {
-        let raw = body.take().expect("request body is available");
-        match axum::body::to_bytes(raw, max_body).await {
-            Ok(bytes) => {
-                auth_state.request_body = Some(bytes.clone());
-                early_body = Some(bytes);
-            }
+    let max_body_bytes =
+        match axum::body::to_bytes(body.take().expect("request body is available"), max_body).await
+        {
+            Ok(bytes) => bytes,
             Err(_) => {
                 let response = payload_too_large();
                 let elapsed = started.elapsed();
@@ -232,8 +226,8 @@ pub async fn proxy(
                 )
                 .await;
             }
-        }
-    }
+        };
+    auth_state.request_body = Some(max_body_bytes);
 
     let mut request_cx = RequestContext {
         request_id: &request_id,
@@ -248,7 +242,31 @@ pub async fn proxy(
         route,
         service,
     };
-    match pre_chain.on_request(&mut request_cx).await {
+    if let Some(response) = pre_chain
+        .rewrite(&mut request_cx)
+        .await
+        .map_err(|error| error.to_string())
+        .ok()
+        .flatten()
+    {
+        let elapsed = started.elapsed();
+        state.metrics.record(response.status().as_u16(), elapsed, 0);
+        return complete(
+            &state,
+            &pre_chain,
+            &PluginChain::default(),
+            &subject,
+            &mut auth_state,
+            Finish {
+                latency: elapsed,
+                target: None,
+                error: None,
+            },
+            response,
+        )
+        .await;
+    }
+    match pre_chain.access(&mut request_cx).await {
         Ok(None) => {}
         Ok(Some(response)) => {
             let elapsed = started.elapsed();
@@ -326,7 +344,7 @@ pub async fn proxy(
         route,
         service,
     };
-    match post_chain.on_request(&mut post_cx).await {
+    match post_chain.access(&mut post_cx).await {
         Ok(None) => {}
         Ok(Some(response)) => {
             let elapsed = started.elapsed();
@@ -458,14 +476,8 @@ pub async fn proxy(
     )
     .unwrap_or(usize::MAX);
     attempts.truncate(attempts.len().min(retry_limit));
-    // Without request buffering the body cannot be replayed, so keep one
-    // attempt. Non-idempotent methods are buffered and may retry only a
-    // connection failure, before any request bytes reached the upstream.
-    if !dispatch.route.route.request_buffering {
-        attempts.truncate(1);
-    }
 
-    let Some(target_url) = attempts.first().map(|endpoint| endpoint.url.clone()) else {
+    if attempts.is_empty() {
         let response = bad_gateway("no eligible upstream target");
         let elapsed = started.elapsed();
         state.metrics.record_upstream_error();
@@ -490,46 +502,7 @@ pub async fn proxy(
         parts.method = method;
     }
 
-    let mut upstream_cx = UpstreamRequestContext {
-        request_id: &request_id,
-        state: &mut auth_state,
-        method: &parts.method,
-        uri: &mut parts.uri,
-        headers: &mut parts.headers,
-        consumer_id: consumer_id.as_deref(),
-        route,
-        service,
-        target_url: &target_url,
-    };
-    for chain in [&pre_chain, &post_chain] {
-        match chain.on_upstream_request(&mut upstream_cx).await {
-            Ok(None) => {}
-            Ok(Some(response)) => {
-                let elapsed = started.elapsed();
-                state.metrics.record(response.status().as_u16(), elapsed, 0);
-                return complete(
-                    &state,
-                    &pre_chain,
-                    &post_chain,
-                    &subject,
-                    &mut auth_state,
-                    Finish {
-                        latency: elapsed,
-                        target: Some(target_url.clone()),
-                        error: None,
-                    },
-                    response,
-                )
-                .await;
-            }
-            Err(error) => {
-                return failed_plugin(&state, &subject, started, error);
-            }
-        }
-    }
-
     let request_headers = parts.headers.clone();
-    let original_uri = parts.uri.clone();
     let upstream_host = endpoint.host_header().map(str::to_string);
     let context = ForwardContext {
         client_addr: Some(peer),
@@ -539,107 +512,11 @@ pub async fn proxy(
         request_id: &request_id,
     };
 
-    let declared_length = parts
-        .headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
-    if declared_length.is_some_and(|length| length > max_body) {
-        let response = payload_too_large();
-        let elapsed = started.elapsed();
-        state.metrics.record(response.status().as_u16(), elapsed, 0);
-        return complete(
-            &state,
-            &pre_chain,
-            &post_chain,
-            &subject,
-            &mut auth_state,
-            Finish {
-                latency: elapsed,
-                target: None,
-                error: None,
-            },
-            response,
-        )
-        .await;
+    let request_body = auth_state.request_body.take().unwrap_or_default();
+    if let Ok(value) = HeaderValue::from_str(&request_body.len().to_string()) {
+        parts.headers.insert(header::CONTENT_LENGTH, value);
     }
-
-    let request_body_plugins = dispatch.route.route.request_buffering
-        && (pre_chain.needs_request_body() || post_chain.needs_request_body());
-    if !dispatch.route.route.request_buffering
-        && (pre_chain.needs_request_body() || post_chain.needs_request_body())
-    {
-        tracing::warn!(
-            route = %dispatch.route.route.id,
-            "route disables request buffering; body-mutating plugins are skipped"
-        );
-    }
-    let payload = if let Some(bytes) = early_body {
-        RequestBody::Buffered(bytes)
-    } else if attempts.len() > 1 || request_body_plugins {
-        let raw = body.take().expect("request body is available");
-        match axum::body::to_bytes(raw, max_body).await {
-            Ok(bytes) => RequestBody::Buffered(bytes),
-            Err(_) => {
-                let response = payload_too_large();
-                let elapsed = started.elapsed();
-                state.metrics.record(response.status().as_u16(), elapsed, 0);
-                return complete(
-                    &state,
-                    &pre_chain,
-                    &post_chain,
-                    &subject,
-                    &mut auth_state,
-                    Finish {
-                        latency: elapsed,
-                        target: None,
-                        error: None,
-                    },
-                    response,
-                )
-                .await;
-            }
-        }
-    } else {
-        RequestBody::Stream(Body::new(http_body_util::Limited::new(
-            body.take().expect("request body is available"),
-            max_body,
-        )))
-    };
-
-    let payload = if request_body_plugins {
-        match payload {
-            RequestBody::Buffered(bytes) => {
-                let bytes = {
-                    let mut body_cx = RequestBodyContext {
-                        request_id: &request_id,
-                        state: &mut auth_state,
-                        method: &parts.method,
-                        uri: &mut parts.uri,
-                        headers: &mut parts.headers,
-                        consumer_id: consumer_id.as_deref(),
-                        route,
-                        service,
-                    };
-                    let bytes = match pre_chain.on_request_buffer(&mut body_cx, bytes).await {
-                        Ok(bytes) => bytes,
-                        Err(error) => return failed_plugin(&state, &subject, started, error),
-                    };
-                    match post_chain.on_request_buffer(&mut body_cx, bytes).await {
-                        Ok(bytes) => bytes,
-                        Err(error) => return failed_plugin(&state, &subject, started, error),
-                    }
-                };
-                if let Ok(value) = HeaderValue::from_str(&bytes.len().to_string()) {
-                    parts.headers.insert(header::CONTENT_LENGTH, value);
-                }
-                RequestBody::Buffered(bytes)
-            }
-            stream => stream,
-        }
-    } else {
-        payload
-    };
+    let payload = RequestBody::Buffered(request_body);
 
     let outcome = forward(
         &state,
@@ -672,7 +549,7 @@ pub async fn proxy(
                     service,
                     target_url: &target,
                 };
-                match chain.on_response(&mut response_cx).await {
+                match chain.response(&mut response_cx).await {
                     Ok(None) => {}
                     Ok(Some(replacement)) => {
                         let elapsed = started.elapsed();
@@ -700,6 +577,23 @@ pub async fn proxy(
                 }
             }
 
+            for chain in [&pre_chain, &post_chain] {
+                let mut header_cx = HeaderFilterContext {
+                    request_id: &request_id,
+                    state: &mut auth_state,
+                    request_headers: &request_headers,
+                    status: &mut response_parts.status,
+                    headers: &mut response_parts.headers,
+                    consumer_id: consumer_id.as_deref(),
+                    route,
+                    service,
+                    target_url: &target,
+                };
+                if let Err(error) = chain.header_filter(&mut header_cx).await {
+                    return failed_plugin(&state, &subject, started, error);
+                }
+            }
+
             if let Some(cookie) = &sticky_cookie
                 && let Some(target) = response_parts.extensions.get::<UpstreamTarget>()
             {
@@ -719,83 +613,27 @@ pub async fn proxy(
                 }
             }
 
-            let response_body_plugins = dispatch.route.route.response_buffering
-                && (pre_chain.needs_response_buffer() || post_chain.needs_response_buffer());
-            let response_body_stream = dispatch.route.route.response_buffering
-                && !response_body_plugins
-                && (pre_chain.streams_response_body() || post_chain.streams_response_body());
-            if !dispatch.route.route.response_buffering
-                && (pre_chain.needs_response_body()
-                    || post_chain.needs_response_body()
-                    || pre_chain.streams_response_body()
-                    || post_chain.streams_response_body())
-            {
-                tracing::warn!(
-                    route = %dispatch.route.route.id,
-                    "route disables response buffering; response-body plugins are skipped"
-                );
-            }
-            let response_body = if response_body_plugins {
-                match axum::body::to_bytes(response_body, max_body).await {
-                    Ok(bytes) => {
-                        let bytes = {
-                            let mut body_cx = ResponseBodyContext {
-                                request_id: &request_id,
-                                state: &mut auth_state,
-                                status: response_parts.status,
-                                headers: &response_parts.headers,
-                                consumer_id: consumer_id.as_deref(),
-                                route,
-                                service,
-                                target_url: &target,
-                            };
-                            let bytes =
-                                match pre_chain.on_response_buffer(&mut body_cx, bytes).await {
-                                    Ok(bytes) => bytes,
-                                    Err(error) => {
-                                        return failed_plugin(&state, &subject, started, error);
-                                    }
-                                };
-                            match post_chain.on_response_buffer(&mut body_cx, bytes).await {
-                                Ok(bytes) => bytes,
-                                Err(error) => {
-                                    return failed_plugin(&state, &subject, started, error);
-                                }
-                            }
-                        };
-                        response_parts.headers.remove(header::CONTENT_LENGTH);
-                        if response_parts.status != StatusCode::NO_CONTENT
-                            && response_parts.status != StatusCode::NOT_MODIFIED
-                            && let Ok(value) = HeaderValue::from_str(&bytes.len().to_string())
-                        {
-                            response_parts.headers.insert(header::CONTENT_LENGTH, value);
-                        }
-                        Body::from(bytes)
-                    }
-                    Err(_) => {
-                        return failed_plugin(
-                            &state,
-                            &subject,
-                            started,
-                            PluginError::fail_closed("response body exceeds gateway limit"),
-                        );
-                    }
-                }
-            } else if response_body_stream
+            let has_body_filter = pre_chain
+                .has_phase(octra_api_plugin_types::PluginPhase::BodyFilter)
+                || post_chain.has_phase(octra_api_plugin_types::PluginPhase::BodyFilter);
+            let response_body = if has_body_filter
                 && response_parts.status != StatusCode::NO_CONTENT
                 && response_parts.status != StatusCode::NOT_MODIFIED
             {
                 response_parts.headers.remove(header::CONTENT_LENGTH);
-                streaming_response_body(
+                response_parts.headers.remove(header::TRANSFER_ENCODING);
+                filtered_response_body(
                     response_body,
                     auth_state.clone(),
                     Arc::clone(&pre_chain),
                     Arc::clone(&post_chain),
+                    request_id.clone(),
+                    response_parts.status,
+                    response_parts.headers.clone(),
+                    consumer_id.clone(),
                     route.clone(),
                     service.clone(),
-                    request_id.clone(),
                     target.clone(),
-                    max_body,
                 )
             } else {
                 response_body
@@ -825,26 +663,7 @@ pub async fn proxy(
                 .metrics
                 .record(fallback.status().as_u16(), elapsed, failure.retries);
 
-            let mut error_cx = ErrorContext {
-                request_id: &request_id,
-                state: &mut auth_state,
-                method: &method,
-                uri: &original_uri,
-                headers: &request_headers,
-                consumer_id: consumer_id.as_deref(),
-                route,
-                service,
-                target_url: &failure.target,
-                error: &failure.message,
-            };
-            let mut response = fallback;
-            for chain in [&pre_chain, &post_chain] {
-                match chain.on_error(&mut error_cx).await {
-                    Ok(Some(replacement)) => response = replacement,
-                    Ok(None) => {}
-                    Err(error) => response = plugin_failure(error),
-                }
-            }
+            let response = fallback;
             complete(
                 &state,
                 &pre_chain,
@@ -1050,7 +869,7 @@ async fn apply_response_plugins(
             service,
             target_url,
         };
-        match chain.on_response(&mut cx).await? {
+        match chain.response(&mut cx).await? {
             None => response = Response::from_parts(parts, body),
             Some(replacement) => return Ok(replacement),
         }
@@ -1059,96 +878,220 @@ async fn apply_response_plugins(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn streaming_response_body(
+fn filtered_response_body(
     body: Body,
     state: GatewayState,
     pre_chain: Arc<PluginChain>,
     post_chain: Arc<PluginChain>,
+    request_id: String,
+    status: StatusCode,
+    headers: HeaderMap,
+    consumer_id: Option<String>,
     route: Route,
     service: Service,
-    request_id: String,
     target_url: String,
-    max_body: usize,
 ) -> Body {
     let upstream = body.into_data_stream();
     let stream = futures_util::stream::unfold(
         (
-            upstream, state, pre_chain, post_chain, route, service, request_id, target_url, 0usize,
+            upstream,
+            None::<Bytes>,
+            false,
+            state,
+            pre_chain,
+            post_chain,
+            request_id,
+            status,
+            headers,
+            consumer_id,
+            route,
+            service,
+            target_url,
         ),
         move |(
             mut upstream,
+            pending,
+            finished,
             mut state,
             pre_chain,
             post_chain,
+            request_id,
+            status,
+            headers,
+            consumer_id,
             route,
             service,
-            request_id,
             target_url,
-            mut total,
         )| async move {
-            match upstream.next().await {
-                Some(Ok(chunk)) => {
-                    total = total.saturating_add(chunk.len());
-                    if total > max_body {
-                        let error = std::io::Error::other(
-                            "response body exceeds gateway limit while streaming",
-                        );
-                        return Some((
-                            Err(error),
-                            (
-                                upstream, state, pre_chain, post_chain, route, service, request_id,
-                                target_url, total,
-                            ),
-                        ));
-                    }
-                    let mut cx = BodyContext {
-                        request_id: &request_id,
-                        state: &mut state,
-                        route: &route,
-                        service: &service,
-                        target_url: &target_url,
-                    };
-                    let chunk: Bytes = match pre_chain.on_response_body(&mut cx, chunk).await {
-                        Ok(chunk) => match post_chain.on_response_body(&mut cx, chunk).await {
-                            Ok(chunk) => chunk,
-                            Err(error) => {
-                                tracing::warn!(%request_id, %error, "response stream plugin failed");
-                                return Some((
-                                    Err(std::io::Error::other(error.to_string())),
-                                    (
-                                        upstream, state, pre_chain, post_chain, route, service,
-                                        request_id, target_url, total,
-                                    ),
-                                ));
-                            }
-                        },
-                        Err(error) => {
-                            tracing::warn!(%request_id, %error, "response stream plugin failed");
+            let mut pending = pending;
+            let mut finished = finished;
+            loop {
+                if finished {
+                    return None;
+                }
+                let (chunk, eof) = if let Some(current) = pending.take() {
+                    match upstream.next().await {
+                        Some(Ok(next)) => {
+                            pending = Some(next);
+                            (Some(current), false)
+                        }
+                        Some(Err(error)) => {
                             return Some((
                                 Err(std::io::Error::other(error.to_string())),
                                 (
-                                    upstream, state, pre_chain, post_chain, route, service,
-                                    request_id, target_url, total,
+                                    upstream,
+                                    pending,
+                                    true,
+                                    state,
+                                    pre_chain,
+                                    post_chain,
+                                    request_id,
+                                    status,
+                                    headers,
+                                    consumer_id,
+                                    route,
+                                    service,
+                                    target_url,
                                 ),
                             ));
                         }
-                    };
-                    Some((
+                        None => {
+                            finished = true;
+                            (Some(current), true)
+                        }
+                    }
+                } else {
+                    match upstream.next().await {
+                        Some(Ok(chunk)) => {
+                            pending = Some(chunk);
+                            continue;
+                        }
+                        Some(Err(error)) => {
+                            return Some((
+                                Err(std::io::Error::other(error.to_string())),
+                                (
+                                    upstream,
+                                    pending,
+                                    true,
+                                    state,
+                                    pre_chain,
+                                    post_chain,
+                                    request_id,
+                                    status,
+                                    headers,
+                                    consumer_id,
+                                    route,
+                                    service,
+                                    target_url,
+                                ),
+                            ));
+                        }
+                        None => {
+                            finished = true;
+                            (None, true)
+                        }
+                    }
+                };
+
+                let chunk = match pre_chain
+                    .body_filter(
+                        chunk,
+                        eof,
+                        &request_id,
+                        status,
+                        &headers,
+                        consumer_id.as_deref(),
+                        &route,
+                        &service,
+                        &target_url,
+                        &mut state,
+                    )
+                    .await
+                {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        tracing::warn!(%request_id, %error, "response body filter failed");
+                        return Some((
+                            Err(std::io::Error::other(error.to_string())),
+                            (
+                                upstream,
+                                pending,
+                                true,
+                                state,
+                                pre_chain,
+                                post_chain,
+                                request_id,
+                                status,
+                                headers,
+                                consumer_id,
+                                route,
+                                service,
+                                target_url,
+                            ),
+                        ));
+                    }
+                };
+                let chunk = match post_chain
+                    .body_filter(
+                        chunk,
+                        eof,
+                        &request_id,
+                        status,
+                        &headers,
+                        consumer_id.as_deref(),
+                        &route,
+                        &service,
+                        &target_url,
+                        &mut state,
+                    )
+                    .await
+                {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        tracing::warn!(%request_id, %error, "response body filter failed");
+                        return Some((
+                            Err(std::io::Error::other(error.to_string())),
+                            (
+                                upstream,
+                                pending,
+                                true,
+                                state,
+                                pre_chain,
+                                post_chain,
+                                request_id,
+                                status,
+                                headers,
+                                consumer_id,
+                                route,
+                                service,
+                                target_url,
+                            ),
+                        ));
+                    }
+                };
+                if let Some(chunk) = chunk {
+                    return Some((
                         Ok(chunk),
                         (
-                            upstream, state, pre_chain, post_chain, route, service, request_id,
-                            target_url, total,
+                            upstream,
+                            pending,
+                            finished,
+                            state,
+                            pre_chain,
+                            post_chain,
+                            request_id,
+                            status,
+                            headers,
+                            consumer_id,
+                            route,
+                            service,
+                            target_url,
                         ),
-                    ))
+                    ));
                 }
-                Some(Err(error)) => Some((
-                    Err(std::io::Error::other(error.to_string())),
-                    (
-                        upstream, state, pre_chain, post_chain, route, service, request_id,
-                        target_url, total,
-                    ),
-                )),
-                None => None,
+                if eof {
+                    return None;
+                }
             }
         },
     );
@@ -1186,8 +1129,8 @@ async fn complete(
         target_url: finish.target.as_deref(),
         error: finish.error.as_deref(),
     };
-    pre_chain.on_log(&mut log_cx).await;
-    post_chain.on_log(&mut log_cx).await;
+    pre_chain.log(&mut log_cx).await;
+    post_chain.log(&mut log_cx).await;
 
     if let Some(error) = finish.error.as_deref() {
         tracing::warn!(
@@ -1339,7 +1282,6 @@ fn payload_too_large() -> Response {
 
 enum RequestBody {
     Buffered(bytes::Bytes),
-    Stream(Body),
 }
 
 fn forwarded_scheme(headers: &HeaderMap) -> &'static str {
@@ -1417,8 +1359,6 @@ struct UpstreamTarget {
     url: String,
 }
 
-type Chunk = Result<bytes::Bytes, axum::Error>;
-
 async fn forward(
     state: &ApiDataState,
     attempts: Vec<Arc<Endpoint>>,
@@ -1468,8 +1408,6 @@ async fn forward(
     };
 
     for (index, endpoint) in attempts.iter().enumerate() {
-        let is_last = index + 1 == total_attempts;
-
         let mut forward_headers = base_headers.clone();
         sanitize_request_headers(&mut forward_headers);
         let host_header = if dispatch.route.route.preserve_host {
@@ -1512,14 +1450,6 @@ async fn forward(
 
         let upstream_body = match &mut payload {
             RequestBody::Buffered(bytes) => reqwest::Body::from(bytes.clone()),
-            RequestBody::Stream(_) if !is_last => reqwest::Body::from(Vec::new()),
-            RequestBody::Stream(body) => {
-                let body = std::mem::replace(body, Body::empty());
-                reqwest::Body::wrap_stream(ChunkStream {
-                    body,
-                    finished: false,
-                })
-            }
         };
 
         let request_method =
@@ -1593,43 +1523,6 @@ async fn forward(
             .unwrap_or_default(),
         retries: total_attempts.saturating_sub(1) as u64,
     })
-}
-
-struct ChunkStream {
-    body: Body,
-    finished: bool,
-}
-
-impl futures_util::Stream for ChunkStream {
-    type Item = Chunk;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        loop {
-            if self.finished {
-                return std::task::Poll::Ready(None);
-            }
-            let frame = std::pin::Pin::new(&mut self.body).poll_frame(cx);
-            match frame {
-                std::task::Poll::Ready(Some(Ok(frame))) => {
-                    if let Ok(data) = frame.into_data() {
-                        return std::task::Poll::Ready(Some(Ok(data)));
-                    }
-                }
-                std::task::Poll::Ready(Some(Err(err))) => {
-                    self.finished = true;
-                    return std::task::Poll::Ready(Some(Err(err)));
-                }
-                std::task::Poll::Ready(None) => {
-                    self.finished = true;
-                    return std::task::Poll::Ready(None);
-                }
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        }
-    }
 }
 
 fn classify_reqwest_error(err: &reqwest::Error) -> String {

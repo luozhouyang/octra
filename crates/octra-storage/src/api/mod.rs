@@ -56,8 +56,7 @@ pub struct Page<T> {
 const SERVICE_COLUMNS: &str = "id, name, protocol, host, port, path, retries, connect_timeout, \
      write_timeout, read_timeout, enabled, description, tags, created_at, updated_at";
 const ROUTE_COLUMNS: &str = "id, name, protocols, methods, hosts, paths, headers, strip_path, \
-     preserve_host, request_buffering, response_buffering, regex_priority, service_id, enabled, \
-     tags, created_at, updated_at";
+     preserve_host, regex_priority, service_id, enabled, tags, created_at, updated_at";
 const UPSTREAM_COLUMNS: &str = "id, name, algorithm, hash_on, hash_fallback, hash_on_header, \
      hash_fallback_header, hash_on_cookie, hash_on_cookie_path, hash_on_query_arg, \
      hash_fallback_query_arg, hash_on_uri_capture, hash_fallback_uri_capture, slots, \

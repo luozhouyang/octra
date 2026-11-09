@@ -51,8 +51,6 @@ pub(super) fn map_route(row: &SqliteRow) -> Result<Route> {
         )?,
         strip_path: decode::<i64>(row.try_get("strip_path"), "route")? != 0,
         preserve_host: decode::<i64>(row.try_get("preserve_host"), "route")? != 0,
-        request_buffering: decode::<i64>(row.try_get("request_buffering"), "route")? != 0,
-        response_buffering: decode::<i64>(row.try_get("response_buffering"), "route")? != 0,
         regex_priority: decode(row.try_get("regex_priority"), "route")?,
         service_id: decode(row.try_get("service_id"), "route")?,
         enabled: decode::<i64>(row.try_get("enabled"), "route")? != 0,

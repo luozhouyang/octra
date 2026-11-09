@@ -316,12 +316,6 @@ function RouteForm({
   const [paths, setPaths] = useState(readList(source, "paths"));
   const [stripPath, setStripPath] = useState(readBoolean(source, "strip_path", true));
   const [preserveHost, setPreserveHost] = useState(readBoolean(source, "preserve_host", false));
-  const [requestBuffering, setRequestBuffering] = useState(
-    readBoolean(source, "request_buffering", true),
-  );
-  const [responseBuffering, setResponseBuffering] = useState(
-    readBoolean(source, "response_buffering", true),
-  );
   const [regexPriority, setRegexPriority] = useState(readNumberText(source, "regex_priority", 0));
   const [enabled, setEnabled] = useState(readBoolean(source, "enabled", true));
   const [tags, setTags] = useState(readList(source, "tags"));
@@ -338,8 +332,6 @@ function RouteForm({
     headers,
     stripPath,
     preserveHost,
-    requestBuffering,
-    responseBuffering,
     regexPriority: numericDraft(regexPriority),
     enabled,
     tags,
@@ -396,8 +388,6 @@ function RouteForm({
         headers,
         stripPath,
         preserveHost,
-        requestBuffering,
-        responseBuffering,
         regexPriority: regexPriorityValue,
         enabled,
         tags,
@@ -510,24 +500,6 @@ function RouteForm({
               checked={preserveHost}
               onCheckedChange={setPreserveHost}
               label="Preserve host"
-            />
-          </div>
-        </Field>
-        <Field label="Request buffering">
-          <div className="flex h-9 items-center">
-            <Switch
-              checked={requestBuffering}
-              onCheckedChange={setRequestBuffering}
-              label="Request buffering"
-            />
-          </div>
-        </Field>
-        <Field label="Response buffering">
-          <div className="flex h-9 items-center">
-            <Switch
-              checked={responseBuffering}
-              onCheckedChange={setResponseBuffering}
-              label="Response buffering"
             />
           </div>
         </Field>
@@ -945,8 +917,6 @@ function routeBody(input: {
   headers: Record<string, unknown>;
   stripPath: boolean;
   preserveHost: boolean;
-  requestBuffering: boolean;
-  responseBuffering: boolean;
   regexPriority: number;
   enabled: boolean;
   tags: string;
@@ -962,8 +932,6 @@ function routeBody(input: {
     headers: input.headers,
     strip_path: input.stripPath,
     preserve_host: input.preserveHost,
-    request_buffering: input.requestBuffering,
-    response_buffering: input.responseBuffering,
     regex_priority: input.regexPriority,
     enabled: input.enabled,
     tags: splitList(input.tags),
