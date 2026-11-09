@@ -326,11 +326,11 @@ async fn unknown_tools_and_methods_are_reported() {
             Some("no-such-session"),
         )
         .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let (_, body) = gateway
         .rpc("no-such-session", json!(1), "tools/list", json!({}), None)
         .await;
-    assert_eq!(body["error"]["code"], -32600);
+    assert_eq!(body["error"]["code"], -32001);
 }
 
 #[tokio::test]
@@ -450,12 +450,90 @@ async fn delete_terminates_the_session_and_get_streams_sse() {
     let (_, body) = gateway
         .rpc(&session, json!(2), "tools/list", json!({}), None)
         .await;
-    assert_eq!(body["error"]["code"], -32600);
+    assert_eq!(body["error"]["code"], -32001);
     assert!(
         body["error"]["message"]
             .as_str()
             .unwrap()
             .contains("session not found")
+    );
+}
+
+#[tokio::test]
+async fn expired_sessions_must_reinitialize() {
+    let mut config = OctraConfig::default();
+    config.mcp.session_ttl_secs = 1;
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new_with_config(config).await;
+    gateway.add_http_server("first", &upstream).await;
+    let session = gateway.open_session(None).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    let (status, body) = gateway
+        .rpc(&session, json!(1), "ping", json!({}), None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], -32001);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("session not found")
+    );
+}
+
+#[tokio::test]
+async fn sessions_are_bound_to_their_scoped_endpoint() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let other = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("first", &upstream).await;
+    gateway.add_http_server("second", &other).await;
+    let session = gateway.open_session_at("/mcp/first", None).await;
+
+    let (status, body) = gateway
+        .rpc_at("/mcp/second", &session, json!(1), "ping", json!({}), None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], -32001);
+
+    let (status, body) = gateway
+        .rpc_at("/mcp/first", &session, json!(2), "ping", json!({}), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn rejects_unsupported_protocol_version_headers() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("first", &upstream).await;
+    let session = gateway.open_session(None).await;
+
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("mcp-session-id", &session)
+        .header("mcp-protocol-version", "1900-01-01")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = tower::ServiceExt::oneshot(gateway.data_router(), request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["error"]["code"], -32600);
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported MCP-Protocol-Version")
     );
 }
 

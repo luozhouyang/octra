@@ -42,6 +42,7 @@ use crate::client::McpError;
 use crate::conversion;
 
 pub const SESSION_HEADER: HeaderName = HeaderName::from_static("mcp-session-id");
+pub const PROTOCOL_VERSION_HEADER: HeaderName = HeaderName::from_static("mcp-protocol-version");
 const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 
 pub fn router(state: McpDataState) -> Router {
@@ -240,6 +241,13 @@ async fn handle_post_inner(
         return with_session(StatusCode::ACCEPTED.into_response(), session);
     }
 
+    let session_missing = replies.iter().any(|reply| {
+        reply
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == codes::SESSION_NOT_FOUND)
+    });
+
     let body = if batch || replies.len() > 1 {
         Value::Array(
             replies
@@ -250,7 +258,12 @@ async fn handle_post_inner(
     } else {
         serde_json::to_value(replies.remove(0)).unwrap_or(Value::Null)
     };
-    with_session(json_status(StatusCode::OK, body, None), session)
+    let status = if session_missing {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::OK
+    };
+    with_session(json_status(status, body, None), session)
 }
 
 /// Handles one JSON-RPC request. Notifications return `None` (no reply).
@@ -264,21 +277,34 @@ async fn handle_request(
     path: &str,
 ) -> Option<JsonRpcResponse> {
     let Some(id) = request.id.clone() else {
-        handle_notification(state, headers, &request.method).await;
+        handle_notification(state, headers, scope, &request.method).await;
         return None;
     };
 
+    let method = request.method.as_str();
+    if method != methods::INITIALIZE
+        && let Some(version) = header_str(headers, &PROTOCOL_VERSION_HEADER)
+        && !octra_mcp_core::protocol::is_supported(&version)
+    {
+        return Some(JsonRpcResponse::failure(
+            id,
+            JsonRpcError::new(
+                codes::INVALID_REQUEST,
+                format!("unsupported MCP-Protocol-Version: {version}"),
+            ),
+        ));
+    }
     let outcome = match request.method.as_str() {
         methods::INITIALIZE => initialize(state, request.params, session, scope).await,
-        methods::PING => match require_session(state, headers).await {
+        methods::PING => match require_session(state, headers, scope).await {
             Ok(_) => Ok(Map::new().into()),
             Err(error) => Err(error),
         },
-        methods::TOOLS_LIST => match require_session(state, headers).await {
+        methods::TOOLS_LIST => match require_session(state, headers, scope).await {
             Ok(_) => tools_list(state, caller, scope, path).await,
             Err(error) => Err(error),
         },
-        methods::TOOLS_CALL => match require_session(state, headers).await {
+        methods::TOOLS_CALL => match require_session(state, headers, scope).await {
             Ok(_) => tools_call(state, caller, request.params, scope, path).await,
             Err(error) => Err(error),
         },
@@ -293,8 +319,13 @@ async fn handle_request(
 
 /// Notifications never produce a response. `initialized` is the only one the
 /// gateway acts on; everything else is accepted and dropped.
-async fn handle_notification(state: &McpDataState, headers: &HeaderMap, method: &str) {
-    if method == methods::INITIALIZED || require_session(state, headers).await.is_ok() {
+async fn handle_notification(
+    state: &McpDataState,
+    headers: &HeaderMap,
+    scope: Option<&RouteScope>,
+    method: &str,
+) {
+    if method == methods::INITIALIZED || require_session(state, headers, scope).await.is_ok() {
         tracing::debug!(method, "accepted MCP notification");
     } else {
         tracing::debug!(method, "dropped notification for an unknown session");
@@ -343,19 +374,49 @@ async fn initialize(
 async fn require_session(
     state: &McpDataState,
     headers: &HeaderMap,
+    scope: Option<&RouteScope>,
 ) -> Result<String, JsonRpcError> {
     let session_id = header_str(headers, &SESSION_HEADER).ok_or_else(|| {
         JsonRpcError::new(codes::INVALID_REQUEST, "missing Mcp-Session-Id header")
     })?;
 
-    match state.storage.mcp.get_session(&session_id).await {
-        Ok(Some(session)) if session.status == session_status::OPEN => Ok(session.id),
-        Ok(_) => Err(JsonRpcError::new(
-            codes::INVALID_REQUEST,
-            format!("session not found: {session_id}"),
-        )),
-        Err(err) => Err(storage_error(err)),
+    let session = match state.storage.mcp.get_session(&session_id).await {
+        Ok(Some(session)) if session.status == session_status::OPEN => session,
+        Ok(_) => return Err(session_not_found(&session_id)),
+        Err(err) => return Err(storage_error(err)),
+    };
+    if session_expired(&session, state.config.mcp.session_ttl_secs) {
+        if let Err(err) = state.storage.mcp.terminate_session(&session.id).await {
+            tracing::warn!(session = %session.id, %err, "cannot expire MCP session");
+        }
+        return Err(session_not_found(&session_id));
     }
+    if let Some(scope) = scope
+        && session.server_id != scope.server.id
+    {
+        return Err(session_not_found(&session_id));
+    }
+    Ok(session.id)
+}
+
+fn session_not_found(session_id: &str) -> JsonRpcError {
+    JsonRpcError::new(
+        codes::SESSION_NOT_FOUND,
+        format!("session not found: {session_id}"),
+    )
+}
+
+/// Sessions are bounded by age, not by idle time: a client that keeps using a
+/// session must still re-initialize after the configured lifetime.
+fn session_expired(session: &octra_mcp_core::domain::McpSession, ttl_secs: u64) -> bool {
+    if ttl_secs == 0 {
+        return false;
+    }
+    let Ok(created) = chrono::DateTime::parse_from_rfc3339(&session.created_at) else {
+        return true;
+    };
+    let age = chrono::Utc::now().signed_duration_since(created.with_timezone(&chrono::Utc));
+    age.num_seconds() >= ttl_secs as i64
 }
 
 /// Creates a gateway session that answers a later DELETE.

@@ -93,6 +93,8 @@ pub struct McpConfig {
     /// Extra browser origins allowed to call the MCP endpoint. Loopback
     /// origins are always accepted; any other Origin is rejected.
     pub allowed_origins: Vec<String>,
+    /// Maximum age of an MCP session in seconds. `0` disables expiry.
+    pub session_ttl_secs: u64,
 }
 
 /// Local agent discovery and configuration hosting.
@@ -251,6 +253,7 @@ impl Default for McpConfig {
             tool_call_timeout_secs: 120,
             require_key: false,
             allowed_origins: Vec::new(),
+            session_ttl_secs: 3_600,
         }
     }
 }

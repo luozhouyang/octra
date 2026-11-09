@@ -21,6 +21,8 @@ pub mod codes {
     pub const FORBIDDEN: i64 = -32005;
     /// The upstream MCP server failed or timed out.
     pub const UPSTREAM_ERROR: i64 = -32006;
+    /// The session id is unknown, terminated, expired, or bound elsewhere.
+    pub const SESSION_NOT_FOUND: i64 = -32001;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
