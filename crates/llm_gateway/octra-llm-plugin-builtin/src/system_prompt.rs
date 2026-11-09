@@ -136,7 +136,7 @@ mod tests {
         let mut state = serde_json::Value::Null;
         let mut cx = LlmRequestContext {
             meta: &meta,
-            headers: &mut LlmResponseHeaders::default(),
+            response_headers: &mut LlmResponseHeaders::default(),
             request,
             state: &mut state,
         };

@@ -64,6 +64,7 @@ pub fn start(
         saw_finish: false,
         usage: Usage::default(),
         accumulator: StreamAccumulator::default(),
+        pending_terminal: Vec::new(),
     };
 
     let body_stream = unfold(state, |mut state| async move {
@@ -595,6 +596,17 @@ impl Framing {
 
 /// Replaces an empty streamed model with the client-facing model so Bedrock
 /// clients never see the synthetic empty model from `messageStart`.
+fn is_terminal(event: &StreamEvent) -> bool {
+    matches!(
+        event,
+        StreamEvent::Usage(_) | StreamEvent::Finish { .. } | StreamEvent::Error(_)
+    )
+}
+
+fn is_held_terminal(event: &StreamEvent) -> bool {
+    matches!(event, StreamEvent::Usage(_) | StreamEvent::Finish { .. })
+}
+
 fn with_requested_model<'a>(event: &'a StreamEvent, requested_model: &str) -> Cow<'a, StreamEvent> {
     match event {
         StreamEvent::MessageStart { id, model } if model.is_empty() => {
@@ -624,12 +636,22 @@ struct BridgeState {
     saw_finish: bool,
     usage: Usage,
     accumulator: StreamAccumulator,
+    pending_terminal: Vec<StreamEvent>,
 }
 
 impl BridgeState {
     fn encode(&mut self, event: &StreamEvent, out: &mut Vec<u8>) {
-        let event = with_requested_model(event, &self.meta.requested_model);
-        let event = event.as_ref();
+        let requested_model = self.meta.requested_model.clone();
+        let event = with_requested_model(event, &requested_model);
+        if is_held_terminal(&event) {
+            self.observe_terminal(&event);
+            self.pending_terminal.push(event.into_owned());
+            return;
+        }
+        self.encode_now(&event, out);
+    }
+
+    fn encode_now(&mut self, event: &StreamEvent, out: &mut Vec<u8>) {
         if let StreamEvent::Usage(usage) = event {
             self.usage = usage.clone();
         }
@@ -641,6 +663,38 @@ impl BridgeState {
         // tail and the usage record both wait for stream close.
         for frame in self.encoder.encode(event).unwrap_or_default() {
             out.extend(frame.to_bytes());
+        }
+    }
+
+    fn observe_terminal(&mut self, event: &StreamEvent) {
+        if let StreamEvent::Usage(usage) = event {
+            self.usage = usage.clone();
+        }
+        if let StreamEvent::Finish { .. } = event {
+            self.saw_finish = true;
+        }
+        self.accumulator.observe(event);
+    }
+
+    async fn run_stream_end(&mut self, out: &mut Vec<u8>) {
+        let Some(chain) = self.plugins.clone() else {
+            return;
+        };
+        let Some(response) = self.accumulator.build(&self.meta.requested_model) else {
+            return;
+        };
+        let meta = self.meta.as_meta();
+        let mut appended = Vec::new();
+        chain
+            .on_stream_end(&meta, &response, &mut appended, &mut self.plugin_state)
+            .await;
+        let requested_model = self.meta.requested_model.clone();
+        for event in appended {
+            if is_terminal(&event) {
+                continue;
+            }
+            let event = with_requested_model(&event, &requested_model);
+            self.encode_now(&event, out);
         }
     }
 
@@ -729,8 +783,15 @@ impl BridgeState {
                 return out;
             }
         };
-        if !self.usage.is_empty() {
-            self.encode(&StreamEvent::Usage(self.usage.clone()), &mut out);
+        self.run_stream_end(&mut out).await;
+        let mut terminal = std::mem::take(&mut self.pending_terminal);
+        terminal.sort_by_key(|event| match event {
+            StreamEvent::Usage(_) => 0,
+            StreamEvent::Finish { .. } => 1,
+            _ => 2,
+        });
+        for event in terminal {
+            self.encode_now(&event, &mut out);
         }
         for frame in self.encoder.finish().unwrap_or_default() {
             out.extend(frame.to_bytes());
@@ -839,6 +900,7 @@ async fn record_stream(
             streaming: true,
             error: tracker.record.error.as_deref(),
             cache_status: None,
+            response_source: None,
         };
         chain.on_log(&request_meta, &event, plugin_state).await;
     }
@@ -878,6 +940,7 @@ pub fn start_events(
         saw_finish: false,
         usage: Usage::default(),
         accumulator: StreamAccumulator::default(),
+        pending_terminal: Vec::new(),
     };
 
     let body_stream = unfold(state, |mut state| async move {
@@ -917,6 +980,7 @@ struct EventBridgeState {
     saw_finish: bool,
     usage: Usage,
     accumulator: StreamAccumulator,
+    pending_terminal: Vec<StreamEvent>,
 }
 
 impl EventBridgeState {
@@ -967,8 +1031,17 @@ impl EventBridgeState {
     }
 
     fn encode(&mut self, event: &StreamEvent, out: &mut Vec<u8>) {
-        let event = with_requested_model(event, &self.meta.requested_model);
-        let event = event.as_ref();
+        let requested_model = self.meta.requested_model.clone();
+        let event = with_requested_model(event, &requested_model);
+        if is_held_terminal(&event) {
+            self.observe_terminal(&event);
+            self.pending_terminal.push(event.into_owned());
+            return;
+        }
+        self.encode_now(&event, out);
+    }
+
+    fn encode_now(&mut self, event: &StreamEvent, out: &mut Vec<u8>) {
         if let StreamEvent::Usage(usage) = event {
             self.usage = usage.clone();
         }
@@ -978,6 +1051,38 @@ impl EventBridgeState {
         self.accumulator.observe(event);
         for frame in self.encoder.encode(event).unwrap_or_default() {
             out.extend(frame.to_bytes());
+        }
+    }
+
+    fn observe_terminal(&mut self, event: &StreamEvent) {
+        if let StreamEvent::Usage(usage) = event {
+            self.usage = usage.clone();
+        }
+        if let StreamEvent::Finish { .. } = event {
+            self.saw_finish = true;
+        }
+        self.accumulator.observe(event);
+    }
+
+    async fn run_stream_end(&mut self, out: &mut Vec<u8>) {
+        let Some(chain) = self.plugins.clone() else {
+            return;
+        };
+        let Some(response) = self.accumulator.build(&self.meta.requested_model) else {
+            return;
+        };
+        let meta = self.meta.as_meta();
+        let mut appended = Vec::new();
+        chain
+            .on_stream_end(&meta, &response, &mut appended, &mut self.plugin_state)
+            .await;
+        let requested_model = self.meta.requested_model.clone();
+        for event in appended {
+            if is_terminal(&event) {
+                continue;
+            }
+            let event = with_requested_model(&event, &requested_model);
+            self.encode_now(&event, out);
         }
     }
 
@@ -1029,8 +1134,15 @@ impl EventBridgeState {
                 self.encode(event, &mut out);
             }
         }
-        if !self.usage.is_empty() {
-            self.encode(&StreamEvent::Usage(self.usage.clone()), &mut out);
+        self.run_stream_end(&mut out).await;
+        let mut terminal = std::mem::take(&mut self.pending_terminal);
+        terminal.sort_by_key(|event| match event {
+            StreamEvent::Usage(_) => 0,
+            StreamEvent::Finish { .. } => 1,
+            _ => 2,
+        });
+        for event in terminal {
+            self.encode_now(&event, &mut out);
         }
         for frame in self.encoder.finish().unwrap_or_default() {
             out.extend(frame.to_bytes());

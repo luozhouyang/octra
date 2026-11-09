@@ -95,7 +95,7 @@ impl LlmPlugin for RequestAudit {
         &self.manifest
     }
 
-    async fn on_log(&self, cx: &mut LlmLogContext<'_>) {
+    async fn on_log(&self, cx: &LlmLogContext<'_>) {
         let record = self.record(cx.meta, cx.event);
         tracing::info!(target: "octra.audit", audit = %record, "llm request audit");
     }
@@ -122,6 +122,7 @@ impl RequestAudit {
             "streaming": event.streaming,
             "finish_reason": event.finish_reason,
             "cache_status": event.cache_status,
+            "response_source": event.response_source,
         });
         if self.include_client {
             record["client_ip"] = json!(meta.client_ip.map(|ip| ip.to_string()));
@@ -185,6 +186,7 @@ mod tests {
             streaming: true,
             error: Some("upstream hiccup"),
             cache_status: Some("hit"),
+            response_source: Some("cache"),
         }
     }
 

@@ -571,12 +571,14 @@ where
     }
 }
 
+type PreCacheKey = (String, String, String, bool);
+
 #[derive(Default)]
 struct PluginChains {
     entries: Vec<PluginEntry>,
     subscribers: Vec<Arc<PluginSubscriber>>,
     jobs: Vec<Arc<PluginJob>>,
-    pre_cache: Mutex<HashMap<(String, String, String, bool), Arc<PluginChain>>>,
+    pre_cache: Mutex<HashMap<PreCacheKey, Arc<PluginChain>>>,
     post_cache: Mutex<HashMap<String, Arc<PluginChain>>>,
     empty: Arc<PluginChain>,
     has_any: bool,
@@ -820,6 +822,7 @@ impl PluginChains {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn post_auth(
         &self,
         route_id: Option<&str>,
@@ -905,6 +908,7 @@ fn default_protocols() -> Vec<String> {
     vec!["http".to_string(), "https".to_string()]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve(
     entries: &[PluginEntry],
     route_id: Option<&str>,
@@ -1150,6 +1154,7 @@ impl PluginRuntime {
     }
 
     /// Post-auth chain for a service that opts out of globally scoped plugins.
+    #[allow(clippy::too_many_arguments)]
     pub fn post_auth_chain_with_policy(
         &self,
         route_id: Option<&str>,

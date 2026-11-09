@@ -25,7 +25,8 @@ use octra_llm_plugin_types::{
     LlmLogContext, LlmLogEvent, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory,
     LlmPluginResult, LlmPluginStateStore, LlmProviderInfo, LlmProviderRequestContext,
     LlmRequestContext, LlmRequestMeta, LlmRequestState, LlmResponseContext, LlmResponseHeaders,
-    LlmScope, LlmStreamAction, LlmStreamContext, LlmStreamResult, MemoryCounterStore,
+    LlmResponseSource, LlmScope, LlmStreamAction, LlmStreamContext, LlmStreamEndAction,
+    LlmStreamEndContext, LlmStreamResult, MemoryCounterStore,
 };
 use octra_storage::Storage;
 use octra_storage::plugins::{PluginConfigRecord, PluginData, PluginRecord};
@@ -107,7 +108,7 @@ impl LlmPluginRegistry {
 }
 
 /// Stages tracked by the metrics counters, in snapshot order.
-const STAGE_COUNT: usize = 7;
+const STAGE_COUNT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -115,6 +116,7 @@ enum Stage {
     ProviderRequest,
     Response,
     StreamEvent,
+    StreamEnd,
     Error,
     Log,
     FinalResponse,
@@ -127,9 +129,10 @@ impl Stage {
             Self::ProviderRequest => 1,
             Self::Response => 2,
             Self::StreamEvent => 3,
-            Self::Error => 4,
-            Self::Log => 5,
-            Self::FinalResponse => 6,
+            Self::StreamEnd => 4,
+            Self::Error => 5,
+            Self::Log => 6,
+            Self::FinalResponse => 7,
         }
     }
 
@@ -139,6 +142,7 @@ impl Stage {
             Self::ProviderRequest => "provider_request",
             Self::Response => "response",
             Self::StreamEvent => "stream_event",
+            Self::StreamEnd => "stream_end",
             Self::Error => "error",
             Self::Log => "log",
             Self::FinalResponse => "final_response",
@@ -400,6 +404,7 @@ impl PluginMetricsView {
             Stage::ProviderRequest,
             Stage::Response,
             Stage::StreamEvent,
+            Stage::StreamEnd,
             Stage::Error,
             Stage::Log,
             Stage::FinalResponse,
@@ -494,8 +499,9 @@ impl From<PluginError> for LlmChainError {
 
 /// Result of the client-facing request chain.
 ///
-/// `Respond` carries a short-circuit response built by a plugin, such as a
-/// cache hit. Callers that cannot serve one (for example the compatibility
+/// `Respond` carries a short-circuit response built by a plugin and its
+/// provenance (cache, synthetic, or termination). Callers that cannot serve
+/// one (for example the compatibility
 /// [`LlmPluginChain::on_request`] wrapper) treat it as `Continue`.
 // The outcome lives for a single request, so keeping the response inline is
 // cheaper than an allocation on the common `Continue` path.
@@ -503,7 +509,10 @@ impl From<PluginError> for LlmChainError {
 #[derive(Debug)]
 pub enum LlmRequestOutcome {
     Continue,
-    Respond(ChatResponse),
+    Respond {
+        response: ChatResponse,
+        source: LlmResponseSource,
+    },
     Reject(GatewayError),
 }
 
@@ -556,7 +565,7 @@ impl LlmPluginChain {
         for entry in &self.entries {
             let mut cx = LlmRequestContext {
                 meta,
-                headers,
+                response_headers: headers,
                 request,
                 state: state.slot(&entry.name),
             };
@@ -569,8 +578,11 @@ impl LlmPluginChain {
             .await?
             {
                 LlmAction::Continue => {}
-                LlmAction::Respond(response) => {
-                    return Ok(LlmRequestOutcome::Respond(*response));
+                LlmAction::Respond { response, source } => {
+                    return Ok(LlmRequestOutcome::Respond {
+                        response: *response,
+                        source,
+                    });
                 }
                 LlmAction::Reject(error) => return Ok(LlmRequestOutcome::Reject(error)),
             }
@@ -594,7 +606,7 @@ impl LlmPluginChain {
             .on_request_outcome(meta, headers, request, state)
             .await?
         {
-            LlmRequestOutcome::Continue | LlmRequestOutcome::Respond(_) => Ok(None),
+            LlmRequestOutcome::Continue | LlmRequestOutcome::Respond { .. } => Ok(None),
             LlmRequestOutcome::Reject(error) => Ok(Some(error)),
         }
     }
@@ -622,7 +634,7 @@ impl LlmPluginChain {
             .await?
             {
                 LlmAction::Continue => {}
-                LlmAction::Respond(_) => return Err(respond_outside_request_stage(entry)),
+                LlmAction::Respond { .. } => return Err(respond_outside_request_stage(entry)),
                 LlmAction::Reject(error) => return Ok(Some(error)),
             }
         }
@@ -635,7 +647,7 @@ impl LlmPluginChain {
         meta: &LlmRequestMeta<'_>,
         request_model: &str,
         response: &mut octra_llm_core::ChatResponse,
-        usage: &mut octra_llm_core::Usage,
+        response_headers: &mut LlmResponseHeaders,
         state: &mut LlmRequestState,
     ) -> std::result::Result<Option<GatewayError>, LlmChainError> {
         for entry in self.entries.iter().rev() {
@@ -643,7 +655,7 @@ impl LlmPluginChain {
                 meta,
                 request_model,
                 response,
-                usage,
+                response_headers,
                 state: state.slot(&entry.name),
             };
             match run_stage(
@@ -655,7 +667,7 @@ impl LlmPluginChain {
             .await?
             {
                 LlmAction::Continue => {}
-                LlmAction::Respond(_) => return Err(respond_outside_request_stage(entry)),
+                LlmAction::Respond { .. } => return Err(respond_outside_request_stage(entry)),
                 LlmAction::Reject(error) => return Ok(Some(error)),
             }
         }
@@ -680,7 +692,7 @@ impl LlmPluginChain {
             };
             match run_stage(entry, Stage::Error, entry.plugin.on_error(&mut cx), false).await? {
                 LlmAction::Continue => {}
-                LlmAction::Respond(_) => return Err(respond_outside_request_stage(entry)),
+                LlmAction::Respond { .. } => return Err(respond_outside_request_stage(entry)),
                 LlmAction::Reject(replacement) => {
                     *cx.error = replacement;
                 }
@@ -726,6 +738,59 @@ impl LlmPluginChain {
         }
     }
 
+    /// Appends non-terminal events before the terminal stream events are
+    /// emitted. Best-effort: a failing or timed-out plugin is logged and the
+    /// stream continues.
+    pub async fn on_stream_end(
+        &self,
+        meta: &LlmRequestMeta<'_>,
+        response: &octra_llm_core::ChatResponse,
+        events: &mut Vec<StreamEvent>,
+        state: &mut LlmRequestState,
+    ) {
+        for entry in self.entries.iter().rev() {
+            let before = events.len();
+            let mut cx = LlmStreamEndContext {
+                meta,
+                response,
+                events,
+                state: state.slot(&entry.name),
+            };
+            let started = Instant::now();
+            let result =
+                tokio::time::timeout(entry.timeout, entry.plugin.on_stream_end(&mut cx)).await;
+            let failure = match result {
+                Ok(Ok(LlmStreamEndAction::Continue)) => None,
+                Ok(Ok(LlmStreamEndAction::Append(mut appended))) => {
+                    events.append(&mut appended);
+                    None
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(plugin = %entry.name, %error, "LLM plugin stream-end hook failed");
+                    Some(StageFailure::Error)
+                }
+                Err(_) => {
+                    tracing::warn!(plugin = %entry.name, "LLM plugin stream-end hook timed out");
+                    Some(StageFailure::Timeout)
+                }
+            };
+            // A plugin may append by mutating `cx.events` or by returning
+            // `Append`; reject terminal events and discard partial appends on
+            // failure.
+            if failure.is_some() || events[before..].iter().any(is_terminal) {
+                events.truncate(before);
+            }
+            let fail_open = failure.is_some();
+            entry.stats.record(
+                Stage::StreamEnd,
+                started.elapsed(),
+                failure,
+                fail_open,
+                false,
+            );
+        }
+    }
+
     /// Runs observational log hooks; failures never affect the response.
     pub async fn on_log(
         &self,
@@ -734,13 +799,14 @@ impl LlmPluginChain {
         state: &mut LlmRequestState,
     ) {
         for entry in self.entries.iter().rev() {
-            let mut cx = LlmLogContext {
+            let slot = state.slot(&entry.name);
+            let cx = LlmLogContext {
                 meta,
                 event,
-                state: state.slot(&entry.name),
+                state: slot,
             };
             let started = Instant::now();
-            let timed_out = tokio::time::timeout(entry.timeout, entry.plugin.on_log(&mut cx))
+            let timed_out = tokio::time::timeout(entry.timeout, entry.plugin.on_log(&cx))
                 .await
                 .is_err();
             entry.stats.record(
@@ -753,7 +819,6 @@ impl LlmPluginChain {
             if timed_out {
                 tracing::warn!(plugin = %entry.name, "LLM plugin log hook timed out");
             }
-            let _ = &mut cx;
         }
     }
 
@@ -835,6 +900,13 @@ where
     result
 }
 
+fn is_terminal(event: &StreamEvent) -> bool {
+    matches!(
+        event,
+        StreamEvent::Usage(_) | StreamEvent::Finish { .. } | StreamEvent::Error(_)
+    )
+}
+
 async fn run_stream_stage<F>(
     entry: &LlmEntry,
     future: F,
@@ -851,7 +923,7 @@ where
             match handle_plugin_error(entry, error) {
                 Ok(LlmAction::Continue) => Ok(LlmStreamAction::Continue),
                 Ok(LlmAction::Reject(_)) => unreachable!("stream errors never reject this way"),
-                Ok(LlmAction::Respond(_)) => {
+                Ok(LlmAction::Respond { .. }) => {
                     unreachable!("stream errors never short-circuit this way")
                 }
                 Err(error) => Err(error),
@@ -862,7 +934,7 @@ where
             match timeout_error(entry) {
                 Ok(LlmAction::Continue) => Ok(LlmStreamAction::Continue),
                 Ok(LlmAction::Reject(_)) => unreachable!("stream timeouts never reject this way"),
-                Ok(LlmAction::Respond(_)) => {
+                Ok(LlmAction::Respond { .. }) => {
                     unreachable!("stream timeouts never short-circuit this way")
                 }
                 Err(error) => Err(error),
@@ -1470,7 +1542,9 @@ mod tests {
     use octra_llm_core::{
         AssistantContent, ChatRequest, ChatResponse, FinishReason, Message, Protocol, Role, Usage,
     };
-    use octra_llm_plugin_types::LlmPluginResult;
+    use octra_llm_plugin_types::{
+        LlmPluginResult, LlmStreamEndAction, LlmStreamEndContext, LlmStreamEndResult,
+    };
 
     struct MarkPlugin {
         manifest: PluginManifest,
@@ -1519,7 +1593,7 @@ mod tests {
             phases: Vec::new(),
             capabilities: Vec::<Capability>::new(),
             config_schema: None,
-            api_version: "2".to_string(),
+            api_version: "7".to_string(),
             entities: Vec::new(),
             migrations: Vec::new(),
             admin_routes: Vec::new(),
@@ -1827,9 +1901,14 @@ mod tests {
             "m",
             octra_llm_core::Message::new(octra_llm_core::Role::Assistant),
         );
-        let mut usage = Usage::default();
         chain
-            .on_response(&meta, "m", &mut response, &mut usage, &mut state)
+            .on_response(
+                &meta,
+                "m",
+                &mut response,
+                &mut LlmResponseHeaders::default(),
+                &mut state,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -2430,11 +2509,14 @@ mod tests {
         }
 
         async fn on_request(&self, _cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
-            Ok(LlmAction::Respond(Box::new(assistant_response(
-                "cached-1",
-                "cached-model",
-                "cached answer",
-            ))))
+            Ok(LlmAction::Respond {
+                response: Box::new(assistant_response(
+                    "cached-1",
+                    "cached-model",
+                    "cached answer",
+                )),
+                source: octra_llm_plugin_types::LlmResponseSource::Cache,
+            })
         }
     }
 
@@ -2457,9 +2539,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let LlmRequestOutcome::Respond(response) = outcome else {
+        let LlmRequestOutcome::Respond { response, source } = outcome else {
             panic!("expected the request chain to short-circuit");
         };
+        assert_eq!(source, octra_llm_plugin_types::LlmResponseSource::Cache);
         assert_eq!(response.model, "cached-model");
         assert_eq!(response.text(), "cached answer");
     }
@@ -2534,15 +2617,17 @@ mod tests {
             &self,
             _cx: &mut LlmProviderRequestContext<'_>,
         ) -> LlmPluginResult {
-            Ok(LlmAction::Respond(Box::new(assistant_response(
-                "id", "m", "nope",
-            ))))
+            Ok(LlmAction::Respond {
+                response: Box::new(assistant_response("id", "m", "nope")),
+                source: LlmResponseSource::Synthetic,
+            })
         }
 
         async fn on_response(&self, _cx: &mut LlmResponseContext<'_>) -> LlmPluginResult {
-            Ok(LlmAction::Respond(Box::new(assistant_response(
-                "id", "m", "nope",
-            ))))
+            Ok(LlmAction::Respond {
+                response: Box::new(assistant_response("id", "m", "nope")),
+                source: LlmResponseSource::Synthetic,
+            })
         }
     }
 
@@ -2574,14 +2659,13 @@ mod tests {
         ));
 
         let mut response = assistant_response("id", "m", "final");
-        let mut usage = Usage::default();
         assert!(matches!(
             chain
                 .on_response(
                     &test_meta(),
                     "m",
                     &mut response,
-                    &mut usage,
+                    &mut LlmResponseHeaders::default(),
                     &mut state
                 )
                 .await,
@@ -2604,5 +2688,112 @@ mod tests {
         assert_eq!(view.stages.len(), STAGE_COUNT);
         assert_eq!(view.stages["final_response"].calls, 1);
         assert_eq!(view.stages["request"].calls, 0);
+    }
+
+    struct UsageAndHeaderPlugin {
+        manifest: PluginManifest,
+    }
+
+    #[async_trait]
+    impl LlmPlugin for UsageAndHeaderPlugin {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn on_response(&self, cx: &mut LlmResponseContext<'_>) -> LlmPluginResult {
+            cx.response.usage = Usage {
+                input_tokens: 42,
+                output_tokens: 7,
+                ..Usage::default()
+            };
+            cx.response_headers.insert("x-usage", "49");
+            Ok(LlmAction::Continue)
+        }
+    }
+
+    #[tokio::test]
+    async fn response_stage_owns_usage_and_response_headers() {
+        let chain = chain_for_plugin(
+            "usage",
+            Arc::new(UsageAndHeaderPlugin {
+                manifest: manifest("usage"),
+            }),
+        );
+        let mut response = assistant_response("id", "m", "final");
+        let mut headers = LlmResponseHeaders::new();
+        let mut state = LlmRequestState::new();
+        chain
+            .on_response(&test_meta(), "m", &mut response, &mut headers, &mut state)
+            .await
+            .unwrap();
+        assert_eq!(response.usage.input_tokens, 42);
+        assert_eq!(response.usage.output_tokens, 7);
+        let header = headers
+            .iter()
+            .find(|(name, _)| name.as_str() == "x-usage")
+            .map(|(_, value)| value.to_str().unwrap());
+        assert_eq!(header, Some("49"));
+    }
+
+    struct StreamEndPlugin {
+        manifest: PluginManifest,
+        terminal: bool,
+    }
+
+    #[async_trait]
+    impl LlmPlugin for StreamEndPlugin {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn on_stream_end(&self, cx: &mut LlmStreamEndContext<'_>) -> LlmStreamEndResult {
+            if self.terminal {
+                cx.events.push(StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                });
+            } else {
+                cx.events.push(StreamEvent::TextDelta {
+                    text: "tail".to_string(),
+                });
+            }
+            Ok(LlmStreamEndAction::Continue)
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_end_appends_non_terminal_events() {
+        let chain = chain_for_plugin(
+            "stream-end",
+            Arc::new(StreamEndPlugin {
+                manifest: manifest("stream-end"),
+                terminal: false,
+            }),
+        );
+        let response = assistant_response("id", "m", "body");
+        let mut events = Vec::new();
+        let mut state = LlmRequestState::new();
+        chain
+            .on_stream_end(&test_meta(), &response, &mut events, &mut state)
+            .await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], StreamEvent::TextDelta { text } if text == "tail"));
+    }
+
+    #[tokio::test]
+    async fn stream_end_rejects_terminal_events() {
+        let chain = chain_for_plugin(
+            "stream-end",
+            Arc::new(StreamEndPlugin {
+                manifest: manifest("stream-end"),
+                terminal: true,
+            }),
+        );
+        let response = assistant_response("id", "m", "body");
+        let mut events = Vec::new();
+        let mut state = LlmRequestState::new();
+        chain
+            .on_stream_end(&test_meta(), &response, &mut events, &mut state)
+            .await;
+        assert!(events.is_empty());
     }
 }

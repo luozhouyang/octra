@@ -8,6 +8,11 @@ use sha2::{Digest, Sha256};
 
 use crate::entity;
 use crate::error::PluginStorageError;
+
+/// LLM plugin contract version accepted by this build. Kept in sync with
+/// `octra_llm_plugin_types::LLM_PLUGIN_API_VERSION`; storage validation only
+/// needs the manifest string.
+const LLM_API_VERSION: &str = "7";
 use crate::store::{validate_plugin_name, validate_version};
 
 #[derive(Debug, Clone)]
@@ -126,11 +131,19 @@ fn validate_manifest(
 ) -> Result<(), PluginStorageError> {
     validate_plugin_name(&manifest.name)?;
     validate_version(&manifest.version)?;
-    if manifest.api_version != octra_api_plugin_types::API_PLUGIN_API_VERSION {
+    let expected = match manifest.kind {
+        PluginKind::Api => octra_api_plugin_types::API_PLUGIN_API_VERSION,
+        PluginKind::Llm => LLM_API_VERSION,
+        PluginKind::Mcp => {
+            return Err(PluginStorageError::InvalidManifest(
+                "MCP plugin artifacts are not supported".to_string(),
+            ));
+        }
+    };
+    if manifest.api_version != expected {
         return Err(PluginStorageError::InvalidManifest(format!(
             "unsupported api_version '{}' (expected '{}')",
-            manifest.api_version,
-            octra_api_plugin_types::API_PLUGIN_API_VERSION
+            manifest.api_version, expected
         )));
     }
     if manifest.kind != kind {
@@ -374,7 +387,7 @@ mod tests {
     fn accepts_llm_artifacts_only_for_the_llm_kind() {
         let dir = tempfile::tempdir().unwrap();
         let llm = r#"{
-            "api_version": "3",
+            "api_version": "7",
             "name": "llm-demo",
             "version": "1.0.0",
             "kind": "llm",
@@ -393,7 +406,7 @@ mod tests {
     fn llm_artifacts_reject_api_store_features() {
         let dir = tempfile::tempdir().unwrap();
         let llm = r#"{
-            "api_version": "3",
+            "api_version": "7",
             "name": "llm-demo",
             "version": "1.0.0",
             "kind": "llm",

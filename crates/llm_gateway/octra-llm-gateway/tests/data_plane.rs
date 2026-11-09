@@ -5,12 +5,21 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use axum::http::StatusCode;
 use common::*;
 use octra_api_core::CreateConsumer;
+use octra_api_plugin_types::{
+    FailPolicy, PluginError, PluginKind, PluginManifest, PluginRuntimeKind,
+};
 use octra_config::SemanticEmbeddingConfig;
+use octra_llm_core::{AssistantContent, ChatResponse, Message, Role, Usage};
 use octra_llm_gateway::LlmDataState;
 use octra_llm_gateway::keys::hash_key;
+use octra_llm_plugin_types::{
+    LlmAction, LlmLogContext, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext,
+    LlmResponseSource,
+};
 use octra_storage::{LlmUsageInput, LlmVirtualKeyInput};
 use serde_json::json;
 
@@ -1366,6 +1375,38 @@ async fn param_override_and_system_prompt_reach_the_upstream() {
 
 fn think_tag_stream(_request: Captured) -> axum::response::Response {
     sse_response(openai_text_stream("<think>secret reasoning</think>hello"))
+}
+
+fn partial_think_tag_stream(_request: Captured) -> axum::response::Response {
+    sse_response(openai_text_stream("hello <thi"))
+}
+
+#[tokio::test]
+async fn think_tags_flushes_a_partial_tag_at_stream_end() {
+    let harness = Harness::new().await;
+    let upstream = MockUpstream::start(&harness.config, partial_think_tag_stream).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness.route_to("octra-default", &[(provider, 0, 1)]).await;
+    harness
+        .plugin_config("llm-think-tags", "global", None, json!({}))
+        .await;
+
+    let (status, _, body) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[],
+        Some(openai_body("octra-default", true)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("hello"), "body: {body}");
+    assert!(
+        body.contains("<thi"),
+        "the stream-end flush must emit the buffered partial tag: {body}"
+    );
 }
 
 #[tokio::test]
@@ -2872,4 +2913,118 @@ async fn semantic_strategy_uses_embedding_vectors() {
     let (status, _, response) = post_json(app, COMPLETION_PATH, &[], body).await;
     assert_eq!(status, StatusCode::OK, "body: {response}");
     assert_eq!(embedding.request_count(), 3);
+}
+
+#[derive(Clone, Debug, Default)]
+struct CapturedShortCircuit {
+    cache_status: Option<String>,
+    response_source: Option<String>,
+    output_tokens: u64,
+}
+
+struct SyntheticFactory {
+    manifest: PluginManifest,
+    captured: Arc<Mutex<Vec<CapturedShortCircuit>>>,
+}
+
+impl LlmPluginFactory for SyntheticFactory {
+    fn manifest(&self) -> PluginManifest {
+        self.manifest.clone()
+    }
+
+    fn create(&self, _config: serde_json::Value) -> Result<Arc<dyn LlmPlugin>, PluginError> {
+        Ok(Arc::new(SyntheticPlugin {
+            manifest: self.manifest.clone(),
+            captured: self.captured.clone(),
+        }))
+    }
+}
+
+struct SyntheticPlugin {
+    manifest: PluginManifest,
+    captured: Arc<Mutex<Vec<CapturedShortCircuit>>>,
+}
+
+#[async_trait]
+impl LlmPlugin for SyntheticPlugin {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    async fn on_request(&self, cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
+        let mut response = ChatResponse::new(
+            "synthetic-1",
+            &cx.request.model,
+            Message::new(Role::Assistant),
+        );
+        response.message.assistant.push(AssistantContent::Text {
+            text: "synthetic answer".to_string(),
+        });
+        response.usage = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Usage::default()
+        };
+        Ok(LlmAction::Respond {
+            response: Box::new(response),
+            source: LlmResponseSource::Synthetic,
+        })
+    }
+
+    async fn on_log(&self, cx: &LlmLogContext<'_>) {
+        self.captured.lock().unwrap().push(CapturedShortCircuit {
+            cache_status: cx.event.cache_status.map(str::to_string),
+            response_source: cx.event.response_source.map(str::to_string),
+            output_tokens: cx.event.usage.output_tokens,
+        });
+    }
+}
+
+#[tokio::test]
+async fn synthetic_short_circuit_is_not_logged_as_a_cache_hit() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let manifest = PluginManifest {
+        name: "test-synthetic".to_string(),
+        version: "1.0.0".to_string(),
+        kind: PluginKind::Llm,
+        runtime: PluginRuntimeKind::Builtin,
+        priority: 0,
+        description: "synthetic short-circuit test plugin".to_string(),
+        timeout_ms: 100,
+        fail_policy: FailPolicy::Closed,
+        phases: Vec::new(),
+        capabilities: Vec::new(),
+        config_schema: None,
+        api_version: "7".to_string(),
+        entities: Vec::new(),
+        migrations: Vec::new(),
+        admin_routes: Vec::new(),
+        subscriptions: Vec::new(),
+        jobs: Vec::new(),
+    };
+    let harness = Harness::new_with_plugins(vec![Arc::new(SyntheticFactory {
+        manifest,
+        captured: captured.clone(),
+    })])
+    .await;
+    harness
+        .plugin_config("test-synthetic", "global", None, json!({}))
+        .await;
+
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("synthetic-model", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "synthetic answer");
+    assert_eq!(body["usage"]["total_tokens"], 15);
+
+    let captured = captured.lock().unwrap().clone();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].cache_status, None);
+    assert_eq!(captured[0].response_source.as_deref(), Some("synthetic"));
+    assert_eq!(captured[0].output_tokens, 5);
 }

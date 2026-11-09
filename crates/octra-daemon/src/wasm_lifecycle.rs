@@ -8,6 +8,7 @@ use octra_api_plugin_wasm::WasmEngine;
 use octra_llm_gateway::LlmPluginRuntime;
 use octra_llm_plugin_runtime::LlmPluginRegistry;
 use octra_llm_plugin_wasm::LlmWasmPluginFactory;
+use octra_plugin_storage::PluginStorageRoot;
 
 /// Bridges the API installer to the LLM plugin registry. The runtime is
 /// reloaded after every change; a failed reload restores the previous factory
@@ -16,6 +17,7 @@ pub struct LlmWasmRuntime {
     registry: Arc<LlmPluginRegistry>,
     runtime: Arc<LlmPluginRuntime>,
     engine: Arc<WasmEngine>,
+    storage_root: Option<Arc<PluginStorageRoot>>,
 }
 
 impl LlmWasmRuntime {
@@ -23,11 +25,13 @@ impl LlmWasmRuntime {
         registry: Arc<LlmPluginRegistry>,
         runtime: Arc<LlmPluginRuntime>,
         engine: Arc<WasmEngine>,
+        storage_root: Option<Arc<PluginStorageRoot>>,
     ) -> Self {
         Self {
             registry,
             runtime,
             engine,
+            storage_root,
         }
     }
 }
@@ -40,8 +44,12 @@ impl LlmWasmLifecycle for LlmWasmRuntime {
         artifact_dir: std::path::PathBuf,
         replaces_hash: Option<&str>,
     ) -> Result<(), String> {
-        let factory = LlmWasmPluginFactory::from_artifact(&self.engine, &artifact_dir)
-            .map_err(|error| error.message)?;
+        let factory = LlmWasmPluginFactory::from_artifact(
+            &self.engine,
+            &artifact_dir,
+            self.storage_root.clone(),
+        )
+        .map_err(|error| error.message)?;
         let installed_hash = factory.component_hash().to_string();
         let previous = self.registry.factory(&manifest.name);
         self.registry.register_arc(Arc::new(factory));

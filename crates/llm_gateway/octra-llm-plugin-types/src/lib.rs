@@ -77,6 +77,27 @@ impl fmt::Display for LlmScope {
     }
 }
 
+/// Why a plugin produced a short-circuit response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmResponseSource {
+    /// Served from a response cache; usage is not billed.
+    Cache,
+    /// Produced by a plugin without an upstream call.
+    Synthetic,
+    /// Produced to terminate the request early, for example a policy denial.
+    Termination,
+}
+
+impl LlmResponseSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cache => "cache",
+            Self::Synthetic => "synthetic",
+            Self::Termination => "termination",
+        }
+    }
+}
+
 pub enum LlmAction {
     Continue,
     /// Short-circuits the request stage with an already built response.
@@ -84,7 +105,10 @@ pub enum LlmAction {
     /// Only the request stage honours this action. Other stages use it for
     /// nothing and fail closed when a plugin returns it there, because they
     /// cannot replace the response they already received.
-    Respond(Box<ChatResponse>),
+    Respond {
+        response: Box<ChatResponse>,
+        source: LlmResponseSource,
+    },
     Reject(GatewayError),
 }
 
@@ -102,15 +126,18 @@ pub type LlmStreamResult = Result<LlmStreamAction, PluginError>;
 
 /// Contract version a factory must implement to be registered. Bumped when a
 /// context or trait signature changes incompatibly.
-pub const LLM_PLUGIN_API_VERSION: u32 = 6;
+pub const LLM_PLUGIN_API_VERSION: u32 = 7;
 
 const MAX_RESPONSE_HEADERS: usize = 128;
 const MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
 
-/// Headers a request-stage plugin may add to the eventual HTTP response.
+/// Headers a request- or response-stage plugin may add to the eventual HTTP
+/// response.
 ///
 /// The host owns the sink and attaches it after the data plane has produced a
 /// response, so it works for JSON bodies, plugin rejections and SSE streams.
+/// Streaming headers are committed before the stream starts; a streaming
+/// plugin must add them at the request stage.
 /// Names and values are validated here; hop-by-hop, body-framing and
 /// host-reserved headers are rejected.
 #[derive(Debug, Default)]
@@ -245,7 +272,7 @@ pub struct LlmRequestContext<'a> {
     pub meta: &'a LlmRequestMeta<'a>,
     /// Headers to attach to the final response. Shared by the whole request
     /// chain and owned by the data plane.
-    pub headers: &'a mut LlmResponseHeaders,
+    pub response_headers: &'a mut LlmResponseHeaders,
     pub request: &'a mut ChatRequest,
     pub state: &'a mut Value,
 }
@@ -261,7 +288,9 @@ pub struct LlmResponseContext<'a> {
     pub meta: &'a LlmRequestMeta<'a>,
     pub request_model: &'a str,
     pub response: &'a mut ChatResponse,
-    pub usage: &'a mut Usage,
+    /// Headers to attach to the final response. Only non-streaming responses
+    /// reach this stage; streaming headers are committed by `on_request`.
+    pub response_headers: &'a mut LlmResponseHeaders,
     pub state: &'a mut Value,
 }
 
@@ -284,6 +313,26 @@ pub struct LlmStreamContext<'a> {
     pub event: &'a mut StreamEvent,
     pub state: &'a mut Value,
 }
+
+/// Stream completion, after the upstream body ends and before the terminal
+/// events are emitted. The hook may append non-terminal events to flush
+/// buffered content; it cannot change the status code.
+pub struct LlmStreamEndContext<'a> {
+    pub meta: &'a LlmRequestMeta<'a>,
+    /// Accumulated canonical response before the hook chain starts.
+    pub response: &'a ChatResponse,
+    /// Events appended by this stage. Earlier plugins' appends are visible
+    /// here. Terminal events are rejected by the host.
+    pub events: &'a mut Vec<StreamEvent>,
+    pub state: &'a mut Value,
+}
+
+pub enum LlmStreamEndAction {
+    Continue,
+    Append(Vec<StreamEvent>),
+}
+
+pub type LlmStreamEndResult = Result<LlmStreamEndAction, PluginError>;
 
 pub struct LlmErrorContext<'a> {
     pub meta: &'a LlmRequestMeta<'a>,
@@ -312,12 +361,16 @@ pub struct LlmLogEvent<'a> {
     /// Cache outcome for this request, for example `"hit"`; `None` when the
     /// request was not served from a cache.
     pub cache_status: Option<&'a str>,
+    /// Provenance of a short-circuit response: `"cache"`, `"synthetic"` or
+    /// `"termination"`; `None` for upstream responses.
+    pub response_source: Option<&'a str>,
 }
 
 pub struct LlmLogContext<'a> {
     pub meta: &'a LlmRequestMeta<'a>,
     pub event: &'a LlmLogEvent<'a>,
-    pub state: &'a mut Value,
+    /// Read-only: `on_log` is observational and host mutations are ignored.
+    pub state: &'a Value,
 }
 
 /// LLM plugin stages. Every stage defaults to continuing unchanged.
@@ -351,6 +404,12 @@ pub trait LlmPlugin: Send + Sync {
         Ok(LlmStreamAction::Continue)
     }
 
+    /// Appends non-terminal events before the terminal stream events are
+    /// emitted. Best-effort: errors and timeouts are logged and ignored.
+    async fn on_stream_end(&self, _cx: &mut LlmStreamEndContext<'_>) -> LlmStreamEndResult {
+        Ok(LlmStreamEndAction::Continue)
+    }
+
     async fn on_error(&self, _cx: &mut LlmErrorContext<'_>) -> LlmPluginResult {
         Ok(LlmAction::Continue)
     }
@@ -361,7 +420,7 @@ pub trait LlmPlugin: Send + Sync {
     /// the response it receives.
     async fn on_final_response(&self, _cx: &mut LlmFinalResponseContext<'_>) {}
 
-    async fn on_log(&self, _cx: &mut LlmLogContext<'_>) {}
+    async fn on_log(&self, _cx: &LlmLogContext<'_>) {}
 }
 
 /// Host-provided plugin state shared across chain reloads and, when backed by

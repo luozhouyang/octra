@@ -13,7 +13,7 @@ use octra_api_plugin_types::{Capability, PluginError, PluginManifest};
 use octra_llm_core::{AssistantContent, StreamEvent};
 use octra_llm_plugin_types::{
     LlmAction, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmResponseContext, LlmStreamAction,
-    LlmStreamContext, LlmStreamResult,
+    LlmStreamContext, LlmStreamEndAction, LlmStreamEndContext, LlmStreamEndResult, LlmStreamResult,
 };
 use serde_json::{Value, json};
 
@@ -146,30 +146,37 @@ impl LlmPlugin for ThinkTags {
                     LlmStreamAction::Replace(vec![StreamEvent::TextDelta { text: out }])
                 }
             }
-            StreamEvent::Finish { reason } => {
-                if in_think {
-                    tracing::warn!(
-                        request_id = cx.meta.request_id,
-                        "llm-think-tags reached the end of a stream inside an unclosed think block; dropping the remaining reasoning"
-                    );
-                    buffer.clear();
-                    LlmStreamAction::Replace(vec![StreamEvent::Finish { reason: *reason }])
-                } else if !buffer.is_empty() {
-                    let text = std::mem::take(&mut buffer);
-                    LlmStreamAction::Replace(vec![
-                        StreamEvent::TextDelta { text },
-                        StreamEvent::Finish { reason: *reason },
-                    ])
-                } else {
-                    LlmStreamAction::Replace(vec![StreamEvent::Finish { reason: *reason }])
-                }
-            }
+            // The terminal event is held by the host; buffered text is
+            // flushed by `on_stream_end`.
+            StreamEvent::Finish { .. } => LlmStreamAction::Continue,
             _ => LlmStreamAction::Continue,
         };
 
         cx.state["buffer"] = json!(buffer);
         cx.state["in_think"] = json!(in_think);
         Ok(action)
+    }
+
+    async fn on_stream_end(&self, cx: &mut LlmStreamEndContext<'_>) -> LlmStreamEndResult {
+        if !self.strip {
+            return Ok(LlmStreamEndAction::Continue);
+        }
+        let mut buffer = state_string(cx.state, "buffer");
+        let in_think = state_bool(cx.state, "in_think");
+        if in_think {
+            tracing::warn!(
+                request_id = cx.meta.request_id,
+                "llm-think-tags reached the end of a stream inside an unclosed think block; dropping the remaining reasoning"
+            );
+            buffer.clear();
+        } else if !buffer.is_empty() {
+            cx.events.push(StreamEvent::TextDelta {
+                text: std::mem::take(&mut buffer),
+            });
+        }
+        cx.state["buffer"] = json!(buffer);
+        cx.state["in_think"] = json!(in_think);
+        Ok(LlmStreamEndAction::Continue)
     }
 }
 
@@ -233,7 +240,7 @@ fn longest_suffix_prefix(value: &str, tag: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use octra_llm_core::{ChatResponse, FinishReason, Message, Protocol, Role, Usage};
+    use octra_llm_core::{ChatResponse, FinishReason, Message, Protocol, Role};
     use octra_llm_plugin_types::LlmRequestMeta;
 
     struct Harness {
@@ -379,12 +386,11 @@ mod tests {
         response.message.assistant = vec![AssistantContent::Text {
             text: "visible<think>secret</think>".into(),
         }];
-        let mut usage = Usage::default();
         let mut cx = LlmResponseContext {
             meta: &meta,
             request_model: "m",
             response: &mut response,
-            usage: &mut usage,
+            response_headers: &mut octra_llm_plugin_types::LlmResponseHeaders::default(),
             state: &mut Value::Null,
         };
         plugin.on_response(&mut cx).await.unwrap();

@@ -1,5 +1,5 @@
 {
-  "api_version": "2",
+  "api_version": "7",
   "name": "llm-demo",
   "version": "1.0.0",
   "kind": "llm",
@@ -8,8 +8,7 @@
   "description": "Reference LLM plugin: rejects configured models and tags responses with a header",
   "timeout_ms": 50,
   "fail_policy": "closed",
-  "capabilities": ["request_body"],
-  "phases": ["request", "response", "log"],
+  "capabilities": ["request_body", "key_value"],
   "config_schema": {
     "type": "object",
     "properties": {
@@ -19,7 +18,8 @@
         "default": []
       },
       "header_name": { "type": "string", "default": "x-llm-demo" },
-      "header_value": { "type": "string", "default": "active" }
+      "header_value": { "type": "string", "default": "active" },
+      "counter": { "type": "boolean", "default": false }
     }
   }
 }

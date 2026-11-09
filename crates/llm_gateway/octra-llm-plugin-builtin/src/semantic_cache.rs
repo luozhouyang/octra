@@ -26,8 +26,8 @@ use octra_llm_core::{AssistantContent, ChatRequest, ChatResponse, ContentPart, F
 use octra_llm_plugin_runtime::MemoryPluginStateStore;
 use octra_llm_plugin_types::{
     LlmAction, LlmFinalResponseContext, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory,
-    LlmPluginResult, LlmPluginStateStore, LlmRequestContext, LlmRequestMeta, LlmScope,
-    REQUEST_LLM_SCOPES,
+    LlmPluginResult, LlmPluginStateStore, LlmRequestContext, LlmRequestMeta, LlmResponseSource,
+    LlmScope, REQUEST_LLM_SCOPES,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -567,8 +567,11 @@ impl LlmPlugin for SemanticCache {
             );
             *cx.state = Value::Null;
             self.persist();
-            cx.headers.insert(CACHE_HEADER, "hit");
-            return Ok(LlmAction::Respond(Box::new(response)));
+            cx.response_headers.insert(CACHE_HEADER, "hit");
+            return Ok(LlmAction::Respond {
+                response: Box::new(response),
+                source: LlmResponseSource::Cache,
+            });
         }
 
         let prompt = prompt_text(cx.request, self.max_prompt_chars);
@@ -617,13 +620,16 @@ impl LlmPlugin for SemanticCache {
             }
             *cx.state = Value::Null;
             self.persist();
-            cx.headers.insert(CACHE_HEADER, "hit");
-            return Ok(LlmAction::Respond(Box::new(response)));
+            cx.response_headers.insert(CACHE_HEADER, "hit");
+            return Ok(LlmAction::Respond {
+                response: Box::new(response),
+                source: LlmResponseSource::Cache,
+            });
         }
 
         let pending = Pending { key, scope, vector };
         *cx.state = serde_json::to_value(pending).unwrap_or(Value::Null);
-        cx.headers.insert(CACHE_HEADER, "miss");
+        cx.response_headers.insert(CACHE_HEADER, "miss");
         tracing::debug!(
             cache = "miss",
             model = %cx.request.model,
@@ -876,7 +882,7 @@ mod tests {
         let action = {
             let mut cx = LlmRequestContext {
                 meta,
-                headers: &mut headers,
+                response_headers: &mut headers,
                 request,
                 state: &mut state,
             };
@@ -915,7 +921,7 @@ mod tests {
 
     fn respond_text(action: &LlmAction) -> String {
         match action {
-            LlmAction::Respond(response) => response.text(),
+            LlmAction::Respond { response, .. } => response.text(),
             _ => panic!("expected a cache hit, got a non-respond action"),
         }
     }
@@ -1045,7 +1051,7 @@ mod tests {
         for prompt in ["two", "three"] {
             let mut request = ChatRequest::new("m", vec![Message::user(prompt)]);
             let (action, _, _) = call_request(plugin.as_ref(), &meta, &mut request).await;
-            assert!(matches!(action, LlmAction::Respond(_)));
+            assert!(matches!(action, LlmAction::Respond { .. }));
         }
     }
 

@@ -19,7 +19,8 @@ use octra_llm_core::{AssistantContent, ChatRequest, ContentPart, Message, Stream
 use octra_llm_plugin_types::{
     LlmAction, LlmErrorContext, LlmLogContext, LlmPlugin, LlmPluginFactory, LlmPluginResult,
     LlmProviderRequestContext, LlmRequestContext, LlmResponseContext, LlmScope, LlmStreamAction,
-    LlmStreamContext, LlmStreamResult, REQUEST_LLM_SCOPES,
+    LlmStreamContext, LlmStreamEndAction, LlmStreamEndContext, LlmStreamEndResult, LlmStreamResult,
+    REQUEST_LLM_SCOPES,
 };
 use octra_pii_types::{
     DetectRequest, Detection, EngineReadiness, PiiDetector, PiiDetectorClient, PiiEngineResolver,
@@ -1120,37 +1121,47 @@ impl LlmPlugin for Redaction {
                     }])
                 }
             }
-            StreamEvent::Finish { reason } => {
-                let mut events = Vec::new();
-                let mut channels: Vec<String> = state.pending.keys().cloned().collect();
-                channels.sort();
-                for channel in channels {
-                    let pending = state.pending.remove(&channel).unwrap_or_default();
-                    let text = Self::restore_text(&pending, &state.mapping);
-                    if text.is_empty() {
-                        continue;
-                    }
-                    match channel.as_str() {
-                        "text" => events.push(StreamEvent::TextDelta { text }),
-                        "reasoning" => events.push(StreamEvent::ReasoningDelta { text }),
-                        other if other.starts_with("tool:") => {
-                            if let Ok(index) = other[5..].parse::<usize>() {
-                                events.push(StreamEvent::ToolCallDelta {
-                                    index,
-                                    arguments: text,
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                events.push(StreamEvent::Finish { reason: *reason });
-                LlmStreamAction::Replace(events)
-            }
+            // The terminal event is held by the host; pending text is
+            // flushed by `on_stream_end`.
+            StreamEvent::Finish { .. } => LlmStreamAction::Continue,
             _ => LlmStreamAction::Continue,
         };
         state.store(cx.state);
         Ok(action)
+    }
+
+    async fn on_stream_end(&self, cx: &mut LlmStreamEndContext<'_>) -> LlmStreamEndResult {
+        if !self.reversible() {
+            return Ok(LlmStreamEndAction::Continue);
+        }
+        let mut state = State::load(cx.state)?;
+        if state.mapping.is_empty() {
+            return Ok(LlmStreamEndAction::Continue);
+        }
+        let mut channels: Vec<String> = state.pending.keys().cloned().collect();
+        channels.sort();
+        for channel in channels {
+            let pending = state.pending.remove(&channel).unwrap_or_default();
+            let text = Self::restore_text(&pending, &state.mapping);
+            if text.is_empty() {
+                continue;
+            }
+            match channel.as_str() {
+                "text" => cx.events.push(StreamEvent::TextDelta { text }),
+                "reasoning" => cx.events.push(StreamEvent::ReasoningDelta { text }),
+                other if other.starts_with("tool:") => {
+                    if let Ok(index) = other[5..].parse::<usize>() {
+                        cx.events.push(StreamEvent::ToolCallDelta {
+                            index,
+                            arguments: text,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        state.store(cx.state);
+        Ok(LlmStreamEndAction::Continue)
     }
 
     async fn on_error(&self, cx: &mut LlmErrorContext<'_>) -> LlmPluginResult {
@@ -1187,7 +1198,7 @@ impl LlmPlugin for Redaction {
         Ok(LlmAction::Continue)
     }
 
-    async fn on_log(&self, cx: &mut LlmLogContext<'_>) {
+    async fn on_log(&self, cx: &LlmLogContext<'_>) {
         let state = match State::load(cx.state) {
             Ok(state) => state,
             Err(error) => {
@@ -1382,12 +1393,13 @@ fn valid_ipv4(value: &str) -> bool {
 mod tests {
     use super::*;
     use octra_llm_core::{
-        ChatRequest, ChatResponse, ErrorKind, FinishReason, GatewayError, Message, Protocol, Role,
-        StreamEvent, UserContent,
+        ChatRequest, ChatResponse, ErrorKind, GatewayError, Message, Protocol, Role, StreamEvent,
+        UserContent,
     };
     use octra_llm_plugin_types::LlmResponseHeaders;
     use octra_llm_plugin_types::{
         LlmErrorContext, LlmPlugin, LlmRequestContext, LlmRequestMeta, LlmResponseContext,
+        LlmStreamEndContext,
     };
     use serde_json::json;
 
@@ -1432,7 +1444,7 @@ mod tests {
         let meta = meta();
         let mut cx = LlmRequestContext {
             meta: &meta,
-            headers: &mut LlmResponseHeaders::default(),
+            response_headers: &mut LlmResponseHeaders::default(),
             request,
             state,
         };
@@ -1481,12 +1493,11 @@ mod tests {
             },
         );
         let meta = meta();
-        let mut usage = usage();
         let mut cx = LlmResponseContext {
             meta: &meta,
             request_model: "m",
             response: &mut response,
-            usage: &mut usage,
+            response_headers: &mut LlmResponseHeaders::default(),
             state: &mut state,
         };
         plugin.on_response(&mut cx).await.unwrap();
@@ -1521,12 +1532,11 @@ mod tests {
             },
         );
         let meta = meta();
-        let mut usage = usage();
         let mut cx = LlmResponseContext {
             meta: &meta,
             request_model: "m",
             response: &mut response,
-            usage: &mut usage,
+            response_headers: &mut LlmResponseHeaders::default(),
             state: &mut state,
         };
         plugin.on_response(&mut cx).await.unwrap();
@@ -1570,19 +1580,18 @@ mod tests {
                 LlmStreamAction::Reject(_) => panic!("unexpected rejection"),
             }
         }
-        let mut finish = StreamEvent::Finish {
-            reason: FinishReason::Stop,
-        };
-        let mut cx = LlmStreamContext {
+        let response = ChatResponse::new("id", "m", Message::new(Role::Assistant));
+        let mut appended = Vec::new();
+        let mut cx = LlmStreamEndContext {
             meta: &meta,
-            event: &mut finish,
+            response: &response,
+            events: &mut appended,
             state: &mut state,
         };
-        if let LlmStreamAction::Replace(events) = plugin.on_stream_event(&mut cx).await.unwrap() {
-            for event in events {
-                if let StreamEvent::TextDelta { text } = event {
-                    emit.push_str(&text);
-                }
+        plugin.on_stream_end(&mut cx).await.unwrap();
+        for event in appended {
+            if let StreamEvent::TextDelta { text } = event {
+                emit.push_str(&text);
             }
         }
         assert_eq!(emit, "contact a@b.com now");
@@ -1817,7 +1826,7 @@ mod tests {
         let meta = meta();
         let mut cx = LlmRequestContext {
             meta: &meta,
-            headers: &mut LlmResponseHeaders::default(),
+            response_headers: &mut LlmResponseHeaders::default(),
             request: &mut request,
             state: &mut state,
         };
@@ -1854,7 +1863,7 @@ mod tests {
         let meta = meta();
         let mut cx = LlmRequestContext {
             meta: &meta,
-            headers: &mut LlmResponseHeaders::default(),
+            response_headers: &mut LlmResponseHeaders::default(),
             request: &mut request,
             state: &mut state,
         };
@@ -1887,12 +1896,11 @@ mod tests {
             },
         );
         let meta = meta();
-        let mut usage = usage();
         let mut cx = LlmResponseContext {
             meta: &meta,
             request_model: "m",
             response: &mut response,
-            usage: &mut usage,
+            response_headers: &mut LlmResponseHeaders::default(),
             state: &mut state,
         };
         plugin.on_response(&mut cx).await.unwrap();
@@ -2046,10 +2054,6 @@ mod tests {
                 .create(json!({"rules": {"unknown": true}}))
                 .is_err()
         );
-    }
-
-    fn usage() -> octra_llm_core::Usage {
-        octra_llm_core::Usage::default()
     }
 
     fn split_at_every(text: &str, size: usize) -> Vec<String> {

@@ -84,6 +84,10 @@ async fn main() -> anyhow::Result<()> {
         .context("cannot load plugin instances")?;
 
     let mut wasm_control: Option<Arc<WasmControlState>> = None;
+    let storage_root = Arc::new(
+        PluginStorageRoot::new(workspace.plugin_dir(&config))
+            .with_max_bytes(config.plugins.max_plugin_db_bytes),
+    );
     let plugin_runtime = if config.plugins.wasm_enabled {
         let engine = Arc::new(
             WasmEngine::new(WasmLimits {
@@ -94,10 +98,6 @@ async fn main() -> anyhow::Result<()> {
                 max_inflight: config.plugins.max_inflight,
             })
             .context("cannot create the wasm plugin engine")?,
-        );
-        let storage_root = Arc::new(
-            PluginStorageRoot::new(workspace.plugin_dir(&config))
-                .with_max_bytes(config.plugins.max_plugin_db_bytes),
         );
         let catalog = Arc::new(WasmPluginCatalog::new());
         let mut installed = Vec::new();
@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
             engine,
             catalog,
             host_provider,
-            storage_root,
+            storage_root: storage_root.clone(),
             artifact_dir: workspace.plugin_artifact_dir(&config),
             max_artifact_bytes: u64::try_from(config.plugins.max_artifact_bytes)
                 .unwrap_or(u64::MAX),
@@ -203,7 +203,11 @@ async fn main() -> anyhow::Result<()> {
                 tracing::warn!(plugin = %record.name, "installed LLM wasm plugin has no artifact path");
                 continue;
             };
-            match LlmWasmPluginFactory::from_artifact(&control.engine, std::path::Path::new(path)) {
+            match LlmWasmPluginFactory::from_artifact(
+                &control.engine,
+                std::path::Path::new(path),
+                Some(storage_root.clone()),
+            ) {
                 Ok(factory) => llm_registry.register_arc(Arc::new(factory)),
                 Err(error) => {
                     if config.plugins.strict_boot {
@@ -260,6 +264,7 @@ async fn main() -> anyhow::Result<()> {
                 llm_registry.clone(),
                 llm_plugin_runtime.clone(),
                 control.engine.clone(),
+                Some(storage_root.clone()),
             )) as Arc<dyn LlmWasmLifecycle>
         });
 

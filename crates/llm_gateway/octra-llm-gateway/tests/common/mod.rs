@@ -21,6 +21,7 @@ use octra_config::OctraConfig;
 use octra_llm_gateway::{
     LlmControlState, LlmDataState, LlmPluginRuntime, LlmRuntime, LlmUpstream, control_router,
 };
+use octra_llm_plugin_types::LlmPluginFactory;
 use octra_storage::Storage;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
@@ -520,6 +521,12 @@ const TEST_SECRET_REF: &str = "env:OCTRA_TEST_UNUSED_SECRET";
 
 impl Harness {
     pub async fn new() -> Self {
+        Self::new_with_plugins(Vec::new()).await
+    }
+
+    /// Builds a harness with extra test-only factories registered before the
+    /// first chain compile.
+    pub async fn new_with_plugins(extra: Vec<Arc<dyn LlmPluginFactory>>) -> Self {
         let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
         let config = Arc::new(OctraConfig::default());
         let runtime = Arc::new(
@@ -531,13 +538,14 @@ impl Harness {
         let pii = Arc::new(octra_llm_gateway::pii::PiiEngineRuntime::with_models_dir(
             models.path().to_path_buf(),
         ));
+        let registry = octra_llm_plugin_builtin::registry_with(Some(pii.clone()));
+        for factory in extra {
+            registry.register_arc(factory);
+        }
         let plugins = Arc::new(
-            LlmPluginRuntime::bootstrap(
-                storage.clone(),
-                Arc::new(octra_llm_plugin_builtin::registry_with(Some(pii.clone()))),
-            )
-            .await
-            .unwrap(),
+            LlmPluginRuntime::bootstrap(storage.clone(), Arc::new(registry))
+                .await
+                .unwrap(),
         );
         Self {
             storage,

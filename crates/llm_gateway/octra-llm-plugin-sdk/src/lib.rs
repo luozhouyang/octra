@@ -23,7 +23,8 @@
 //!         &mut self,
 //!         cx: &mut octra_llm_plugin_sdk::RequestContext<'_>,
 //!     ) -> octra_llm_plugin_sdk::Result<octra_llm_plugin_sdk::Decision> {
-//!         cx.headers.push(("x-plugin".to_string(), self.tag.clone()));
+//!         cx.response_headers
+//!             .push(("x-plugin".to_string(), self.tag.clone()));
 //!         Ok(octra_llm_plugin_sdk::Decision::Continue)
 //!     }
 //! }
@@ -116,11 +117,34 @@ impl GatewayError {
     }
 }
 
+/// Why a plugin produced a short-circuit response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseSource {
+    Cache,
+    Synthetic,
+    Termination,
+}
+
+impl ResponseSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cache => "cache",
+            Self::Synthetic => "synthetic",
+            Self::Termination => "termination",
+        }
+    }
+}
+
 /// Stage outcome for request, provider-request, response and error stages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     /// Continue with the (possibly mutated) payload.
     Continue,
+    /// Short-circuit the request stage with an already built response.
+    Respond {
+        response: Value,
+        source: ResponseSource,
+    },
     /// Reject the request. On the error stage this replaces the error.
     Reject(GatewayError),
 }
@@ -137,7 +161,7 @@ pub enum StreamDecision {
 /// headers are attached to the final response.
 pub struct RequestContext<'a> {
     pub meta: Value,
-    pub headers: &'a mut Vec<(String, String)>,
+    pub response_headers: &'a mut Vec<(String, String)>,
     pub request: &'a mut Value,
     pub state: &'a mut Value,
 }
@@ -159,7 +183,7 @@ pub struct ProviderRequestContext<'a> {
 pub struct ResponseContext<'a> {
     pub meta: Value,
     pub response: &'a mut Value,
-    pub usage: &'a mut Value,
+    pub response_headers: &'a mut Vec<(String, String)>,
     pub state: &'a mut Value,
 }
 
@@ -177,18 +201,45 @@ pub struct ErrorContext<'a> {
     pub state: &'a mut Value,
 }
 
-/// Content-free log event. The state is readable but the host ignores mutations
+/// Stream completion. Append non-terminal events to flush buffered content;
+/// the host emits them before the held terminal events.
+pub struct StreamEndContext<'a> {
+    pub meta: Value,
+    pub response: Value,
+    pub events: &'a mut Vec<Value>,
+    pub state: &'a mut Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEndDecision {
+    Continue,
+    Append(Vec<Value>),
+}
+
+/// Read-only final response, after the response/stream transforms and before
+/// protocol encoding. Best-effort; failures never change the response.
+pub struct FinalResponseContext<'a> {
+    pub meta: Value,
+    pub response: Value,
+    pub state: &'a mut Value,
+}
+
+/// Content-free log event. The state is read-only; the host ignores mutations
 /// at this stage.
 pub struct LogContext<'a> {
     pub meta: Value,
     pub event: Value,
-    pub state: &'a mut Value,
+    pub state: &'a Value,
 }
 
 /// Lifecycle implemented by a plugin. Every stage defaults to continuing
 /// unchanged.
 pub trait LlmPlugin: Sized {
     fn configure(config: Value) -> Result<Self>;
+
+    fn restores_sensitive_content() -> bool {
+        false
+    }
 
     fn on_request(&mut self, _cx: &mut RequestContext<'_>) -> Result<Decision> {
         Ok(Decision::Continue)
@@ -206,11 +257,17 @@ pub trait LlmPlugin: Sized {
         Ok(StreamDecision::Continue)
     }
 
+    fn on_stream_end(&mut self, _cx: &mut StreamEndContext<'_>) -> Result<StreamEndDecision> {
+        Ok(StreamEndDecision::Continue)
+    }
+
     fn on_error(&mut self, _cx: &mut ErrorContext<'_>) -> Result<Decision> {
         Ok(Decision::Continue)
     }
 
-    fn on_log(&mut self, _cx: &mut LogContext<'_>) {}
+    fn on_final_response(&mut self, _cx: &mut FinalResponseContext<'_>) {}
+
+    fn on_log(&mut self, _cx: &LogContext<'_>) {}
 }
 
 /// Exports `$plugin` as the component's `plugin-api` implementation.
@@ -251,9 +308,28 @@ macro_rules! export_plugin {
         ) -> $bindings::exports::octra::llm_plugin::plugin_api::Outcome {
             $bindings::exports::octra::llm_plugin::plugin_api::Outcome {
                 action: action.to_string(),
+                source: ::std::option::Option::None,
                 payload_json: payload.map(|value| value.to_string()),
                 state_json: state.to_string(),
                 error_json: error.map(|error| error.to_json().to_string()),
+                headers,
+            }
+        }
+
+        fn __octra_respond_outcome(
+            source: &str,
+            response: $crate::__Value,
+            state: &$crate::__Value,
+            headers: ::std::vec::Vec<(::std::string::String, ::std::string::String)>,
+        ) -> $bindings::exports::octra::llm_plugin::plugin_api::Outcome {
+            $bindings::exports::octra::llm_plugin::plugin_api::Outcome {
+                action: "respond".to_string(),
+                source: ::std::option::Option::Some(source.to_string()),
+                payload_json: ::std::option::Option::Some(
+                    $crate::__serde_json::json!({ "response": response }).to_string(),
+                ),
+                state_json: state.to_string(),
+                error_json: ::std::option::Option::None,
                 headers,
             }
         }
@@ -270,6 +346,10 @@ macro_rules! export_plugin {
                     .map_err(|_| "plugin state lock poisoned".to_string())?;
                 *state = ::std::option::Option::Some(plugin);
                 ::std::result::Result::Ok(())
+            }
+
+            fn restores_sensitive_content() -> bool {
+                <$plugin as $crate::LlmPlugin>::restores_sensitive_content()
             }
 
             fn on_stage(
@@ -303,7 +383,7 @@ macro_rules! export_plugin {
                         let decision = {
                             let mut cx = $crate::RequestContext {
                                 meta,
-                                headers: &mut headers,
+                                response_headers: &mut headers,
                                 request: &mut request,
                                 state: &mut state,
                             };
@@ -318,6 +398,14 @@ macro_rules! export_plugin {
                                     ),
                                     &state,
                                     ::std::option::Option::None,
+                                    headers,
+                                ))
+                            }
+                            $crate::Decision::Respond { response, source } => {
+                                ::std::result::Result::Ok(__octra_respond_outcome(
+                                    source.as_str(),
+                                    response,
+                                    &state,
                                     headers,
                                 ))
                             }
@@ -363,6 +451,11 @@ macro_rules! export_plugin {
                                     headers,
                                 ))
                             }
+                            $crate::Decision::Respond { .. } => {
+                                ::std::result::Result::Err(
+                                    "respond is only valid at the request stage".to_string(),
+                                )
+                            }
                             $crate::Decision::Reject(error) => {
                                 ::std::result::Result::Ok(__octra_outcome(
                                     "reject",
@@ -380,15 +473,11 @@ macro_rules! export_plugin {
                             .get("response")
                             .cloned()
                             .unwrap_or($crate::__Value::Null);
-                        let mut usage = payload
-                            .get("usage")
-                            .cloned()
-                            .unwrap_or($crate::__Value::Null);
                         let decision = {
                             let mut cx = $crate::ResponseContext {
                                 meta,
                                 response: &mut response,
-                                usage: &mut usage,
+                                response_headers: &mut headers,
                                 state: &mut state,
                             };
                             <$plugin as $crate::LlmPlugin>::on_response(plugin, &mut cx)?
@@ -399,12 +488,16 @@ macro_rules! export_plugin {
                                     "continue",
                                     ::std::option::Option::Some($crate::__serde_json::json!({
                                         "response": response,
-                                        "usage": usage,
                                     })),
                                     &state,
                                     ::std::option::Option::None,
                                     headers,
                                 ))
+                            }
+                            $crate::Decision::Respond { .. } => {
+                                ::std::result::Result::Err(
+                                    "respond is only valid at the request stage".to_string(),
+                                )
                             }
                             $crate::Decision::Reject(error) => {
                                 ::std::result::Result::Ok(__octra_outcome(
@@ -465,6 +558,51 @@ macro_rules! export_plugin {
                             }
                         }
                     }
+                    Stage::StreamEnd => {
+                        let payload = __octra_parse_json(&call.payload_json, "stream-end payload")?;
+                        let response = payload
+                            .get("response")
+                            .cloned()
+                            .unwrap_or($crate::__Value::Null);
+                        let mut events: ::std::vec::Vec<$crate::__Value> = payload
+                            .get("events")
+                            .and_then($crate::__Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        let decision = {
+                            let mut cx = $crate::StreamEndContext {
+                                meta,
+                                response,
+                                events: &mut events,
+                                state: &mut state,
+                            };
+                            <$plugin as $crate::LlmPlugin>::on_stream_end(plugin, &mut cx)?
+                        };
+                        match decision {
+                            $crate::StreamEndDecision::Continue => {
+                                ::std::result::Result::Ok(__octra_outcome(
+                                    "continue",
+                                    ::std::option::Option::Some(
+                                        $crate::__serde_json::json!({ "events": events }),
+                                    ),
+                                    &state,
+                                    ::std::option::Option::None,
+                                    headers,
+                                ))
+                            }
+                            $crate::StreamEndDecision::Append(events) => {
+                                ::std::result::Result::Ok(__octra_outcome(
+                                    "append",
+                                    ::std::option::Option::Some(
+                                        $crate::__serde_json::json!({ "events": events }),
+                                    ),
+                                    &state,
+                                    ::std::option::Option::None,
+                                    headers,
+                                ))
+                            }
+                        }
+                    }
                     Stage::Error => {
                         let payload = __octra_parse_json(&call.payload_json, "error payload")?;
                         let mut error = payload
@@ -501,6 +639,11 @@ macro_rules! export_plugin {
                                     headers,
                                 ))
                             }
+                            $crate::Decision::Respond { .. } => {
+                                ::std::result::Result::Err(
+                                    "respond is only valid at the request stage".to_string(),
+                                )
+                            }
                             $crate::Decision::Reject(error) => {
                                 ::std::result::Result::Ok(__octra_outcome(
                                     "reject",
@@ -512,17 +655,39 @@ macro_rules! export_plugin {
                             }
                         }
                     }
+                    Stage::FinalResponse => {
+                        let payload = __octra_parse_json(&call.payload_json, "final response payload")?;
+                        let response = payload
+                            .get("response")
+                            .cloned()
+                            .unwrap_or($crate::__Value::Null);
+                        {
+                            let mut cx = $crate::FinalResponseContext {
+                                meta,
+                                response,
+                                state: &mut state,
+                            };
+                            <$plugin as $crate::LlmPlugin>::on_final_response(plugin, &mut cx);
+                        }
+                        ::std::result::Result::Ok(__octra_outcome(
+                            "continue",
+                            ::std::option::Option::None,
+                            &state,
+                            ::std::option::Option::None,
+                            headers,
+                        ))
+                    }
                     Stage::Log => {
                         let event = __octra_parse_json(&call.payload_json, "log payload")?
                             .get("event")
                             .cloned()
                             .unwrap_or($crate::__Value::Null);
-                        let mut cx = $crate::LogContext {
+                        let cx = $crate::LogContext {
                             meta,
                             event,
-                            state: &mut state,
+                            state: &state,
                         };
-                        <$plugin as $crate::LlmPlugin>::on_log(plugin, &mut cx);
+                        <$plugin as $crate::LlmPlugin>::on_log(plugin, &cx);
                         ::std::result::Result::Ok(__octra_outcome(
                             "continue",
                             ::std::option::Option::None,

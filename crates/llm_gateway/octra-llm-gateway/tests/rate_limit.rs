@@ -355,7 +355,7 @@ async fn rate_limit_runs_before_the_budget_guard() {
 
 #[test]
 fn agent_example_json_files_are_valid() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     for path in [
         "examples/agents/claude-code/settings.json",
         "examples/agents/opencode/opencode.json",

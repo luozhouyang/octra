@@ -233,7 +233,7 @@ impl LlmPlugin for BudgetGuard {
     }
 
     /// Replaces the token estimate with the actual usage once it is known.
-    async fn on_log(&self, cx: &mut LlmLogContext<'_>) {
+    async fn on_log(&self, cx: &LlmLogContext<'_>) {
         let Some(reserved) = cx.state.get(TOKEN_RESERVATION).and_then(Value::as_u64) else {
             return;
         };
@@ -255,7 +255,6 @@ impl LlmPlugin for BudgetGuard {
         {
             tracing::warn!(%error, "cannot settle the LLM token budget");
         }
-        *cx.state = Value::Null;
     }
 
     /// Refunds the token reservation when the request fails before a log event
@@ -361,7 +360,7 @@ mod tests {
         let mut state = Value::Null;
         let mut cx = LlmRequestContext {
             meta: &meta,
-            headers: &mut LlmResponseHeaders::default(),
+            response_headers: &mut LlmResponseHeaders::default(),
             request: &mut request,
             state: &mut state,
         };
@@ -378,7 +377,7 @@ mod tests {
         let rejected = request(&harness.plugin, "hello").await.unwrap();
         let error = match rejected {
             LlmAction::Reject(error) => error,
-            LlmAction::Continue | LlmAction::Respond(_) => {
+            LlmAction::Continue | LlmAction::Respond { .. } => {
                 panic!("second request should be rejected")
             }
         };
@@ -394,7 +393,7 @@ mod tests {
         let mut state = Value::Null;
         let mut cx = LlmRequestContext {
             meta: &meta,
-            headers: &mut LlmResponseHeaders::default(),
+            response_headers: &mut LlmResponseHeaders::default(),
             request: &mut request,
             state: &mut state,
         };
@@ -426,7 +425,7 @@ mod tests {
         let mut state = Value::Null;
         let mut cx = LlmRequestContext {
             meta: &meta,
-            headers: &mut LlmResponseHeaders::default(),
+            response_headers: &mut LlmResponseHeaders::default(),
             request: &mut request,
             state: &mut state,
         };
@@ -453,16 +452,19 @@ mod tests {
             streaming: false,
             error: None,
             cache_status: None,
+            response_source: None,
         };
-        let mut state = json!({ TOKEN_RESERVATION: reserved });
-        let mut cx = LlmLogContext {
+        let state = json!({ TOKEN_RESERVATION: reserved });
+        let cx = LlmLogContext {
             meta: &meta,
             event: &event,
-            state: &mut state,
+            state: &state,
         };
-        harness.plugin.on_log(&mut cx).await;
+        harness.plugin.on_log(&cx).await;
         assert_eq!(window_tokens(&harness), 5);
-        assert_eq!(state, Value::Null);
+        // `on_log` is read-only; the per-request state is dropped with the
+        // request rather than cleared by the plugin.
+        assert_eq!(state[TOKEN_RESERVATION], json!(reserved));
     }
 
     #[test]

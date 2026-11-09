@@ -148,20 +148,20 @@ fn mapping(state: &Value) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use octra_llm_core::{ChatRequest, ChatResponse, Message, Protocol, Usage};
+    use octra_llm_core::{ChatRequest, ChatResponse, Message, Protocol};
     use octra_llm_plugin_types::LlmRequestMeta;
     use octra_llm_plugin_types::LlmResponseHeaders;
     use serde_json::json;
 
     fn context<'a>(
         meta: &'a LlmRequestMeta<'a>,
-        headers: &'a mut LlmResponseHeaders,
+        response_headers: &'a mut LlmResponseHeaders,
         request: &'a mut ChatRequest,
         state: &'a mut serde_json::Value,
     ) -> LlmRequestContext<'a> {
         LlmRequestContext {
             meta,
-            headers,
+            response_headers,
             request,
             state,
         }
@@ -215,12 +215,11 @@ mod tests {
         }
 
         let mut response = ChatResponse::new("id", "gpt-4o-mini", Message::user("hello"));
-        let mut usage = Usage::default();
         let mut cx = octra_llm_plugin_types::LlmResponseContext {
             meta: &meta,
             request_model: "fast",
             response: &mut response,
-            usage: &mut usage,
+            response_headers: &mut LlmResponseHeaders::default(),
             state: &mut state,
         };
         plugin.on_response(&mut cx).await.unwrap();

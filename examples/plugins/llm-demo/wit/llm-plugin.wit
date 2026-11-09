@@ -5,7 +5,7 @@
 // same shape. Keeping the ABI string-based avoids mirroring every message,
 // content-part and stream-event variant in WIT.
 
-package octra:llm-plugin@1.0.0;
+package octra:llm-plugin@2.0.0;
 
 interface types {
     enum log-level {
@@ -21,7 +21,9 @@ interface types {
         provider-request,
         response,
         stream-event,
+        stream-end,
         error,
+        final-response,
         log,
     }
 
@@ -37,8 +39,12 @@ interface types {
     }
 
     record outcome {
-        /// One of `continue`, `reject`, `replace` or `ignore`.
+        /// One of `continue`, `respond`, `reject`, `replace`, `ignore` or
+        /// `append`.
         action: string,
+        /// Short-circuit provenance for `respond`: `cache`, `synthetic` or
+        /// `termination`.
+        source: option<string>,
         /// Mutated payload in the same shape as the invocation payload.
         /// Missing means "leave the payload unchanged".
         payload-json: option<string>,
@@ -46,7 +52,8 @@ interface types {
         state-json: string,
         /// A serialized GatewayError, required when `action` is `reject`.
         error-json: option<string>,
-        /// Headers to attach to the final response (request stage only).
+        /// Headers to attach to the final response. Merged at the request and
+        /// response stages; ignored at stream-end, final-response and log.
         headers: list<tuple<string, string>>,
     }
 }
@@ -56,6 +63,10 @@ interface host {
 
     log: func(level: log-level, message: string);
     now-unix: func() -> s64;
+    kv-get: func(key: string) -> result<option<string>, string>;
+    kv-put: func(key: string, value: string, ttl-seconds: option<u32>) -> result<_, string>;
+    kv-delete: func(key: string) -> result<bool, string>;
+    kv-incr: func(key: string, delta: s64, ttl-seconds: option<u32>) -> result<s64, string>;
 }
 
 interface plugin-api {
@@ -63,6 +74,10 @@ interface plugin-api {
 
     /// Called once per component instance before the first stage.
     configure: func(config-json: string) -> result<_, string>;
+    /// Whether response or stream output can contain values restored from
+    /// sensitive upstream placeholders. Cache plugins must not persist such
+    /// content. Called once after configure.
+    restores-sensitive-content: func() -> bool;
     on-stage: func(call: invocation) -> result<outcome, string>;
 }
 

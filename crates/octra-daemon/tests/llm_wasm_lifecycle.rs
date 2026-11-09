@@ -21,6 +21,7 @@ use octra_daemon::wasm_lifecycle::LlmWasmRuntime;
 use octra_llm_core::{ChatRequest, Message, Protocol};
 use octra_llm_gateway::LlmPluginRuntime;
 use octra_llm_plugin_types::{LlmRequestMeta, LlmRequestState, LlmResponseHeaders};
+use octra_plugin_storage::PluginStorageRoot;
 use octra_storage::Storage;
 
 fn example_dir() -> PathBuf {
@@ -75,7 +76,13 @@ async fn installs_configures_serves_and_uninstalls_an_llm_component() {
             .unwrap(),
     );
     let engine = Arc::new(WasmEngine::new(WasmLimits::default()).unwrap());
-    let lifecycle = LlmWasmRuntime::new(registry.clone(), runtime.clone(), engine.clone());
+    let storage_root = Arc::new(PluginStorageRoot::new(temp.path().join("plugins")));
+    let lifecycle = LlmWasmRuntime::new(
+        registry.clone(),
+        runtime.clone(),
+        engine.clone(),
+        Some(storage_root),
+    );
 
     // Install through the same bridge the admin handler uses.
     lifecycle

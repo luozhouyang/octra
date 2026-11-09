@@ -64,7 +64,7 @@ fn parse_block(block: &[u8]) -> Option<DecodedEvent> {
 
 fn fixture(relative: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/protocol-compat")
+        .join("../../../tests/protocol-compat")
         .join(relative);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))

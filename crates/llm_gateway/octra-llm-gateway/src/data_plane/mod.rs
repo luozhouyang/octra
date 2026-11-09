@@ -18,6 +18,7 @@ use octra_llm_core::{
 use octra_llm_plugin_runtime::{LlmPluginChain, LlmRequestOutcome};
 use octra_llm_plugin_types::{
     LlmLogEvent, LlmProviderInfo, LlmRequestMeta, LlmRequestState, LlmResponseHeaders,
+    LlmResponseSource,
 };
 use octra_llm_protocol::decode_request;
 use serde_json::Value;
@@ -633,7 +634,7 @@ async fn handle(
             &ir.model,
         )
     });
-    let mut cached_response: Option<ChatResponse> = None;
+    let mut cached_response: Option<(ChatResponse, LlmResponseSource)> = None;
     if let Some(chain) = &request_chain {
         let rejection = match chain
             .on_request_outcome(&meta, &mut response_headers, &mut ir, &mut request_state)
@@ -641,8 +642,8 @@ async fn handle(
         {
             Ok(LlmRequestOutcome::Continue) => None,
             Ok(LlmRequestOutcome::Reject(error)) => Some(error),
-            Ok(LlmRequestOutcome::Respond(response)) => {
-                cached_response = Some(response);
+            Ok(LlmRequestOutcome::Respond { response, source }) => {
+                cached_response = Some((response, source));
                 None
             }
             Err(error) => Some(chain_error(error)),
@@ -732,16 +733,27 @@ async fn handle(
     // A request-stage plugin may answer from a cache. Model policy above ran
     // against the effective model, so a short-circuit cannot bypass consumer
     // or virtual-key restrictions.
-    if let Some(mut response) = cached_response {
+    if let Some((mut response, source)) = cached_response {
         response.model = requested_model.clone();
+        let is_cache = source == LlmResponseSource::Cache;
+        let usage = if is_cache {
+            Usage::default()
+        } else {
+            response.usage.clone()
+        };
+        let finish_reason = if is_cache {
+            "stop".to_string()
+        } else {
+            usage::finish_reason_label(&response.finish_reason).to_string()
+        };
         if ir.stream == Some(true) {
             match stream::cached_response(&response, ingress, ir.include_usage.unwrap_or(false)) {
                 Ok(cached) => {
                     tracker.record.model_id = Some(effective_model.clone());
-                    tracker.record.finish_reason = Some("stop".to_string());
-                    // A cache hit costs no upstream tokens; the stored body
-                    // keeps the response it was cached with.
-                    tracker.record.usage = Usage::default();
+                    tracker.record.finish_reason = Some(finish_reason.clone());
+                    // A cache hit costs no upstream tokens; synthetic and
+                    // termination responses keep the usage they declare.
+                    tracker.record.usage = usage.clone();
                     tracker.finish_with_status(200);
                     if let Some(chain) = &request_chain {
                         let event = LlmLogEvent {
@@ -757,7 +769,8 @@ async fn handle(
                             finish_reason: tracker.record.finish_reason.as_deref(),
                             streaming: true,
                             error: None,
-                            cache_status: Some("hit"),
+                            cache_status: is_cache.then_some("hit"),
+                            response_source: Some(source.as_str()),
                         };
                         chain.on_log(&meta, &event, &mut request_state).await;
                     }
@@ -779,10 +792,10 @@ async fn handle(
             match translate::encode_response(ingress, &response) {
                 Ok(body) => {
                     tracker.record.model_id = Some(effective_model.clone());
-                    tracker.record.finish_reason = Some("stop".to_string());
-                    // A cache hit costs no upstream tokens; the stored body
-                    // keeps the response it was cached with.
-                    tracker.record.usage = Usage::default();
+                    tracker.record.finish_reason = Some(finish_reason.clone());
+                    // A cache hit costs no upstream tokens; synthetic and
+                    // termination responses keep the usage they declare.
+                    tracker.record.usage = usage.clone();
                     tracker.finish_with_status(200);
                     if let Some(chain) = &request_chain {
                         let event = LlmLogEvent {
@@ -798,7 +811,8 @@ async fn handle(
                             finish_reason: tracker.record.finish_reason.as_deref(),
                             streaming: false,
                             error: None,
-                            cache_status: Some("hit"),
+                            cache_status: is_cache.then_some("hit"),
+                            response_source: Some(source.as_str()),
                         };
                         chain.on_log(&meta, &event, &mut request_state).await;
                     }
@@ -859,10 +873,14 @@ async fn handle(
 
 /// Attaches plugin-provided headers, then the host request id.
 fn finish(mut response: Response, headers: &LlmResponseHeaders, request_id: &str) -> Response {
+    apply_headers(&mut response, headers);
+    with_request_id(response, request_id)
+}
+
+fn apply_headers(response: &mut Response, headers: &LlmResponseHeaders) {
     for (name, value) in headers.iter() {
         response.headers_mut().insert(name, value.clone());
     }
-    with_request_id(response, request_id)
 }
 
 fn with_request_id(mut response: Response, request_id: &str) -> Response {
@@ -1225,6 +1243,7 @@ async fn execute(
                                 streaming: false,
                                 error: None,
                                 cache_status: None,
+                                response_source: None,
                             };
                             chain.on_log(meta, &event, request_state).await;
                         }
@@ -1306,6 +1325,7 @@ async fn execute(
             streaming: false,
             error: Some(&error.message),
             cache_status: None,
+            response_source: None,
         };
         chain.on_log(meta, &event, request_state).await;
     }
@@ -1335,6 +1355,7 @@ async fn log_rejection(
         streaming: false,
         error: Some(&error.message),
         cache_status: None,
+        response_source: None,
     };
     chain.on_log(meta, &event, state).await;
 }
@@ -1489,19 +1510,24 @@ async fn apply_response_chain(
     meta: &LlmRequestMeta<'_>,
     requested_model: &str,
     response: &mut ChatResponse,
+    response_headers: &mut LlmResponseHeaders,
     request_state: &mut LlmRequestState,
 ) -> LlmResult<()> {
     if let Some(chain) = chain {
-        let mut usage = response.usage.clone();
         match chain
-            .on_response(meta, requested_model, response, &mut usage, request_state)
+            .on_response(
+                meta,
+                requested_model,
+                response,
+                response_headers,
+                request_state,
+            )
             .await
         {
             Ok(None) => {}
             Ok(Some(error)) => return Err(error),
             Err(error) => return Err(chain_error(error)),
         }
-        response.usage = usage;
     }
     Ok(())
 }
@@ -1571,7 +1597,16 @@ async fn try_attempt(
         }
         let mut response = runner.execute(ir.clone(), account_record).await?;
         response.model = requested_model.to_string();
-        apply_response_chain(chain, meta, requested_model, &mut response, request_state).await?;
+        let mut response_headers = LlmResponseHeaders::new();
+        apply_response_chain(
+            chain,
+            meta,
+            requested_model,
+            &mut response,
+            &mut response_headers,
+            request_state,
+        )
+        .await?;
         if let Some(chain) = chain {
             chain
                 .on_final_response(meta, requested_model, &response, request_state)
@@ -1580,8 +1615,10 @@ async fn try_attempt(
         let usage = response.usage.clone();
         let finish_reason = response.finish_reason;
         let body = translate::encode_response(ingress, &response)?;
+        let mut response = json_response(body);
+        apply_headers(&mut response, &response_headers);
         return Ok(AttemptOutcome {
-            response: json_response(body),
+            response,
             usage,
             finish_reason,
             streaming: false,
@@ -1694,7 +1731,16 @@ async fn try_attempt(
     // Clients see the model name they asked for, not the routed provider
     // model, so a model alias stays opaque.
     response.model = requested_model.to_string();
-    apply_response_chain(chain, meta, requested_model, &mut response, request_state).await?;
+    let mut response_headers = LlmResponseHeaders::new();
+    apply_response_chain(
+        chain,
+        meta,
+        requested_model,
+        &mut response,
+        &mut response_headers,
+        request_state,
+    )
+    .await?;
     if let Some(chain) = chain {
         chain
             .on_final_response(meta, requested_model, &response, request_state)
@@ -1703,8 +1749,10 @@ async fn try_attempt(
     let usage = response.usage.clone();
     let finish_reason = response.finish_reason;
     let body = translate::encode_response(ingress, &response)?;
+    let mut response = json_response(body);
+    apply_headers(&mut response, &response_headers);
     Ok(AttemptOutcome {
-        response: json_response(body),
+        response,
         usage,
         finish_reason,
         streaming: false,

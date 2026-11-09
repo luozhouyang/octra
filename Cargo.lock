@@ -4244,6 +4244,7 @@ dependencies = [
  "nix",
  "octra-ai-config",
  "octra-api-core",
+ "octra-api-plugin-types",
  "octra-config",
  "octra-core",
  "octra-data-plane",

@@ -44,15 +44,15 @@ flowchart TB
 
 ## LLM plugins
 
-- Stages: `on_request`, `on_provider_request`, `on_response`, `on_stream_event`, `on_error`, `on_log`, `on_final_response`.
+- Stages: `on_request`, `on_provider_request`, `on_response`, `on_stream_event`, `on_stream_end`, `on_error`, `on_final_response`, `on_log`.
 - Scopes: virtual key, consumer, model, provider, global.
 - Built-ins: `budget-guard`, `intent-hint`, `request-audit`, `model-map`, `param-override`, `rate-limit`, `llm-pii-redaction`, `system-prompt`, `think-tags`, `llm-prompt-guard`, `llm-prompt-compress`, `llm-semantic-cache`.
-- The plugin sees the canonical IR, response headers, usage, and stream events. It can reject, rewrite, replace stream events, short-circuit with a cached canonical response at the request stage, or add response headers. `on_final_response` runs after every response transform and before protocol encoding; it is read-only and best-effort.
+- The plugin sees the canonical IR, response headers, usage, and stream events. `ChatResponse::usage` is the single usage source; a response plugin mutates it directly. A request-stage `Respond` carries a source (`cache`, `synthetic`, or `termination`) so logs do not label every short-circuit as a cache hit. `on_response` can add response headers for non-streaming responses; streaming headers are committed by `on_request`. `on_stream_end` runs after the upstream stream ends and before the held terminal events; it appends non-terminal events to flush buffered transforms. `on_final_response` runs after every response transform and before protocol encoding; it is read-only and best-effort. `on_log` is read-only and runs last.
 
 ## Runtime tiers
 
 - **Native:** first-party Rust factories registered in the daemon. They have full host access and no WASM overhead.
-- **WASM:** third-party components with a WIT ABI, a manifest, approved capabilities, fuel/memory/timeout/body limits, and a host-owned per-plugin SQLite database. The API plugin contract version is 3 (Kong seven phases, chunk/EOF body filtering, and a separate background event/job interface); the LLM plugin contract version is 6.
+- **WASM:** third-party components with a WIT ABI, a manifest, approved capabilities, fuel/memory/timeout/body limits, and a host-owned per-plugin SQLite database. The API plugin contract version is 3 (Kong seven phases, chunk/EOF body filtering, and a separate background event/job interface); the LLM plugin contract version is 7 (eight stages, `restores-sensitive-content`, and capability-gated KV). The LLM runtime dispatches every stage; the stale API phase vocabulary is not used for gating.
 - **Install/upgrade:** artifacts are stored with a hash, optional Ed25519 signature, manifest, and approved capabilities. A plugin instance is compiled only after the artifact passes layout and signature policy. Uninstall keeps plugin data unless `purge=true`; destructive migrations need explicit approval.
 
 ## Storage
@@ -70,4 +70,4 @@ Event and job hooks are a separate background plugin interface; they are not pha
 
 ## Drift instrument
 
-Drift caught by: `crates/api_gateway/octra-api-plugin-runtime` unit tests, `crates/api_gateway/octra-api-plugin-wasm/tests/`, `crates/api_gateway/octra-api-gateway/tests/plugins/`, `crates/octra-llm-plugin-runtime` tests, `crates/octra-llm-plugin-wasm/tests/wasm_e2e.rs`, and the `octra-api-plugin-events` delivery/retry/job tests.
+Drift caught by: `crates/api_gateway/octra-api-plugin-runtime` unit tests, `crates/api_gateway/octra-api-plugin-wasm/tests/`, `crates/api_gateway/octra-api-gateway/tests/plugins/`, `crates/llm_gateway/octra-llm-plugin-runtime` tests, `crates/llm_gateway/octra-llm-plugin-wasm/tests/wasm_e2e.rs`, and the `octra-api-plugin-events` delivery/retry/job tests.

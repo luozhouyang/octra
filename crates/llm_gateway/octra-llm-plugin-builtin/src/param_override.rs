@@ -265,13 +265,13 @@ mod tests {
 
     fn context<'a>(
         meta: &'a LlmRequestMeta<'a>,
-        headers: &'a mut LlmResponseHeaders,
+        response_headers: &'a mut LlmResponseHeaders,
         request: &'a mut ChatRequest,
         state: &'a mut serde_json::Value,
     ) -> LlmRequestContext<'a> {
         LlmRequestContext {
             meta,
-            headers,
+            response_headers,
             request,
             state,
         }

@@ -5,12 +5,18 @@
 //!
 //!   * rejects requests for models listed in `reject_models` with a 429,
 //!   * tags successful requests with `header_name: header_value`,
+//!   * increments a per-plugin KV counter when `counter` is enabled,
+//!   * appends a stream-end event and reports that it can restore sensitive
+//!     content, and
 //!   * records the requested model in per-request state.
 
 #[allow(warnings)]
 mod bindings;
 
-use octra_llm_plugin_sdk::{Decision, Error, GatewayError, LlmPlugin, RequestContext, Result};
+use octra_llm_plugin_sdk::{
+    Decision, Error, GatewayError, LlmPlugin, RequestContext, ResponseContext, Result,
+    StreamEndContext, StreamEndDecision,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -22,6 +28,8 @@ struct Config {
     header_name: String,
     #[serde(default = "default_header_value")]
     header_value: String,
+    #[serde(default)]
+    counter: bool,
 }
 
 fn default_header_name() -> String {
@@ -43,6 +51,10 @@ impl LlmPlugin for LlmDemo {
         Ok(Self { config })
     }
 
+    fn restores_sensitive_content() -> bool {
+        true
+    }
+
     fn on_request(&mut self, cx: &mut RequestContext<'_>) -> Result<Decision> {
         let model = cx.request_model().unwrap_or_default().to_string();
         if self
@@ -61,12 +73,35 @@ impl LlmPlugin for LlmDemo {
             ));
         }
 
-        cx.headers.push((
+        cx.response_headers.push((
             self.config.header_name.clone(),
             self.config.header_value.clone(),
         ));
+        if self.config.counter {
+            let _ = bindings::octra::llm_plugin::host::kv_incr("requests", 1, None);
+        }
         *cx.state = serde_json::json!({ "model": model });
         Ok(Decision::Continue)
+    }
+
+    fn on_response(&mut self, cx: &mut ResponseContext<'_>) -> Result<Decision> {
+        let output_tokens = cx
+            .response
+            .get("usage")
+            .and_then(|usage| usage.get("output_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        cx.response_headers.push((
+            "x-llm-demo-output-tokens".to_string(),
+            output_tokens.to_string(),
+        ));
+        Ok(Decision::Continue)
+    }
+
+    fn on_stream_end(&mut self, cx: &mut StreamEndContext<'_>) -> Result<StreamEndDecision> {
+        cx.events
+            .push(serde_json::json!({"type": "text_delta", "text": " tail"}));
+        Ok(StreamEndDecision::Continue)
     }
 }
 

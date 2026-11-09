@@ -42,6 +42,7 @@ nix.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
+octra-api-plugin-types.workspace = true
 octra-llm-plugin-builtin.workspace = true
 http-body-util.workspace = true
 tempfile = "3"

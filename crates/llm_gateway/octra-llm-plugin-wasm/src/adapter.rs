@@ -11,16 +11,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use octra_api_plugin_types::{PluginError, PluginManifest, PluginPhase};
+use octra_api_plugin_types::{Capability, PluginError, PluginManifest, PluginStorage};
 use octra_api_plugin_wasm::WasmLimits;
-use octra_llm_core::{GatewayError, StreamEvent};
+use octra_llm_core::{ChatResponse, GatewayError, StreamEvent};
 use octra_llm_plugin_types::{
-    ALL_LLM_SCOPES, LlmAction, LlmErrorContext, LlmLogContext, LlmLogEvent, LlmPlugin,
-    LlmPluginCreateContext, LlmPluginFactory, LlmPluginResult, LlmProviderInfo,
-    LlmProviderRequestContext, LlmRequestContext, LlmRequestMeta, LlmResponseContext,
-    LlmResponseHeaders, LlmScope, LlmStreamAction, LlmStreamContext, LlmStreamResult,
-    REQUEST_LLM_SCOPES,
+    ALL_LLM_SCOPES, LlmAction, LlmErrorContext, LlmFinalResponseContext, LlmLogContext,
+    LlmLogEvent, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory, LlmPluginResult,
+    LlmProviderInfo, LlmProviderRequestContext, LlmRequestContext, LlmRequestMeta,
+    LlmResponseContext, LlmResponseHeaders, LlmResponseSource, LlmScope, LlmStreamAction,
+    LlmStreamContext, LlmStreamEndAction, LlmStreamEndContext, LlmStreamEndResult, LlmStreamResult,
 };
+use octra_plugin_storage::PluginStorageRoot;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::task::spawn_blocking;
@@ -39,6 +40,7 @@ pub struct LlmWasmPluginFactory {
     limits: WasmLimits,
     scopes: &'static [LlmScope],
     hash: String,
+    storage_root: Option<Arc<PluginStorageRoot>>,
 }
 
 impl LlmWasmPluginFactory {
@@ -47,25 +49,41 @@ impl LlmWasmPluginFactory {
         component: Arc<Component>,
         limits: WasmLimits,
         hash: String,
+        storage_root: Option<Arc<PluginStorageRoot>>,
     ) -> Self {
-        let scopes: &'static [LlmScope] =
-            if manifest.phases.contains(&PluginPhase::Request) || manifest.phases.is_empty() {
-                &REQUEST_LLM_SCOPES
-            } else {
-                &ALL_LLM_SCOPES
-            };
+        let scopes: &'static [LlmScope] = &ALL_LLM_SCOPES;
         Self {
             manifest,
             component,
             limits,
             scopes,
             hash,
+            storage_root,
         }
     }
 
     /// Content hash of the artifact this factory was loaded from.
     pub fn component_hash(&self) -> &str {
         &self.hash
+    }
+
+    fn storage_for_plugin(&self) -> Result<Option<Arc<dyn PluginStorage>>, PluginError> {
+        if !self.manifest.capabilities.contains(&Capability::KeyValue) {
+            return Ok(None);
+        }
+        let Some(root) = &self.storage_root else {
+            return Err(PluginError::fail_closed(
+                "LLM wasm plugin requests KeyValue but no plugin storage root is configured",
+            ));
+        };
+        let store = root
+            .open(&self.manifest.name, Vec::new())
+            .map_err(|error| {
+                PluginError::fail_closed(format!(
+                    "cannot open LLM plugin key-value storage: {error}"
+                ))
+            })?;
+        Ok(Some(Arc::new(store)))
     }
 }
 
@@ -101,14 +119,15 @@ impl LlmPluginFactory for LlmWasmPluginFactory {
         let config_json = serde_json::to_string(&config).map_err(|error| {
             PluginError::fail_closed(format!("cannot serialize wasm plugin config: {error}"))
         })?;
-        let plugin = LlmWasmPlugin {
+        let mut plugin = LlmWasmPlugin {
             manifest: self.manifest.clone(),
             component: self.component.clone(),
             config_json,
             limits: self.limits.clone(),
             scope: context.scope.to_string(),
             scope_id: context.scope_id.to_string(),
-            phases: phases(&self.manifest),
+            restores_sensitive: false,
+            storage: self.storage_for_plugin()?,
             instances: Mutex::new(HashMap::new()),
             max_instances: if self.limits.max_inflight == 0 {
                 1024
@@ -118,7 +137,8 @@ impl LlmPluginFactory for LlmWasmPluginFactory {
         };
         // Instantiate once during chain compilation so a configuration the
         // guest rejects fails the control write instead of every request.
-        plugin.instantiate()?;
+        let mut instance = plugin.instantiate()?;
+        plugin.restores_sensitive = instance.restores_sensitive_content()?;
         Ok(Arc::new(plugin))
     }
 }
@@ -130,7 +150,8 @@ pub struct LlmWasmPlugin {
     limits: WasmLimits,
     scope: String,
     scope_id: String,
-    phases: Vec<PluginPhase>,
+    restores_sensitive: bool,
+    storage: Option<Arc<dyn PluginStorage>>,
     instances: Mutex<HashMap<String, InstanceEntry>>,
     max_instances: usize,
 }
@@ -150,11 +171,20 @@ enum CallError {
     Trap(String),
 }
 
-impl LlmWasmPlugin {
-    fn handles(&self, stage: PluginPhase) -> bool {
-        self.phases.contains(&stage)
+impl WasmInstance {
+    fn restores_sensitive_content(&mut self) -> Result<bool, PluginError> {
+        self.bindings
+            .octra_llm_plugin_plugin_api()
+            .call_restores_sensitive_content(&mut self.store)
+            .map_err(|error| {
+                PluginError::fail_closed(format!(
+                    "cannot read LLM plugin sensitive-content flag: {error}"
+                ))
+            })
     }
+}
 
+impl LlmWasmPlugin {
     fn instance_for(&self, request_id: &str) -> Result<Arc<Mutex<WasmInstance>>, PluginError> {
         let now = Instant::now();
         let mut instances = self.instances.lock();
@@ -198,7 +228,11 @@ impl LlmWasmPlugin {
     fn instantiate(&self) -> Result<WasmInstance, PluginError> {
         let mut store = Store::new(
             self.component.engine(),
-            LlmHostState::new(&self.manifest.name, self.limits.max_memory_bytes),
+            LlmHostState::new(
+                &self.manifest.name,
+                self.limits.max_memory_bytes,
+                self.storage.clone(),
+            ),
         );
         store.limiter(|state| &mut state.limits);
         arm(&mut store, &self.limits)?;
@@ -305,9 +339,35 @@ impl LlmWasmPlugin {
             "ignore" => Ok("ignore"),
             "reject" => Ok("reject"),
             "replace" => Ok("replace"),
+            "respond" => Ok("respond"),
+            "append" => Ok("append"),
             other => Err(PluginError::fail_closed(format!(
                 "LLM plugin returned unknown action '{other}'"
             ))),
+        }
+    }
+
+    fn parse_source(outcome: &wit::Outcome) -> Result<LlmResponseSource, PluginError> {
+        match outcome.source.as_deref() {
+            Some("cache") => Ok(LlmResponseSource::Cache),
+            Some("synthetic") => Ok(LlmResponseSource::Synthetic),
+            Some("termination") => Ok(LlmResponseSource::Termination),
+            Some(other) => Err(PluginError::fail_closed(format!(
+                "LLM plugin returned unknown response source '{other}'"
+            ))),
+            None => Err(PluginError::fail_closed(
+                "LLM plugin responded without a response source",
+            )),
+        }
+    }
+
+    fn ensure_action(action: &str, allowed: &[&str]) -> Result<(), PluginError> {
+        if allowed.contains(&action) {
+            Ok(())
+        } else {
+            Err(PluginError::fail_closed(format!(
+                "LLM plugin action '{action}' is not valid at this stage"
+            )))
         }
     }
 
@@ -327,10 +387,11 @@ impl LlmPlugin for LlmWasmPlugin {
         &self.manifest
     }
 
+    fn restores_sensitive_content(&self) -> bool {
+        self.restores_sensitive
+    }
+
     async fn on_request(&self, cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
-        if !self.handles(PluginPhase::Request) {
-            return Ok(LlmAction::Continue);
-        }
         let payload = json!({"request": cx.request});
         let outcome = self
             .invoke(
@@ -338,11 +399,35 @@ impl LlmPlugin for LlmWasmPlugin {
                 wit::Stage::Request,
                 payload,
                 cx.state,
-                Some(cx.headers),
+                Some(cx.response_headers),
             )
             .await?;
-        if Self::parse_action(&outcome)? == "reject" {
-            return Ok(LlmAction::Reject(Self::parse_rejection(&outcome)?));
+        match Self::parse_action(&outcome)? {
+            "reject" => return Ok(LlmAction::Reject(Self::parse_rejection(&outcome)?)),
+            "respond" => {
+                let payload = outcome.payload_json.as_deref().ok_or_else(|| {
+                    PluginError::fail_closed("LLM plugin responded without a payload")
+                })?;
+                let value: Value = serde_json::from_str(payload).map_err(|error| {
+                    PluginError::fail_closed(format!(
+                        "LLM plugin returned invalid response JSON: {error}"
+                    ))
+                })?;
+                let response = value.get("response").cloned().ok_or_else(|| {
+                    PluginError::fail_closed("LLM plugin responded without a response object")
+                })?;
+                let response: ChatResponse = serde_json::from_value(response).map_err(|error| {
+                    PluginError::fail_closed(format!(
+                        "LLM plugin returned an invalid ChatResponse: {error}"
+                    ))
+                })?;
+                let source = Self::parse_source(&outcome)?;
+                return Ok(LlmAction::Respond {
+                    response: Box::new(response),
+                    source,
+                });
+            }
+            _ => {}
         }
         if let Some(payload) = &outcome.payload_json {
             let value: Value = serde_json::from_str(payload).map_err(|error| {
@@ -362,9 +447,6 @@ impl LlmPlugin for LlmWasmPlugin {
     }
 
     async fn on_provider_request(&self, cx: &mut LlmProviderRequestContext<'_>) -> LlmPluginResult {
-        if !self.handles(PluginPhase::UpstreamRequest) {
-            return Ok(LlmAction::Continue);
-        }
         let payload = json!({"provider": provider_json(cx.provider), "request": cx.request});
         let outcome = self
             .invoke(
@@ -375,7 +457,9 @@ impl LlmPlugin for LlmWasmPlugin {
                 None,
             )
             .await?;
-        if Self::parse_action(&outcome)? == "reject" {
+        let action = Self::parse_action(&outcome)?;
+        Self::ensure_action(action, &["continue", "reject"])?;
+        if action == "reject" {
             return Ok(LlmAction::Reject(Self::parse_rejection(&outcome)?));
         }
         if let Some(payload) = &outcome.payload_json {
@@ -396,14 +480,19 @@ impl LlmPlugin for LlmWasmPlugin {
     }
 
     async fn on_response(&self, cx: &mut LlmResponseContext<'_>) -> LlmPluginResult {
-        if !self.handles(PluginPhase::Response) {
-            return Ok(LlmAction::Continue);
-        }
-        let payload = json!({"response": cx.response, "usage": cx.usage});
+        let payload = json!({"response": cx.response});
         let outcome = self
-            .invoke(cx.meta, wit::Stage::Response, payload, cx.state, None)
+            .invoke(
+                cx.meta,
+                wit::Stage::Response,
+                payload,
+                cx.state,
+                Some(cx.response_headers),
+            )
             .await?;
-        if Self::parse_action(&outcome)? == "reject" {
+        let action = Self::parse_action(&outcome)?;
+        Self::ensure_action(action, &["continue", "reject"])?;
+        if action == "reject" {
             return Ok(LlmAction::Reject(Self::parse_rejection(&outcome)?));
         }
         if let Some(payload) = &outcome.payload_json {
@@ -419,24 +508,71 @@ impl LlmPlugin for LlmWasmPlugin {
                     ))
                 })?;
             }
-            if let Some(usage) = value.get("usage") {
-                *cx.usage = serde_json::from_value(usage.clone()).map_err(|error| {
-                    PluginError::fail_closed(format!("LLM plugin returned invalid usage: {error}"))
-                })?;
-            }
         }
         Ok(LlmAction::Continue)
     }
 
-    async fn on_stream_event(&self, cx: &mut LlmStreamContext<'_>) -> LlmStreamResult {
-        if !self.handles(PluginPhase::ResponseBody) {
-            return Ok(LlmStreamAction::Continue);
+    async fn on_stream_end(&self, cx: &mut LlmStreamEndContext<'_>) -> LlmStreamEndResult {
+        let before = cx.events.len();
+        let payload = json!({"response": cx.response, "events": cx.events});
+        let outcome = self
+            .invoke(cx.meta, wit::Stage::StreamEnd, payload, cx.state, None)
+            .await?;
+        let action = Self::parse_action(&outcome)?;
+        if !matches!(action, "continue" | "append") {
+            return Err(PluginError::fail_closed(format!(
+                "LLM plugin returned action '{action}' at the stream-end stage"
+            )));
         }
+        let Some(payload) = &outcome.payload_json else {
+            return Ok(LlmStreamEndAction::Continue);
+        };
+        let value: Value = serde_json::from_str(payload).map_err(|error| {
+            PluginError::fail_closed(format!(
+                "LLM plugin returned invalid stream-end payload: {error}"
+            ))
+        })?;
+        let events: Vec<StreamEvent> = serde_json::from_value(
+            value.get("events").cloned().unwrap_or(Value::Null),
+        )
+        .map_err(|error| {
+            PluginError::fail_closed(format!(
+                "LLM plugin returned invalid stream-end events: {error}"
+            ))
+        })?;
+        // The envelope carries earlier plugins' appends too; return only the
+        // events this guest added.
+        let appended: Vec<StreamEvent> = events.into_iter().skip(before).collect();
+        if appended.is_empty() {
+            Ok(LlmStreamEndAction::Continue)
+        } else {
+            Ok(LlmStreamEndAction::Append(appended))
+        }
+    }
+
+    async fn on_final_response(&self, cx: &mut LlmFinalResponseContext<'_>) {
+        let payload = json!({"response": cx.response});
+        if let Err(error) = self
+            .invoke(cx.meta, wit::Stage::FinalResponse, payload, cx.state, None)
+            .await
+        {
+            tracing::warn!(
+                plugin = %self.manifest.name,
+                request_id = cx.meta.request_id,
+                %error,
+                "LLM wasm plugin final-response stage failed"
+            );
+        }
+    }
+
+    async fn on_stream_event(&self, cx: &mut LlmStreamContext<'_>) -> LlmStreamResult {
         let payload = json!({"event": cx.event});
         let outcome = self
             .invoke(cx.meta, wit::Stage::StreamEvent, payload, cx.state, None)
             .await?;
-        match Self::parse_action(&outcome)? {
+        let action = Self::parse_action(&outcome)?;
+        Self::ensure_action(action, &["continue", "replace", "reject"])?;
+        match action {
             "reject" => return Ok(LlmStreamAction::Reject(Self::parse_rejection(&outcome)?)),
             "replace" => {
                 let payload = outcome.payload_json.as_deref().ok_or_else(|| {
@@ -474,9 +610,6 @@ impl LlmPlugin for LlmWasmPlugin {
     }
 
     async fn on_error(&self, cx: &mut LlmErrorContext<'_>) -> LlmPluginResult {
-        if !self.handles(PluginPhase::Error) {
-            return Ok(LlmAction::Continue);
-        }
         let payload = json!({
             "provider_id": cx.provider_id,
             "account_id": cx.account_id,
@@ -485,7 +618,9 @@ impl LlmPlugin for LlmWasmPlugin {
         let outcome = self
             .invoke(cx.meta, wit::Stage::Error, payload, cx.state, None)
             .await?;
-        if Self::parse_action(&outcome)? == "reject" {
+        let action = Self::parse_action(&outcome)?;
+        Self::ensure_action(action, &["continue", "reject"])?;
+        if action == "reject" {
             *cx.error = Self::parse_rejection(&outcome)?;
             return Ok(LlmAction::Continue);
         }
@@ -504,20 +639,19 @@ impl LlmPlugin for LlmWasmPlugin {
         Ok(LlmAction::Continue)
     }
 
-    async fn on_log(&self, cx: &mut LlmLogContext<'_>) {
-        if self.handles(PluginPhase::Log) {
-            let payload = json!({"event": log_json(cx.event)});
-            if let Err(error) = self
-                .invoke(cx.meta, wit::Stage::Log, payload, cx.state, None)
-                .await
-            {
-                tracing::warn!(
-                    plugin = %self.manifest.name,
-                    request_id = cx.meta.request_id,
-                    %error,
-                    "LLM wasm plugin log stage failed"
-                );
-            }
+    async fn on_log(&self, cx: &LlmLogContext<'_>) {
+        let payload = json!({"event": log_json(cx.event)});
+        let mut state = cx.state.clone();
+        if let Err(error) = self
+            .invoke(cx.meta, wit::Stage::Log, payload, &mut state, None)
+            .await
+        {
+            tracing::warn!(
+                plugin = %self.manifest.name,
+                request_id = cx.meta.request_id,
+                %error,
+                "LLM wasm plugin log stage failed"
+            );
         }
         self.drop_instance(cx.meta.request_id);
     }
@@ -541,7 +675,7 @@ pub(crate) fn probe_component(
 ) -> Result<(), PluginError> {
     let mut store = Store::new(
         component.engine(),
-        LlmHostState::new(plugin, limits.max_memory_bytes),
+        LlmHostState::new(plugin, limits.max_memory_bytes, None),
     );
     store.limiter(|state| &mut state.limits);
     arm(&mut store, limits)?;
@@ -561,18 +695,6 @@ pub(crate) fn probe_component(
 fn epoch_ticks(timeout: Duration) -> u64 {
     let millis = timeout.as_millis().max(1) as u64;
     (millis / 10).max(1).saturating_sub(1).max(1)
-}
-
-fn phases(manifest: &PluginManifest) -> Vec<PluginPhase> {
-    if manifest.phases.is_empty() {
-        vec![
-            PluginPhase::Request,
-            PluginPhase::Response,
-            PluginPhase::Log,
-        ]
-    } else {
-        manifest.phases.clone()
-    }
 }
 
 fn meta_json(meta: &LlmRequestMeta<'_>) -> Value {
@@ -627,6 +749,7 @@ mod tests {
     fn outcome(action: &str) -> wit::Outcome {
         wit::Outcome {
             action: action.to_string(),
+            source: None,
             payload_json: None,
             state_json: "null".to_string(),
             error_json: None,
@@ -657,39 +780,10 @@ mod tests {
     }
 
     #[test]
-    fn default_phases_cover_request_response_log() {
-        let manifest = PluginManifest {
-            name: "x".into(),
-            version: "1".into(),
-            kind: octra_api_plugin_types::PluginKind::Llm,
-            runtime: octra_api_plugin_types::PluginRuntimeKind::Wasm,
-            priority: 0,
-            description: String::new(),
-            timeout_ms: 100,
-            fail_policy: octra_api_plugin_types::FailPolicy::Open,
-            phases: Vec::new(),
-            capabilities: Vec::new(),
-            config_schema: None,
-            api_version: "2".into(),
-            entities: Vec::new(),
-            migrations: Vec::new(),
-            admin_routes: Vec::new(),
-            subscriptions: Vec::new(),
-            jobs: Vec::new(),
-        };
-        assert_eq!(
-            phases(&manifest),
-            vec![
-                PluginPhase::Request,
-                PluginPhase::Response,
-                PluginPhase::Log
-            ]
-        );
-    }
-
-    #[test]
     fn parses_known_actions_and_rejects_unknown_ones() {
-        for action in ["continue", "ignore", "reject", "replace"] {
+        for action in [
+            "continue", "ignore", "reject", "replace", "respond", "append",
+        ] {
             assert_eq!(
                 LlmWasmPlugin::parse_action(&outcome(action)).unwrap(),
                 action
@@ -743,6 +837,7 @@ mod tests {
             streaming: false,
             error: None,
             cache_status: None,
+            response_source: None,
         };
         let value = log_json(&event);
         assert_eq!(value["requested_model"], "alias");

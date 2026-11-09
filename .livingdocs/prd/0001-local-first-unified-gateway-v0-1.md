@@ -93,7 +93,7 @@ Claude Code, Codex, and OpenCode adapters detect installations, render a preview
 
 ### R6 Plugins
 
-Built-in plugins use the API and LLM gateway traits. Third-party plugins use the WASM component ABI with a manifest, approved capabilities, signature policy, and a host-owned per-plugin SQLite database. Durable events and scheduled jobs are delivered by the daemon. API plugin contract version is 3; LLM plugin contract version is 6.
+Built-in plugins use the API and LLM gateway traits. Third-party plugins use the WASM component ABI with a manifest, approved capabilities, signature policy, and a host-owned per-plugin SQLite database. Durable events and scheduled jobs are delivered by the daemon. API plugin contract version is 3; LLM plugin contract version is 7, with eight stages, a sensitive-content marker, and capability-gated per-plugin key-value storage.
 
 ### R7 Persistence
 

@@ -397,7 +397,7 @@ mod tests {
         let mut state = Value::Null;
         let mut cx = LlmRequestContext {
             meta: &meta,
-            headers: &mut LlmResponseHeaders::default(),
+            response_headers: &mut LlmResponseHeaders::default(),
             request,
             state: &mut state,
         };
@@ -412,7 +412,9 @@ mod tests {
                 assert_eq!(error.message, "prompt blocked by policy");
             }
             LlmAction::Continue => panic!("expected the prompt guard to reject the request"),
-            LlmAction::Respond(_) => panic!("the prompt guard must not short-circuit a response"),
+            LlmAction::Respond { .. } => {
+                panic!("the prompt guard must not short-circuit a response")
+            }
         }
     }
 

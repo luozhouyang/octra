@@ -671,11 +671,11 @@ impl RateLimitPlugin {
             if eval.label.is_empty() {
                 continue;
             }
-            cx.headers.insert(
+            cx.response_headers.insert(
                 &format!("X-RateLimit-Limit-{}", eval.label),
                 &header_number(eval.limit),
             );
-            cx.headers.insert(
+            cx.response_headers.insert(
                 &format!("X-RateLimit-Remaining-{}", eval.label),
                 &header_number(eval.remaining),
             );
@@ -690,11 +690,11 @@ impl RateLimitPlugin {
                         .then_with(|| left.reset.cmp(&right.reset))
                 })
         {
-            cx.headers
+            cx.response_headers
                 .insert("RateLimit-Limit", &header_number(worst.limit));
-            cx.headers
+            cx.response_headers
                 .insert("RateLimit-Remaining", &header_number(worst.remaining));
-            cx.headers
+            cx.response_headers
                 .insert("RateLimit-Reset", &worst.reset.max(1).to_string());
         }
         if rejected {
@@ -704,7 +704,8 @@ impl RateLimitPlugin {
                 .map(|eval| eval.reset.max(1))
                 .max()
                 .unwrap_or(1);
-            cx.headers.insert("Retry-After", &retry.to_string());
+            cx.response_headers
+                .insert("Retry-After", &retry.to_string());
         }
     }
 }
@@ -849,7 +850,7 @@ mod tests {
         let mut headers = LlmResponseHeaders::default();
         let mut cx = LlmRequestContext {
             meta: &meta,
-            headers: &mut headers,
+            response_headers: &mut headers,
             request: &mut request,
             state: &mut state,
         };
