@@ -657,6 +657,12 @@ pub trait ApiGatewayPlugin: Send + Sync {
         false
     }
 
+    /// Whether this instance needs the full response body buffered before the
+    /// response-body stage. Header-only response plugins return false.
+    fn needs_response_body(&self) -> bool {
+        false
+    }
+
     async fn on_rewrite(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
         Ok(PluginAction::Continue)
     }

@@ -20,12 +20,15 @@ use octra_api_plugin_types::{
 use octra_core::{Error, Result};
 use octra_storage::{EventRecord, NewEvent, NewJob, Storage};
 use serde_json::Value;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 pub use control::{EventControlState, control_router};
 
 const PUBLISH_QUEUE: usize = 1024;
+/// Bound on overflow tasks that wait for queue capacity. Each task holds one
+/// permit while it awaits, so a stalled bus cannot create unbounded tasks.
+const PUBLISH_OVERFLOW_TASKS: usize = 32;
 const DISPATCH_BATCH: u32 = 32;
 const DELIVERY_BATCH: u32 = 64;
 const JOB_BATCH: u32 = 32;
@@ -44,6 +47,7 @@ pub struct EventBus {
     sender: mpsc::Sender<PublishMessage>,
     receiver: Mutex<Option<mpsc::Receiver<PublishMessage>>>,
     notify: Arc<Notify>,
+    overflow: Arc<Semaphore>,
 }
 
 impl EventBus {
@@ -55,6 +59,7 @@ impl EventBus {
             sender,
             receiver: Mutex::new(Some(receiver)),
             notify: Arc::new(Notify::new()),
+            overflow: Arc::new(Semaphore::new(PUBLISH_OVERFLOW_TASKS)),
         }
     }
 
@@ -369,8 +374,33 @@ impl EventPublisher for EventBus {
         };
         match self.sender.try_send(message) {
             Ok(()) => self.notify.notify_one(),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!(topic, "event queue is full; dropping event")
+            Err(mpsc::error::TrySendError::Full(message)) => {
+                // Do not drop an event just because the dispatcher is briefly
+                // behind. Wait for capacity in a bounded overflow task.
+                let Ok(permit) = self.overflow.clone().try_acquire_owned() else {
+                    tracing::warn!(
+                        topic,
+                        "event queue and overflow tasks are full; dropping event"
+                    );
+                    return;
+                };
+                let Ok(handle) = tokio::runtime::Handle::try_current() else {
+                    tracing::warn!(
+                        topic,
+                        "event queue is full outside a runtime; dropping event"
+                    );
+                    return;
+                };
+                let sender = self.sender.clone();
+                let notify = self.notify.clone();
+                handle.spawn(async move {
+                    let _permit = permit;
+                    if sender.send(message).await.is_ok() {
+                        notify.notify_one();
+                    } else {
+                        tracing::warn!("event bus stopped while flushing an overflow event");
+                    }
+                });
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 tracing::warn!(topic, "event bus is stopped; dropping event")
@@ -390,6 +420,7 @@ mod tests {
 
     use async_trait::async_trait;
     use octra_api_plugin_types::{EventSubscriber, PluginError};
+    use serde_json::json;
 
     use super::*;
 
@@ -821,5 +852,36 @@ mod tests {
         assert_eq!(retry_delay(9), 2560);
         assert_eq!(retry_delay(10), 3600);
         assert_eq!(retry_delay(20), 3600);
+    }
+
+    #[tokio::test]
+    async fn queue_overflow_is_flushed_instead_of_dropped() {
+        let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
+        let subscriber = Arc::new(FakeSubscriber::new("sub-overflow", &["test.*"], 0));
+        let source = Arc::new(FakeSource {
+            subscribers: vec![subscriber.clone()],
+            jobs: Vec::new(),
+        });
+        let bus = Arc::new(EventBus::new(storage, source));
+        let total = PUBLISH_QUEUE + 16;
+        for index in 0..total {
+            bus.publish("test.overflow", "test", json!({"index": index}));
+        }
+        bus.start(CancellationToken::new());
+        let delivered = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if subscriber.calls() >= total {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            delivered.is_ok(),
+            "only {} events delivered",
+            subscriber.calls()
+        );
+        assert_eq!(subscriber.calls(), total);
     }
 }

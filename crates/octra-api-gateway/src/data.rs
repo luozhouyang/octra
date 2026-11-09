@@ -16,8 +16,8 @@ use http_body::Body as _;
 use octra_api_core::{Route, Service};
 use octra_api_plugin_runtime::PluginChain;
 use octra_api_plugin_types::{
-    AuthBasic, AuthJwt, AuthKey, Capability, ConsumerInfo, ErrorContext, GatewayState, LogContext,
-    PluginError, RequestBodyContext, RequestContext, ResponseBodyContext, ResponseContext,
+    AuthBasic, AuthJwt, AuthKey, ConsumerInfo, ErrorContext, GatewayState, LogContext, PluginError,
+    RequestBodyContext, RequestContext, ResponseBodyContext, ResponseContext,
     UpstreamRequestContext,
 };
 use octra_data_plane::{
@@ -686,8 +686,8 @@ pub async fn proxy(
                 response_parts.headers.append(header::SET_COOKIE, value);
             }
 
-            let response_body_plugins = pre_chain.has_capability(Capability::ResponseBody)
-                || post_chain.has_capability(Capability::ResponseBody);
+            let response_body_plugins =
+                pre_chain.needs_response_body() || post_chain.needs_response_body();
             let response_body = if response_body_plugins {
                 match axum::body::to_bytes(response_body, max_body).await {
                     Ok(bytes) => {

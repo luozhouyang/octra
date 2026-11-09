@@ -81,7 +81,7 @@ flowchart TB
 
 **Plugin runtimes.** Native Rust and WASM plugin registries for the API and LLM gateways, with host-owned per-plugin storage, capability approval, events, and jobs (ADR 0005, ADR 0006, ADR 0009).
 
-**Event bus.** A SQLite-backed outbox and per-subscriber delivery rows with exponential backoff, plus a scheduled-job reconciler.
+**Event bus.** A SQLite-backed outbox and per-subscriber delivery rows with exponential backoff, plus a scheduled-job reconciler. The in-process publish queue is bounded; when it is full, a bounded pool of overflow tasks waits for capacity instead of dropping the event.
 
 **Retention worker.** A background task that prunes request logs, audit logs, LLM usage, usage rollups, MCP invocations, and terminal plugin events.
 

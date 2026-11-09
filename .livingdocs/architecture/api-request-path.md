@@ -40,7 +40,7 @@ flowchart LR
 6. **Select a target.** The Service resolves to a direct endpoint or an Upstream pool. The pool filters disabled and unhealthy targets, then orders attempts by round-robin, weighted round-robin, consistent hashing, least-connections, or latency EWMA. The request hash supports header, cookie, query, URI capture, client IP, and consumer inputs.
 7. **Bound retries.** Attempts are truncated to `1 + service.retries` and to the pool size. Non-idempotent methods are attempted once. A retry is only taken for a transport-level failure; an upstream HTTP error is not retried by the proxy.
 8. **Proxy.** The request path is stripped when configured, the Host header is preserved or replaced, hop-by-hop headers are sanitized, and the body is streamed unless buffering is required for retries or a body-mutating plugin. Header-only `key-auth` instances do not request the body; `key_in_body = true` opts in. The body is capped by `gateway.max_body_bytes`.
-9. **Response plugins.** Response and response-body phases run in order. A plugin can replace the response or rewrite the body.
+9. **Response plugins.** Response and response-body phases run in order. A plugin can replace the response or rewrite the body. The response body is buffered only when a plugin instance declares that it needs body mutation; header-only response-transformer instances pass the upstream body through.
 10. **Account.** The handler records status, latency, route, service, target, consumer, and error to `request_logs`, updates JSON/Prometheus metrics, emits an event, and runs the log-phase plugins.
 
 ## Error paths

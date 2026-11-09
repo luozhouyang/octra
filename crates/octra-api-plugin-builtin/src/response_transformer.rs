@@ -214,6 +214,10 @@ impl ApiGatewayPlugin for ResponseTransformerPlugin {
         &self.manifest
     }
 
+    fn needs_response_body(&self) -> bool {
+        self.config.has_body_ops()
+    }
+
     async fn on_response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
         apply_header_ops(
             cx.headers,
@@ -339,6 +343,19 @@ mod tests {
                 .create("test", json!({"rename": {"headers": ["x:bad header"]}}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn body_buffering_follows_body_operations() {
+        let header_only = ResponseTransformerFactory
+            .create("test", json!({"add": {"headers": ["x-added:value"]}}))
+            .unwrap();
+        assert!(!header_only.needs_response_body());
+
+        let body = ResponseTransformerFactory
+            .create("test", json!({"add": {"json": ["added:true"]}}))
+            .unwrap();
+        assert!(body.needs_response_body());
     }
 
     #[test]
