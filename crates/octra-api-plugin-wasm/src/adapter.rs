@@ -207,6 +207,13 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
         &self.inner.manifest
     }
 
+    fn needs_request_body(&self) -> bool {
+        self.inner
+            .manifest
+            .capabilities
+            .contains(&octra_api_plugin_types::Capability::RequestBody)
+    }
+
     async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let started = Instant::now();
         let request = request_dto(cx);

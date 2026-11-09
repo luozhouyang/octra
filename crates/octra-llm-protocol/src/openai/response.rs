@@ -183,6 +183,7 @@ pub fn decode_usage(value: Option<&Value>) -> Usage {
         cache_read_tokens: cached,
         cache_write_tokens: None,
         reasoning_tokens: reasoning,
+        cache_read_included_in_input: cached.is_some(),
     }
 }
 

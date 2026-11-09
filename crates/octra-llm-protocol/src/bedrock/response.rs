@@ -154,6 +154,7 @@ pub fn decode_usage(value: Option<&Value>) -> Usage {
         cache_read_tokens: value.get("cacheReadInputTokens").and_then(Value::as_u64),
         cache_write_tokens: value.get("cacheWriteInputTokens").and_then(Value::as_u64),
         reasoning_tokens: None,
+        cache_read_included_in_input: false,
     }
 }
 

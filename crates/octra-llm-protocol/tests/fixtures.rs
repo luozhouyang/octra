@@ -205,6 +205,7 @@ fn openai_response_fixture_decodes_to_ir() {
             cache_read_tokens: Some(8),
             cache_write_tokens: None,
             reasoning_tokens: None,
+            cache_read_included_in_input: true,
         }
     );
     assert!(matches!(
@@ -437,6 +438,7 @@ fn anthropic_stream_fixture_decodes() {
         cache_read_tokens: None,
         cache_write_tokens: None,
         reasoning_tokens: None,
+        cache_read_included_in_input: false,
     })));
     assert!(events.contains(&StreamEvent::Finish {
         reason: FinishReason::ToolCalls

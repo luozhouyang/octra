@@ -72,6 +72,7 @@ fn parse_usage(value: &Value) -> Option<Usage> {
         cache_read_tokens: number(&["cache_read_input_tokens", "cached_input_tokens"]),
         cache_write_tokens: number(&["cache_creation_input_tokens"]),
         reasoning_tokens: number(&["reasoning_tokens"]),
+        cache_read_included_in_input: false,
     })
 }
 

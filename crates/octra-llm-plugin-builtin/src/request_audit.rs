@@ -196,6 +196,7 @@ mod tests {
             cache_read_tokens: Some(3),
             cache_write_tokens: Some(4),
             reasoning_tokens: Some(5),
+            cache_read_included_in_input: false,
         };
         let plugin = RequestAuditFactory.create(json!({})).unwrap();
         let plugin = plugin.as_ref();

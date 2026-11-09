@@ -142,6 +142,7 @@ pub fn decode_usage(value: Option<&Value>) -> Usage {
         cache_read_tokens: value.get("cachedContentTokenCount").and_then(Value::as_u64),
         cache_write_tokens: None,
         reasoning_tokens: value.get("thoughtsTokenCount").and_then(Value::as_u64),
+        cache_read_included_in_input: true,
     }
 }
 

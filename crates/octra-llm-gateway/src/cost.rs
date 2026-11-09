@@ -32,12 +32,15 @@ pub fn compute(usage: &Usage, pricing: &Value) -> Option<Cost> {
             micros += tokens as f64 * price;
         }
     };
-    add(usage.input_tokens, "input_per_million");
+    let cached = usage.cache_read_tokens.unwrap_or(0);
+    let billable_input = if usage.cache_read_included_in_input {
+        usage.input_tokens.saturating_sub(cached)
+    } else {
+        usage.input_tokens
+    };
+    add(billable_input, "input_per_million");
     add(usage.output_tokens, "output_per_million");
-    add(
-        usage.cache_read_tokens.unwrap_or(0),
-        "cache_read_per_million",
-    );
+    add(cached, "cache_read_per_million");
     add(
         usage.cache_write_tokens.unwrap_or(0),
         "cache_write_per_million",
@@ -78,6 +81,24 @@ mod tests {
         // 1000*3 + 500*15 + 2000*0.3 + 100*3.75 = 3000 + 7500 + 600 + 375
         assert_eq!(cost.micros, 11_475);
         assert_eq!(cost.currency, "USD");
+    }
+
+    #[test]
+    fn cached_input_is_not_charged_twice() {
+        let usage = Usage {
+            input_tokens: 1_000,
+            output_tokens: 0,
+            cache_read_tokens: Some(400),
+            cache_read_included_in_input: true,
+            ..Usage::default()
+        };
+        let pricing = json!({
+            "input_per_million": 3.0,
+            "cache_read_per_million": 0.3
+        });
+        let cost = compute(&usage, &pricing).unwrap();
+        // 600 uncached input * 3 + 400 cached * 0.3 = 1,920
+        assert_eq!(cost.micros, 1_920);
     }
 
     #[test]

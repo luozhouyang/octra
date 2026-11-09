@@ -226,6 +226,10 @@ impl ApiGatewayPlugin for RequestTransformerPlugin {
         &self.manifest
     }
 
+    fn needs_request_body(&self) -> bool {
+        true
+    }
+
     async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         if let Some(uri) = &self.config.replace.uri {
             replace_uri(cx.uri, uri);

@@ -650,6 +650,13 @@ pub struct ResponseBodyContext<'a> {
 pub trait ApiGatewayPlugin: Send + Sync {
     fn manifest(&self) -> &PluginManifest;
 
+    /// Whether this instance needs the full request body buffered before the
+    /// request stage. The default is false so header-only plugins (including
+    /// key-auth with `key_in_body = false`) do not defeat request streaming.
+    fn needs_request_body(&self) -> bool {
+        false
+    }
+
     async fn on_rewrite(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
         Ok(PluginAction::Continue)
     }

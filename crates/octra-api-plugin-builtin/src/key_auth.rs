@@ -103,6 +103,10 @@ impl ApiGatewayPlugin for KeyAuthPlugin {
         &self.manifest
     }
 
+    fn needs_request_body(&self) -> bool {
+        self.config.key_in_body
+    }
+
     async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         if cx.method == http::Method::OPTIONS && !self.config.run_on_preflight {
             return Ok(PluginAction::Continue);
@@ -303,6 +307,13 @@ mod tests {
         KeyAuthFactory
             .create("key-auth", config)
             .expect("key-auth config")
+    }
+
+    #[test]
+    fn body_buffering_follows_key_in_body() {
+        assert!(!plugin(json!({})).needs_request_body());
+        assert!(!plugin(json!({"key_in_body": false})).needs_request_body());
+        assert!(plugin(json!({"key_in_body": true})).needs_request_body());
     }
 
     fn headers(content_type: Option<&str>) -> HeaderMap {

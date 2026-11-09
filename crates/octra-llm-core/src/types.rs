@@ -332,6 +332,11 @@ pub struct Usage {
     pub cache_write_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// OpenAI's `prompt_tokens` includes cached tokens, while the canonical IR
+    /// reports uncached input. Cost calculation uses this marker to avoid
+    /// charging cached tokens at both the input and cache-read rate.
+    #[serde(skip)]
+    pub cache_read_included_in_input: bool,
 }
 
 impl Usage {

@@ -204,7 +204,7 @@ pub async fn proxy(
     let max_body = state.config.gateway.max_body_bytes;
     let mut body = Some(body);
     let mut early_body = None;
-    if pre_chain.has_capability(Capability::RequestBody) {
+    if pre_chain.needs_request_body() {
         let raw = body.take().expect("request body is available");
         match axum::body::to_bytes(raw, max_body).await {
             Ok(bytes) => {
@@ -549,8 +549,7 @@ pub async fn proxy(
         .await;
     }
 
-    let request_body_plugins = pre_chain.has_capability(Capability::RequestBody)
-        || post_chain.has_capability(Capability::RequestBody);
+    let request_body_plugins = pre_chain.needs_request_body() || post_chain.needs_request_body();
     let payload = if let Some(bytes) = early_body {
         RequestBody::Buffered(bytes)
     } else if attempts.len() > 1 || request_body_plugins {

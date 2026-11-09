@@ -354,6 +354,13 @@ impl PluginChain {
         self.entries.iter().any(|entry| entry.auth)
     }
 
+    /// Whether any instance in this chain needs the full request body.
+    pub fn needs_request_body(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.plugin.needs_request_body())
+    }
+
     pub async fn on_rewrite(
         &self,
         cx: &mut RequestContext<'_>,
