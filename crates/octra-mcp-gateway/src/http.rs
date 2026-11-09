@@ -237,6 +237,9 @@ fn resolve_reference(reference: &str) -> Option<String> {
     let (scheme, name) = reference.split_once(':')?;
     match scheme {
         "env" => std::env::var(name).ok(),
+        "file" if std::path::Path::new(name).is_absolute() => std::fs::read_to_string(name)
+            .ok()
+            .map(|value| value.trim_end_matches(['\r', '\n']).to_string()),
         _ => {
             tracing::warn!(
                 reference = scheme,
@@ -633,13 +636,30 @@ impl UpstreamClient for HttpClient {
     }
 
     fn close(&self) {
-        // Forget the upstream session id; no further requests are sent on it.
-        // Termination itself is best effort and not sent here because `close`
-        // runs without a runtime guarantee (drop paths).
-        if let Ok(mut session) = self.session_id.lock() {
-            *session = None;
-        }
+        // Best-effort DELETE so the upstream can release its session.
+        let session = self
+            .session_id
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
         self.notifications.close();
+        let Some(session) = session else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let url = self.url.clone();
+        let client = self.client.clone();
+        let headers = self.headers.clone();
+        handle.spawn(async move {
+            let mut request = client
+                .delete(&url)
+                .headers(headers)
+                .header(SESSION_HEADER, session);
+            request = request.timeout(NOTIFICATION_TIMEOUT);
+            let _ = request.send().await;
+        });
     }
 }
 

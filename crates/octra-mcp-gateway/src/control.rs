@@ -415,6 +415,11 @@ async fn clear_tools(state: &McpControlState, server_id: &str) -> ApiResult<()> 
 /// Strips inline documents and resolved-secret references from API responses.
 fn summarize_config(config: &Value) -> Value {
     let mut summary = config.clone();
+    if let Some(env) = summary.get_mut("env").and_then(Value::as_object_mut) {
+        for value in env.values_mut() {
+            *value = json!("***");
+        }
+    }
     let Some(openapi) = summary.get_mut("openapi").and_then(Value::as_object_mut) else {
         return summary;
     };
@@ -425,6 +430,13 @@ fn summarize_config(config: &Value) -> Value {
         auth.remove("secret_ref");
     }
     summary
+}
+
+fn is_secret_reference(value: &str) -> bool {
+    matches!(
+        value.split_once(':').map(|(scheme, _)| scheme),
+        Some("env") | Some("file") | Some("keyring")
+    )
 }
 
 /// Resolves `sources` references (server ids or names) to canonical server
@@ -508,8 +520,17 @@ async fn server_response(
         .len();
     // Responses always expose the effective path, even when the column is null.
     server.route_path = Some(server.effective_route_path());
-    // Never echo inline documents or secret references back to callers.
+    // Never echo inline documents, secret references, or literal header/env
+    // credentials back to callers. Reference strings stay visible so an
+    // operator can tell which source is configured.
     server.config = summarize_config(&server.config);
+    for value in server.headers.values_mut() {
+        if let Some(raw) = value.as_str()
+            && !is_secret_reference(raw)
+        {
+            *value = json!("***");
+        }
+    }
     Ok(ServerResponse { server, tool_count })
 }
 

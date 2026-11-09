@@ -1292,8 +1292,15 @@ async fn forward(
 
         let mut forward_headers = base_headers.clone();
         sanitize_request_headers(&mut forward_headers);
-        if let Ok(authority) = HeaderValue::from_str(&endpoint_authority(&endpoint.url)) {
-            forward_headers.insert(header::HOST, authority);
+        let host_header = if dispatch.route.route.preserve_host {
+            context
+                .host
+                .and_then(|host| HeaderValue::from_str(host).ok())
+        } else {
+            HeaderValue::from_str(&endpoint_authority(&endpoint.url)).ok()
+        };
+        if let Some(value) = host_header {
+            forward_headers.insert(header::HOST, value);
         }
         apply_forwarded_headers(
             &mut forward_headers,

@@ -79,9 +79,6 @@ pub trait UpstreamClient: Send + Sync {
     /// Sends a JSON-RPC notification and waits for the write to complete.
     fn notify<'a>(&'a self, method: &'a str) -> BoxFuture<'a, Result<(), McpError>>;
 
-    /// Sends a JSON-RPC notification without waiting; failures are logged.
-    fn notify_detached(&self, _method: &str) {}
-
     fn protocol_version(&self) -> Option<String>;
 
     /// Returns a receiver for server-initiated notifications. Transports
@@ -135,9 +132,9 @@ pub async fn initialize(
 
     let result: InitializeResult =
         typed(client.request("initialize", Some(params), timeout).await?)?;
-    // Clients SHOULD send the initialized notification. It is fire-and-forget:
-    // a broken notification channel must not fail a successful handshake.
-    client.notify_detached("notifications/initialized");
+    // Clients SHOULD send the initialized notification. A broken notification
+    // channel must not fail an otherwise successful handshake.
+    let _ = client.notify("notifications/initialized").await;
     Ok(result)
 }
 

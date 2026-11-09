@@ -956,3 +956,48 @@ fn gemini_stream_round_trip() {
     assert!(rendered.contains("functionCall"));
     assert!(rendered.contains("finishReason"));
 }
+
+#[test]
+fn openai_max_completion_tokens_round_trips() {
+    let request = decode_request(
+        octra_llm_core::Protocol::Openai,
+        serde_json::json!({
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 64
+        }),
+    )
+    .unwrap();
+    let encoded = encode_request(octra_llm_core::Protocol::Openai, &request).unwrap();
+    assert_eq!(encoded["max_completion_tokens"], 64);
+    assert!(encoded.get("max_tokens").is_none());
+}
+
+#[test]
+fn anthropic_accepts_string_content_and_reports_max_tokens() {
+    let request = decode_request(
+        octra_llm_core::Protocol::Anthropic,
+        serde_json::json!({
+            "model": "claude",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hello"}]
+        }),
+    )
+    .unwrap();
+    assert_eq!(request.messages.len(), 1);
+
+    let response = decode_response(
+        octra_llm_core::Protocol::Anthropic,
+        serde_json::json!({
+            "id": "msg-1",
+            "model": "claude",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 1, "output_tokens": 2}
+        }),
+    )
+    .unwrap();
+    assert_eq!(response.finish_reason, octra_llm_core::FinishReason::Length);
+}

@@ -188,10 +188,17 @@ fn decode_message(value: &Value) -> ProtocolResult<Message> {
         .get("role")
         .and_then(Value::as_str)
         .ok_or_else(|| ProtocolError::new("each message needs a string `role`"))?;
-    let blocks = object
-        .get("content")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ProtocolError::new("anthropic message content must be an array"))?;
+    // The Messages API accepts either a string shorthand or an array of
+    // content blocks. Normalize the string form before decoding.
+    let blocks: Vec<Value> = match object.get("content") {
+        Some(Value::Array(blocks)) => blocks.clone(),
+        Some(Value::String(text)) => vec![json!({"type": "text", "text": text})],
+        _ => {
+            return Err(ProtocolError::new(
+                "anthropic message content must be a string or an array",
+            ));
+        }
+    };
 
     let mut extra = Map::new();
     for (key, value) in object {
@@ -204,7 +211,7 @@ fn decode_message(value: &Value) -> ProtocolResult<Message> {
         "user" => {
             let mut parts = Vec::new();
             let mut tool_results = Vec::new();
-            for block in blocks {
+            for block in &blocks {
                 let kind = block.get("type").and_then(Value::as_str).unwrap_or("text");
                 match kind {
                     "text" => parts.push(ContentPart::Text {
@@ -248,7 +255,7 @@ fn decode_message(value: &Value) -> ProtocolResult<Message> {
                 name: None,
                 extra,
             };
-            for block in blocks {
+            for block in &blocks {
                 if let Some(content) = decode_assistant_block(block) {
                     message.assistant.push(content);
                 }

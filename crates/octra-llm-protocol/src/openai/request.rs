@@ -74,6 +74,13 @@ pub fn decode_request(value: Value) -> ProtocolResult<ChatRequest> {
         .or_else(|| object.get("max_tokens"))
         .and_then(Value::as_u64)
         .map(|value| value.min(u32::MAX as u64) as u32);
+    if object.get("max_completion_tokens").is_some() {
+        // OpenAI reasoning models reject `max_tokens`; remember which spelling
+        // the client used so the encoder can preserve it.
+        request
+            .extra
+            .insert("openai_max_completion_tokens".into(), Value::Bool(true));
+    }
     request.stop = match object.get("stop") {
         Some(Value::String(text)) => vec![text.clone()],
         Some(Value::Array(items)) => items
@@ -525,7 +532,17 @@ pub fn encode_request(request: &ChatRequest) -> ProtocolResult<Value> {
         object.insert("top_p".to_string(), json!(top_p));
     }
     if let Some(max_tokens) = request.max_tokens {
-        object.insert("max_tokens".to_string(), json!(max_tokens));
+        let field = if request
+            .extra
+            .get("openai_max_completion_tokens")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        object.insert(field.to_string(), json!(max_tokens));
     }
     match request.stop.len() {
         0 => {}

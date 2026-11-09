@@ -60,8 +60,6 @@ enum Outgoing {
         line: Vec<u8>,
         reply: oneshot::Sender<Result<(), McpError>>,
     },
-    /// Writes a notification without any caller waiting for the result.
-    Detached { line: Vec<u8> },
     /// Fails pending and queued requests immediately.
     Close,
 }
@@ -355,11 +353,6 @@ impl Worker {
             Outgoing::Notify { line, reply } => {
                 let _ = reply.send(self.write(&line));
             }
-            Outgoing::Detached { line } => {
-                if let Err(err) = self.write(&line) {
-                    tracing::debug!(server = %self.name, %err, "dropped MCP notification");
-                }
-            }
             Outgoing::Close => return false,
         }
         true
@@ -421,7 +414,7 @@ impl Worker {
                 Outgoing::Notify { reply, .. } => {
                     let _ = reply.send(Err(McpError::Transport("the MCP process exited".into())));
                 }
-                Outgoing::Detached { .. } | Outgoing::Close => {}
+                Outgoing::Close => {}
             }
         }
     }
@@ -487,13 +480,6 @@ impl UpstreamClient for StdioClient {
                 Err(_) => Err(McpError::Timeout),
             }
         })
-    }
-
-    fn notify_detached(&self, method: &str) {
-        let note = JsonRpcRequest::notification(method, None);
-        if let Ok(line) = encode_line(&note) {
-            let _ = self.outgoing.send(Outgoing::Detached { line });
-        }
     }
 
     fn protocol_version(&self) -> Option<String> {

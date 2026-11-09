@@ -131,6 +131,7 @@ pub fn decode_response(value: Value) -> ProtocolResult<ChatResponse> {
     let stop_reason = object.get("stop_reason").and_then(Value::as_str);
     let finish_reason = match stop_reason {
         Some("tool_use") => FinishReason::ToolCalls,
+        Some("max_tokens") => FinishReason::Length,
         Some("pause_turn") => FinishReason::Pause,
         Some("refusal") => FinishReason::Refusal,
         _ => match object.get("stop_sequence") {

@@ -106,7 +106,7 @@ async fn installs_configures_serves_and_uninstalls_an_llm_component() {
     let mut request = ChatRequest::new("allowed-model", vec![Message::user("hi")]);
     let mut state = LlmRequestState::new();
     let error = runtime
-        .request_chain(None, None, "allowed-model")
+        .request_chain(None, None, &[], "allowed-model")
         .on_request(&meta, &mut headers, &mut request, &mut state)
         .await
         .unwrap();
@@ -122,7 +122,7 @@ async fn installs_configures_serves_and_uninstalls_an_llm_component() {
     let mut request = ChatRequest::new("blocked-model", vec![Message::user("hi")]);
     let mut state = LlmRequestState::new();
     let error = runtime
-        .request_chain(None, None, "blocked-model")
+        .request_chain(None, None, &[], "blocked-model")
         .on_request(&meta, &mut headers, &mut request, &mut state)
         .await
         .unwrap()
@@ -144,7 +144,7 @@ async fn installs_configures_serves_and_uninstalls_an_llm_component() {
     let mut request = ChatRequest::new("allowed-model", vec![Message::user("hi")]);
     let mut state = LlmRequestState::new();
     let error = runtime
-        .request_chain(None, None, "allowed-model")
+        .request_chain(None, None, &[], "allowed-model")
         .on_request(&meta, &mut headers, &mut request, &mut state)
         .await
         .unwrap();
