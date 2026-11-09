@@ -61,6 +61,7 @@ pub mod octra {
                 pub consumer_id: Option<_rt::String>,
                 pub route_id: _rt::String,
                 pub service_id: _rt::String,
+                pub body: Option<_rt::Vec<u8>>,
             }
             impl ::core::fmt::Debug for Request {
                 fn fmt(
@@ -77,6 +78,7 @@ pub mod octra {
                         .field("consumer-id", &self.consumer_id)
                         .field("route-id", &self.route_id)
                         .field("service-id", &self.service_id)
+                        .field("body", &self.body)
                         .finish()
                 }
             }
@@ -104,6 +106,7 @@ pub mod octra {
                 pub query: Option<_rt::String>,
                 pub set_headers: _rt::Vec<(_rt::String, _rt::String)>,
                 pub remove_headers: _rt::Vec<_rt::String>,
+                pub body: Option<_rt::Vec<u8>>,
             }
             impl ::core::fmt::Debug for RequestMutation {
                 fn fmt(
@@ -115,6 +118,7 @@ pub mod octra {
                         .field("query", &self.query)
                         .field("set-headers", &self.set_headers)
                         .field("remove-headers", &self.remove_headers)
+                        .field("body", &self.body)
                         .finish()
                 }
             }
@@ -229,38 +233,11 @@ pub mod octra {
                 }
             }
             #[derive(Clone)]
-            pub struct UpstreamRequest {
-                pub request_id: _rt::String,
-                pub method: _rt::String,
-                pub path: _rt::String,
-                pub query: _rt::String,
-                pub headers: _rt::Vec<(_rt::String, _rt::String)>,
-                pub consumer_id: Option<_rt::String>,
-                pub route_id: _rt::String,
-                pub service_id: _rt::String,
-                pub target_url: _rt::String,
-            }
-            impl ::core::fmt::Debug for UpstreamRequest {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("UpstreamRequest")
-                        .field("request-id", &self.request_id)
-                        .field("method", &self.method)
-                        .field("path", &self.path)
-                        .field("query", &self.query)
-                        .field("headers", &self.headers)
-                        .field("consumer-id", &self.consumer_id)
-                        .field("route-id", &self.route_id)
-                        .field("service-id", &self.service_id)
-                        .field("target-url", &self.target_url)
-                        .finish()
-                }
-            }
-            #[derive(Clone)]
             pub struct BodyInfo {
                 pub request_id: _rt::String,
+                pub status: u16,
+                pub headers: _rt::Vec<(_rt::String, _rt::String)>,
+                pub consumer_id: Option<_rt::String>,
                 pub route_id: _rt::String,
                 pub service_id: _rt::String,
                 pub target_url: _rt::String,
@@ -272,122 +249,13 @@ pub mod octra {
                 ) -> ::core::fmt::Result {
                     f.debug_struct("BodyInfo")
                         .field("request-id", &self.request_id)
-                        .field("route-id", &self.route_id)
-                        .field("service-id", &self.service_id)
-                        .field("target-url", &self.target_url)
-                        .finish()
-                }
-            }
-            #[derive(Clone)]
-            pub struct RequestBodyResult {
-                pub body: _rt::Vec<u8>,
-                pub set_headers: _rt::Vec<(_rt::String, _rt::String)>,
-                pub remove_headers: _rt::Vec<_rt::String>,
-            }
-            impl ::core::fmt::Debug for RequestBodyResult {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("RequestBodyResult")
-                        .field("body", &self.body)
-                        .field("set-headers", &self.set_headers)
-                        .field("remove-headers", &self.remove_headers)
-                        .finish()
-                }
-            }
-            #[derive(Clone)]
-            pub enum RequestBodyAction {
-                Continue(RequestBodyResult),
-                Reject(Reject),
-            }
-            impl ::core::fmt::Debug for RequestBodyAction {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    match self {
-                        RequestBodyAction::Continue(e) => {
-                            f.debug_tuple("RequestBodyAction::Continue")
-                                .field(e)
-                                .finish()
-                        }
-                        RequestBodyAction::Reject(e) => {
-                            f.debug_tuple("RequestBodyAction::Reject").field(e).finish()
-                        }
-                    }
-                }
-            }
-            #[derive(Clone)]
-            pub enum BodyAction {
-                Continue(_rt::Vec<u8>),
-                Reject(Reject),
-            }
-            impl ::core::fmt::Debug for BodyAction {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    match self {
-                        BodyAction::Continue(e) => {
-                            f.debug_tuple("BodyAction::Continue").field(e).finish()
-                        }
-                        BodyAction::Reject(e) => {
-                            f.debug_tuple("BodyAction::Reject").field(e).finish()
-                        }
-                    }
-                }
-            }
-            #[derive(Clone)]
-            pub struct ErrorInfo {
-                pub request_id: _rt::String,
-                pub method: _rt::String,
-                pub path: _rt::String,
-                pub query: _rt::String,
-                pub headers: _rt::Vec<(_rt::String, _rt::String)>,
-                pub consumer_id: Option<_rt::String>,
-                pub route_id: _rt::String,
-                pub service_id: _rt::String,
-                pub target_url: _rt::String,
-                pub message: _rt::String,
-            }
-            impl ::core::fmt::Debug for ErrorInfo {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("ErrorInfo")
-                        .field("request-id", &self.request_id)
-                        .field("method", &self.method)
-                        .field("path", &self.path)
-                        .field("query", &self.query)
+                        .field("status", &self.status)
                         .field("headers", &self.headers)
                         .field("consumer-id", &self.consumer_id)
                         .field("route-id", &self.route_id)
                         .field("service-id", &self.service_id)
                         .field("target-url", &self.target_url)
-                        .field("message", &self.message)
                         .finish()
-                }
-            }
-            #[derive(Clone)]
-            pub enum ErrorAction {
-                Continue,
-                Respond(Reject),
-            }
-            impl ::core::fmt::Debug for ErrorAction {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    match self {
-                        ErrorAction::Continue => {
-                            f.debug_tuple("ErrorAction::Continue").finish()
-                        }
-                        ErrorAction::Respond(e) => {
-                            f.debug_tuple("ErrorAction::Respond").field(e).finish()
-                        }
-                    }
                 }
             }
             #[derive(Clone)]
@@ -517,7 +385,7 @@ pub mod octra {
                     let ptr0 = vec0.as_ptr().cast::<u8>();
                     let len0 = vec0.len();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "log"]
                         fn wit_import1(_: i32, _: *mut u8, _: usize);
@@ -533,7 +401,7 @@ pub mod octra {
             pub fn now_unix() -> i64 {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "now-unix"]
                         fn wit_import0() -> i64;
@@ -562,7 +430,7 @@ pub mod octra {
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "instance-id"]
                         fn wit_import1(_: *mut u8);
@@ -653,7 +521,7 @@ pub mod octra {
                     };
                     let ptr11 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "authenticate"]
                         fn wit_import12(
@@ -750,7 +618,7 @@ pub mod octra {
             pub fn authenticated() -> bool {
                 unsafe {
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "authenticated"]
                         fn wit_import0() -> i32;
@@ -780,7 +648,7 @@ pub mod octra {
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "current-auth"]
                         fn wit_import1(_: *mut u8);
@@ -939,6 +807,129 @@ pub mod octra {
                 }
             }
             #[allow(unused_unsafe, clippy::all)]
+            /// Request-scoped body storage for `body-filter` plugins.
+            pub fn body_append(data: &[u8]) -> Result<(), _rt::String> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 3 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 3
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let vec0 = data;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
+                    unsafe extern "C" {
+                        #[link_name = "body-append"]
+                        fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import2(_: *mut u8, _: usize, _: *mut u8) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import2(ptr0.cast_mut(), len0, ptr1) };
+                    let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                    let result7 = match l3 {
+                        0 => {
+                            let e = ();
+                            Ok(e)
+                        }
+                        1 => {
+                            let e = {
+                                let l4 = *ptr1
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l5 = *ptr1
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len6 = l5;
+                                let bytes6 = _rt::Vec::from_raw_parts(
+                                    l4.cast(),
+                                    len6,
+                                    len6,
+                                );
+                                _rt::string_lift(bytes6)
+                            };
+                            Err(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    result7
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            pub fn body_take() -> Result<_rt::Vec<u8>, _rt::String> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 3 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 3
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
+                    unsafe extern "C" {
+                        #[link_name = "body-take"]
+                        fn wit_import1(_: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: *mut u8) {
+                        unreachable!()
+                    }
+                    unsafe { wit_import1(ptr0) };
+                    let l2 = i32::from(*ptr0.add(0).cast::<u8>());
+                    let result9 = match l2 {
+                        0 => {
+                            let e = {
+                                let l3 = *ptr0
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l4 = *ptr0
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len5 = l4;
+                                _rt::Vec::from_raw_parts(l3.cast(), len5, len5)
+                            };
+                            Ok(e)
+                        }
+                        1 => {
+                            let e = {
+                                let l6 = *ptr0
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l7 = *ptr0
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len8 = l7;
+                                let bytes8 = _rt::Vec::from_raw_parts(
+                                    l6.cast(),
+                                    len8,
+                                    len8,
+                                );
+                                _rt::string_lift(bytes8)
+                            };
+                            Err(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    result9
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
             pub fn kv_get(key: &str) -> Result<Option<_rt::String>, _rt::String> {
                 unsafe {
                     #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
@@ -957,7 +948,7 @@ pub mod octra {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-get"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -1052,7 +1043,7 @@ pub mod octra {
                     };
                     let ptr3 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-put"]
                         fn wit_import4(
@@ -1136,7 +1127,7 @@ pub mod octra {
                     let len0 = vec0.len();
                     let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-delete"]
                         fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
@@ -1206,7 +1197,7 @@ pub mod octra {
                     };
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "kv-incr"]
                         fn wit_import3(
@@ -1294,7 +1285,7 @@ pub mod octra {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "entity-get"]
                         fn wit_import3(
@@ -1398,7 +1389,7 @@ pub mod octra {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "entity-upsert"]
                         fn wit_import3(
@@ -1490,7 +1481,7 @@ pub mod octra {
                     };
                     let ptr5 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "entity-increment"]
                         fn wit_import6(
@@ -1593,7 +1584,7 @@ pub mod octra {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "entity-delete"]
                         fn wit_import3(
@@ -1676,7 +1667,7 @@ pub mod octra {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "octra:api-plugin/host@2.0.0")]
+                    #[link(wasm_import_module = "octra:api-plugin/host@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "entity-query"]
                         fn wit_import3(
@@ -1762,16 +1753,9 @@ pub mod exports {
                 pub type Action = super::super::super::super::octra::api_plugin::types::Action;
                 pub type ResponseAction = super::super::super::super::octra::api_plugin::types::ResponseAction;
                 pub type LogEntry = super::super::super::super::octra::api_plugin::types::LogEntry;
-                pub type UpstreamRequest = super::super::super::super::octra::api_plugin::types::UpstreamRequest;
                 pub type BodyInfo = super::super::super::super::octra::api_plugin::types::BodyInfo;
-                pub type RequestBodyAction = super::super::super::super::octra::api_plugin::types::RequestBodyAction;
-                pub type BodyAction = super::super::super::super::octra::api_plugin::types::BodyAction;
-                pub type ErrorInfo = super::super::super::super::octra::api_plugin::types::ErrorInfo;
-                pub type ErrorAction = super::super::super::super::octra::api_plugin::types::ErrorAction;
                 pub type AdminRequest = super::super::super::super::octra::api_plugin::types::AdminRequest;
                 pub type AdminResponse = super::super::super::super::octra::api_plugin::types::AdminResponse;
-                pub type Event = super::super::super::super::octra::api_plugin::types::Event;
-                pub type Job = super::super::super::super::octra::api_plugin::types::Job;
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub unsafe fn _export_configure_cabi<T: Guest>(
@@ -2070,132 +2054,6 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
-                pub unsafe fn _export_on_event_cabi<T: Guest>(
-                    arg0: *mut u8,
-                    arg1: usize,
-                    arg2: *mut u8,
-                    arg3: usize,
-                    arg4: *mut u8,
-                    arg5: usize,
-                    arg6: i64,
-                    arg7: *mut u8,
-                    arg8: usize,
-                ) -> *mut u8 {
-                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-                    let len0 = arg1;
-                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
-                    let len1 = arg3;
-                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
-                    let len2 = arg5;
-                    let bytes2 = _rt::Vec::from_raw_parts(arg4.cast(), len2, len2);
-                    let len3 = arg8;
-                    let bytes3 = _rt::Vec::from_raw_parts(arg7.cast(), len3, len3);
-                    let result4 = T::on_event(super::super::super::super::octra::api_plugin::types::Event {
-                        id: _rt::string_lift(bytes0),
-                        topic: _rt::string_lift(bytes1),
-                        source: _rt::string_lift(bytes2),
-                        timestamp: arg6,
-                        payload_json: _rt::string_lift(bytes3),
-                    });
-                    let ptr5 = (&raw mut _RET_AREA.0).cast::<u8>();
-                    match result4 {
-                        Ok(_) => {
-                            *ptr5.add(0).cast::<u8>() = (0i32) as u8;
-                        }
-                        Err(e) => {
-                            *ptr5.add(0).cast::<u8>() = (1i32) as u8;
-                            let vec6 = (e.into_bytes()).into_boxed_slice();
-                            let ptr6 = vec6.as_ptr().cast::<u8>();
-                            let len6 = vec6.len();
-                            ::core::mem::forget(vec6);
-                            *ptr5
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len6;
-                            *ptr5
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr6.cast_mut();
-                        }
-                    };
-                    ptr5
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn __post_return_on_event<T: Guest>(arg0: *mut u8) {
-                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
-                    match l0 {
-                        0 => {}
-                        _ => {
-                            let l1 = *arg0
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l2 = *arg0
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            _rt::cabi_dealloc(l1, l2, 1);
-                        }
-                    }
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn _export_on_job_cabi<T: Guest>(
-                    arg0: *mut u8,
-                    arg1: usize,
-                    arg2: *mut u8,
-                    arg3: usize,
-                    arg4: i64,
-                    arg5: i32,
-                ) -> *mut u8 {
-                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-                    let len0 = arg1;
-                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
-                    let len1 = arg3;
-                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
-                    let result2 = T::on_job(super::super::super::super::octra::api_plugin::types::Job {
-                        id: _rt::string_lift(bytes0),
-                        name: _rt::string_lift(bytes1),
-                        scheduled_for: arg4,
-                        attempt: arg5 as u32,
-                    });
-                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
-                    match result2 {
-                        Ok(_) => {
-                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
-                        }
-                        Err(e) => {
-                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
-                            let vec4 = (e.into_bytes()).into_boxed_slice();
-                            let ptr4 = vec4.as_ptr().cast::<u8>();
-                            let len4 = vec4.len();
-                            ::core::mem::forget(vec4);
-                            *ptr3
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len4;
-                            *ptr3
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr4.cast_mut();
-                        }
-                    };
-                    ptr3
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn __post_return_on_job<T: Guest>(arg0: *mut u8) {
-                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
-                    match l0 {
-                        0 => {}
-                        _ => {
-                            let l1 = *arg0
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l2 = *arg0
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            _rt::cabi_dealloc(l1, l2, 1);
-                        }
-                    }
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
                 pub unsafe fn _export_on_rewrite_cabi<T: Guest>(
                     arg0: *mut u8,
                 ) -> *mut u8 {
@@ -2296,7 +2154,10 @@ pub mod exports {
                         .cast::<usize>();
                     let len34 = l33;
                     let bytes34 = _rt::Vec::from_raw_parts(l32.cast(), len34, len34);
-                    let result35 = T::on_rewrite(super::super::super::super::octra::api_plugin::types::Request {
+                    let l35 = i32::from(
+                        *arg0.add(20 * ::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                    );
+                    let result39 = T::on_rewrite(super::super::super::super::octra::api_plugin::types::Request {
                         request_id: _rt::string_lift(bytes2),
                         method: _rt::string_lift(bytes5),
                         path: _rt::string_lift(bytes8),
@@ -2348,187 +2209,156 @@ pub mod exports {
                         },
                         route_id: _rt::string_lift(bytes31),
                         service_id: _rt::string_lift(bytes34),
+                        body: match l35 {
+                            0 => None,
+                            1 => {
+                                let e = {
+                                    let l36 = *arg0
+                                        .add(21 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l37 = *arg0
+                                        .add(22 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len38 = l37;
+                                    _rt::Vec::from_raw_parts(l36.cast(), len38, len38)
+                                };
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        },
                     });
                     _rt::cabi_dealloc(
                         arg0,
-                        20 * ::core::mem::size_of::<*const u8>(),
+                        23 * ::core::mem::size_of::<*const u8>(),
                         ::core::mem::size_of::<*const u8>(),
                     );
-                    let ptr36 = (&raw mut _RET_AREA.0).cast::<u8>();
-                    match result35 {
+                    let ptr40 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result39 {
                         Ok(e) => {
-                            *ptr36.add(0).cast::<u8>() = (0i32) as u8;
-                            use super::super::super::super::octra::api_plugin::types::Action as V52;
+                            *ptr40.add(0).cast::<u8>() = (0i32) as u8;
+                            use super::super::super::super::octra::api_plugin::types::Action as V57;
                             match e {
-                                V52::Continue(e) => {
-                                    *ptr36
+                                V57::Continue(e) => {
+                                    *ptr40
                                         .add(::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (0i32) as u8;
                                     let super::super::super::super::octra::api_plugin::types::RequestMutation {
-                                        path: path37,
-                                        query: query37,
-                                        set_headers: set_headers37,
-                                        remove_headers: remove_headers37,
+                                        path: path41,
+                                        query: query41,
+                                        set_headers: set_headers41,
+                                        remove_headers: remove_headers41,
+                                        body: body41,
                                     } = e;
-                                    match path37 {
+                                    match path41 {
                                         Some(e) => {
-                                            *ptr36
+                                            *ptr40
                                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<u8>() = (1i32) as u8;
-                                            let vec38 = (e.into_bytes()).into_boxed_slice();
-                                            let ptr38 = vec38.as_ptr().cast::<u8>();
-                                            let len38 = vec38.len();
-                                            ::core::mem::forget(vec38);
-                                            *ptr36
-                                                .add(4 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len38;
-                                            *ptr36
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr38.cast_mut();
-                                        }
-                                        None => {
-                                            *ptr36
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>() = (0i32) as u8;
-                                        }
-                                    };
-                                    match query37 {
-                                        Some(e) => {
-                                            *ptr36
-                                                .add(5 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>() = (1i32) as u8;
-                                            let vec39 = (e.into_bytes()).into_boxed_slice();
-                                            let ptr39 = vec39.as_ptr().cast::<u8>();
-                                            let len39 = vec39.len();
-                                            ::core::mem::forget(vec39);
-                                            *ptr36
-                                                .add(7 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len39;
-                                            *ptr36
-                                                .add(6 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr39.cast_mut();
-                                        }
-                                        None => {
-                                            *ptr36
-                                                .add(5 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>() = (0i32) as u8;
-                                        }
-                                    };
-                                    let vec43 = set_headers37;
-                                    let len43 = vec43.len();
-                                    let layout43 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec43.len() * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let result43 = if layout43.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout43).cast::<u8>();
-                                        if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout43);
-                                        }
-                                        ptr
-                                    } else {
-                                        ::core::ptr::null_mut()
-                                    };
-                                    for (i, e) in vec43.into_iter().enumerate() {
-                                        let base = result43
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let (t40_0, t40_1) = e;
-                                            let vec41 = (t40_0.into_bytes()).into_boxed_slice();
-                                            let ptr41 = vec41.as_ptr().cast::<u8>();
-                                            let len41 = vec41.len();
-                                            ::core::mem::forget(vec41);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len41;
-                                            *base.add(0).cast::<*mut u8>() = ptr41.cast_mut();
-                                            let vec42 = (t40_1.into_bytes()).into_boxed_slice();
+                                            let vec42 = (e.into_bytes()).into_boxed_slice();
                                             let ptr42 = vec42.as_ptr().cast::<u8>();
                                             let len42 = vec42.len();
                                             ::core::mem::forget(vec42);
-                                            *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                            *ptr40
+                                                .add(4 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>() = len42;
-                                            *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                            *ptr40
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<*mut u8>() = ptr42.cast_mut();
                                         }
-                                    }
-                                    *ptr36
-                                        .add(9 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len43;
-                                    *ptr36
-                                        .add(8 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result43;
-                                    let vec45 = remove_headers37;
-                                    let len45 = vec45.len();
-                                    let layout45 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec45.len() * (2 * ::core::mem::size_of::<*const u8>()),
+                                        None => {
+                                            *ptr40
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
+                                        }
+                                    };
+                                    match query41 {
+                                        Some(e) => {
+                                            *ptr40
+                                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (1i32) as u8;
+                                            let vec43 = (e.into_bytes()).into_boxed_slice();
+                                            let ptr43 = vec43.as_ptr().cast::<u8>();
+                                            let len43 = vec43.len();
+                                            ::core::mem::forget(vec43);
+                                            *ptr40
+                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len43;
+                                            *ptr40
+                                                .add(6 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr43.cast_mut();
+                                        }
+                                        None => {
+                                            *ptr40
+                                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
+                                        }
+                                    };
+                                    let vec47 = set_headers41;
+                                    let len47 = vec47.len();
+                                    let layout47 = _rt::alloc::Layout::from_size_align_unchecked(
+                                        vec47.len() * (4 * ::core::mem::size_of::<*const u8>()),
                                         ::core::mem::size_of::<*const u8>(),
                                     );
-                                    let result45 = if layout45.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout45).cast::<u8>();
+                                    let result47 = if layout47.size() != 0 {
+                                        let ptr = _rt::alloc::alloc(layout47).cast::<u8>();
                                         if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout45);
+                                            _rt::alloc::handle_alloc_error(layout47);
                                         }
                                         ptr
                                     } else {
                                         ::core::ptr::null_mut()
                                     };
-                                    for (i, e) in vec45.into_iter().enumerate() {
-                                        let base = result45
-                                            .add(i * (2 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let vec44 = (e.into_bytes()).into_boxed_slice();
-                                            let ptr44 = vec44.as_ptr().cast::<u8>();
-                                            let len44 = vec44.len();
-                                            ::core::mem::forget(vec44);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len44;
-                                            *base.add(0).cast::<*mut u8>() = ptr44.cast_mut();
-                                        }
-                                    }
-                                    *ptr36
-                                        .add(11 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len45;
-                                    *ptr36
-                                        .add(10 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result45;
-                                }
-                                V52::Reject(e) => {
-                                    *ptr36
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>() = (1i32) as u8;
-                                    let super::super::super::super::octra::api_plugin::types::Reject {
-                                        status: status46,
-                                        headers: headers46,
-                                        body: body46,
-                                    } = e;
-                                    *ptr36
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u16>() = (_rt::as_i32(status46)) as u16;
-                                    let vec50 = headers46;
-                                    let len50 = vec50.len();
-                                    let layout50 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec50.len() * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let result50 = if layout50.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout50).cast::<u8>();
-                                        if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout50);
-                                        }
-                                        ptr
-                                    } else {
-                                        ::core::ptr::null_mut()
-                                    };
-                                    for (i, e) in vec50.into_iter().enumerate() {
-                                        let base = result50
+                                    for (i, e) in vec47.into_iter().enumerate() {
+                                        let base = result47
                                             .add(i * (4 * ::core::mem::size_of::<*const u8>()));
                                         {
-                                            let (t47_0, t47_1) = e;
-                                            let vec48 = (t47_0.into_bytes()).into_boxed_slice();
+                                            let (t44_0, t44_1) = e;
+                                            let vec45 = (t44_0.into_bytes()).into_boxed_slice();
+                                            let ptr45 = vec45.as_ptr().cast::<u8>();
+                                            let len45 = vec45.len();
+                                            ::core::mem::forget(vec45);
+                                            *base
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len45;
+                                            *base.add(0).cast::<*mut u8>() = ptr45.cast_mut();
+                                            let vec46 = (t44_1.into_bytes()).into_boxed_slice();
+                                            let ptr46 = vec46.as_ptr().cast::<u8>();
+                                            let len46 = vec46.len();
+                                            ::core::mem::forget(vec46);
+                                            *base
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len46;
+                                            *base
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr46.cast_mut();
+                                        }
+                                    }
+                                    *ptr40
+                                        .add(9 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len47;
+                                    *ptr40
+                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = result47;
+                                    let vec49 = remove_headers41;
+                                    let len49 = vec49.len();
+                                    let layout49 = _rt::alloc::Layout::from_size_align_unchecked(
+                                        vec49.len() * (2 * ::core::mem::size_of::<*const u8>()),
+                                        ::core::mem::size_of::<*const u8>(),
+                                    );
+                                    let result49 = if layout49.size() != 0 {
+                                        let ptr = _rt::alloc::alloc(layout49).cast::<u8>();
+                                        if ptr.is_null() {
+                                            _rt::alloc::handle_alloc_error(layout49);
+                                        }
+                                        ptr
+                                    } else {
+                                        ::core::ptr::null_mut()
+                                    };
+                                    for (i, e) in vec49.into_iter().enumerate() {
+                                        let base = result49
+                                            .add(i * (2 * ::core::mem::size_of::<*const u8>()));
+                                        {
+                                            let vec48 = (e.into_bytes()).into_boxed_slice();
                                             let ptr48 = vec48.as_ptr().cast::<u8>();
                                             let len48 = vec48.len();
                                             ::core::mem::forget(vec48);
@@ -2536,52 +2366,123 @@ pub mod exports {
                                                 .add(::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>() = len48;
                                             *base.add(0).cast::<*mut u8>() = ptr48.cast_mut();
-                                            let vec49 = (t47_1.into_bytes()).into_boxed_slice();
-                                            let ptr49 = vec49.as_ptr().cast::<u8>();
-                                            let len49 = vec49.len();
-                                            ::core::mem::forget(vec49);
-                                            *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len49;
-                                            *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr49.cast_mut();
                                         }
                                     }
-                                    *ptr36
+                                    *ptr40
+                                        .add(11 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len49;
+                                    *ptr40
+                                        .add(10 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = result49;
+                                    match body41 {
+                                        Some(e) => {
+                                            *ptr40
+                                                .add(12 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (1i32) as u8;
+                                            let vec50 = (e).into_boxed_slice();
+                                            let ptr50 = vec50.as_ptr().cast::<u8>();
+                                            let len50 = vec50.len();
+                                            ::core::mem::forget(vec50);
+                                            *ptr40
+                                                .add(14 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len50;
+                                            *ptr40
+                                                .add(13 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr50.cast_mut();
+                                        }
+                                        None => {
+                                            *ptr40
+                                                .add(12 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
+                                        }
+                                    };
+                                }
+                                V57::Reject(e) => {
+                                    *ptr40
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (1i32) as u8;
+                                    let super::super::super::super::octra::api_plugin::types::Reject {
+                                        status: status51,
+                                        headers: headers51,
+                                        body: body51,
+                                    } = e;
+                                    *ptr40
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u16>() = (_rt::as_i32(status51)) as u16;
+                                    let vec55 = headers51;
+                                    let len55 = vec55.len();
+                                    let layout55 = _rt::alloc::Layout::from_size_align_unchecked(
+                                        vec55.len() * (4 * ::core::mem::size_of::<*const u8>()),
+                                        ::core::mem::size_of::<*const u8>(),
+                                    );
+                                    let result55 = if layout55.size() != 0 {
+                                        let ptr = _rt::alloc::alloc(layout55).cast::<u8>();
+                                        if ptr.is_null() {
+                                            _rt::alloc::handle_alloc_error(layout55);
+                                        }
+                                        ptr
+                                    } else {
+                                        ::core::ptr::null_mut()
+                                    };
+                                    for (i, e) in vec55.into_iter().enumerate() {
+                                        let base = result55
+                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                        {
+                                            let (t52_0, t52_1) = e;
+                                            let vec53 = (t52_0.into_bytes()).into_boxed_slice();
+                                            let ptr53 = vec53.as_ptr().cast::<u8>();
+                                            let len53 = vec53.len();
+                                            ::core::mem::forget(vec53);
+                                            *base
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len53;
+                                            *base.add(0).cast::<*mut u8>() = ptr53.cast_mut();
+                                            let vec54 = (t52_1.into_bytes()).into_boxed_slice();
+                                            let ptr54 = vec54.as_ptr().cast::<u8>();
+                                            let len54 = vec54.len();
+                                            ::core::mem::forget(vec54);
+                                            *base
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len54;
+                                            *base
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr54.cast_mut();
+                                        }
+                                    }
+                                    *ptr40
                                         .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len50;
-                                    *ptr36
+                                        .cast::<usize>() = len55;
+                                    *ptr40
                                         .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result50;
-                                    let vec51 = (body46).into_boxed_slice();
-                                    let ptr51 = vec51.as_ptr().cast::<u8>();
-                                    let len51 = vec51.len();
-                                    ::core::mem::forget(vec51);
-                                    *ptr36
+                                        .cast::<*mut u8>() = result55;
+                                    let vec56 = (body51).into_boxed_slice();
+                                    let ptr56 = vec56.as_ptr().cast::<u8>();
+                                    let len56 = vec56.len();
+                                    ::core::mem::forget(vec56);
+                                    *ptr40
                                         .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len51;
-                                    *ptr36
+                                        .cast::<usize>() = len56;
+                                    *ptr40
                                         .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = ptr51.cast_mut();
+                                        .cast::<*mut u8>() = ptr56.cast_mut();
                                 }
                             }
                         }
                         Err(e) => {
-                            *ptr36.add(0).cast::<u8>() = (1i32) as u8;
-                            let vec53 = (e.into_bytes()).into_boxed_slice();
-                            let ptr53 = vec53.as_ptr().cast::<u8>();
-                            let len53 = vec53.len();
-                            ::core::mem::forget(vec53);
-                            *ptr36
+                            *ptr40.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec58 = (e.into_bytes()).into_boxed_slice();
+                            let ptr58 = vec58.as_ptr().cast::<u8>();
+                            let len58 = vec58.len();
+                            ::core::mem::forget(vec58);
+                            *ptr40
                                 .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len53;
-                            *ptr36
+                                .cast::<usize>() = len58;
+                            *ptr40
                                 .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr53.cast_mut();
+                                .cast::<*mut u8>() = ptr58.cast_mut();
                         }
                     };
-                    ptr36
+                    ptr40
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
@@ -2683,65 +2584,84 @@ pub mod exports {
                                         len19 * (2 * ::core::mem::size_of::<*const u8>()),
                                         ::core::mem::size_of::<*const u8>(),
                                     );
+                                    let l20 = i32::from(
+                                        *arg0
+                                            .add(12 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>(),
+                                    );
+                                    match l20 {
+                                        0 => {}
+                                        _ => {
+                                            let l21 = *arg0
+                                                .add(13 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>();
+                                            let l22 = *arg0
+                                                .add(14 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>();
+                                            let base23 = l21;
+                                            let len23 = l22;
+                                            _rt::cabi_dealloc(base23, len23 * 1, 1);
+                                        }
+                                    }
                                 }
                                 _ => {
-                                    let l20 = *arg0
+                                    let l24 = *arg0
                                         .add(3 * ::core::mem::size_of::<*const u8>())
                                         .cast::<*mut u8>();
-                                    let l21 = *arg0
+                                    let l25 = *arg0
                                         .add(4 * ::core::mem::size_of::<*const u8>())
                                         .cast::<usize>();
-                                    let base26 = l20;
-                                    let len26 = l21;
-                                    for i in 0..len26 {
-                                        let base = base26
+                                    let base30 = l24;
+                                    let len30 = l25;
+                                    for i in 0..len30 {
+                                        let base = base30
                                             .add(i * (4 * ::core::mem::size_of::<*const u8>()));
                                         {
-                                            let l22 = *base.add(0).cast::<*mut u8>();
-                                            let l23 = *base
+                                            let l26 = *base.add(0).cast::<*mut u8>();
+                                            let l27 = *base
                                                 .add(::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>();
-                                            _rt::cabi_dealloc(l22, l23, 1);
-                                            let l24 = *base
+                                            _rt::cabi_dealloc(l26, l27, 1);
+                                            let l28 = *base
                                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<*mut u8>();
-                                            let l25 = *base
+                                            let l29 = *base
                                                 .add(3 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>();
-                                            _rt::cabi_dealloc(l24, l25, 1);
+                                            _rt::cabi_dealloc(l28, l29, 1);
                                         }
                                     }
                                     _rt::cabi_dealloc(
-                                        base26,
-                                        len26 * (4 * ::core::mem::size_of::<*const u8>()),
+                                        base30,
+                                        len30 * (4 * ::core::mem::size_of::<*const u8>()),
                                         ::core::mem::size_of::<*const u8>(),
                                     );
-                                    let l27 = *arg0
+                                    let l31 = *arg0
                                         .add(5 * ::core::mem::size_of::<*const u8>())
                                         .cast::<*mut u8>();
-                                    let l28 = *arg0
+                                    let l32 = *arg0
                                         .add(6 * ::core::mem::size_of::<*const u8>())
                                         .cast::<usize>();
-                                    let base29 = l27;
-                                    let len29 = l28;
-                                    _rt::cabi_dealloc(base29, len29 * 1, 1);
+                                    let base33 = l31;
+                                    let len33 = l32;
+                                    _rt::cabi_dealloc(base33, len33 * 1, 1);
                                 }
                             }
                         }
                         _ => {
-                            let l30 = *arg0
+                            let l34 = *arg0
                                 .add(::core::mem::size_of::<*const u8>())
                                 .cast::<*mut u8>();
-                            let l31 = *arg0
+                            let l35 = *arg0
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<usize>();
-                            _rt::cabi_dealloc(l30, l31, 1);
+                            _rt::cabi_dealloc(l34, l35, 1);
                         }
                     }
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
-                pub unsafe fn _export_on_request_cabi<T: Guest>(
+                pub unsafe fn _export_on_access_cabi<T: Guest>(
                     arg0: *mut u8,
                 ) -> *mut u8 {
                     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
@@ -2841,7 +2761,10 @@ pub mod exports {
                         .cast::<usize>();
                     let len34 = l33;
                     let bytes34 = _rt::Vec::from_raw_parts(l32.cast(), len34, len34);
-                    let result35 = T::on_request(super::super::super::super::octra::api_plugin::types::Request {
+                    let l35 = i32::from(
+                        *arg0.add(20 * ::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                    );
+                    let result39 = T::on_access(super::super::super::super::octra::api_plugin::types::Request {
                         request_id: _rt::string_lift(bytes2),
                         method: _rt::string_lift(bytes5),
                         path: _rt::string_lift(bytes8),
@@ -2893,642 +2816,94 @@ pub mod exports {
                         },
                         route_id: _rt::string_lift(bytes31),
                         service_id: _rt::string_lift(bytes34),
+                        body: match l35 {
+                            0 => None,
+                            1 => {
+                                let e = {
+                                    let l36 = *arg0
+                                        .add(21 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l37 = *arg0
+                                        .add(22 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len38 = l37;
+                                    _rt::Vec::from_raw_parts(l36.cast(), len38, len38)
+                                };
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        },
                     });
                     _rt::cabi_dealloc(
                         arg0,
-                        20 * ::core::mem::size_of::<*const u8>(),
+                        23 * ::core::mem::size_of::<*const u8>(),
                         ::core::mem::size_of::<*const u8>(),
                     );
-                    let ptr36 = (&raw mut _RET_AREA.0).cast::<u8>();
-                    match result35 {
+                    let ptr40 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result39 {
                         Ok(e) => {
-                            *ptr36.add(0).cast::<u8>() = (0i32) as u8;
-                            use super::super::super::super::octra::api_plugin::types::Action as V52;
+                            *ptr40.add(0).cast::<u8>() = (0i32) as u8;
+                            use super::super::super::super::octra::api_plugin::types::Action as V57;
                             match e {
-                                V52::Continue(e) => {
-                                    *ptr36
+                                V57::Continue(e) => {
+                                    *ptr40
                                         .add(::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (0i32) as u8;
                                     let super::super::super::super::octra::api_plugin::types::RequestMutation {
-                                        path: path37,
-                                        query: query37,
-                                        set_headers: set_headers37,
-                                        remove_headers: remove_headers37,
+                                        path: path41,
+                                        query: query41,
+                                        set_headers: set_headers41,
+                                        remove_headers: remove_headers41,
+                                        body: body41,
                                     } = e;
-                                    match path37 {
+                                    match path41 {
                                         Some(e) => {
-                                            *ptr36
+                                            *ptr40
                                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<u8>() = (1i32) as u8;
-                                            let vec38 = (e.into_bytes()).into_boxed_slice();
-                                            let ptr38 = vec38.as_ptr().cast::<u8>();
-                                            let len38 = vec38.len();
-                                            ::core::mem::forget(vec38);
-                                            *ptr36
-                                                .add(4 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len38;
-                                            *ptr36
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr38.cast_mut();
-                                        }
-                                        None => {
-                                            *ptr36
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>() = (0i32) as u8;
-                                        }
-                                    };
-                                    match query37 {
-                                        Some(e) => {
-                                            *ptr36
-                                                .add(5 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>() = (1i32) as u8;
-                                            let vec39 = (e.into_bytes()).into_boxed_slice();
-                                            let ptr39 = vec39.as_ptr().cast::<u8>();
-                                            let len39 = vec39.len();
-                                            ::core::mem::forget(vec39);
-                                            *ptr36
-                                                .add(7 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len39;
-                                            *ptr36
-                                                .add(6 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr39.cast_mut();
-                                        }
-                                        None => {
-                                            *ptr36
-                                                .add(5 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>() = (0i32) as u8;
-                                        }
-                                    };
-                                    let vec43 = set_headers37;
-                                    let len43 = vec43.len();
-                                    let layout43 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec43.len() * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let result43 = if layout43.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout43).cast::<u8>();
-                                        if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout43);
-                                        }
-                                        ptr
-                                    } else {
-                                        ::core::ptr::null_mut()
-                                    };
-                                    for (i, e) in vec43.into_iter().enumerate() {
-                                        let base = result43
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let (t40_0, t40_1) = e;
-                                            let vec41 = (t40_0.into_bytes()).into_boxed_slice();
-                                            let ptr41 = vec41.as_ptr().cast::<u8>();
-                                            let len41 = vec41.len();
-                                            ::core::mem::forget(vec41);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len41;
-                                            *base.add(0).cast::<*mut u8>() = ptr41.cast_mut();
-                                            let vec42 = (t40_1.into_bytes()).into_boxed_slice();
+                                            let vec42 = (e.into_bytes()).into_boxed_slice();
                                             let ptr42 = vec42.as_ptr().cast::<u8>();
                                             let len42 = vec42.len();
                                             ::core::mem::forget(vec42);
-                                            *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                            *ptr40
+                                                .add(4 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>() = len42;
-                                            *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                            *ptr40
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<*mut u8>() = ptr42.cast_mut();
                                         }
-                                    }
-                                    *ptr36
-                                        .add(9 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len43;
-                                    *ptr36
-                                        .add(8 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result43;
-                                    let vec45 = remove_headers37;
-                                    let len45 = vec45.len();
-                                    let layout45 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec45.len() * (2 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let result45 = if layout45.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout45).cast::<u8>();
-                                        if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout45);
-                                        }
-                                        ptr
-                                    } else {
-                                        ::core::ptr::null_mut()
-                                    };
-                                    for (i, e) in vec45.into_iter().enumerate() {
-                                        let base = result45
-                                            .add(i * (2 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let vec44 = (e.into_bytes()).into_boxed_slice();
-                                            let ptr44 = vec44.as_ptr().cast::<u8>();
-                                            let len44 = vec44.len();
-                                            ::core::mem::forget(vec44);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len44;
-                                            *base.add(0).cast::<*mut u8>() = ptr44.cast_mut();
-                                        }
-                                    }
-                                    *ptr36
-                                        .add(11 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len45;
-                                    *ptr36
-                                        .add(10 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result45;
-                                }
-                                V52::Reject(e) => {
-                                    *ptr36
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>() = (1i32) as u8;
-                                    let super::super::super::super::octra::api_plugin::types::Reject {
-                                        status: status46,
-                                        headers: headers46,
-                                        body: body46,
-                                    } = e;
-                                    *ptr36
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u16>() = (_rt::as_i32(status46)) as u16;
-                                    let vec50 = headers46;
-                                    let len50 = vec50.len();
-                                    let layout50 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec50.len() * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let result50 = if layout50.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout50).cast::<u8>();
-                                        if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout50);
-                                        }
-                                        ptr
-                                    } else {
-                                        ::core::ptr::null_mut()
-                                    };
-                                    for (i, e) in vec50.into_iter().enumerate() {
-                                        let base = result50
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let (t47_0, t47_1) = e;
-                                            let vec48 = (t47_0.into_bytes()).into_boxed_slice();
-                                            let ptr48 = vec48.as_ptr().cast::<u8>();
-                                            let len48 = vec48.len();
-                                            ::core::mem::forget(vec48);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len48;
-                                            *base.add(0).cast::<*mut u8>() = ptr48.cast_mut();
-                                            let vec49 = (t47_1.into_bytes()).into_boxed_slice();
-                                            let ptr49 = vec49.as_ptr().cast::<u8>();
-                                            let len49 = vec49.len();
-                                            ::core::mem::forget(vec49);
-                                            *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len49;
-                                            *base
+                                        None => {
+                                            *ptr40
                                                 .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr49.cast_mut();
+                                                .cast::<u8>() = (0i32) as u8;
                                         }
-                                    }
-                                    *ptr36
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len50;
-                                    *ptr36
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result50;
-                                    let vec51 = (body46).into_boxed_slice();
-                                    let ptr51 = vec51.as_ptr().cast::<u8>();
-                                    let len51 = vec51.len();
-                                    ::core::mem::forget(vec51);
-                                    *ptr36
-                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len51;
-                                    *ptr36
-                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = ptr51.cast_mut();
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            *ptr36.add(0).cast::<u8>() = (1i32) as u8;
-                            let vec53 = (e.into_bytes()).into_boxed_slice();
-                            let ptr53 = vec53.as_ptr().cast::<u8>();
-                            let len53 = vec53.len();
-                            ::core::mem::forget(vec53);
-                            *ptr36
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len53;
-                            *ptr36
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr53.cast_mut();
-                        }
-                    };
-                    ptr36
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn __post_return_on_request<T: Guest>(arg0: *mut u8) {
-                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
-                    match l0 {
-                        0 => {
-                            let l1 = i32::from(
-                                *arg0.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
-                            );
-                            match l1 {
-                                0 => {
-                                    let l2 = i32::from(
-                                        *arg0
-                                            .add(2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>(),
-                                    );
-                                    match l2 {
-                                        0 => {}
-                                        _ => {
-                                            let l3 = *arg0
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l4 = *arg0
-                                                .add(4 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l3, l4, 1);
-                                        }
-                                    }
-                                    let l5 = i32::from(
-                                        *arg0
-                                            .add(5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>(),
-                                    );
-                                    match l5 {
-                                        0 => {}
-                                        _ => {
-                                            let l6 = *arg0
-                                                .add(6 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l7 = *arg0
-                                                .add(7 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l6, l7, 1);
-                                        }
-                                    }
-                                    let l8 = *arg0
-                                        .add(8 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l9 = *arg0
-                                        .add(9 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base14 = l8;
-                                    let len14 = l9;
-                                    for i in 0..len14 {
-                                        let base = base14
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let l10 = *base.add(0).cast::<*mut u8>();
-                                            let l11 = *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l10, l11, 1);
-                                            let l12 = *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l13 = *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l12, l13, 1);
-                                        }
-                                    }
-                                    _rt::cabi_dealloc(
-                                        base14,
-                                        len14 * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let l15 = *arg0
-                                        .add(10 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l16 = *arg0
-                                        .add(11 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base19 = l15;
-                                    let len19 = l16;
-                                    for i in 0..len19 {
-                                        let base = base19
-                                            .add(i * (2 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let l17 = *base.add(0).cast::<*mut u8>();
-                                            let l18 = *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l17, l18, 1);
-                                        }
-                                    }
-                                    _rt::cabi_dealloc(
-                                        base19,
-                                        len19 * (2 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                }
-                                _ => {
-                                    let l20 = *arg0
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l21 = *arg0
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base26 = l20;
-                                    let len26 = l21;
-                                    for i in 0..len26 {
-                                        let base = base26
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let l22 = *base.add(0).cast::<*mut u8>();
-                                            let l23 = *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l22, l23, 1);
-                                            let l24 = *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l25 = *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l24, l25, 1);
-                                        }
-                                    }
-                                    _rt::cabi_dealloc(
-                                        base26,
-                                        len26 * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let l27 = *arg0
-                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l28 = *arg0
-                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base29 = l27;
-                                    let len29 = l28;
-                                    _rt::cabi_dealloc(base29, len29 * 1, 1);
-                                }
-                            }
-                        }
-                        _ => {
-                            let l30 = *arg0
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l31 = *arg0
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            _rt::cabi_dealloc(l30, l31, 1);
-                        }
-                    }
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn _export_on_request_body_cabi<T: Guest>(
-                    arg0: *mut u8,
-                ) -> *mut u8 {
-                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-                    let l0 = *arg0.add(0).cast::<*mut u8>();
-                    let l1 = *arg0
-                        .add(::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len2 = l1;
-                    let bytes2 = _rt::Vec::from_raw_parts(l0.cast(), len2, len2);
-                    let l3 = *arg0
-                        .add(2 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l4 = *arg0
-                        .add(3 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len5 = l4;
-                    let bytes5 = _rt::Vec::from_raw_parts(l3.cast(), len5, len5);
-                    let l6 = *arg0
-                        .add(4 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l7 = *arg0
-                        .add(5 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len8 = l7;
-                    let bytes8 = _rt::Vec::from_raw_parts(l6.cast(), len8, len8);
-                    let l9 = *arg0
-                        .add(6 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l10 = *arg0
-                        .add(7 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len11 = l10;
-                    let bytes11 = _rt::Vec::from_raw_parts(l9.cast(), len11, len11);
-                    let l12 = *arg0
-                        .add(8 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l13 = *arg0
-                        .add(9 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let base20 = l12;
-                    let len20 = l13;
-                    let mut result20 = _rt::Vec::with_capacity(len20);
-                    for i in 0..len20 {
-                        let base = base20
-                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                        let e20 = {
-                            let l14 = *base.add(0).cast::<*mut u8>();
-                            let l15 = *base
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let len16 = l15;
-                            let bytes16 = _rt::Vec::from_raw_parts(
-                                l14.cast(),
-                                len16,
-                                len16,
-                            );
-                            let l17 = *base
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l18 = *base
-                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let len19 = l18;
-                            let bytes19 = _rt::Vec::from_raw_parts(
-                                l17.cast(),
-                                len19,
-                                len19,
-                            );
-                            (_rt::string_lift(bytes16), _rt::string_lift(bytes19))
-                        };
-                        result20.push(e20);
-                    }
-                    _rt::cabi_dealloc(
-                        base20,
-                        len20 * (4 * ::core::mem::size_of::<*const u8>()),
-                        ::core::mem::size_of::<*const u8>(),
-                    );
-                    let l21 = i32::from(
-                        *arg0.add(10 * ::core::mem::size_of::<*const u8>()).cast::<u8>(),
-                    );
-                    let l25 = i32::from(
-                        *arg0.add(13 * ::core::mem::size_of::<*const u8>()).cast::<u8>(),
-                    );
-                    let l29 = *arg0
-                        .add(16 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l30 = *arg0
-                        .add(17 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len31 = l30;
-                    let bytes31 = _rt::Vec::from_raw_parts(l29.cast(), len31, len31);
-                    let l32 = *arg0
-                        .add(18 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l33 = *arg0
-                        .add(19 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len34 = l33;
-                    let bytes34 = _rt::Vec::from_raw_parts(l32.cast(), len34, len34);
-                    let l35 = *arg0
-                        .add(20 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l36 = *arg0
-                        .add(21 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len37 = l36;
-                    let result38 = T::on_request_body(
-                        super::super::super::super::octra::api_plugin::types::Request {
-                            request_id: _rt::string_lift(bytes2),
-                            method: _rt::string_lift(bytes5),
-                            path: _rt::string_lift(bytes8),
-                            query: _rt::string_lift(bytes11),
-                            headers: result20,
-                            client_ip: match l21 {
-                                0 => None,
-                                1 => {
-                                    let e = {
-                                        let l22 = *arg0
-                                            .add(11 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l23 = *arg0
-                                            .add(12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len24 = l23;
-                                        let bytes24 = _rt::Vec::from_raw_parts(
-                                            l22.cast(),
-                                            len24,
-                                            len24,
-                                        );
-                                        _rt::string_lift(bytes24)
                                     };
-                                    Some(e)
-                                }
-                                _ => _rt::invalid_enum_discriminant(),
-                            },
-                            consumer_id: match l25 {
-                                0 => None,
-                                1 => {
-                                    let e = {
-                                        let l26 = *arg0
-                                            .add(14 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l27 = *arg0
-                                            .add(15 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len28 = l27;
-                                        let bytes28 = _rt::Vec::from_raw_parts(
-                                            l26.cast(),
-                                            len28,
-                                            len28,
-                                        );
-                                        _rt::string_lift(bytes28)
-                                    };
-                                    Some(e)
-                                }
-                                _ => _rt::invalid_enum_discriminant(),
-                            },
-                            route_id: _rt::string_lift(bytes31),
-                            service_id: _rt::string_lift(bytes34),
-                        },
-                        _rt::Vec::from_raw_parts(l35.cast(), len37, len37),
-                    );
-                    _rt::cabi_dealloc(
-                        arg0,
-                        22 * ::core::mem::size_of::<*const u8>(),
-                        ::core::mem::size_of::<*const u8>(),
-                    );
-                    let ptr39 = (&raw mut _RET_AREA.0).cast::<u8>();
-                    match result38 {
-                        Ok(e) => {
-                            *ptr39.add(0).cast::<u8>() = (0i32) as u8;
-                            use super::super::super::super::octra::api_plugin::types::RequestBodyAction as V54;
-                            match e {
-                                V54::Continue(e) => {
-                                    *ptr39
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>() = (0i32) as u8;
-                                    let super::super::super::super::octra::api_plugin::types::RequestBodyResult {
-                                        body: body40,
-                                        set_headers: set_headers40,
-                                        remove_headers: remove_headers40,
-                                    } = e;
-                                    let vec41 = (body40).into_boxed_slice();
-                                    let ptr41 = vec41.as_ptr().cast::<u8>();
-                                    let len41 = vec41.len();
-                                    ::core::mem::forget(vec41);
-                                    *ptr39
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len41;
-                                    *ptr39
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = ptr41.cast_mut();
-                                    let vec45 = set_headers40;
-                                    let len45 = vec45.len();
-                                    let layout45 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec45.len() * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let result45 = if layout45.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout45).cast::<u8>();
-                                        if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout45);
-                                        }
-                                        ptr
-                                    } else {
-                                        ::core::ptr::null_mut()
-                                    };
-                                    for (i, e) in vec45.into_iter().enumerate() {
-                                        let base = result45
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let (t42_0, t42_1) = e;
-                                            let vec43 = (t42_0.into_bytes()).into_boxed_slice();
+                                    match query41 {
+                                        Some(e) => {
+                                            *ptr40
+                                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (1i32) as u8;
+                                            let vec43 = (e.into_bytes()).into_boxed_slice();
                                             let ptr43 = vec43.as_ptr().cast::<u8>();
                                             let len43 = vec43.len();
                                             ::core::mem::forget(vec43);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
+                                            *ptr40
+                                                .add(7 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>() = len43;
-                                            *base.add(0).cast::<*mut u8>() = ptr43.cast_mut();
-                                            let vec44 = (t42_1.into_bytes()).into_boxed_slice();
-                                            let ptr44 = vec44.as_ptr().cast::<u8>();
-                                            let len44 = vec44.len();
-                                            ::core::mem::forget(vec44);
-                                            *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len44;
-                                            *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr44.cast_mut();
+                                            *ptr40
+                                                .add(6 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr43.cast_mut();
                                         }
-                                    }
-                                    *ptr39
-                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len45;
-                                    *ptr39
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result45;
-                                    let vec47 = remove_headers40;
+                                        None => {
+                                            *ptr40
+                                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
+                                        }
+                                    };
+                                    let vec47 = set_headers41;
                                     let len47 = vec47.len();
                                     let layout47 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec47.len() * (2 * ::core::mem::size_of::<*const u8>()),
+                                        vec47.len() * (4 * ::core::mem::size_of::<*const u8>()),
                                         ::core::mem::size_of::<*const u8>(),
                                     );
                                     let result47 = if layout47.size() != 0 {
@@ -3542,545 +2917,39 @@ pub mod exports {
                                     };
                                     for (i, e) in vec47.into_iter().enumerate() {
                                         let base = result47
-                                            .add(i * (2 * ::core::mem::size_of::<*const u8>()));
+                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
                                         {
-                                            let vec46 = (e.into_bytes()).into_boxed_slice();
+                                            let (t44_0, t44_1) = e;
+                                            let vec45 = (t44_0.into_bytes()).into_boxed_slice();
+                                            let ptr45 = vec45.as_ptr().cast::<u8>();
+                                            let len45 = vec45.len();
+                                            ::core::mem::forget(vec45);
+                                            *base
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len45;
+                                            *base.add(0).cast::<*mut u8>() = ptr45.cast_mut();
+                                            let vec46 = (t44_1.into_bytes()).into_boxed_slice();
                                             let ptr46 = vec46.as_ptr().cast::<u8>();
                                             let len46 = vec46.len();
                                             ::core::mem::forget(vec46);
                                             *base
-                                                .add(::core::mem::size_of::<*const u8>())
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>() = len46;
-                                            *base.add(0).cast::<*mut u8>() = ptr46.cast_mut();
-                                        }
-                                    }
-                                    *ptr39
-                                        .add(7 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len47;
-                                    *ptr39
-                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result47;
-                                }
-                                V54::Reject(e) => {
-                                    *ptr39
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>() = (1i32) as u8;
-                                    let super::super::super::super::octra::api_plugin::types::Reject {
-                                        status: status48,
-                                        headers: headers48,
-                                        body: body48,
-                                    } = e;
-                                    *ptr39
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u16>() = (_rt::as_i32(status48)) as u16;
-                                    let vec52 = headers48;
-                                    let len52 = vec52.len();
-                                    let layout52 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec52.len() * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let result52 = if layout52.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout52).cast::<u8>();
-                                        if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout52);
-                                        }
-                                        ptr
-                                    } else {
-                                        ::core::ptr::null_mut()
-                                    };
-                                    for (i, e) in vec52.into_iter().enumerate() {
-                                        let base = result52
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let (t49_0, t49_1) = e;
-                                            let vec50 = (t49_0.into_bytes()).into_boxed_slice();
-                                            let ptr50 = vec50.as_ptr().cast::<u8>();
-                                            let len50 = vec50.len();
-                                            ::core::mem::forget(vec50);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len50;
-                                            *base.add(0).cast::<*mut u8>() = ptr50.cast_mut();
-                                            let vec51 = (t49_1.into_bytes()).into_boxed_slice();
-                                            let ptr51 = vec51.as_ptr().cast::<u8>();
-                                            let len51 = vec51.len();
-                                            ::core::mem::forget(vec51);
-                                            *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len51;
                                             *base
                                                 .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr51.cast_mut();
+                                                .cast::<*mut u8>() = ptr46.cast_mut();
                                         }
                                     }
-                                    *ptr39
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len52;
-                                    *ptr39
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result52;
-                                    let vec53 = (body48).into_boxed_slice();
-                                    let ptr53 = vec53.as_ptr().cast::<u8>();
-                                    let len53 = vec53.len();
-                                    ::core::mem::forget(vec53);
-                                    *ptr39
-                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len53;
-                                    *ptr39
-                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = ptr53.cast_mut();
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            *ptr39.add(0).cast::<u8>() = (1i32) as u8;
-                            let vec55 = (e.into_bytes()).into_boxed_slice();
-                            let ptr55 = vec55.as_ptr().cast::<u8>();
-                            let len55 = vec55.len();
-                            ::core::mem::forget(vec55);
-                            *ptr39
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len55;
-                            *ptr39
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr55.cast_mut();
-                        }
-                    };
-                    ptr39
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn __post_return_on_request_body<T: Guest>(arg0: *mut u8) {
-                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
-                    match l0 {
-                        0 => {
-                            let l1 = i32::from(
-                                *arg0.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
-                            );
-                            match l1 {
-                                0 => {
-                                    let l2 = *arg0
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l3 = *arg0
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base4 = l2;
-                                    let len4 = l3;
-                                    _rt::cabi_dealloc(base4, len4 * 1, 1);
-                                    let l5 = *arg0
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l6 = *arg0
-                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base11 = l5;
-                                    let len11 = l6;
-                                    for i in 0..len11 {
-                                        let base = base11
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let l7 = *base.add(0).cast::<*mut u8>();
-                                            let l8 = *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l7, l8, 1);
-                                            let l9 = *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l10 = *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l9, l10, 1);
-                                        }
-                                    }
-                                    _rt::cabi_dealloc(
-                                        base11,
-                                        len11 * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let l12 = *arg0
-                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l13 = *arg0
-                                        .add(7 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base16 = l12;
-                                    let len16 = l13;
-                                    for i in 0..len16 {
-                                        let base = base16
-                                            .add(i * (2 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let l14 = *base.add(0).cast::<*mut u8>();
-                                            let l15 = *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l14, l15, 1);
-                                        }
-                                    }
-                                    _rt::cabi_dealloc(
-                                        base16,
-                                        len16 * (2 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                }
-                                _ => {
-                                    let l17 = *arg0
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l18 = *arg0
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base23 = l17;
-                                    let len23 = l18;
-                                    for i in 0..len23 {
-                                        let base = base23
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let l19 = *base.add(0).cast::<*mut u8>();
-                                            let l20 = *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l19, l20, 1);
-                                            let l21 = *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l22 = *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l21, l22, 1);
-                                        }
-                                    }
-                                    _rt::cabi_dealloc(
-                                        base23,
-                                        len23 * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let l24 = *arg0
-                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l25 = *arg0
-                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base26 = l24;
-                                    let len26 = l25;
-                                    _rt::cabi_dealloc(base26, len26 * 1, 1);
-                                }
-                            }
-                        }
-                        _ => {
-                            let l27 = *arg0
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l28 = *arg0
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            _rt::cabi_dealloc(l27, l28, 1);
-                        }
-                    }
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn _export_on_upstream_request_cabi<T: Guest>(
-                    arg0: *mut u8,
-                ) -> *mut u8 {
-                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-                    let l0 = *arg0.add(0).cast::<*mut u8>();
-                    let l1 = *arg0
-                        .add(::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len2 = l1;
-                    let bytes2 = _rt::Vec::from_raw_parts(l0.cast(), len2, len2);
-                    let l3 = *arg0
-                        .add(2 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l4 = *arg0
-                        .add(3 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len5 = l4;
-                    let bytes5 = _rt::Vec::from_raw_parts(l3.cast(), len5, len5);
-                    let l6 = *arg0
-                        .add(4 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l7 = *arg0
-                        .add(5 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len8 = l7;
-                    let bytes8 = _rt::Vec::from_raw_parts(l6.cast(), len8, len8);
-                    let l9 = *arg0
-                        .add(6 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l10 = *arg0
-                        .add(7 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len11 = l10;
-                    let bytes11 = _rt::Vec::from_raw_parts(l9.cast(), len11, len11);
-                    let l12 = *arg0
-                        .add(8 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l13 = *arg0
-                        .add(9 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let base20 = l12;
-                    let len20 = l13;
-                    let mut result20 = _rt::Vec::with_capacity(len20);
-                    for i in 0..len20 {
-                        let base = base20
-                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                        let e20 = {
-                            let l14 = *base.add(0).cast::<*mut u8>();
-                            let l15 = *base
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let len16 = l15;
-                            let bytes16 = _rt::Vec::from_raw_parts(
-                                l14.cast(),
-                                len16,
-                                len16,
-                            );
-                            let l17 = *base
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l18 = *base
-                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let len19 = l18;
-                            let bytes19 = _rt::Vec::from_raw_parts(
-                                l17.cast(),
-                                len19,
-                                len19,
-                            );
-                            (_rt::string_lift(bytes16), _rt::string_lift(bytes19))
-                        };
-                        result20.push(e20);
-                    }
-                    _rt::cabi_dealloc(
-                        base20,
-                        len20 * (4 * ::core::mem::size_of::<*const u8>()),
-                        ::core::mem::size_of::<*const u8>(),
-                    );
-                    let l21 = i32::from(
-                        *arg0.add(10 * ::core::mem::size_of::<*const u8>()).cast::<u8>(),
-                    );
-                    let l25 = *arg0
-                        .add(13 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l26 = *arg0
-                        .add(14 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len27 = l26;
-                    let bytes27 = _rt::Vec::from_raw_parts(l25.cast(), len27, len27);
-                    let l28 = *arg0
-                        .add(15 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l29 = *arg0
-                        .add(16 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len30 = l29;
-                    let bytes30 = _rt::Vec::from_raw_parts(l28.cast(), len30, len30);
-                    let l31 = *arg0
-                        .add(17 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l32 = *arg0
-                        .add(18 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len33 = l32;
-                    let bytes33 = _rt::Vec::from_raw_parts(l31.cast(), len33, len33);
-                    let result34 = T::on_upstream_request(super::super::super::super::octra::api_plugin::types::UpstreamRequest {
-                        request_id: _rt::string_lift(bytes2),
-                        method: _rt::string_lift(bytes5),
-                        path: _rt::string_lift(bytes8),
-                        query: _rt::string_lift(bytes11),
-                        headers: result20,
-                        consumer_id: match l21 {
-                            0 => None,
-                            1 => {
-                                let e = {
-                                    let l22 = *arg0
-                                        .add(11 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l23 = *arg0
-                                        .add(12 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let len24 = l23;
-                                    let bytes24 = _rt::Vec::from_raw_parts(
-                                        l22.cast(),
-                                        len24,
-                                        len24,
-                                    );
-                                    _rt::string_lift(bytes24)
-                                };
-                                Some(e)
-                            }
-                            _ => _rt::invalid_enum_discriminant(),
-                        },
-                        route_id: _rt::string_lift(bytes27),
-                        service_id: _rt::string_lift(bytes30),
-                        target_url: _rt::string_lift(bytes33),
-                    });
-                    _rt::cabi_dealloc(
-                        arg0,
-                        19 * ::core::mem::size_of::<*const u8>(),
-                        ::core::mem::size_of::<*const u8>(),
-                    );
-                    let ptr35 = (&raw mut _RET_AREA.0).cast::<u8>();
-                    match result34 {
-                        Ok(e) => {
-                            *ptr35.add(0).cast::<u8>() = (0i32) as u8;
-                            use super::super::super::super::octra::api_plugin::types::Action as V51;
-                            match e {
-                                V51::Continue(e) => {
-                                    *ptr35
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>() = (0i32) as u8;
-                                    let super::super::super::super::octra::api_plugin::types::RequestMutation {
-                                        path: path36,
-                                        query: query36,
-                                        set_headers: set_headers36,
-                                        remove_headers: remove_headers36,
-                                    } = e;
-                                    match path36 {
-                                        Some(e) => {
-                                            *ptr35
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>() = (1i32) as u8;
-                                            let vec37 = (e.into_bytes()).into_boxed_slice();
-                                            let ptr37 = vec37.as_ptr().cast::<u8>();
-                                            let len37 = vec37.len();
-                                            ::core::mem::forget(vec37);
-                                            *ptr35
-                                                .add(4 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len37;
-                                            *ptr35
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr37.cast_mut();
-                                        }
-                                        None => {
-                                            *ptr35
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>() = (0i32) as u8;
-                                        }
-                                    };
-                                    match query36 {
-                                        Some(e) => {
-                                            *ptr35
-                                                .add(5 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>() = (1i32) as u8;
-                                            let vec38 = (e.into_bytes()).into_boxed_slice();
-                                            let ptr38 = vec38.as_ptr().cast::<u8>();
-                                            let len38 = vec38.len();
-                                            ::core::mem::forget(vec38);
-                                            *ptr35
-                                                .add(7 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len38;
-                                            *ptr35
-                                                .add(6 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr38.cast_mut();
-                                        }
-                                        None => {
-                                            *ptr35
-                                                .add(5 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>() = (0i32) as u8;
-                                        }
-                                    };
-                                    let vec42 = set_headers36;
-                                    let len42 = vec42.len();
-                                    let layout42 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec42.len() * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let result42 = if layout42.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout42).cast::<u8>();
-                                        if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout42);
-                                        }
-                                        ptr
-                                    } else {
-                                        ::core::ptr::null_mut()
-                                    };
-                                    for (i, e) in vec42.into_iter().enumerate() {
-                                        let base = result42
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let (t39_0, t39_1) = e;
-                                            let vec40 = (t39_0.into_bytes()).into_boxed_slice();
-                                            let ptr40 = vec40.as_ptr().cast::<u8>();
-                                            let len40 = vec40.len();
-                                            ::core::mem::forget(vec40);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len40;
-                                            *base.add(0).cast::<*mut u8>() = ptr40.cast_mut();
-                                            let vec41 = (t39_1.into_bytes()).into_boxed_slice();
-                                            let ptr41 = vec41.as_ptr().cast::<u8>();
-                                            let len41 = vec41.len();
-                                            ::core::mem::forget(vec41);
-                                            *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len41;
-                                            *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr41.cast_mut();
-                                        }
-                                    }
-                                    *ptr35
+                                    *ptr40
                                         .add(9 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len42;
-                                    *ptr35
+                                        .cast::<usize>() = len47;
+                                    *ptr40
                                         .add(8 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result42;
-                                    let vec44 = remove_headers36;
-                                    let len44 = vec44.len();
-                                    let layout44 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec44.len() * (2 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let result44 = if layout44.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout44).cast::<u8>();
-                                        if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout44);
-                                        }
-                                        ptr
-                                    } else {
-                                        ::core::ptr::null_mut()
-                                    };
-                                    for (i, e) in vec44.into_iter().enumerate() {
-                                        let base = result44
-                                            .add(i * (2 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let vec43 = (e.into_bytes()).into_boxed_slice();
-                                            let ptr43 = vec43.as_ptr().cast::<u8>();
-                                            let len43 = vec43.len();
-                                            ::core::mem::forget(vec43);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len43;
-                                            *base.add(0).cast::<*mut u8>() = ptr43.cast_mut();
-                                        }
-                                    }
-                                    *ptr35
-                                        .add(11 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len44;
-                                    *ptr35
-                                        .add(10 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result44;
-                                }
-                                V51::Reject(e) => {
-                                    *ptr35
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>() = (1i32) as u8;
-                                    let super::super::super::super::octra::api_plugin::types::Reject {
-                                        status: status45,
-                                        headers: headers45,
-                                        body: body45,
-                                    } = e;
-                                    *ptr35
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u16>() = (_rt::as_i32(status45)) as u16;
-                                    let vec49 = headers45;
+                                        .cast::<*mut u8>() = result47;
+                                    let vec49 = remove_headers41;
                                     let len49 = vec49.len();
                                     let layout49 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec49.len() * (4 * ::core::mem::size_of::<*const u8>()),
+                                        vec49.len() * (2 * ::core::mem::size_of::<*const u8>()),
                                         ::core::mem::size_of::<*const u8>(),
                                     );
                                     let result49 = if layout49.size() != 0 {
@@ -4094,69 +2963,137 @@ pub mod exports {
                                     };
                                     for (i, e) in vec49.into_iter().enumerate() {
                                         let base = result49
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                            .add(i * (2 * ::core::mem::size_of::<*const u8>()));
                                         {
-                                            let (t46_0, t46_1) = e;
-                                            let vec47 = (t46_0.into_bytes()).into_boxed_slice();
-                                            let ptr47 = vec47.as_ptr().cast::<u8>();
-                                            let len47 = vec47.len();
-                                            ::core::mem::forget(vec47);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len47;
-                                            *base.add(0).cast::<*mut u8>() = ptr47.cast_mut();
-                                            let vec48 = (t46_1.into_bytes()).into_boxed_slice();
+                                            let vec48 = (e.into_bytes()).into_boxed_slice();
                                             let ptr48 = vec48.as_ptr().cast::<u8>();
                                             let len48 = vec48.len();
                                             ::core::mem::forget(vec48);
                                             *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                .add(::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>() = len48;
-                                            *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr48.cast_mut();
+                                            *base.add(0).cast::<*mut u8>() = ptr48.cast_mut();
                                         }
                                     }
-                                    *ptr35
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                    *ptr40
+                                        .add(11 * ::core::mem::size_of::<*const u8>())
                                         .cast::<usize>() = len49;
-                                    *ptr35
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                    *ptr40
+                                        .add(10 * ::core::mem::size_of::<*const u8>())
                                         .cast::<*mut u8>() = result49;
-                                    let vec50 = (body45).into_boxed_slice();
-                                    let ptr50 = vec50.as_ptr().cast::<u8>();
-                                    let len50 = vec50.len();
-                                    ::core::mem::forget(vec50);
-                                    *ptr35
+                                    match body41 {
+                                        Some(e) => {
+                                            *ptr40
+                                                .add(12 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (1i32) as u8;
+                                            let vec50 = (e).into_boxed_slice();
+                                            let ptr50 = vec50.as_ptr().cast::<u8>();
+                                            let len50 = vec50.len();
+                                            ::core::mem::forget(vec50);
+                                            *ptr40
+                                                .add(14 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len50;
+                                            *ptr40
+                                                .add(13 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr50.cast_mut();
+                                        }
+                                        None => {
+                                            *ptr40
+                                                .add(12 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
+                                        }
+                                    };
+                                }
+                                V57::Reject(e) => {
+                                    *ptr40
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (1i32) as u8;
+                                    let super::super::super::super::octra::api_plugin::types::Reject {
+                                        status: status51,
+                                        headers: headers51,
+                                        body: body51,
+                                    } = e;
+                                    *ptr40
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u16>() = (_rt::as_i32(status51)) as u16;
+                                    let vec55 = headers51;
+                                    let len55 = vec55.len();
+                                    let layout55 = _rt::alloc::Layout::from_size_align_unchecked(
+                                        vec55.len() * (4 * ::core::mem::size_of::<*const u8>()),
+                                        ::core::mem::size_of::<*const u8>(),
+                                    );
+                                    let result55 = if layout55.size() != 0 {
+                                        let ptr = _rt::alloc::alloc(layout55).cast::<u8>();
+                                        if ptr.is_null() {
+                                            _rt::alloc::handle_alloc_error(layout55);
+                                        }
+                                        ptr
+                                    } else {
+                                        ::core::ptr::null_mut()
+                                    };
+                                    for (i, e) in vec55.into_iter().enumerate() {
+                                        let base = result55
+                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                        {
+                                            let (t52_0, t52_1) = e;
+                                            let vec53 = (t52_0.into_bytes()).into_boxed_slice();
+                                            let ptr53 = vec53.as_ptr().cast::<u8>();
+                                            let len53 = vec53.len();
+                                            ::core::mem::forget(vec53);
+                                            *base
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len53;
+                                            *base.add(0).cast::<*mut u8>() = ptr53.cast_mut();
+                                            let vec54 = (t52_1.into_bytes()).into_boxed_slice();
+                                            let ptr54 = vec54.as_ptr().cast::<u8>();
+                                            let len54 = vec54.len();
+                                            ::core::mem::forget(vec54);
+                                            *base
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len54;
+                                            *base
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr54.cast_mut();
+                                        }
+                                    }
+                                    *ptr40
+                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len55;
+                                    *ptr40
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = result55;
+                                    let vec56 = (body51).into_boxed_slice();
+                                    let ptr56 = vec56.as_ptr().cast::<u8>();
+                                    let len56 = vec56.len();
+                                    ::core::mem::forget(vec56);
+                                    *ptr40
                                         .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len50;
-                                    *ptr35
+                                        .cast::<usize>() = len56;
+                                    *ptr40
                                         .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = ptr50.cast_mut();
+                                        .cast::<*mut u8>() = ptr56.cast_mut();
                                 }
                             }
                         }
                         Err(e) => {
-                            *ptr35.add(0).cast::<u8>() = (1i32) as u8;
-                            let vec52 = (e.into_bytes()).into_boxed_slice();
-                            let ptr52 = vec52.as_ptr().cast::<u8>();
-                            let len52 = vec52.len();
-                            ::core::mem::forget(vec52);
-                            *ptr35
+                            *ptr40.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec58 = (e.into_bytes()).into_boxed_slice();
+                            let ptr58 = vec58.as_ptr().cast::<u8>();
+                            let len58 = vec58.len();
+                            ::core::mem::forget(vec58);
+                            *ptr40
                                 .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len52;
-                            *ptr35
+                                .cast::<usize>() = len58;
+                            *ptr40
                                 .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr52.cast_mut();
+                                .cast::<*mut u8>() = ptr58.cast_mut();
                         }
                     };
-                    ptr35
+                    ptr40
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
-                pub unsafe fn __post_return_on_upstream_request<T: Guest>(
-                    arg0: *mut u8,
-                ) {
+                pub unsafe fn __post_return_on_access<T: Guest>(arg0: *mut u8) {
                     let l0 = i32::from(*arg0.add(0).cast::<u8>());
                     match l0 {
                         0 => {
@@ -4254,59 +3191,78 @@ pub mod exports {
                                         len19 * (2 * ::core::mem::size_of::<*const u8>()),
                                         ::core::mem::size_of::<*const u8>(),
                                     );
+                                    let l20 = i32::from(
+                                        *arg0
+                                            .add(12 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>(),
+                                    );
+                                    match l20 {
+                                        0 => {}
+                                        _ => {
+                                            let l21 = *arg0
+                                                .add(13 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>();
+                                            let l22 = *arg0
+                                                .add(14 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>();
+                                            let base23 = l21;
+                                            let len23 = l22;
+                                            _rt::cabi_dealloc(base23, len23 * 1, 1);
+                                        }
+                                    }
                                 }
                                 _ => {
-                                    let l20 = *arg0
+                                    let l24 = *arg0
                                         .add(3 * ::core::mem::size_of::<*const u8>())
                                         .cast::<*mut u8>();
-                                    let l21 = *arg0
+                                    let l25 = *arg0
                                         .add(4 * ::core::mem::size_of::<*const u8>())
                                         .cast::<usize>();
-                                    let base26 = l20;
-                                    let len26 = l21;
-                                    for i in 0..len26 {
-                                        let base = base26
+                                    let base30 = l24;
+                                    let len30 = l25;
+                                    for i in 0..len30 {
+                                        let base = base30
                                             .add(i * (4 * ::core::mem::size_of::<*const u8>()));
                                         {
-                                            let l22 = *base.add(0).cast::<*mut u8>();
-                                            let l23 = *base
+                                            let l26 = *base.add(0).cast::<*mut u8>();
+                                            let l27 = *base
                                                 .add(::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>();
-                                            _rt::cabi_dealloc(l22, l23, 1);
-                                            let l24 = *base
+                                            _rt::cabi_dealloc(l26, l27, 1);
+                                            let l28 = *base
                                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<*mut u8>();
-                                            let l25 = *base
+                                            let l29 = *base
                                                 .add(3 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>();
-                                            _rt::cabi_dealloc(l24, l25, 1);
+                                            _rt::cabi_dealloc(l28, l29, 1);
                                         }
                                     }
                                     _rt::cabi_dealloc(
-                                        base26,
-                                        len26 * (4 * ::core::mem::size_of::<*const u8>()),
+                                        base30,
+                                        len30 * (4 * ::core::mem::size_of::<*const u8>()),
                                         ::core::mem::size_of::<*const u8>(),
                                     );
-                                    let l27 = *arg0
+                                    let l31 = *arg0
                                         .add(5 * ::core::mem::size_of::<*const u8>())
                                         .cast::<*mut u8>();
-                                    let l28 = *arg0
+                                    let l32 = *arg0
                                         .add(6 * ::core::mem::size_of::<*const u8>())
                                         .cast::<usize>();
-                                    let base29 = l27;
-                                    let len29 = l28;
-                                    _rt::cabi_dealloc(base29, len29 * 1, 1);
+                                    let base33 = l31;
+                                    let len33 = l32;
+                                    _rt::cabi_dealloc(base33, len33 * 1, 1);
                                 }
                             }
                         }
                         _ => {
-                            let l30 = *arg0
+                            let l34 = *arg0
                                 .add(::core::mem::size_of::<*const u8>())
                                 .cast::<*mut u8>();
-                            let l31 = *arg0
+                            let l35 = *arg0
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<usize>();
-                            _rt::cabi_dealloc(l30, l31, 1);
+                            _rt::cabi_dealloc(l34, l35, 1);
                         }
                     }
                 }
@@ -4709,7 +3665,7 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
-                pub unsafe fn _export_on_response_buffer_cabi<T: Guest>(
+                pub unsafe fn _export_on_header_filter_cabi<T: Guest>(
                     arg0: *mut u8,
                     arg1: usize,
                     arg2: i32,
@@ -4722,8 +3678,6 @@ pub mod exports {
                     arg9: usize,
                     arg10: *mut u8,
                     arg11: usize,
-                    arg12: *mut u8,
-                    arg13: usize,
                 ) -> *mut u8 {
                     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
                     let len0 = arg1;
@@ -4762,70 +3716,109 @@ pub mod exports {
                     let bytes9 = _rt::Vec::from_raw_parts(arg8.cast(), len9, len9);
                     let len10 = arg11;
                     let bytes10 = _rt::Vec::from_raw_parts(arg10.cast(), len10, len10);
-                    let len11 = arg13;
-                    let result12 = T::on_response_buffer(
-                        super::super::super::super::octra::api_plugin::types::Response {
-                            request_id: _rt::string_lift(bytes0),
-                            status: arg2 as u16,
-                            headers: result7,
-                            consumer_id: match arg5 {
-                                0 => None,
-                                1 => {
-                                    let e = {
-                                        let len8 = arg7;
-                                        let bytes8 = _rt::Vec::from_raw_parts(
-                                            arg6.cast(),
-                                            len8,
-                                            len8,
-                                        );
-                                        _rt::string_lift(bytes8)
-                                    };
-                                    Some(e)
-                                }
-                                _ => _rt::invalid_enum_discriminant(),
-                            },
-                            route_id: _rt::string_lift(bytes9),
-                            service_id: _rt::string_lift(bytes10),
+                    let result11 = T::on_header_filter(super::super::super::super::octra::api_plugin::types::Response {
+                        request_id: _rt::string_lift(bytes0),
+                        status: arg2 as u16,
+                        headers: result7,
+                        consumer_id: match arg5 {
+                            0 => None,
+                            1 => {
+                                let e = {
+                                    let len8 = arg7;
+                                    let bytes8 = _rt::Vec::from_raw_parts(
+                                        arg6.cast(),
+                                        len8,
+                                        len8,
+                                    );
+                                    _rt::string_lift(bytes8)
+                                };
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
                         },
-                        _rt::Vec::from_raw_parts(arg12.cast(), len11, len11),
-                    );
-                    let ptr13 = (&raw mut _RET_AREA.0).cast::<u8>();
-                    match result12 {
+                        route_id: _rt::string_lift(bytes9),
+                        service_id: _rt::string_lift(bytes10),
+                    });
+                    let ptr12 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result11 {
                         Ok(e) => {
-                            *ptr13.add(0).cast::<u8>() = (0i32) as u8;
-                            use super::super::super::super::octra::api_plugin::types::BodyAction as V21;
+                            *ptr12.add(0).cast::<u8>() = (0i32) as u8;
+                            use super::super::super::super::octra::api_plugin::types::ResponseAction as V26;
                             match e {
-                                V21::Continue(e) => {
-                                    *ptr13
+                                V26::Continue(e) => {
+                                    *ptr12
                                         .add(::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (0i32) as u8;
-                                    let vec14 = (e).into_boxed_slice();
-                                    let ptr14 = vec14.as_ptr().cast::<u8>();
-                                    let len14 = vec14.len();
-                                    ::core::mem::forget(vec14);
-                                    *ptr13
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len14;
-                                    *ptr13
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = ptr14.cast_mut();
-                                }
-                                V21::Reject(e) => {
-                                    *ptr13
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>() = (1i32) as u8;
-                                    let super::super::super::super::octra::api_plugin::types::Reject {
-                                        status: status15,
-                                        headers: headers15,
-                                        body: body15,
+                                    let super::super::super::super::octra::api_plugin::types::ResponseMutation {
+                                        status: status13,
+                                        set_headers: set_headers13,
+                                        remove_headers: remove_headers13,
                                     } = e;
-                                    *ptr13
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u16>() = (_rt::as_i32(status15)) as u16;
-                                    let vec19 = headers15;
+                                    match status13 {
+                                        Some(e) => {
+                                            *ptr12
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (1i32) as u8;
+                                            *ptr12
+                                                .add(2 + 2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u16>() = (_rt::as_i32(e)) as u16;
+                                        }
+                                        None => {
+                                            *ptr12
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
+                                        }
+                                    };
+                                    let vec17 = set_headers13;
+                                    let len17 = vec17.len();
+                                    let layout17 = _rt::alloc::Layout::from_size_align_unchecked(
+                                        vec17.len() * (4 * ::core::mem::size_of::<*const u8>()),
+                                        ::core::mem::size_of::<*const u8>(),
+                                    );
+                                    let result17 = if layout17.size() != 0 {
+                                        let ptr = _rt::alloc::alloc(layout17).cast::<u8>();
+                                        if ptr.is_null() {
+                                            _rt::alloc::handle_alloc_error(layout17);
+                                        }
+                                        ptr
+                                    } else {
+                                        ::core::ptr::null_mut()
+                                    };
+                                    for (i, e) in vec17.into_iter().enumerate() {
+                                        let base = result17
+                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                        {
+                                            let (t14_0, t14_1) = e;
+                                            let vec15 = (t14_0.into_bytes()).into_boxed_slice();
+                                            let ptr15 = vec15.as_ptr().cast::<u8>();
+                                            let len15 = vec15.len();
+                                            ::core::mem::forget(vec15);
+                                            *base
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len15;
+                                            *base.add(0).cast::<*mut u8>() = ptr15.cast_mut();
+                                            let vec16 = (t14_1.into_bytes()).into_boxed_slice();
+                                            let ptr16 = vec16.as_ptr().cast::<u8>();
+                                            let len16 = vec16.len();
+                                            ::core::mem::forget(vec16);
+                                            *base
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len16;
+                                            *base
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr16.cast_mut();
+                                        }
+                                    }
+                                    *ptr12
+                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len17;
+                                    *ptr12
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = result17;
+                                    let vec19 = remove_headers13;
                                     let len19 = vec19.len();
                                     let layout19 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec19.len() * (4 * ::core::mem::size_of::<*const u8>()),
+                                        vec19.len() * (2 * ::core::mem::size_of::<*const u8>()),
                                         ::core::mem::size_of::<*const u8>(),
                                     );
                                     let result19 = if layout19.size() != 0 {
@@ -4839,67 +3832,115 @@ pub mod exports {
                                     };
                                     for (i, e) in vec19.into_iter().enumerate() {
                                         let base = result19
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                            .add(i * (2 * ::core::mem::size_of::<*const u8>()));
                                         {
-                                            let (t16_0, t16_1) = e;
-                                            let vec17 = (t16_0.into_bytes()).into_boxed_slice();
-                                            let ptr17 = vec17.as_ptr().cast::<u8>();
-                                            let len17 = vec17.len();
-                                            ::core::mem::forget(vec17);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len17;
-                                            *base.add(0).cast::<*mut u8>() = ptr17.cast_mut();
-                                            let vec18 = (t16_1.into_bytes()).into_boxed_slice();
+                                            let vec18 = (e.into_bytes()).into_boxed_slice();
                                             let ptr18 = vec18.as_ptr().cast::<u8>();
                                             let len18 = vec18.len();
                                             ::core::mem::forget(vec18);
                                             *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                .add(::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>() = len18;
-                                            *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr18.cast_mut();
+                                            *base.add(0).cast::<*mut u8>() = ptr18.cast_mut();
                                         }
                                     }
-                                    *ptr13
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                    *ptr12
+                                        .add(6 * ::core::mem::size_of::<*const u8>())
                                         .cast::<usize>() = len19;
-                                    *ptr13
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                    *ptr12
+                                        .add(5 * ::core::mem::size_of::<*const u8>())
                                         .cast::<*mut u8>() = result19;
-                                    let vec20 = (body15).into_boxed_slice();
-                                    let ptr20 = vec20.as_ptr().cast::<u8>();
-                                    let len20 = vec20.len();
-                                    ::core::mem::forget(vec20);
-                                    *ptr13
+                                }
+                                V26::Reject(e) => {
+                                    *ptr12
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (1i32) as u8;
+                                    let super::super::super::super::octra::api_plugin::types::Reject {
+                                        status: status20,
+                                        headers: headers20,
+                                        body: body20,
+                                    } = e;
+                                    *ptr12
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u16>() = (_rt::as_i32(status20)) as u16;
+                                    let vec24 = headers20;
+                                    let len24 = vec24.len();
+                                    let layout24 = _rt::alloc::Layout::from_size_align_unchecked(
+                                        vec24.len() * (4 * ::core::mem::size_of::<*const u8>()),
+                                        ::core::mem::size_of::<*const u8>(),
+                                    );
+                                    let result24 = if layout24.size() != 0 {
+                                        let ptr = _rt::alloc::alloc(layout24).cast::<u8>();
+                                        if ptr.is_null() {
+                                            _rt::alloc::handle_alloc_error(layout24);
+                                        }
+                                        ptr
+                                    } else {
+                                        ::core::ptr::null_mut()
+                                    };
+                                    for (i, e) in vec24.into_iter().enumerate() {
+                                        let base = result24
+                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                        {
+                                            let (t21_0, t21_1) = e;
+                                            let vec22 = (t21_0.into_bytes()).into_boxed_slice();
+                                            let ptr22 = vec22.as_ptr().cast::<u8>();
+                                            let len22 = vec22.len();
+                                            ::core::mem::forget(vec22);
+                                            *base
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len22;
+                                            *base.add(0).cast::<*mut u8>() = ptr22.cast_mut();
+                                            let vec23 = (t21_1.into_bytes()).into_boxed_slice();
+                                            let ptr23 = vec23.as_ptr().cast::<u8>();
+                                            let len23 = vec23.len();
+                                            ::core::mem::forget(vec23);
+                                            *base
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len23;
+                                            *base
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr23.cast_mut();
+                                        }
+                                    }
+                                    *ptr12
+                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len24;
+                                    *ptr12
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = result24;
+                                    let vec25 = (body20).into_boxed_slice();
+                                    let ptr25 = vec25.as_ptr().cast::<u8>();
+                                    let len25 = vec25.len();
+                                    ::core::mem::forget(vec25);
+                                    *ptr12
                                         .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len20;
-                                    *ptr13
+                                        .cast::<usize>() = len25;
+                                    *ptr12
                                         .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = ptr20.cast_mut();
+                                        .cast::<*mut u8>() = ptr25.cast_mut();
                                 }
                             }
                         }
                         Err(e) => {
-                            *ptr13.add(0).cast::<u8>() = (1i32) as u8;
-                            let vec22 = (e.into_bytes()).into_boxed_slice();
-                            let ptr22 = vec22.as_ptr().cast::<u8>();
-                            let len22 = vec22.len();
-                            ::core::mem::forget(vec22);
-                            *ptr13
+                            *ptr12.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec27 = (e.into_bytes()).into_boxed_slice();
+                            let ptr27 = vec27.as_ptr().cast::<u8>();
+                            let len27 = vec27.len();
+                            ::core::mem::forget(vec27);
+                            *ptr12
                                 .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len22;
-                            *ptr13
+                                .cast::<usize>() = len27;
+                            *ptr12
                                 .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr22.cast_mut();
+                                .cast::<*mut u8>() = ptr27.cast_mut();
                         }
                     };
-                    ptr13
+                    ptr12
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
-                pub unsafe fn __post_return_on_response_buffer<T: Guest>(arg0: *mut u8) {
+                pub unsafe fn __post_return_on_header_filter<T: Guest>(arg0: *mut u8) {
                     let l0 = i32::from(*arg0.add(0).cast::<u8>());
                     match l0 {
                         0 => {
@@ -4908,549 +3949,6 @@ pub mod exports {
                             );
                             match l1 {
                                 0 => {
-                                    let l2 = *arg0
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l3 = *arg0
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base4 = l2;
-                                    let len4 = l3;
-                                    _rt::cabi_dealloc(base4, len4 * 1, 1);
-                                }
-                                _ => {
-                                    let l5 = *arg0
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l6 = *arg0
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base11 = l5;
-                                    let len11 = l6;
-                                    for i in 0..len11 {
-                                        let base = base11
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let l7 = *base.add(0).cast::<*mut u8>();
-                                            let l8 = *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l7, l8, 1);
-                                            let l9 = *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l10 = *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l9, l10, 1);
-                                        }
-                                    }
-                                    _rt::cabi_dealloc(
-                                        base11,
-                                        len11 * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let l12 = *arg0
-                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l13 = *arg0
-                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base14 = l12;
-                                    let len14 = l13;
-                                    _rt::cabi_dealloc(base14, len14 * 1, 1);
-                                }
-                            }
-                        }
-                        _ => {
-                            let l15 = *arg0
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l16 = *arg0
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            _rt::cabi_dealloc(l15, l16, 1);
-                        }
-                    }
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn _export_on_response_chunk_cabi<T: Guest>(
-                    arg0: *mut u8,
-                    arg1: usize,
-                    arg2: *mut u8,
-                    arg3: usize,
-                    arg4: *mut u8,
-                    arg5: usize,
-                    arg6: *mut u8,
-                    arg7: usize,
-                    arg8: *mut u8,
-                    arg9: usize,
-                ) -> *mut u8 {
-                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-                    let len0 = arg1;
-                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
-                    let len1 = arg3;
-                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
-                    let len2 = arg5;
-                    let bytes2 = _rt::Vec::from_raw_parts(arg4.cast(), len2, len2);
-                    let len3 = arg7;
-                    let bytes3 = _rt::Vec::from_raw_parts(arg6.cast(), len3, len3);
-                    let len4 = arg9;
-                    let result5 = T::on_response_chunk(
-                        super::super::super::super::octra::api_plugin::types::BodyInfo {
-                            request_id: _rt::string_lift(bytes0),
-                            route_id: _rt::string_lift(bytes1),
-                            service_id: _rt::string_lift(bytes2),
-                            target_url: _rt::string_lift(bytes3),
-                        },
-                        _rt::Vec::from_raw_parts(arg8.cast(), len4, len4),
-                    );
-                    let ptr6 = (&raw mut _RET_AREA.0).cast::<u8>();
-                    match result5 {
-                        Ok(e) => {
-                            *ptr6.add(0).cast::<u8>() = (0i32) as u8;
-                            use super::super::super::super::octra::api_plugin::types::BodyAction as V14;
-                            match e {
-                                V14::Continue(e) => {
-                                    *ptr6
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>() = (0i32) as u8;
-                                    let vec7 = (e).into_boxed_slice();
-                                    let ptr7 = vec7.as_ptr().cast::<u8>();
-                                    let len7 = vec7.len();
-                                    ::core::mem::forget(vec7);
-                                    *ptr6
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len7;
-                                    *ptr6
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = ptr7.cast_mut();
-                                }
-                                V14::Reject(e) => {
-                                    *ptr6
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>() = (1i32) as u8;
-                                    let super::super::super::super::octra::api_plugin::types::Reject {
-                                        status: status8,
-                                        headers: headers8,
-                                        body: body8,
-                                    } = e;
-                                    *ptr6
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u16>() = (_rt::as_i32(status8)) as u16;
-                                    let vec12 = headers8;
-                                    let len12 = vec12.len();
-                                    let layout12 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec12.len() * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let result12 = if layout12.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout12).cast::<u8>();
-                                        if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout12);
-                                        }
-                                        ptr
-                                    } else {
-                                        ::core::ptr::null_mut()
-                                    };
-                                    for (i, e) in vec12.into_iter().enumerate() {
-                                        let base = result12
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let (t9_0, t9_1) = e;
-                                            let vec10 = (t9_0.into_bytes()).into_boxed_slice();
-                                            let ptr10 = vec10.as_ptr().cast::<u8>();
-                                            let len10 = vec10.len();
-                                            ::core::mem::forget(vec10);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len10;
-                                            *base.add(0).cast::<*mut u8>() = ptr10.cast_mut();
-                                            let vec11 = (t9_1.into_bytes()).into_boxed_slice();
-                                            let ptr11 = vec11.as_ptr().cast::<u8>();
-                                            let len11 = vec11.len();
-                                            ::core::mem::forget(vec11);
-                                            *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len11;
-                                            *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr11.cast_mut();
-                                        }
-                                    }
-                                    *ptr6
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len12;
-                                    *ptr6
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result12;
-                                    let vec13 = (body8).into_boxed_slice();
-                                    let ptr13 = vec13.as_ptr().cast::<u8>();
-                                    let len13 = vec13.len();
-                                    ::core::mem::forget(vec13);
-                                    *ptr6
-                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len13;
-                                    *ptr6
-                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = ptr13.cast_mut();
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            *ptr6.add(0).cast::<u8>() = (1i32) as u8;
-                            let vec15 = (e.into_bytes()).into_boxed_slice();
-                            let ptr15 = vec15.as_ptr().cast::<u8>();
-                            let len15 = vec15.len();
-                            ::core::mem::forget(vec15);
-                            *ptr6
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len15;
-                            *ptr6
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr15.cast_mut();
-                        }
-                    };
-                    ptr6
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn __post_return_on_response_chunk<T: Guest>(arg0: *mut u8) {
-                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
-                    match l0 {
-                        0 => {
-                            let l1 = i32::from(
-                                *arg0.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
-                            );
-                            match l1 {
-                                0 => {
-                                    let l2 = *arg0
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l3 = *arg0
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base4 = l2;
-                                    let len4 = l3;
-                                    _rt::cabi_dealloc(base4, len4 * 1, 1);
-                                }
-                                _ => {
-                                    let l5 = *arg0
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l6 = *arg0
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base11 = l5;
-                                    let len11 = l6;
-                                    for i in 0..len11 {
-                                        let base = base11
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let l7 = *base.add(0).cast::<*mut u8>();
-                                            let l8 = *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l7, l8, 1);
-                                            let l9 = *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l10 = *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            _rt::cabi_dealloc(l9, l10, 1);
-                                        }
-                                    }
-                                    _rt::cabi_dealloc(
-                                        base11,
-                                        len11 * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let l12 = *arg0
-                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l13 = *arg0
-                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let base14 = l12;
-                                    let len14 = l13;
-                                    _rt::cabi_dealloc(base14, len14 * 1, 1);
-                                }
-                            }
-                        }
-                        _ => {
-                            let l15 = *arg0
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l16 = *arg0
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            _rt::cabi_dealloc(l15, l16, 1);
-                        }
-                    }
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn _export_on_error_cabi<T: Guest>(arg0: *mut u8) -> *mut u8 {
-                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-                    let l0 = *arg0.add(0).cast::<*mut u8>();
-                    let l1 = *arg0
-                        .add(::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len2 = l1;
-                    let bytes2 = _rt::Vec::from_raw_parts(l0.cast(), len2, len2);
-                    let l3 = *arg0
-                        .add(2 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l4 = *arg0
-                        .add(3 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len5 = l4;
-                    let bytes5 = _rt::Vec::from_raw_parts(l3.cast(), len5, len5);
-                    let l6 = *arg0
-                        .add(4 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l7 = *arg0
-                        .add(5 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len8 = l7;
-                    let bytes8 = _rt::Vec::from_raw_parts(l6.cast(), len8, len8);
-                    let l9 = *arg0
-                        .add(6 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l10 = *arg0
-                        .add(7 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len11 = l10;
-                    let bytes11 = _rt::Vec::from_raw_parts(l9.cast(), len11, len11);
-                    let l12 = *arg0
-                        .add(8 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l13 = *arg0
-                        .add(9 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let base20 = l12;
-                    let len20 = l13;
-                    let mut result20 = _rt::Vec::with_capacity(len20);
-                    for i in 0..len20 {
-                        let base = base20
-                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                        let e20 = {
-                            let l14 = *base.add(0).cast::<*mut u8>();
-                            let l15 = *base
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let len16 = l15;
-                            let bytes16 = _rt::Vec::from_raw_parts(
-                                l14.cast(),
-                                len16,
-                                len16,
-                            );
-                            let l17 = *base
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l18 = *base
-                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let len19 = l18;
-                            let bytes19 = _rt::Vec::from_raw_parts(
-                                l17.cast(),
-                                len19,
-                                len19,
-                            );
-                            (_rt::string_lift(bytes16), _rt::string_lift(bytes19))
-                        };
-                        result20.push(e20);
-                    }
-                    _rt::cabi_dealloc(
-                        base20,
-                        len20 * (4 * ::core::mem::size_of::<*const u8>()),
-                        ::core::mem::size_of::<*const u8>(),
-                    );
-                    let l21 = i32::from(
-                        *arg0.add(10 * ::core::mem::size_of::<*const u8>()).cast::<u8>(),
-                    );
-                    let l25 = *arg0
-                        .add(13 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l26 = *arg0
-                        .add(14 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len27 = l26;
-                    let bytes27 = _rt::Vec::from_raw_parts(l25.cast(), len27, len27);
-                    let l28 = *arg0
-                        .add(15 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l29 = *arg0
-                        .add(16 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len30 = l29;
-                    let bytes30 = _rt::Vec::from_raw_parts(l28.cast(), len30, len30);
-                    let l31 = *arg0
-                        .add(17 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l32 = *arg0
-                        .add(18 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len33 = l32;
-                    let bytes33 = _rt::Vec::from_raw_parts(l31.cast(), len33, len33);
-                    let l34 = *arg0
-                        .add(19 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l35 = *arg0
-                        .add(20 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len36 = l35;
-                    let bytes36 = _rt::Vec::from_raw_parts(l34.cast(), len36, len36);
-                    let result37 = T::on_error(super::super::super::super::octra::api_plugin::types::ErrorInfo {
-                        request_id: _rt::string_lift(bytes2),
-                        method: _rt::string_lift(bytes5),
-                        path: _rt::string_lift(bytes8),
-                        query: _rt::string_lift(bytes11),
-                        headers: result20,
-                        consumer_id: match l21 {
-                            0 => None,
-                            1 => {
-                                let e = {
-                                    let l22 = *arg0
-                                        .add(11 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l23 = *arg0
-                                        .add(12 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let len24 = l23;
-                                    let bytes24 = _rt::Vec::from_raw_parts(
-                                        l22.cast(),
-                                        len24,
-                                        len24,
-                                    );
-                                    _rt::string_lift(bytes24)
-                                };
-                                Some(e)
-                            }
-                            _ => _rt::invalid_enum_discriminant(),
-                        },
-                        route_id: _rt::string_lift(bytes27),
-                        service_id: _rt::string_lift(bytes30),
-                        target_url: _rt::string_lift(bytes33),
-                        message: _rt::string_lift(bytes36),
-                    });
-                    _rt::cabi_dealloc(
-                        arg0,
-                        21 * ::core::mem::size_of::<*const u8>(),
-                        ::core::mem::size_of::<*const u8>(),
-                    );
-                    let ptr38 = (&raw mut _RET_AREA.0).cast::<u8>();
-                    match result37 {
-                        Ok(e) => {
-                            *ptr38.add(0).cast::<u8>() = (0i32) as u8;
-                            use super::super::super::super::octra::api_plugin::types::ErrorAction as V45;
-                            match e {
-                                V45::Continue => {
-                                    *ptr38
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>() = (0i32) as u8;
-                                }
-                                V45::Respond(e) => {
-                                    *ptr38
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>() = (1i32) as u8;
-                                    let super::super::super::super::octra::api_plugin::types::Reject {
-                                        status: status39,
-                                        headers: headers39,
-                                        body: body39,
-                                    } = e;
-                                    *ptr38
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u16>() = (_rt::as_i32(status39)) as u16;
-                                    let vec43 = headers39;
-                                    let len43 = vec43.len();
-                                    let layout43 = _rt::alloc::Layout::from_size_align_unchecked(
-                                        vec43.len() * (4 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    );
-                                    let result43 = if layout43.size() != 0 {
-                                        let ptr = _rt::alloc::alloc(layout43).cast::<u8>();
-                                        if ptr.is_null() {
-                                            _rt::alloc::handle_alloc_error(layout43);
-                                        }
-                                        ptr
-                                    } else {
-                                        ::core::ptr::null_mut()
-                                    };
-                                    for (i, e) in vec43.into_iter().enumerate() {
-                                        let base = result43
-                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
-                                        {
-                                            let (t40_0, t40_1) = e;
-                                            let vec41 = (t40_0.into_bytes()).into_boxed_slice();
-                                            let ptr41 = vec41.as_ptr().cast::<u8>();
-                                            let len41 = vec41.len();
-                                            ::core::mem::forget(vec41);
-                                            *base
-                                                .add(::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len41;
-                                            *base.add(0).cast::<*mut u8>() = ptr41.cast_mut();
-                                            let vec42 = (t40_1.into_bytes()).into_boxed_slice();
-                                            let ptr42 = vec42.as_ptr().cast::<u8>();
-                                            let len42 = vec42.len();
-                                            ::core::mem::forget(vec42);
-                                            *base
-                                                .add(3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>() = len42;
-                                            *base
-                                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>() = ptr42.cast_mut();
-                                        }
-                                    }
-                                    *ptr38
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len43;
-                                    *ptr38
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = result43;
-                                    let vec44 = (body39).into_boxed_slice();
-                                    let ptr44 = vec44.as_ptr().cast::<u8>();
-                                    let len44 = vec44.len();
-                                    ::core::mem::forget(vec44);
-                                    *ptr38
-                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len44;
-                                    *ptr38
-                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = ptr44.cast_mut();
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            *ptr38.add(0).cast::<u8>() = (1i32) as u8;
-                            let vec46 = (e.into_bytes()).into_boxed_slice();
-                            let ptr46 = vec46.as_ptr().cast::<u8>();
-                            let len46 = vec46.len();
-                            ::core::mem::forget(vec46);
-                            *ptr38
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len46;
-                            *ptr38
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr46.cast_mut();
-                        }
-                    };
-                    ptr38
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn __post_return_on_error<T: Guest>(arg0: *mut u8) {
-                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
-                    match l0 {
-                        0 => {
-                            let l1 = i32::from(
-                                *arg0.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
-                            );
-                            match l1 {
-                                0 => {}
-                                _ => {
                                     let l2 = *arg0
                                         .add(3 * ::core::mem::size_of::<*const u8>())
                                         .cast::<*mut u8>();
@@ -5488,20 +3986,298 @@ pub mod exports {
                                     let l10 = *arg0
                                         .add(6 * ::core::mem::size_of::<*const u8>())
                                         .cast::<usize>();
-                                    let base11 = l9;
-                                    let len11 = l10;
-                                    _rt::cabi_dealloc(base11, len11 * 1, 1);
+                                    let base13 = l9;
+                                    let len13 = l10;
+                                    for i in 0..len13 {
+                                        let base = base13
+                                            .add(i * (2 * ::core::mem::size_of::<*const u8>()));
+                                        {
+                                            let l11 = *base.add(0).cast::<*mut u8>();
+                                            let l12 = *base
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>();
+                                            _rt::cabi_dealloc(l11, l12, 1);
+                                        }
+                                    }
+                                    _rt::cabi_dealloc(
+                                        base13,
+                                        len13 * (2 * ::core::mem::size_of::<*const u8>()),
+                                        ::core::mem::size_of::<*const u8>(),
+                                    );
+                                }
+                                _ => {
+                                    let l14 = *arg0
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l15 = *arg0
+                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let base20 = l14;
+                                    let len20 = l15;
+                                    for i in 0..len20 {
+                                        let base = base20
+                                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                        {
+                                            let l16 = *base.add(0).cast::<*mut u8>();
+                                            let l17 = *base
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>();
+                                            _rt::cabi_dealloc(l16, l17, 1);
+                                            let l18 = *base
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>();
+                                            let l19 = *base
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>();
+                                            _rt::cabi_dealloc(l18, l19, 1);
+                                        }
+                                    }
+                                    _rt::cabi_dealloc(
+                                        base20,
+                                        len20 * (4 * ::core::mem::size_of::<*const u8>()),
+                                        ::core::mem::size_of::<*const u8>(),
+                                    );
+                                    let l21 = *arg0
+                                        .add(5 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l22 = *arg0
+                                        .add(6 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let base23 = l21;
+                                    let len23 = l22;
+                                    _rt::cabi_dealloc(base23, len23 * 1, 1);
                                 }
                             }
                         }
                         _ => {
-                            let l12 = *arg0
+                            let l24 = *arg0
                                 .add(::core::mem::size_of::<*const u8>())
                                 .cast::<*mut u8>();
-                            let l13 = *arg0
+                            let l25 = *arg0
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<usize>();
-                            _rt::cabi_dealloc(l12, l13, 1);
+                            _rt::cabi_dealloc(l24, l25, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_on_body_filter_cabi<T: Guest>(
+                    arg0: *mut u8,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let l0 = *arg0.add(0).cast::<*mut u8>();
+                    let l1 = *arg0
+                        .add(::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    let len2 = l1;
+                    let bytes2 = _rt::Vec::from_raw_parts(l0.cast(), len2, len2);
+                    let l3 = i32::from(
+                        *arg0.add(2 * ::core::mem::size_of::<*const u8>()).cast::<u16>(),
+                    );
+                    let l4 = *arg0
+                        .add(3 * ::core::mem::size_of::<*const u8>())
+                        .cast::<*mut u8>();
+                    let l5 = *arg0
+                        .add(4 * ::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    let base12 = l4;
+                    let len12 = l5;
+                    let mut result12 = _rt::Vec::with_capacity(len12);
+                    for i in 0..len12 {
+                        let base = base12
+                            .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                        let e12 = {
+                            let l6 = *base.add(0).cast::<*mut u8>();
+                            let l7 = *base
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let len8 = l7;
+                            let bytes8 = _rt::Vec::from_raw_parts(l6.cast(), len8, len8);
+                            let l9 = *base
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l10 = *base
+                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let len11 = l10;
+                            let bytes11 = _rt::Vec::from_raw_parts(
+                                l9.cast(),
+                                len11,
+                                len11,
+                            );
+                            (_rt::string_lift(bytes8), _rt::string_lift(bytes11))
+                        };
+                        result12.push(e12);
+                    }
+                    _rt::cabi_dealloc(
+                        base12,
+                        len12 * (4 * ::core::mem::size_of::<*const u8>()),
+                        ::core::mem::size_of::<*const u8>(),
+                    );
+                    let l13 = i32::from(
+                        *arg0.add(5 * ::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                    );
+                    let l17 = *arg0
+                        .add(8 * ::core::mem::size_of::<*const u8>())
+                        .cast::<*mut u8>();
+                    let l18 = *arg0
+                        .add(9 * ::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    let len19 = l18;
+                    let bytes19 = _rt::Vec::from_raw_parts(l17.cast(), len19, len19);
+                    let l20 = *arg0
+                        .add(10 * ::core::mem::size_of::<*const u8>())
+                        .cast::<*mut u8>();
+                    let l21 = *arg0
+                        .add(11 * ::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    let len22 = l21;
+                    let bytes22 = _rt::Vec::from_raw_parts(l20.cast(), len22, len22);
+                    let l23 = *arg0
+                        .add(12 * ::core::mem::size_of::<*const u8>())
+                        .cast::<*mut u8>();
+                    let l24 = *arg0
+                        .add(13 * ::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    let len25 = l24;
+                    let bytes25 = _rt::Vec::from_raw_parts(l23.cast(), len25, len25);
+                    let l26 = i32::from(
+                        *arg0.add(14 * ::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                    );
+                    let l30 = i32::from(
+                        *arg0.add(17 * ::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                    );
+                    let result31 = T::on_body_filter(
+                        super::super::super::super::octra::api_plugin::types::BodyInfo {
+                            request_id: _rt::string_lift(bytes2),
+                            status: l3 as u16,
+                            headers: result12,
+                            consumer_id: match l13 {
+                                0 => None,
+                                1 => {
+                                    let e = {
+                                        let l14 = *arg0
+                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l15 = *arg0
+                                            .add(7 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let len16 = l15;
+                                        let bytes16 = _rt::Vec::from_raw_parts(
+                                            l14.cast(),
+                                            len16,
+                                            len16,
+                                        );
+                                        _rt::string_lift(bytes16)
+                                    };
+                                    Some(e)
+                                }
+                                _ => _rt::invalid_enum_discriminant(),
+                            },
+                            route_id: _rt::string_lift(bytes19),
+                            service_id: _rt::string_lift(bytes22),
+                            target_url: _rt::string_lift(bytes25),
+                        },
+                        match l26 {
+                            0 => None,
+                            1 => {
+                                let e = {
+                                    let l27 = *arg0
+                                        .add(15 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l28 = *arg0
+                                        .add(16 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let len29 = l28;
+                                    _rt::Vec::from_raw_parts(l27.cast(), len29, len29)
+                                };
+                                Some(e)
+                            }
+                            _ => _rt::invalid_enum_discriminant(),
+                        },
+                        _rt::bool_lift(l30 as u8),
+                    );
+                    _rt::cabi_dealloc(
+                        arg0,
+                        18 * ::core::mem::size_of::<*const u8>(),
+                        ::core::mem::size_of::<*const u8>(),
+                    );
+                    let ptr32 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result31 {
+                        Ok(e) => {
+                            *ptr32.add(0).cast::<u8>() = (0i32) as u8;
+                            match e {
+                                Some(e) => {
+                                    *ptr32
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (1i32) as u8;
+                                    let vec33 = (e).into_boxed_slice();
+                                    let ptr33 = vec33.as_ptr().cast::<u8>();
+                                    let len33 = vec33.len();
+                                    ::core::mem::forget(vec33);
+                                    *ptr32
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len33;
+                                    *ptr32
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr33.cast_mut();
+                                }
+                                None => {
+                                    *ptr32
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (0i32) as u8;
+                                }
+                            };
+                        }
+                        Err(e) => {
+                            *ptr32.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec34 = (e.into_bytes()).into_boxed_slice();
+                            let ptr34 = vec34.as_ptr().cast::<u8>();
+                            let len34 = vec34.len();
+                            ::core::mem::forget(vec34);
+                            *ptr32
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len34;
+                            *ptr32
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr34.cast_mut();
+                        }
+                    };
+                    ptr32
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_on_body_filter<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = i32::from(
+                                *arg0.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                            );
+                            match l1 {
+                                0 => {}
+                                _ => {
+                                    let l2 = *arg0
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l3 = *arg0
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    let base4 = l2;
+                                    let len4 = l3;
+                                    _rt::cabi_dealloc(base4, len4 * 1, 1);
+                                }
+                            }
+                        }
+                        _ => {
+                            let l5 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l6 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l5, l6, 1);
                         }
                     }
                 }
@@ -5566,44 +4342,34 @@ pub mod exports {
                     fn on_admin_request(
                         req: AdminRequest,
                     ) -> Result<AdminResponse, _rt::String>;
-                    fn on_event(event: Event) -> Result<(), _rt::String>;
-                    fn on_job(job: Job) -> Result<(), _rt::String>;
                     fn on_rewrite(req: Request) -> Result<Action, _rt::String>;
-                    fn on_request(req: Request) -> Result<Action, _rt::String>;
-                    fn on_request_body(
-                        req: Request,
-                        body: _rt::Vec<u8>,
-                    ) -> Result<RequestBodyAction, _rt::String>;
-                    fn on_upstream_request(
-                        req: UpstreamRequest,
-                    ) -> Result<Action, _rt::String>;
+                    fn on_access(req: Request) -> Result<Action, _rt::String>;
                     fn on_response(
                         resp: Response,
                     ) -> Result<ResponseAction, _rt::String>;
-                    fn on_response_buffer(
+                    fn on_header_filter(
                         resp: Response,
-                        body: _rt::Vec<u8>,
-                    ) -> Result<BodyAction, _rt::String>;
-                    fn on_response_chunk(
+                    ) -> Result<ResponseAction, _rt::String>;
+                    fn on_body_filter(
                         info: BodyInfo,
-                        chunk: _rt::Vec<u8>,
-                    ) -> Result<BodyAction, _rt::String>;
-                    fn on_error(err: ErrorInfo) -> Result<ErrorAction, _rt::String>;
+                        chunk: Option<_rt::Vec<u8>>,
+                        eof: bool,
+                    ) -> Result<Option<_rt::Vec<u8>>, _rt::String>;
                     fn on_log(entry: LogEntry) -> ();
                 }
                 #[doc(hidden)]
-                macro_rules! __export_octra_api_plugin_plugin_api_2_0_0_cabi {
+                macro_rules! __export_octra_api_plugin_plugin_api_3_0_0_cabi {
                     ($ty:ident with_types_in $($path_to_types:tt)*) => {
                         const _ : () = { #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@2.0.0#configure")] unsafe extern "C"
+                        "octra:api-plugin/plugin-api@3.0.0#configure")] unsafe extern "C"
                         fn export_configure(arg0 : * mut u8, arg1 : usize,) -> * mut u8 {
                         unsafe { $($path_to_types)*:: _export_configure_cabi::<$ty >
                         (arg0, arg1) } } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#configure")] unsafe
+                        "cabi_post_octra:api-plugin/plugin-api@3.0.0#configure")] unsafe
                         extern "C" fn _post_return_configure(arg0 : * mut u8,) { unsafe {
                         $($path_to_types)*:: __post_return_configure::<$ty > (arg0) } }
                         #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@2.0.0#on-admin-request")] unsafe
+                        "octra:api-plugin/plugin-api@3.0.0#on-admin-request")] unsafe
                         extern "C" fn export_on_admin_request(arg0 : * mut u8, arg1 :
                         usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
                         usize, arg6 : * mut u8, arg7 : usize, arg8 : * mut u8, arg9 :
@@ -5612,131 +4378,257 @@ pub mod exports {
                         _export_on_admin_request_cabi::<$ty > (arg0, arg1, arg2, arg3,
                         arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13) }
                         } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-admin-request")]
+                        "cabi_post_octra:api-plugin/plugin-api@3.0.0#on-admin-request")]
                         unsafe extern "C" fn _post_return_on_admin_request(arg0 : * mut
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_on_admin_request::<$ty > (arg0) } } #[unsafe
-                        (export_name = "octra:api-plugin/plugin-api@2.0.0#on-event")]
-                        unsafe extern "C" fn export_on_event(arg0 : * mut u8, arg1 :
-                        usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
-                        usize, arg6 : i64, arg7 : * mut u8, arg8 : usize,) -> * mut u8 {
-                        unsafe { $($path_to_types)*:: _export_on_event_cabi::<$ty >
-                        (arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) } }
-                        #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-event")] unsafe
-                        extern "C" fn _post_return_on_event(arg0 : * mut u8,) { unsafe {
-                        $($path_to_types)*:: __post_return_on_event::<$ty > (arg0) } }
-                        #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@2.0.0#on-job")] unsafe extern "C" fn
-                        export_on_job(arg0 : * mut u8, arg1 : usize, arg2 : * mut u8,
-                        arg3 : usize, arg4 : i64, arg5 : i32,) -> * mut u8 { unsafe {
-                        $($path_to_types)*:: _export_on_job_cabi::<$ty > (arg0, arg1,
-                        arg2, arg3, arg4, arg5) } } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-job")] unsafe
-                        extern "C" fn _post_return_on_job(arg0 : * mut u8,) { unsafe {
-                        $($path_to_types)*:: __post_return_on_job::<$ty > (arg0) } }
-                        #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@2.0.0#on-rewrite")] unsafe extern
-                        "C" fn export_on_rewrite(arg0 : * mut u8,) -> * mut u8 { unsafe {
-                        $($path_to_types)*:: _export_on_rewrite_cabi::<$ty > (arg0) } }
-                        #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-rewrite")] unsafe
+                        (export_name = "octra:api-plugin/plugin-api@3.0.0#on-rewrite")]
+                        unsafe extern "C" fn export_on_rewrite(arg0 : * mut u8,) -> * mut
+                        u8 { unsafe { $($path_to_types)*:: _export_on_rewrite_cabi::<$ty
+                        > (arg0) } } #[unsafe (export_name =
+                        "cabi_post_octra:api-plugin/plugin-api@3.0.0#on-rewrite")] unsafe
                         extern "C" fn _post_return_on_rewrite(arg0 : * mut u8,) { unsafe
                         { $($path_to_types)*:: __post_return_on_rewrite::<$ty > (arg0) }
                         } #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@2.0.0#on-request")] unsafe extern
-                        "C" fn export_on_request(arg0 : * mut u8,) -> * mut u8 { unsafe {
-                        $($path_to_types)*:: _export_on_request_cabi::<$ty > (arg0) } }
+                        "octra:api-plugin/plugin-api@3.0.0#on-access")] unsafe extern "C"
+                        fn export_on_access(arg0 : * mut u8,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_on_access_cabi::<$ty > (arg0) } }
                         #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-request")] unsafe
-                        extern "C" fn _post_return_on_request(arg0 : * mut u8,) { unsafe
-                        { $($path_to_types)*:: __post_return_on_request::<$ty > (arg0) }
-                        } #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@2.0.0#on-request-body")] unsafe
-                        extern "C" fn export_on_request_body(arg0 : * mut u8,) -> * mut
-                        u8 { unsafe { $($path_to_types)*::
-                        _export_on_request_body_cabi::<$ty > (arg0) } } #[unsafe
+                        "cabi_post_octra:api-plugin/plugin-api@3.0.0#on-access")] unsafe
+                        extern "C" fn _post_return_on_access(arg0 : * mut u8,) { unsafe {
+                        $($path_to_types)*:: __post_return_on_access::<$ty > (arg0) } }
+                        #[unsafe (export_name =
+                        "octra:api-plugin/plugin-api@3.0.0#on-response")] unsafe extern
+                        "C" fn export_on_response(arg0 : * mut u8, arg1 : usize, arg2 :
+                        i32, arg3 : * mut u8, arg4 : usize, arg5 : i32, arg6 : * mut u8,
+                        arg7 : usize, arg8 : * mut u8, arg9 : usize, arg10 : * mut u8,
+                        arg11 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_on_response_cabi::<$ty > (arg0, arg1, arg2, arg3, arg4,
+                        arg5, arg6, arg7, arg8, arg9, arg10, arg11) } } #[unsafe
                         (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-request-body")]
-                        unsafe extern "C" fn _post_return_on_request_body(arg0 : * mut
-                        u8,) { unsafe { $($path_to_types)*::
-                        __post_return_on_request_body::<$ty > (arg0) } } #[unsafe
-                        (export_name =
-                        "octra:api-plugin/plugin-api@2.0.0#on-upstream-request")] unsafe
-                        extern "C" fn export_on_upstream_request(arg0 : * mut u8,) -> *
-                        mut u8 { unsafe { $($path_to_types)*::
-                        _export_on_upstream_request_cabi::<$ty > (arg0) } } #[unsafe
-                        (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-upstream-request")]
-                        unsafe extern "C" fn _post_return_on_upstream_request(arg0 : *
-                        mut u8,) { unsafe { $($path_to_types)*::
-                        __post_return_on_upstream_request::<$ty > (arg0) } } #[unsafe
-                        (export_name = "octra:api-plugin/plugin-api@2.0.0#on-response")]
-                        unsafe extern "C" fn export_on_response(arg0 : * mut u8, arg1 :
-                        usize, arg2 : i32, arg3 : * mut u8, arg4 : usize, arg5 : i32,
-                        arg6 : * mut u8, arg7 : usize, arg8 : * mut u8, arg9 : usize,
-                        arg10 : * mut u8, arg11 : usize,) -> * mut u8 { unsafe {
-                        $($path_to_types)*:: _export_on_response_cabi::<$ty > (arg0,
-                        arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10,
-                        arg11) } } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-response")]
+                        "cabi_post_octra:api-plugin/plugin-api@3.0.0#on-response")]
                         unsafe extern "C" fn _post_return_on_response(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_on_response::<$ty >
                         (arg0) } } #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@2.0.0#on-response-buffer")] unsafe
-                        extern "C" fn export_on_response_buffer(arg0 : * mut u8, arg1 :
+                        "octra:api-plugin/plugin-api@3.0.0#on-header-filter")] unsafe
+                        extern "C" fn export_on_header_filter(arg0 : * mut u8, arg1 :
                         usize, arg2 : i32, arg3 : * mut u8, arg4 : usize, arg5 : i32,
                         arg6 : * mut u8, arg7 : usize, arg8 : * mut u8, arg9 : usize,
-                        arg10 : * mut u8, arg11 : usize, arg12 : * mut u8, arg13 :
-                        usize,) -> * mut u8 { unsafe { $($path_to_types)*::
-                        _export_on_response_buffer_cabi::<$ty > (arg0, arg1, arg2, arg3,
-                        arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13) }
-                        } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-response-buffer")]
-                        unsafe extern "C" fn _post_return_on_response_buffer(arg0 : * mut
+                        arg10 : * mut u8, arg11 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_on_header_filter_cabi::<$ty > (arg0,
+                        arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10,
+                        arg11) } } #[unsafe (export_name =
+                        "cabi_post_octra:api-plugin/plugin-api@3.0.0#on-header-filter")]
+                        unsafe extern "C" fn _post_return_on_header_filter(arg0 : * mut
                         u8,) { unsafe { $($path_to_types)*::
-                        __post_return_on_response_buffer::<$ty > (arg0) } } #[unsafe
+                        __post_return_on_header_filter::<$ty > (arg0) } } #[unsafe
                         (export_name =
-                        "octra:api-plugin/plugin-api@2.0.0#on-response-chunk")] unsafe
-                        extern "C" fn export_on_response_chunk(arg0 : * mut u8, arg1 :
-                        usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
-                        usize, arg6 : * mut u8, arg7 : usize, arg8 : * mut u8, arg9 :
-                        usize,) -> * mut u8 { unsafe { $($path_to_types)*::
-                        _export_on_response_chunk_cabi::<$ty > (arg0, arg1, arg2, arg3,
-                        arg4, arg5, arg6, arg7, arg8, arg9) } } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-response-chunk")]
-                        unsafe extern "C" fn _post_return_on_response_chunk(arg0 : * mut
+                        "octra:api-plugin/plugin-api@3.0.0#on-body-filter")] unsafe
+                        extern "C" fn export_on_body_filter(arg0 : * mut u8,) -> * mut u8
+                        { unsafe { $($path_to_types)*:: _export_on_body_filter_cabi::<$ty
+                        > (arg0) } } #[unsafe (export_name =
+                        "cabi_post_octra:api-plugin/plugin-api@3.0.0#on-body-filter")]
+                        unsafe extern "C" fn _post_return_on_body_filter(arg0 : * mut
                         u8,) { unsafe { $($path_to_types)*::
-                        __post_return_on_response_chunk::<$ty > (arg0) } } #[unsafe
-                        (export_name = "octra:api-plugin/plugin-api@2.0.0#on-error")]
-                        unsafe extern "C" fn export_on_error(arg0 : * mut u8,) -> * mut
-                        u8 { unsafe { $($path_to_types)*:: _export_on_error_cabi::<$ty >
-                        (arg0) } } #[unsafe (export_name =
-                        "cabi_post_octra:api-plugin/plugin-api@2.0.0#on-error")] unsafe
-                        extern "C" fn _post_return_on_error(arg0 : * mut u8,) { unsafe {
-                        $($path_to_types)*:: __post_return_on_error::<$ty > (arg0) } }
-                        #[unsafe (export_name =
-                        "octra:api-plugin/plugin-api@2.0.0#on-log")] unsafe extern "C" fn
-                        export_on_log(arg0 : * mut u8, arg1 : usize, arg2 : * mut u8,
-                        arg3 : usize, arg4 : * mut u8, arg5 : usize, arg6 : i32, arg7 :
-                        i64, arg8 : i32, arg9 : * mut u8, arg10 : usize, arg11 : * mut
-                        u8, arg12 : usize, arg13 : * mut u8, arg14 : usize,) { unsafe {
-                        $($path_to_types)*:: _export_on_log_cabi::<$ty > (arg0, arg1,
-                        arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11,
-                        arg12, arg13, arg14) } } };
+                        __post_return_on_body_filter::<$ty > (arg0) } } #[unsafe
+                        (export_name = "octra:api-plugin/plugin-api@3.0.0#on-log")]
+                        unsafe extern "C" fn export_on_log(arg0 : * mut u8, arg1 : usize,
+                        arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 : usize,
+                        arg6 : i32, arg7 : i64, arg8 : i32, arg9 : * mut u8, arg10 :
+                        usize, arg11 : * mut u8, arg12 : usize, arg13 : * mut u8, arg14 :
+                        usize,) { unsafe { $($path_to_types)*:: _export_on_log_cabi::<$ty
+                        > (arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9,
+                        arg10, arg11, arg12, arg13, arg14) } } };
                     };
                 }
                 #[doc(hidden)]
-                pub(crate) use __export_octra_api_plugin_plugin_api_2_0_0_cabi;
+                pub(crate) use __export_octra_api_plugin_plugin_api_3_0_0_cabi;
                 #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
                 #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
                 struct _RetArea(
                     [::core::mem::MaybeUninit<
                         u8,
-                    >; 12 * ::core::mem::size_of::<*const u8>()],
+                    >; 15 * ::core::mem::size_of::<*const u8>()],
                 );
                 static mut _RET_AREA: _RetArea = _RetArea(
-                    [::core::mem::MaybeUninit::uninit(); 12
+                    [::core::mem::MaybeUninit::uninit(); 15
+                        * ::core::mem::size_of::<*const u8>()],
+                );
+            }
+            #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+            pub mod background_api {
+                #[used]
+                #[doc(hidden)]
+                static __FORCE_SECTION_REF: fn() = super::super::super::super::__link_custom_section_describing_imports;
+                use super::super::super::super::_rt;
+                pub type Event = super::super::super::super::octra::api_plugin::types::Event;
+                pub type Job = super::super::super::super::octra::api_plugin::types::Job;
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_on_event_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: *mut u8,
+                    arg5: usize,
+                    arg6: i64,
+                    arg7: *mut u8,
+                    arg8: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
+                    let len2 = arg5;
+                    let bytes2 = _rt::Vec::from_raw_parts(arg4.cast(), len2, len2);
+                    let len3 = arg8;
+                    let bytes3 = _rt::Vec::from_raw_parts(arg7.cast(), len3, len3);
+                    let result4 = T::on_event(super::super::super::super::octra::api_plugin::types::Event {
+                        id: _rt::string_lift(bytes0),
+                        topic: _rt::string_lift(bytes1),
+                        source: _rt::string_lift(bytes2),
+                        timestamp: arg6,
+                        payload_json: _rt::string_lift(bytes3),
+                    });
+                    let ptr5 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result4 {
+                        Ok(_) => {
+                            *ptr5.add(0).cast::<u8>() = (0i32) as u8;
+                        }
+                        Err(e) => {
+                            *ptr5.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec6 = (e.into_bytes()).into_boxed_slice();
+                            let ptr6 = vec6.as_ptr().cast::<u8>();
+                            let len6 = vec6.len();
+                            ::core::mem::forget(vec6);
+                            *ptr5
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len6;
+                            *ptr5
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr6.cast_mut();
+                        }
+                    };
+                    ptr5
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_on_event<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_on_job_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: i64,
+                    arg5: i32,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
+                    let result2 = T::on_job(super::super::super::super::octra::api_plugin::types::Job {
+                        id: _rt::string_lift(bytes0),
+                        name: _rt::string_lift(bytes1),
+                        scheduled_for: arg4,
+                        attempt: arg5 as u32,
+                    });
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(_) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_on_job<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                pub trait Guest {
+                    fn on_event(event: Event) -> Result<(), _rt::String>;
+                    fn on_job(job: Job) -> Result<(), _rt::String>;
+                }
+                #[doc(hidden)]
+                macro_rules! __export_octra_api_plugin_background_api_3_0_0_cabi {
+                    ($ty:ident with_types_in $($path_to_types:tt)*) => {
+                        const _ : () = { #[unsafe (export_name =
+                        "octra:api-plugin/background-api@3.0.0#on-event")] unsafe extern
+                        "C" fn export_on_event(arg0 : * mut u8, arg1 : usize, arg2 : *
+                        mut u8, arg3 : usize, arg4 : * mut u8, arg5 : usize, arg6 : i64,
+                        arg7 : * mut u8, arg8 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_on_event_cabi::<$ty > (arg0, arg1,
+                        arg2, arg3, arg4, arg5, arg6, arg7, arg8) } } #[unsafe
+                        (export_name =
+                        "cabi_post_octra:api-plugin/background-api@3.0.0#on-event")]
+                        unsafe extern "C" fn _post_return_on_event(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*:: __post_return_on_event::<$ty >
+                        (arg0) } } #[unsafe (export_name =
+                        "octra:api-plugin/background-api@3.0.0#on-job")] unsafe extern
+                        "C" fn export_on_job(arg0 : * mut u8, arg1 : usize, arg2 : * mut
+                        u8, arg3 : usize, arg4 : i64, arg5 : i32,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_on_job_cabi::<$ty > (arg0, arg1,
+                        arg2, arg3, arg4, arg5) } } #[unsafe (export_name =
+                        "cabi_post_octra:api-plugin/background-api@3.0.0#on-job")] unsafe
+                        extern "C" fn _post_return_on_job(arg0 : * mut u8,) { unsafe {
+                        $($path_to_types)*:: __post_return_on_job::<$ty > (arg0) } } };
+                    };
+                }
+                #[doc(hidden)]
+                pub(crate) use __export_octra_api_plugin_background_api_3_0_0_cabi;
+                #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                struct _RetArea(
+                    [::core::mem::MaybeUninit<
+                        u8,
+                    >; 3 * ::core::mem::size_of::<*const u8>()],
+                );
+                static mut _RET_AREA: _RetArea = _RetArea(
+                    [::core::mem::MaybeUninit::uninit(); 3
                         * ::core::mem::size_of::<*const u8>()],
                 );
             }
@@ -5893,92 +4785,92 @@ macro_rules! __export_plugin_impl {
     };
     ($ty:ident with_types_in $($path_to_types_root:tt)*) => {
         $($path_to_types_root)*::
-        exports::octra::api_plugin::plugin_api::__export_octra_api_plugin_plugin_api_2_0_0_cabi!($ty
+        exports::octra::api_plugin::plugin_api::__export_octra_api_plugin_plugin_api_3_0_0_cabi!($ty
         with_types_in $($path_to_types_root)*:: exports::octra::api_plugin::plugin_api);
+        $($path_to_types_root)*::
+        exports::octra::api_plugin::background_api::__export_octra_api_plugin_background_api_3_0_0_cabi!($ty
+        with_types_in $($path_to_types_root)*::
+        exports::octra::api_plugin::background_api);
     };
 }
 #[doc(inline)]
 pub(crate) use __export_plugin_impl as export;
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.41.0:octra:api-plugin@2.0.0:plugin:encoded world"
+    link_section = "component-type:wit-bindgen:0.41.0:octra:api-plugin@3.0.0:plugin:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3297] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe4\x18\x01A\x02\x01\
-A\x17\x01B0\x01m\x05\x05trace\x05debug\x04info\x04warn\x05error\x04\0\x09log-lev\
-el\x03\0\0\x01o\x02ss\x01p\x02\x01ks\x01r\x09\x0arequest-ids\x06methods\x04paths\
-\x05querys\x07headers\x03\x09client-ip\x04\x0bconsumer-id\x04\x08route-ids\x0ase\
-rvice-ids\x04\0\x07request\x03\0\x05\x01p}\x01r\x03\x06status{\x07headers\x03\x04\
-body\x07\x04\0\x06reject\x03\0\x08\x01ps\x01r\x04\x04path\x04\x05query\x04\x0bse\
-t-headers\x03\x0eremove-headers\x0a\x04\0\x10request-mutation\x03\0\x0b\x01q\x02\
-\x08continue\x01\x0c\0\x06reject\x01\x09\0\x04\0\x06action\x03\0\x0d\x01r\x06\x0a\
-request-ids\x06status{\x07headers\x03\x0bconsumer-id\x04\x08route-ids\x0aservice\
--ids\x04\0\x08response\x03\0\x0f\x01k{\x01r\x03\x06status\x11\x0bset-headers\x03\
-\x0eremove-headers\x0a\x04\0\x11response-mutation\x03\0\x12\x01q\x02\x08continue\
-\x01\x13\0\x06reject\x01\x09\0\x04\0\x0fresponse-action\x03\0\x14\x01r\x08\x0are\
-quest-ids\x06methods\x04paths\x06status{\x0alatency-msw\x0bconsumer-id\x04\x08ro\
-ute-ids\x0aservice-ids\x04\0\x09log-entry\x03\0\x16\x01r\x09\x0arequest-ids\x06m\
-ethods\x04paths\x05querys\x07headers\x03\x0bconsumer-id\x04\x08route-ids\x0aserv\
-ice-ids\x0atarget-urls\x04\0\x10upstream-request\x03\0\x18\x01r\x04\x0arequest-i\
-ds\x08route-ids\x0aservice-ids\x0atarget-urls\x04\0\x09body-info\x03\0\x1a\x01r\x03\
-\x04body\x07\x0bset-headers\x03\x0eremove-headers\x0a\x04\0\x13request-body-resu\
-lt\x03\0\x1c\x01q\x02\x08continue\x01\x1d\0\x06reject\x01\x09\0\x04\0\x13request\
--body-action\x03\0\x1e\x01q\x02\x08continue\x01\x07\0\x06reject\x01\x09\0\x04\0\x0b\
-body-action\x03\0\x20\x01r\x0a\x0arequest-ids\x06methods\x04paths\x05querys\x07h\
-eaders\x03\x0bconsumer-id\x04\x08route-ids\x0aservice-ids\x0atarget-urls\x07mess\
-ages\x04\0\x0aerror-info\x03\0\"\x01q\x02\x08continue\0\0\x07respond\x01\x09\0\x04\
-\0\x0cerror-action\x03\0$\x01r\x05\x0bconsumer-id\x04\x11consumer-username\x04\x12\
-consumer-custom-id\x04\x0dcredential-id\x04\x0fcredential-type\x04\x04\0\x0dauth\
--identity\x03\0&\x01r\x07\x0arequest-ids\x06methods\x04paths\x05querys\x07header\
-s\x03\x06params\x03\x04body\x07\x04\0\x0dadmin-request\x03\0(\x01r\x03\x06status\
-{\x07headers\x03\x04body\x07\x04\0\x0eadmin-response\x03\0*\x01r\x05\x02ids\x05t\
-opics\x06sources\x09timestampx\x0cpayload-jsons\x04\0\x05event\x03\0,\x01r\x04\x02\
-ids\x04names\x0dscheduled-forx\x07attempty\x04\0\x03job\x03\0.\x03\0\x1coctra:ap\
-i-plugin/types@2.0.0\x05\0\x02\x03\0\0\x09log-level\x02\x03\0\0\x0dauth-identity\
-\x01B*\x02\x03\x02\x01\x01\x04\0\x09log-level\x03\0\0\x02\x03\x02\x01\x02\x04\0\x0d\
-auth-identity\x03\0\x02\x01@\x02\x05level\x01\x07messages\x01\0\x04\0\x03log\x01\
-\x04\x01@\0\0x\x04\0\x08now-unix\x01\x05\x01@\0\0s\x04\0\x0binstance-id\x01\x06\x01\
-j\0\x01s\x01@\x01\x08identity\x03\0\x07\x04\0\x0cauthenticate\x01\x08\x01@\0\0\x7f\
-\x04\0\x0dauthenticated\x01\x09\x01k\x03\x01@\0\0\x0a\x04\0\x0ccurrent-auth\x01\x0b\
-\x01ks\x01j\x01\x0c\x01s\x01@\x01\x03keys\0\x0d\x04\0\x06kv-get\x01\x0e\x01ky\x01\
-@\x03\x03keys\x05values\x0bttl-seconds\x0f\0\x07\x04\0\x06kv-put\x01\x10\x01j\x01\
-\x7f\x01s\x01@\x01\x03keys\0\x11\x04\0\x09kv-delete\x01\x12\x01j\x01x\x01s\x01@\x03\
-\x03keys\x05deltax\x0bttl-seconds\x0f\0\x13\x04\0\x07kv-incr\x01\x14\x01@\x02\x06\
-entitys\x08key-jsons\0\x0d\x04\0\x0aentity-get\x01\x15\x01@\x02\x06entitys\x0bva\
-lues-jsons\0\x07\x04\0\x0dentity-upsert\x01\x16\x01@\x05\x06entitys\x08key-jsons\
-\x05fields\x05deltax\x0aextra-json\x0c\0\x13\x04\0\x10entity-increment\x01\x17\x01\
-@\x02\x06entitys\x08key-jsons\0\x11\x04\0\x0dentity-delete\x01\x18\x01j\x01s\x01\
-s\x01@\x02\x06entitys\x0aquery-jsons\0\x19\x04\0\x0centity-query\x01\x1a\x03\0\x1b\
-octra:api-plugin/host@2.0.0\x05\x03\x02\x03\0\0\x07request\x02\x03\0\0\x08respon\
-se\x02\x03\0\0\x06action\x02\x03\0\0\x0fresponse-action\x02\x03\0\0\x09log-entry\
-\x02\x03\0\0\x10upstream-request\x02\x03\0\0\x09body-info\x02\x03\0\0\x13request\
--body-action\x02\x03\0\0\x0bbody-action\x02\x03\0\0\x0aerror-info\x02\x03\0\0\x0c\
-error-action\x02\x03\0\0\x0dadmin-request\x02\x03\0\0\x0eadmin-response\x02\x03\0\
-\0\x05event\x02\x03\0\0\x03job\x01B?\x02\x03\x02\x01\x04\x04\0\x07request\x03\0\0\
-\x02\x03\x02\x01\x05\x04\0\x08response\x03\0\x02\x02\x03\x02\x01\x06\x04\0\x06ac\
-tion\x03\0\x04\x02\x03\x02\x01\x07\x04\0\x0fresponse-action\x03\0\x06\x02\x03\x02\
-\x01\x08\x04\0\x09log-entry\x03\0\x08\x02\x03\x02\x01\x09\x04\0\x10upstream-requ\
-est\x03\0\x0a\x02\x03\x02\x01\x0a\x04\0\x09body-info\x03\0\x0c\x02\x03\x02\x01\x0b\
-\x04\0\x13request-body-action\x03\0\x0e\x02\x03\x02\x01\x0c\x04\0\x0bbody-action\
-\x03\0\x10\x02\x03\x02\x01\x0d\x04\0\x0aerror-info\x03\0\x12\x02\x03\x02\x01\x0e\
-\x04\0\x0cerror-action\x03\0\x14\x02\x03\x02\x01\x0f\x04\0\x0dadmin-request\x03\0\
-\x16\x02\x03\x02\x01\x10\x04\0\x0eadmin-response\x03\0\x18\x02\x03\x02\x01\x11\x04\
-\0\x05event\x03\0\x1a\x02\x03\x02\x01\x12\x04\0\x03job\x03\0\x1c\x01j\0\x01s\x01\
-@\x01\x0bconfig-jsons\0\x1e\x04\0\x09configure\x01\x1f\x01j\x01\x19\x01s\x01@\x01\
-\x03req\x17\0\x20\x04\0\x10on-admin-request\x01!\x01@\x01\x05event\x1b\0\x1e\x04\
-\0\x08on-event\x01\"\x01@\x01\x03job\x1d\0\x1e\x04\0\x06on-job\x01#\x01j\x01\x05\
-\x01s\x01@\x01\x03req\x01\0$\x04\0\x0aon-rewrite\x01%\x04\0\x0aon-request\x01%\x01\
-p}\x01j\x01\x0f\x01s\x01@\x02\x03req\x01\x04body&\0'\x04\0\x0fon-request-body\x01\
-(\x01@\x01\x03req\x0b\0$\x04\0\x13on-upstream-request\x01)\x01j\x01\x07\x01s\x01\
-@\x01\x04resp\x03\0*\x04\0\x0bon-response\x01+\x01j\x01\x11\x01s\x01@\x02\x04res\
-p\x03\x04body&\0,\x04\0\x12on-response-buffer\x01-\x01@\x02\x04info\x0d\x05chunk\
-&\0,\x04\0\x11on-response-chunk\x01.\x01j\x01\x15\x01s\x01@\x01\x03err\x13\0/\x04\
-\0\x08on-error\x010\x01@\x01\x05entry\x09\x01\0\x04\0\x06on-log\x011\x04\0!octra\
-:api-plugin/plugin-api@2.0.0\x05\x13\x04\0\x1doctra:api-plugin/plugin@2.0.0\x04\0\
-\x0b\x0c\x01\0\x06plugin\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-\
-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3111] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xaa\x17\x01A\x02\x01\
+A\x14\x01B1\x01m\x05\x05trace\x05debug\x04info\x04warn\x05error\x04\0\x09log-lev\
+el\x03\0\0\x01o\x02ss\x01p\x02\x01ks\x01p}\x01k\x05\x01r\x0a\x0arequest-ids\x06m\
+ethods\x04paths\x05querys\x07headers\x03\x09client-ip\x04\x0bconsumer-id\x04\x08\
+route-ids\x0aservice-ids\x04body\x06\x04\0\x07request\x03\0\x07\x01r\x03\x06stat\
+us{\x07headers\x03\x04body\x05\x04\0\x06reject\x03\0\x09\x01ps\x01r\x05\x04path\x04\
+\x05query\x04\x0bset-headers\x03\x0eremove-headers\x0b\x04body\x06\x04\0\x10requ\
+est-mutation\x03\0\x0c\x01q\x02\x08continue\x01\x0d\0\x06reject\x01\x0a\0\x04\0\x06\
+action\x03\0\x0e\x01r\x06\x0arequest-ids\x06status{\x07headers\x03\x0bconsumer-i\
+d\x04\x08route-ids\x0aservice-ids\x04\0\x08response\x03\0\x10\x01k{\x01r\x03\x06\
+status\x12\x0bset-headers\x03\x0eremove-headers\x0b\x04\0\x11response-mutation\x03\
+\0\x13\x01q\x02\x08continue\x01\x14\0\x06reject\x01\x0a\0\x04\0\x0fresponse-acti\
+on\x03\0\x15\x01r\x08\x0arequest-ids\x06methods\x04paths\x06status{\x0alatency-m\
+sw\x0bconsumer-id\x04\x08route-ids\x0aservice-ids\x04\0\x09log-entry\x03\0\x17\x01\
+r\x09\x0arequest-ids\x06methods\x04paths\x05querys\x07headers\x03\x0bconsumer-id\
+\x04\x08route-ids\x0aservice-ids\x0atarget-urls\x04\0\x10upstream-request\x03\0\x19\
+\x01r\x07\x0arequest-ids\x06status{\x07headers\x03\x0bconsumer-id\x04\x08route-i\
+ds\x0aservice-ids\x0atarget-urls\x04\0\x09body-info\x03\0\x1b\x01r\x03\x04body\x05\
+\x0bset-headers\x03\x0eremove-headers\x0b\x04\0\x13request-body-result\x03\0\x1d\
+\x01q\x02\x08continue\x01\x1e\0\x06reject\x01\x0a\0\x04\0\x13request-body-action\
+\x03\0\x1f\x01q\x02\x08continue\x01\x05\0\x06reject\x01\x0a\0\x04\0\x0bbody-acti\
+on\x03\0!\x01r\x0a\x0arequest-ids\x06methods\x04paths\x05querys\x07headers\x03\x0b\
+consumer-id\x04\x08route-ids\x0aservice-ids\x0atarget-urls\x07messages\x04\0\x0a\
+error-info\x03\0#\x01q\x02\x08continue\0\0\x07respond\x01\x0a\0\x04\0\x0cerror-a\
+ction\x03\0%\x01r\x05\x0bconsumer-id\x04\x11consumer-username\x04\x12consumer-cu\
+stom-id\x04\x0dcredential-id\x04\x0fcredential-type\x04\x04\0\x0dauth-identity\x03\
+\0'\x01r\x07\x0arequest-ids\x06methods\x04paths\x05querys\x07headers\x03\x06para\
+ms\x03\x04body\x05\x04\0\x0dadmin-request\x03\0)\x01r\x03\x06status{\x07headers\x03\
+\x04body\x05\x04\0\x0eadmin-response\x03\0+\x01r\x05\x02ids\x05topics\x06sources\
+\x09timestampx\x0cpayload-jsons\x04\0\x05event\x03\0-\x01r\x04\x02ids\x04names\x0d\
+scheduled-forx\x07attempty\x04\0\x03job\x03\0/\x03\0\x1coctra:api-plugin/types@3\
+.0.0\x05\0\x02\x03\0\0\x09log-level\x02\x03\0\0\x0dauth-identity\x01B0\x02\x03\x02\
+\x01\x01\x04\0\x09log-level\x03\0\0\x02\x03\x02\x01\x02\x04\0\x0dauth-identity\x03\
+\0\x02\x01@\x02\x05level\x01\x07messages\x01\0\x04\0\x03log\x01\x04\x01@\0\0x\x04\
+\0\x08now-unix\x01\x05\x01@\0\0s\x04\0\x0binstance-id\x01\x06\x01j\0\x01s\x01@\x01\
+\x08identity\x03\0\x07\x04\0\x0cauthenticate\x01\x08\x01@\0\0\x7f\x04\0\x0dauthe\
+nticated\x01\x09\x01k\x03\x01@\0\0\x0a\x04\0\x0ccurrent-auth\x01\x0b\x01p}\x01@\x01\
+\x04data\x0c\0\x07\x04\0\x0bbody-append\x01\x0d\x01j\x01\x0c\x01s\x01@\0\0\x0e\x04\
+\0\x09body-take\x01\x0f\x01ks\x01j\x01\x10\x01s\x01@\x01\x03keys\0\x11\x04\0\x06\
+kv-get\x01\x12\x01ky\x01@\x03\x03keys\x05values\x0bttl-seconds\x13\0\x07\x04\0\x06\
+kv-put\x01\x14\x01j\x01\x7f\x01s\x01@\x01\x03keys\0\x15\x04\0\x09kv-delete\x01\x16\
+\x01j\x01x\x01s\x01@\x03\x03keys\x05deltax\x0bttl-seconds\x13\0\x17\x04\0\x07kv-\
+incr\x01\x18\x01@\x02\x06entitys\x08key-jsons\0\x11\x04\0\x0aentity-get\x01\x19\x01\
+@\x02\x06entitys\x0bvalues-jsons\0\x07\x04\0\x0dentity-upsert\x01\x1a\x01@\x05\x06\
+entitys\x08key-jsons\x05fields\x05deltax\x0aextra-json\x10\0\x17\x04\0\x10entity\
+-increment\x01\x1b\x01@\x02\x06entitys\x08key-jsons\0\x15\x04\0\x0dentity-delete\
+\x01\x1c\x01j\x01s\x01s\x01@\x02\x06entitys\x0aquery-jsons\0\x1d\x04\0\x0centity\
+-query\x01\x1e\x03\0\x1boctra:api-plugin/host@3.0.0\x05\x03\x02\x03\0\0\x07reque\
+st\x02\x03\0\0\x08response\x02\x03\0\0\x06action\x02\x03\0\0\x0fresponse-action\x02\
+\x03\0\0\x09log-entry\x02\x03\0\0\x09body-info\x02\x03\0\0\x0dadmin-request\x02\x03\
+\0\0\x0eadmin-response\x01B%\x02\x03\x02\x01\x04\x04\0\x07request\x03\0\0\x02\x03\
+\x02\x01\x05\x04\0\x08response\x03\0\x02\x02\x03\x02\x01\x06\x04\0\x06action\x03\
+\0\x04\x02\x03\x02\x01\x07\x04\0\x0fresponse-action\x03\0\x06\x02\x03\x02\x01\x08\
+\x04\0\x09log-entry\x03\0\x08\x02\x03\x02\x01\x09\x04\0\x09body-info\x03\0\x0a\x02\
+\x03\x02\x01\x0a\x04\0\x0dadmin-request\x03\0\x0c\x02\x03\x02\x01\x0b\x04\0\x0ea\
+dmin-response\x03\0\x0e\x01j\0\x01s\x01@\x01\x0bconfig-jsons\0\x10\x04\0\x09conf\
+igure\x01\x11\x01j\x01\x0f\x01s\x01@\x01\x03req\x0d\0\x12\x04\0\x10on-admin-requ\
+est\x01\x13\x01j\x01\x05\x01s\x01@\x01\x03req\x01\0\x14\x04\0\x0aon-rewrite\x01\x15\
+\x04\0\x09on-access\x01\x15\x01j\x01\x07\x01s\x01@\x01\x04resp\x03\0\x16\x04\0\x0b\
+on-response\x01\x17\x04\0\x10on-header-filter\x01\x17\x01p}\x01k\x18\x01j\x01\x19\
+\x01s\x01@\x03\x04info\x0b\x05chunk\x19\x03eof\x7f\0\x1a\x04\0\x0eon-body-filter\
+\x01\x1b\x01@\x01\x05entry\x09\x01\0\x04\0\x06on-log\x01\x1c\x04\0!octra:api-plu\
+gin/plugin-api@3.0.0\x05\x0c\x02\x03\0\0\x05event\x02\x03\0\0\x03job\x01B\x09\x02\
+\x03\x02\x01\x0d\x04\0\x05event\x03\0\0\x02\x03\x02\x01\x0e\x04\0\x03job\x03\0\x02\
+\x01j\0\x01s\x01@\x01\x05event\x01\0\x04\x04\0\x08on-event\x01\x05\x01@\x01\x03j\
+ob\x03\0\x04\x04\0\x06on-job\x01\x06\x04\0%octra:api-plugin/background-api@3.0.0\
+\x05\x0f\x04\0\x1doctra:api-plugin/plugin@3.0.0\x04\0\x0b\x0c\x01\0\x06plugin\x03\
+\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-\
+bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

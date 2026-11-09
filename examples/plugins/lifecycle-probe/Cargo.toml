@@ -1,0 +1,23 @@
+[package]
+name = "lifecycle-probe"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+octra-plugin-sdk = { path = "../../../crates/octra-plugin-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wit-bindgen-rt = { version = "0.41", features = ["bitflags"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+[package.metadata.component]
+package = "octra:api-plugin"
+
+[workspace]

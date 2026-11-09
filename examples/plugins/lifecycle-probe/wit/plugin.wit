@@ -1,0 +1,251 @@
+// ABI contract for third-party API Gateway plugins.
+
+package octra:api-plugin@3.0.0;
+
+interface types {
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    record request {
+        request-id: string,
+        method: string,
+        path: string,
+        query: string,
+        headers: list<tuple<string, string>>,
+        client-ip: option<string>,
+        consumer-id: option<string>,
+        route-id: string,
+        service-id: string,
+        body: option<list<u8>>,
+    }
+
+    record reject {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    record request-mutation {
+        path: option<string>,
+        query: option<string>,
+        set-headers: list<tuple<string, string>>,
+        remove-headers: list<string>,
+        body: option<list<u8>>,
+    }
+
+    variant action {
+        continue(request-mutation),
+        reject(reject),
+    }
+
+    record response {
+        request-id: string,
+        status: u16,
+        headers: list<tuple<string, string>>,
+        consumer-id: option<string>,
+        route-id: string,
+        service-id: string,
+    }
+
+    record response-mutation {
+        status: option<u16>,
+        set-headers: list<tuple<string, string>>,
+        remove-headers: list<string>,
+    }
+
+    variant response-action {
+        continue(response-mutation),
+        reject(reject),
+    }
+
+    record log-entry {
+        request-id: string,
+        method: string,
+        path: string,
+        status: u16,
+        latency-ms: u64,
+        consumer-id: option<string>,
+        route-id: string,
+        service-id: string,
+    }
+
+    record upstream-request {
+        request-id: string,
+        method: string,
+        path: string,
+        query: string,
+        headers: list<tuple<string, string>>,
+        consumer-id: option<string>,
+        route-id: string,
+        service-id: string,
+        target-url: string,
+    }
+
+    record body-info {
+        request-id: string,
+        status: u16,
+        headers: list<tuple<string, string>>,
+        consumer-id: option<string>,
+        route-id: string,
+        service-id: string,
+        target-url: string,
+    }
+
+    record request-body-result {
+        body: list<u8>,
+        set-headers: list<tuple<string, string>>,
+        remove-headers: list<string>,
+    }
+
+    variant request-body-action {
+        continue(request-body-result),
+        reject(reject),
+    }
+
+    variant body-action {
+        continue(list<u8>),
+        reject(reject),
+    }
+
+    record error-info {
+        request-id: string,
+        method: string,
+        path: string,
+        query: string,
+        headers: list<tuple<string, string>>,
+        consumer-id: option<string>,
+        route-id: string,
+        service-id: string,
+        target-url: string,
+        message: string,
+    }
+
+    variant error-action {
+        continue,
+        respond(reject),
+    }
+
+    record auth-identity {
+        consumer-id: option<string>,
+        consumer-username: option<string>,
+        consumer-custom-id: option<string>,
+        credential-id: option<string>,
+        credential-type: option<string>,
+    }
+
+    record admin-request {
+        request-id: string,
+        method: string,
+        path: string,
+        query: string,
+        headers: list<tuple<string, string>>,
+        params: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    record admin-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    /// One event delivered to a subscription. Payloads are content-free by
+    /// convention; the host never includes credentials or request bodies.
+    record event {
+        id: string,
+        topic: string,
+        source: string,
+        timestamp: s64,
+        payload-json: string,
+    }
+
+    /// One scheduled job invocation.
+    record job {
+        id: string,
+        name: string,
+        scheduled-for: s64,
+        attempt: u32,
+    }
+}
+
+interface host {
+    use types.{log-level, auth-identity};
+
+    log: func(level: log-level, message: string);
+    now-unix: func() -> s64;
+    instance-id: func() -> string;
+
+    /// Authenticates the current request as `identity`, like Kong's
+    /// `kong.client.authenticate`. The consumer must be known to the gateway;
+    /// an unresolvable identity fails the request with a 500.
+    authenticate: func(identity: auth-identity) -> result<_, string>;
+    /// Whether an auth plugin has already authenticated this request.
+    authenticated: func() -> bool;
+    /// The identity that is currently authenticated, if any.
+    current-auth: func() -> option<auth-identity>;
+
+    /// Request-scoped body storage for `body-filter` plugins.
+    body-append: func(data: list<u8>) -> result<_, string>;
+    body-take: func() -> result<list<u8>, string>;
+
+    kv-get: func(key: string) -> result<option<string>, string>;
+    kv-put: func(key: string, value: string, ttl-seconds: option<u32>) -> result<_, string>;
+    kv-delete: func(key: string) -> result<bool, string>;
+    kv-incr: func(key: string, delta: s64, ttl-seconds: option<u32>) -> result<s64, string>;
+
+    entity-get: func(entity: string, key-json: string) -> result<option<string>, string>;
+    entity-upsert: func(entity: string, values-json: string) -> result<_, string>;
+    entity-increment: func(
+        entity: string,
+        key-json: string,
+        field: string,
+        delta: s64,
+        extra-json: option<string>,
+    ) -> result<s64, string>;
+    entity-delete: func(entity: string, key-json: string) -> result<bool, string>;
+    entity-query: func(entity: string, query-json: string) -> result<string, string>;
+}
+
+interface plugin-api {
+    use types.{
+        request,
+        response,
+        action,
+        response-action,
+        log-entry,
+        body-info,
+        admin-request,
+        admin-response,
+    };
+
+    configure: func(config-json: string) -> result<_, string>;
+    on-admin-request: func(req: admin-request) -> result<admin-response, string>;
+    on-rewrite: func(req: request) -> result<action, string>;
+    on-access: func(req: request) -> result<action, string>;
+    on-response: func(resp: response) -> result<response-action, string>;
+    on-header-filter: func(resp: response) -> result<response-action, string>;
+    on-body-filter: func(
+        info: body-info,
+        chunk: option<list<u8>>,
+        eof: bool,
+    ) -> result<option<list<u8>>, string>;
+    on-log: func(entry: log-entry);
+}
+
+interface background-api {
+    use types.{event, job};
+
+    on-event: func(event: event) -> result<_, string>;
+    on-job: func(job: job) -> result<_, string>;
+}
+
+world plugin {
+    import host;
+    export plugin-api;
+    export background-api;
+}

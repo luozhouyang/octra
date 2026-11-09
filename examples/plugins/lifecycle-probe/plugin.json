@@ -1,0 +1,13 @@
+{
+  "api_version": "3",
+  "name": "lifecycle-probe",
+  "version": "1.0.0",
+  "kind": "api",
+  "runtime": "wasm",
+  "priority": 0,
+  "description": "Integration probe for the Kong lifecycle ABI",
+  "timeout_ms": 1000,
+  "fail_policy": "closed",
+  "phases": ["access", "response", "header_filter", "body_filter", "log"],
+  "capabilities": ["request_headers", "response_headers", "response_body", "log"]
+}

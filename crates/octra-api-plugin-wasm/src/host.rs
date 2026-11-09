@@ -138,10 +138,11 @@ impl bindings::Host for HostState {
     }
 
     fn body_take(&mut self) -> Result<Vec<u8>, String> {
-        self.body_contexts
+        Ok(self
+            .body_contexts
             .lock()
             .remove(&self.request_id)
-            .ok_or_else(|| "no body context for this request".to_string())
+            .unwrap_or_default())
     }
 
     fn kv_get(&mut self, key: String) -> Result<Option<String>, String> {
