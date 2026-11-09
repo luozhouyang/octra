@@ -36,7 +36,7 @@ Route matching remains before the plugin chain (matcher-first). Moving `rewrite`
 
 ### Request body
 
-Kong has no request-body filter. A plugin that needs the request body calls `request_body()` from `access`, which lazily reads and caches the complete body for the request. `set_request_body()` replaces the cached body and updates `Content-Length`. Authentication plugins such as `key-auth` with `key_in_body` use the same API. Request bodies are never delivered as chunk/EOF events.
+Kong has no request-body filter. The host buffers the complete request body before the `access` phase, subject to `gateway.max_body_bytes`. A plugin reads it with `request_body()` and replaces it with `set_request_body()`, which updates `Content-Length` before the upstream request. Authentication plugins such as `key-auth` with `key_in_body` use the same cached body. Request bodies are never delivered as chunk/EOF events.
 
 ### Response body
 
