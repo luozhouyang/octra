@@ -20,7 +20,9 @@ uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+http-body-util.workspace = true
 tempfile = "3"
+tower.workspace = true
 
 [lints]
 workspace = true

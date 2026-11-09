@@ -29,6 +29,7 @@ import type {
   ControlConfig,
   CreatedLlmVirtualKey,
   CreatedMcpApiKey,
+  EventStats,
   HealthResponse,
   ListResponse,
   LlmPlugin,
@@ -215,6 +216,10 @@ export class ControlApiClient {
       "/admin/plugin-metrics",
       { signal },
     );
+  }
+
+  eventStats(signal?: AbortSignal): Promise<EventStats> {
+    return this.request<EventStats>("/admin/events/stats", { signal });
   }
 
   requestLogs(limit = 100, signal?: AbortSignal): Promise<RequestLog[]> {

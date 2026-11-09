@@ -6,7 +6,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::Utc;
 use octra_api_plugin_types::validate_topic_pattern;
+use octra_storage::events::EventStats;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -26,6 +28,7 @@ impl EventControlState {
 pub fn control_router(state: EventControlState) -> Router {
     Router::new()
         .route("/admin/events", get(list_events).post(create_event))
+        .route("/admin/events/stats", get(event_stats))
         .route("/admin/events/{id}", get(get_event))
         .route("/admin/jobs", get(list_jobs))
         .route("/admin/jobs/{id}/run", post(run_job))
@@ -99,6 +102,16 @@ async fn get_event(
     })))
 }
 
+async fn event_stats(State(state): State<EventControlState>) -> ApiResult<Json<EventStats>> {
+    let stats = state
+        .bus
+        .storage()
+        .event_stats(Utc::now().timestamp())
+        .await
+        .map_err(internal)?;
+    Ok(Json(stats))
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateEvent {
     topic: String,
@@ -169,4 +182,85 @@ fn event_view(event: &octra_storage::EventRecord) -> Value {
         "completed_at": event.completed_at,
         "payload": payload,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use octra_api_plugin_types::{EventSubscriber, PluginServiceSource, ScheduledJob};
+    use octra_storage::{NewEvent, Storage};
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    struct EmptySource;
+
+    impl PluginServiceSource for EmptySource {
+        fn subscribers(&self) -> Vec<Arc<dyn EventSubscriber>> {
+            Vec::new()
+        }
+
+        fn jobs(&self) -> Vec<Arc<dyn ScheduledJob>> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn stats_route_is_not_captured_by_the_event_id_route() {
+        let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
+        let event = storage
+            .insert_event(&NewEvent {
+                topic: "gateway.request".to_string(),
+                source: "test".to_string(),
+                payload_json: "{}".to_string(),
+                max_attempts: 5,
+            })
+            .await
+            .unwrap();
+        storage
+            .ensure_event_delivery(
+                &event.id,
+                "sub-1",
+                "plugin",
+                "instance",
+                5,
+                event.created_at,
+            )
+            .await
+            .unwrap();
+        storage
+            .mark_event_delivery_retry(&event.id, "sub-1", event.created_at + 30, "boom")
+            .await
+            .unwrap();
+
+        let bus = Arc::new(EventBus::new(storage.clone(), Arc::new(EmptySource)));
+        let app = control_router(EventControlState::new(bus));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/events/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let stats: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(stats["pending_events"], 1);
+        assert_eq!(stats["delivered_events"], 0);
+        assert_eq!(stats["failed_events"], 0);
+        assert_eq!(stats["pending_deliveries"], 1);
+        assert_eq!(stats["failed_deliveries"], 0);
+        assert_eq!(stats["retrying_deliveries"], 1);
+        assert_eq!(stats["total_attempts"], 1);
+        assert!(stats["oldest_pending_age_secs"].as_i64().unwrap() >= 0);
+    }
 }

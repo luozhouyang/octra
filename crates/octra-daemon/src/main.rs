@@ -3,7 +3,7 @@ mod token;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use axum::Router;
@@ -28,6 +28,7 @@ use octra_llm_plugin_wasm::LlmWasmPluginFactory;
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
 use octra_plugin_storage::PluginStorageRoot;
 use octra_runtime::GatewayRuntime;
+use octra_telemetry::{ApiSnapshot, EventSnapshot, OtlpExporter, TelemetrySnapshot};
 use octra_types::{AppState, AuthState};
 use tokio_util::sync::CancellationToken;
 
@@ -332,9 +333,14 @@ async fn main() -> anyhow::Result<()> {
             config.clone(),
         )))
         .merge(octra_api_gateway::data_plane_router(
-            ApiDataState::with_plugins(api_runtime, config.clone(), api_metrics, plugin_runtime)
-                .with_storage(storage.clone())
-                .with_events(event_bus.clone()),
+            ApiDataState::with_plugins(
+                api_runtime,
+                config.clone(),
+                api_metrics.clone(),
+                plugin_runtime,
+            )
+            .with_storage(storage.clone())
+            .with_events(event_bus.clone()),
         ));
 
     let control_listener = tokio::net::TcpListener::bind(&config.daemon.control_bind)
@@ -367,6 +373,12 @@ async fn main() -> anyhow::Result<()> {
 
     let shutdown = CancellationToken::new();
     event_bus.start(shutdown.clone());
+    spawn_telemetry(
+        &config.telemetry,
+        api_metrics.clone(),
+        storage.clone(),
+        shutdown.clone(),
+    );
     tokio::spawn(shutdown_signal(shutdown.clone()));
     tokio::spawn(health_check_loop(health_runtime, shutdown.clone()));
     if config.storage.retention.enabled {
@@ -392,6 +404,109 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("octra daemon stopped");
     Ok(())
+}
+
+fn spawn_telemetry(
+    config: &octra_config::TelemetryConfig,
+    api_metrics: Arc<ApiMetrics>,
+    storage: Arc<octra_storage::Storage>,
+    shutdown: CancellationToken,
+) {
+    if !config.enabled {
+        return;
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(%error, "cannot create the OTLP HTTP client");
+            return;
+        }
+    };
+    let exporter = match OtlpExporter::new(config, client) {
+        Ok(exporter) => exporter,
+        Err(error) => {
+            tracing::warn!(%error, "OTLP metrics export is unavailable");
+            return;
+        }
+    };
+
+    tracing::info!(
+        endpoint = %config.otlp.as_ref().map(|otlp| otlp.endpoint.as_str()).unwrap_or_default(),
+        interval_secs = config.interval_secs,
+        "OTLP metrics export enabled"
+    );
+    tokio::spawn(telemetry_loop(
+        exporter,
+        Duration::from_secs(config.interval_secs),
+        api_metrics,
+        storage,
+        shutdown,
+    ));
+}
+
+async fn telemetry_loop(
+    exporter: OtlpExporter,
+    interval: Duration,
+    api_metrics: Arc<ApiMetrics>,
+    storage: Arc<octra_storage::Storage>,
+    shutdown: CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = ticker.tick() => {
+                let events = match storage.event_stats(unix_seconds()).await {
+                    Ok(events) => events,
+                    Err(error) => {
+                        tracing::warn!(%error, "cannot collect event statistics for OTLP");
+                        continue;
+                    }
+                };
+                let metrics = api_metrics.snapshot();
+                let latency_micros_total =
+                    (metrics.latency_avg_ms * metrics.requests_total as f64 * 1_000.0)
+                        .clamp(0.0, u64::MAX as f64) as u64;
+                let snapshot = TelemetrySnapshot {
+                    api: ApiSnapshot {
+                        requests_total: metrics.requests_total,
+                        status_2xx: metrics.status_2xx,
+                        status_3xx: metrics.status_3xx,
+                        status_4xx: metrics.status_4xx,
+                        status_5xx: metrics.status_5xx,
+                        upstream_errors: metrics.upstream_errors,
+                        retries: metrics.retries,
+                        latency_micros_total,
+                    },
+                    events: EventSnapshot {
+                        pending_events: events.pending_events,
+                        delivered_events: events.delivered_events,
+                        failed_events: events.failed_events,
+                        pending_deliveries: events.pending_deliveries,
+                        failed_deliveries: events.failed_deliveries,
+                        retrying_deliveries: events.retrying_deliveries,
+                        oldest_pending_age_secs: events.oldest_pending_age_secs,
+                        total_attempts: events.total_attempts,
+                    },
+                };
+                if let Err(error) = exporter.export(&snapshot).await {
+                    tracing::warn!(%error, "cannot export OTLP metrics");
+                }
+            }
+        }
+    }
+}
+
+fn unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 async fn wait_for_shutdown(cancel: CancellationToken) {

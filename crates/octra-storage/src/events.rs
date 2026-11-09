@@ -35,6 +35,19 @@ pub struct EventDeliveryRecord {
     pub delivered_at: Option<i64>,
 }
 
+/// Delivery health of the durable event outbox.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EventStats {
+    pub pending_events: i64,
+    pub delivered_events: i64,
+    pub failed_events: i64,
+    pub pending_deliveries: i64,
+    pub failed_deliveries: i64,
+    pub retrying_deliveries: i64,
+    pub oldest_pending_age_secs: i64,
+    pub total_attempts: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct JobRecord {
     pub id: String,
@@ -179,6 +192,39 @@ impl Storage {
         .await
         .map_err(|error| map_error("cannot list events", error))?;
         Ok(rows.iter().map(event_from_row).collect())
+    }
+
+    /// Summarizes event and delivery state for operations dashboards and
+    /// telemetry. `oldest_pending_age_secs` is relative to `now`.
+    pub async fn event_stats(&self, now: i64) -> Result<EventStats> {
+        let row = sqlx::query(
+            "SELECT
+                (SELECT COUNT(*) FROM events WHERE status = 'pending') AS pending_events,
+                (SELECT COUNT(*) FROM events WHERE status = 'completed') AS delivered_events,
+                (SELECT COUNT(*) FROM events WHERE status = 'failed') AS failed_events,
+                (SELECT COUNT(*) FROM event_deliveries WHERE status = 'pending') AS pending_deliveries,
+                (SELECT COUNT(*) FROM event_deliveries WHERE status = 'failed') AS failed_deliveries,
+                (SELECT COUNT(*) FROM event_deliveries
+                  WHERE status = 'pending' AND attempts > 0) AS retrying_deliveries,
+                (SELECT COALESCE(MAX(?1 - created_at), 0) FROM events
+                  WHERE status = 'pending') AS oldest_pending_age_secs,
+                (SELECT COALESCE(SUM(attempts), 0) FROM event_deliveries) AS total_attempts",
+        )
+        .bind(now)
+        .fetch_one(self.pool())
+        .await
+        .map_err(|error| map_error("cannot summarize events", error))?;
+
+        Ok(EventStats {
+            pending_events: row.get("pending_events"),
+            delivered_events: row.get("delivered_events"),
+            failed_events: row.get("failed_events"),
+            pending_deliveries: row.get("pending_deliveries"),
+            failed_deliveries: row.get("failed_deliveries"),
+            retrying_deliveries: row.get("retrying_deliveries"),
+            oldest_pending_age_secs: row.get::<i64, _>("oldest_pending_age_secs").max(0),
+            total_attempts: row.get("total_attempts"),
+        })
     }
 
     pub async fn list_due_events(&self, now: i64, limit: u32) -> Result<Vec<EventRecord>> {
@@ -551,5 +597,139 @@ impl Storage {
         .await
         .map_err(|error| map_error("cannot trigger job", error))?;
         Ok(result.rows_affected() > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn in_memory_storage() -> Storage {
+        Storage::connect_in_memory().await.unwrap()
+    }
+
+    fn new_event(topic: &str) -> NewEvent {
+        NewEvent {
+            topic: topic.to_string(),
+            source: "test".to_string(),
+            payload_json: "{}".to_string(),
+            max_attempts: 5,
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stats_are_zero_for_an_empty_outbox() {
+        let storage = in_memory_storage().await;
+        let stats = storage.event_stats(1_700_000_000).await.unwrap();
+
+        assert_eq!(
+            stats,
+            EventStats {
+                pending_events: 0,
+                delivered_events: 0,
+                failed_events: 0,
+                pending_deliveries: 0,
+                failed_deliveries: 0,
+                retrying_deliveries: 0,
+                oldest_pending_age_secs: 0,
+                total_attempts: 0,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn event_stats_count_retrying_deliveries_and_oldest_pending_age() {
+        let storage = in_memory_storage().await;
+        let event = storage
+            .insert_event(&new_event("gateway.request"))
+            .await
+            .unwrap();
+
+        storage
+            .ensure_event_delivery(
+                &event.id,
+                "sub-a",
+                "plugin",
+                "instance",
+                5,
+                event.created_at,
+            )
+            .await
+            .unwrap();
+        storage
+            .ensure_event_delivery(
+                &event.id,
+                "sub-b",
+                "plugin",
+                "instance",
+                5,
+                event.created_at,
+            )
+            .await
+            .unwrap();
+        storage
+            .mark_event_delivery_delivered(&event.id, "sub-a", event.created_at)
+            .await
+            .unwrap();
+        storage
+            .mark_event_delivery_retry(&event.id, "sub-b", event.created_at + 30, "boom")
+            .await
+            .unwrap();
+        storage
+            .refresh_event_status(&event.id, event.created_at)
+            .await
+            .unwrap();
+
+        let stats = storage.event_stats(event.created_at + 42).await.unwrap();
+
+        assert_eq!(stats.pending_events, 1);
+        assert_eq!(stats.delivered_events, 0);
+        assert_eq!(stats.failed_events, 0);
+        assert_eq!(stats.pending_deliveries, 1);
+        assert_eq!(stats.failed_deliveries, 0);
+        assert_eq!(stats.retrying_deliveries, 1);
+        assert_eq!(stats.oldest_pending_age_secs, 42);
+        assert_eq!(stats.total_attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn event_stats_separate_completed_and_failed_events() {
+        let storage = in_memory_storage().await;
+        let completed = storage.insert_event(&new_event("a.b")).await.unwrap();
+        let failed = storage.insert_event(&new_event("c.d")).await.unwrap();
+
+        storage
+            .ensure_event_delivery(&completed.id, "sub-a", "plugin", "instance", 5, 0)
+            .await
+            .unwrap();
+        storage
+            .mark_event_delivery_delivered(&completed.id, "sub-a", 10)
+            .await
+            .unwrap();
+        storage
+            .refresh_event_status(&completed.id, 10)
+            .await
+            .unwrap();
+
+        storage
+            .ensure_event_delivery(&failed.id, "sub-b", "plugin", "instance", 5, 0)
+            .await
+            .unwrap();
+        storage
+            .mark_event_delivery_failed(&failed.id, "sub-b", "boom")
+            .await
+            .unwrap();
+        storage.refresh_event_status(&failed.id, 20).await.unwrap();
+
+        let stats = storage.event_stats(1_700_000_000).await.unwrap();
+
+        assert_eq!(stats.pending_events, 0);
+        assert_eq!(stats.delivered_events, 1);
+        assert_eq!(stats.failed_events, 1);
+        assert_eq!(stats.pending_deliveries, 0);
+        assert_eq!(stats.failed_deliveries, 1);
+        assert_eq!(stats.retrying_deliveries, 0);
+        assert_eq!(stats.oldest_pending_age_secs, 0);
+        assert_eq!(stats.total_attempts, 2);
     }
 }

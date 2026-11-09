@@ -47,3 +47,14 @@ batch_size = 5000
 [logging]
 level = "info"
 format = "pretty"
+
+# Optional OTLP/HTTP JSON metrics export. Disabled by default.
+# interval_secs must be between 5 and 3600.
+# [telemetry]
+# enabled = false
+# interval_secs = 30
+# service_name = "octra"
+#
+# [telemetry.otlp]
+# endpoint = "http://127.0.0.1:4318"
+# headers = {}

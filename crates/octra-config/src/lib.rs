@@ -1,5 +1,6 @@
 //! Configuration loading and local workspace path resolution.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -22,6 +23,7 @@ pub struct OctraConfig {
     pub storage: StorageConfig,
     pub logging: LoggingConfig,
     pub plugins: PluginsConfig,
+    pub telemetry: TelemetryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +153,23 @@ pub struct PluginsConfig {
     pub counter_backend: CounterBackend,
 }
 
+/// Optional periodic export of daemon metrics to an OTLP/HTTP collector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub service_name: String,
+    pub otlp: Option<OtlpConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OtlpConfig {
+    pub endpoint: String,
+    pub headers: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CounterBackend {
@@ -253,6 +272,17 @@ impl Default for LoggingConfig {
         Self {
             level: "info".to_string(),
             format: LogFormat::Pretty,
+        }
+    }
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 30,
+            service_name: "octra".to_string(),
+            otlp: None,
         }
     }
 }
@@ -526,6 +556,32 @@ fn validate(config: &OctraConfig) -> Result<()> {
         return Err(Error::Config("logging.level must not be empty".into()));
     }
 
+    if !(5..=3_600).contains(&config.telemetry.interval_secs) {
+        return Err(Error::Config(
+            "telemetry.interval_secs must be between 5 and 3600".into(),
+        ));
+    }
+    if config.telemetry.service_name.trim().is_empty() {
+        return Err(Error::Config(
+            "telemetry.service_name must not be empty".into(),
+        ));
+    }
+    if let Some(otlp) = &config.telemetry.otlp {
+        let parsed = url::Url::parse(&otlp.endpoint).map_err(|error| {
+            Error::Config(format!(
+                "invalid telemetry.otlp.endpoint '{}': {error}",
+                otlp.endpoint
+            ))
+        })?;
+        if !(parsed.scheme() == "http" || parsed.scheme() == "https") || parsed.host_str().is_none()
+        {
+            return Err(Error::Config(format!(
+                "telemetry.otlp.endpoint '{}' must be an absolute http:// or https:// URL",
+                otlp.endpoint
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -689,6 +745,88 @@ model = "nomic-embed-text"
             .unwrap()
             .cache_entries = 0;
         assert!(validate(&invalid_cache).is_err());
+    }
+
+    #[test]
+    fn telemetry_defaults_to_disabled() {
+        let config = OctraConfig::default();
+        assert!(!config.telemetry.enabled);
+        assert_eq!(config.telemetry.interval_secs, 30);
+        assert_eq!(config.telemetry.service_name, "octra");
+        assert!(config.telemetry.otlp.is_none());
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn parses_otlp_telemetry_config() {
+        let config: OctraConfig = toml::from_str(
+            r#"
+[telemetry]
+enabled = true
+interval_secs = 15
+service_name = "octra-test"
+
+[telemetry.otlp]
+endpoint = "http://127.0.0.1:4318/"
+headers = { authorization = "Bearer test" }
+"#,
+        )
+        .unwrap();
+
+        let telemetry = &config.telemetry;
+        assert!(telemetry.enabled);
+        assert_eq!(telemetry.interval_secs, 15);
+        assert_eq!(telemetry.service_name, "octra-test");
+        let otlp = telemetry.otlp.as_ref().unwrap();
+        assert_eq!(otlp.endpoint, "http://127.0.0.1:4318/");
+        assert_eq!(
+            otlp.headers.get("authorization").map(String::as_str),
+            Some("Bearer test")
+        );
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_telemetry_config() {
+        let mut config = OctraConfig::default();
+        config.telemetry.interval_secs = 4;
+        assert!(validate(&config).is_err());
+
+        let mut config = OctraConfig::default();
+        config.telemetry.interval_secs = 3_601;
+        assert!(validate(&config).is_err());
+
+        let mut config = OctraConfig::default();
+        config.telemetry.service_name = "  ".into();
+        assert!(validate(&config).is_err());
+
+        let mut config = OctraConfig::default();
+        config.telemetry.otlp = Some(OtlpConfig {
+            endpoint: "127.0.0.1:4318".into(),
+            headers: BTreeMap::new(),
+        });
+        assert!(validate(&config).is_err());
+
+        let mut config = OctraConfig::default();
+        config.telemetry.otlp = Some(OtlpConfig {
+            endpoint: "ftp://127.0.0.1:4318".into(),
+            headers: BTreeMap::new(),
+        });
+        assert!(validate(&config).is_err());
+
+        let mut config = OctraConfig::default();
+        config.telemetry.otlp = Some(OtlpConfig {
+            endpoint: "http://127.0.0.1:4318".into(),
+            headers: BTreeMap::new(),
+        });
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn telemetry_enabled_without_otlp_is_allowed() {
+        let mut config = OctraConfig::default();
+        config.telemetry.enabled = true;
+        assert!(validate(&config).is_ok());
     }
 
     #[test]

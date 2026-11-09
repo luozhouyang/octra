@@ -112,3 +112,4 @@ octra-plugin-storage = { path = "crates/octra-plugin-storage" }
 octra-plugin-events = { path = "crates/octra-plugin-events" }
 octra-secrets = { path = "crates/octra-secrets" }
 octra-storage = { path = "crates/octra-storage" }
+octra-telemetry = { path = "crates/octra-telemetry" }

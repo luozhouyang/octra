@@ -31,6 +31,44 @@ function formatLatency(calls: number, micros: number): string {
   return calls === 0 ? "—" : `${(micros / 1000).toFixed(1)} ms`;
 }
 
+function formatAge(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  if (seconds === 0) {
+    return "—";
+  }
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  if (seconds < 3_600) {
+    return `${Math.round(seconds / 60)}m`;
+  }
+  return `${Math.round(seconds / 3_600)}h`;
+}
+
+function MetricCell({
+  label,
+  value,
+  danger = false,
+}: {
+  label: string;
+  value: string;
+  danger?: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5 bg-card p-4">
+      <span className="text-[11.5px] text-muted-foreground">{label}</span>
+      <span
+        className={cn(
+          "font-mono text-xl font-medium leading-none",
+          danger ? toneText.danger : "text-foreground",
+        )}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
 export function PluginsPage() {
   const queryClient = useQueryClient();
 
@@ -44,6 +82,13 @@ export function PluginsPage() {
     queryKey: ["llm-plugin-metrics"],
     queryFn: () => controlClient().llmPluginMetrics(),
     retry: 1,
+  });
+
+  const eventStatsQuery = useQuery({
+    queryKey: ["event-stats"],
+    queryFn: () => controlClient().eventStats(),
+    retry: 1,
+    refetchInterval: 5_000,
   });
 
   const togglePlugin = useMutation({
@@ -111,6 +156,52 @@ export function PluginsPage() {
     return { stage, calls, rejections, p95 };
   });
   const totalRejections = stageRows.reduce((total, row) => total + row.rejections, 0);
+
+  const eventStats = eventStatsQuery.data;
+  const failedEvents = eventStats?.failed_events ?? 0;
+  const failedDeliveries = eventStats?.failed_deliveries ?? 0;
+  const eventStatsItems = [
+    {
+      label: "Pending events",
+      value: formatNumber(eventStats?.pending_events ?? 0),
+      danger: false,
+    },
+    {
+      label: "Delivered events",
+      value: formatNumber(eventStats?.delivered_events ?? 0),
+      danger: false,
+    },
+    {
+      label: "Failed events",
+      value: formatNumber(failedEvents),
+      danger: failedEvents > 0,
+    },
+    {
+      label: "Oldest pending",
+      value: formatAge(eventStats?.oldest_pending_age_secs ?? 0),
+      danger: false,
+    },
+    {
+      label: "Pending deliveries",
+      value: formatNumber(eventStats?.pending_deliveries ?? 0),
+      danger: false,
+    },
+    {
+      label: "Failed deliveries",
+      value: formatNumber(failedDeliveries),
+      danger: failedDeliveries > 0,
+    },
+    {
+      label: "Retrying deliveries",
+      value: formatNumber(eventStats?.retrying_deliveries ?? 0),
+      danger: false,
+    },
+    {
+      label: "Total attempts",
+      value: formatNumber(eventStats?.total_attempts ?? 0),
+      danger: false,
+    },
+  ];
 
   function latencyFor(pluginName: string): string {
     const entries = metricsEntries.filter((entry) => entry.name === pluginName);
@@ -273,6 +364,48 @@ export function PluginsPage() {
           </CardFooter>
         </Card>
       </div>
+
+      <Card className="overflow-hidden">
+        <CardHeader>
+          <div className="flex flex-col gap-1">
+            <CardTitle>Event delivery</CardTitle>
+            <CardDescription>
+              Outbox and subscriber delivery health · refreshed every 5 seconds
+            </CardDescription>
+          </div>
+          <Badge variant={failedEvents > 0 || failedDeliveries > 0 ? "danger" : "neutral"}>
+            {formatNumber(failedDeliveries)} failed deliveries
+          </Badge>
+        </CardHeader>
+        <CardSeparator />
+        {eventStatsQuery.isPending ? (
+          <div className="flex h-20 items-center px-5 text-[11px] text-muted-foreground">
+            Loading event statistics…
+          </div>
+        ) : eventStatsQuery.isError ? (
+          <div className="flex h-20 items-center px-5 text-[11px] text-danger">
+            Event statistics are unavailable.
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-px bg-border md:grid-cols-4">
+            {eventStatsItems.map((item) => (
+              <MetricCell
+                key={item.label}
+                label={item.label}
+                value={item.value}
+                danger={item.danger ?? false}
+              />
+            ))}
+          </div>
+        )}
+        <CardFooter>
+          <span className="text-[11px] text-muted-foreground">
+            {formatNumber(eventStats?.total_attempts ?? 0)} total attempts ·{" "}
+            {formatNumber(eventStats?.retrying_deliveries ?? 0)} retrying now
+          </span>
+          <span className="font-mono text-[11px] text-secondary">outbox · 5s poll</span>
+        </CardFooter>
+      </Card>
     </div>
   );
 }

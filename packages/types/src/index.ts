@@ -216,6 +216,17 @@ export interface ApiPluginStats {
   max_latency_micros: number;
 }
 
+export interface EventStats {
+  pending_events: number;
+  delivered_events: number;
+  failed_events: number;
+  pending_deliveries: number;
+  failed_deliveries: number;
+  retrying_deliveries: number;
+  oldest_pending_age_secs: number;
+  total_attempts: number;
+}
+
 // ---------------------------------------------------------------------------
 // LLM gateway
 
