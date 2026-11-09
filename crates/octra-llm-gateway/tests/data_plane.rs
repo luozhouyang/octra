@@ -2170,7 +2170,7 @@ async fn virtual_key_limit_allows_usage_below_the_limit() {
         .key_with_permissions(
             "limits",
             "octra-governance-key-0001",
-            json!({"limits": [{"window": "day", "tokens": 100}]}),
+            json!({"limits": [{"window": "day", "tokens": 10}]}),
         )
         .await;
     harness

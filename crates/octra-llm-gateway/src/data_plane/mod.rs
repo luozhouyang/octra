@@ -474,10 +474,20 @@ async fn enforce_virtual_key_limits(
                 )
                 .with_code("virtual_key_usage_unavailable")
             })?;
+        let remaining_tokens = limit
+            .tokens
+            .map(|limit| limit.saturating_sub(totals.tokens.max(0) as u64));
+        let remaining_cost = limit
+            .cost_micros
+            .map(|limit| limit.saturating_sub(totals.cost_micros.max(0) as u64));
         reservations.push(crate::vk_reservation::ReservationRequest {
             key: format!("{family}:{}:{since}", limit.window.as_str()),
-            tokens: reserved_tokens,
-            cost_micros: reserved_cost,
+            tokens: remaining_tokens
+                .map(|remaining| reserved_tokens.min(remaining))
+                .unwrap_or(reserved_tokens),
+            cost_micros: remaining_cost
+                .map(|remaining| reserved_cost.min(remaining))
+                .unwrap_or(reserved_cost),
             usage_tokens: totals.tokens.max(0) as u64,
             usage_cost_micros: totals.cost_micros.max(0) as u64,
             limit_tokens: limit.tokens,
@@ -488,7 +498,7 @@ async fn enforce_virtual_key_limits(
     let Some(reservation) = state.vk_reservations.try_reserve(reservations) else {
         return Err(GatewayError::upstream(
             429,
-            "virtual key limit would be exceeded by concurrent requests",
+            "virtual key limit exceeded",
         )
         .with_code("virtual_key_limit_exceeded"));
     };
