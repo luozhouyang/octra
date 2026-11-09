@@ -321,7 +321,11 @@ impl CompiledRoute {
 
         if !self.hosts.is_empty() {
             let host = input.host.map(normalize_host).unwrap_or_default();
-            if !self.hosts.iter().any(|expected| host_matches(expected, &host)) {
+            if !self
+                .hosts
+                .iter()
+                .any(|expected| host_matches(expected, &host))
+            {
                 return None;
             }
         }
@@ -512,10 +516,7 @@ mod tests {
             matched_id(&matcher, Some("api.example.com:8080"), "/x", "GET").as_deref(),
             Some("r1")
         );
-        assert_eq!(
-            matched_id(&matcher, Some("example.com"), "/x", "GET"),
-            None
-        );
+        assert_eq!(matched_id(&matcher, Some("example.com"), "/x", "GET"), None);
     }
 
     #[test]

@@ -508,11 +508,11 @@ impl<'a> ExternalRefResolver<'a> {
             DocumentBase::None
         };
         let file_root = match &base {
-            DocumentBase::Directory(directory) => Some(
-                std::fs::canonicalize(directory).map_err(|err| {
+            DocumentBase::Directory(directory) => {
+                Some(std::fs::canonicalize(directory).map_err(|err| {
                     format!("cannot resolve config.openapi.document_base_dir: {err}")
-                })?,
-            ),
+                })?)
+            }
             _ => None,
         };
         Ok(Self {
