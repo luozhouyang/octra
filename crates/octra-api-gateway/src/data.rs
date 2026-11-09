@@ -22,7 +22,7 @@ use octra_api_plugin_types::{
 };
 use octra_data_plane::{
     HEADER_REQUEST_ID, apply_forwarded_headers, error_response, new_request_id,
-    sanitize_request_headers, sanitize_response_headers,
+    path_has_dot_segments, sanitize_request_headers, sanitize_response_headers,
 };
 use octra_runtime::balancer::Endpoint;
 use octra_runtime::{
@@ -55,6 +55,55 @@ pub async fn proxy(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(new_request_id);
+
+    // Reject dot segments before route matching. `url::Url::set_path`
+    // normalizes them, which could forward a path outside the matched route
+    // prefix and bypass that route's plugins.
+    if path_has_dot_segments(&path) {
+        let response = invalid_path();
+        let elapsed = started.elapsed();
+        state.metrics.record(response.status().as_u16(), elapsed, 0);
+        tracing::warn!(
+            %method,
+            %path,
+            status = response.status().as_u16(),
+            latency_ms = elapsed.as_millis() as u64,
+            request_id = %request_id,
+            "api gateway: invalid path"
+        );
+        persist_request_log(
+            &state,
+            NewRequestLog {
+                request_id: request_id.clone(),
+                method: method.as_str().to_string(),
+                path: path.clone(),
+                status: response.status().as_u16(),
+                latency_ms: elapsed.as_millis() as u64,
+                route_id: None,
+                service_id: None,
+                target_url: None,
+                consumer_id: None,
+                error: Some("invalid_path".to_string()),
+            },
+        );
+        publish_request_event(
+            &state,
+            json!({
+                "request_id": request_id,
+                "method": method.as_str(),
+                "path": path,
+                "status": response.status().as_u16(),
+                "latency_ms": elapsed.as_millis() as u64,
+                "route_id": null,
+                "service_id": null,
+                "target_url": null,
+                "consumer_id": null,
+                "error": "invalid_path",
+            }),
+        );
+        return with_request_id(response, &request_id);
+    }
+
     let client_ip = state.client_ip.resolve(peer, &parts.headers);
 
     let snapshot = state.runtime.snapshot().await;
@@ -1106,6 +1155,14 @@ fn json_error(status: StatusCode, code: &'static str, message: &str) -> Response
 
 fn not_found() -> Response {
     json_error(StatusCode::NOT_FOUND, "no_route", "no matching route")
+}
+
+fn invalid_path() -> Response {
+    json_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_path",
+        "path must not contain dot segments",
+    )
 }
 
 fn bad_gateway(message: &str) -> Response {

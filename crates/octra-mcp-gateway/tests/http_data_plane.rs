@@ -3055,7 +3055,8 @@ async fn default_strategy_applies_globally_and_per_server_strategy_overrides_it(
         now - 10,
     );
 
-    // Global `/mcp` uses the default strategy.
+    // Global `/mcp` uses the default strategy. The server explicitly pinned to
+    // `server-sso` has a different effective strategy, so it is not exposed.
     let session = gateway.open_session(Some(&default_token)).await;
     let (status, body) = gateway
         .rpc(
@@ -3067,10 +3068,29 @@ async fn default_strategy_applies_globally_and_per_server_strategy_overrides_it(
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        tool_names(&body).is_empty(),
+        "a server with a different auth strategy must not be visible globally: {body}"
+    );
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "must-not-run"}}),
+            Some(&default_token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["error"]["code"], -32002, "{body}");
+    assert!(
+        upstream.state.calls.lock().unwrap().is_empty(),
+        "a server with a different auth strategy must not be callable globally: {body}"
+    );
     let (status, _, _) = gateway.initialize_at("/mcp", Some(&server_token)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    // The scoped endpoint overrides it with the server strategy.
+    // The scoped endpoint uses the server strategy and keeps its tools.
     let session = gateway
         .open_session_at("/mcp/remote", Some(&server_token))
         .await;
@@ -3078,17 +3098,144 @@ async fn default_strategy_applies_globally_and_per_server_strategy_overrides_it(
         .rpc_at(
             "/mcp/remote",
             &session,
-            json!(3),
+            json!(4),
             "tools/list",
             json!({}),
             Some(&server_token),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(tool_names(&body), vec!["remote__boom", "remote__echo"]);
+    let (status, body) = gateway
+        .rpc_at(
+            "/mcp/remote",
+            &session,
+            json!(5),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "scoped"}}),
+            Some(&server_token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["content"][0]["text"], "scoped");
     let (status, _, _) = gateway
         .initialize_at("/mcp/remote", Some(&default_token))
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn global_endpoint_rejects_tool_calls_for_servers_with_a_different_auth_strategy() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    let jwks = start_jwks(test_jwks("test-kid")).await;
+    let server_id = gateway.add_http_server("remote", &upstream).await;
+
+    let (status, default) = post_oidc_strategy(
+        &gateway,
+        "default-sso",
+        &jwks.url(),
+        Some("default-aud"),
+        true,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{default}");
+    let (status, per_server) = post_oidc_strategy(
+        &gateway,
+        "server-sso",
+        &jwks.url(),
+        Some("server-aud"),
+        false,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{per_server}");
+    let per_server_id = per_server["id"].as_str().unwrap();
+
+    let (status, updated) = gateway
+        .control(
+            "PUT",
+            &format!("/api/v1/mcp/servers/{server_id}"),
+            json!({
+                "name": "remote",
+                "transport": "http",
+                "url": upstream.url(),
+                "auth_strategy_id": per_server_id,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+
+    let now = epoch_now();
+    let default_token = mint_token(
+        "test-kid",
+        OIDC_ISSUER,
+        Some("default-aud"),
+        "default-user",
+        json!(["team"]),
+        "tools:call",
+        now + 3600,
+        now - 10,
+    );
+
+    let session = gateway.open_session(Some(&default_token)).await;
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(2),
+            "tools/list",
+            json!({}),
+            Some(&default_token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(tool_names(&body).is_empty(), "{body}");
+
+    // The remote tool must behave exactly like an unknown tool: no upstream
+    // call is made and the JSON-RPC error is the not-found code.
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "must-not-run"}}),
+            Some(&default_token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["error"]["code"], -32002, "{body}");
+    assert!(
+        upstream.state.calls.lock().unwrap().is_empty(),
+        "an excluded server must not receive the call: {body}"
+    );
+
+    // The server-scoped endpoint still uses the server strategy.
+    let server_token = mint_token(
+        "test-kid",
+        OIDC_ISSUER,
+        Some("server-aud"),
+        "server-user",
+        json!(["team"]),
+        "tools:call",
+        now + 3600,
+        now - 10,
+    );
+    let scoped = gateway
+        .open_session_at("/mcp/remote", Some(&server_token))
+        .await;
+    let (status, body) = gateway
+        .rpc_at(
+            "/mcp/remote",
+            &scoped,
+            json!(4),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "scoped"}}),
+            Some(&server_token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["content"][0]["text"], "scoped");
 }
 
 #[tokio::test]

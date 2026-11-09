@@ -117,6 +117,54 @@ pub fn apply_forwarded_headers(
     }
 }
 
+/// Returns `true` when a request path contains a dot segment.
+///
+/// Both raw `.`/`..` segments and percent-encoded forms are detected. This
+/// matters for proxy forwarding because `url::Url::set_path` normalizes dot
+/// segments, which could otherwise escape the matched route prefix and bypass
+/// its plugins. The whole path is decoded before splitting, so encoded
+/// separators such as `%2F..` cannot smuggle a dot segment past the check.
+/// Backslashes are treated as separators because the URL parser normalizes
+/// them to `/` for special schemes such as `http` and `https`.
+pub fn path_has_dot_segments(path: &str) -> bool {
+    // Decode percent escapes before splitting so `%2F..` or `%5C..` cannot
+    // smuggle a dot segment past the check for an upstream that decodes the
+    // path again.
+    let decoded = percent_decode_for_path_check(path);
+    decoded
+        .split(['/', '\\'])
+        .any(|segment| segment == "." || segment == "..")
+}
+
+fn percent_decode_for_path_check(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            out.push(high * 16 + low);
+            index += 3;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Reads a request body while enforcing the configured size limit.
 pub async fn body_bytes_limited(body: Body, limit: usize) -> Result<bytes::Bytes, axum::Error> {
     axum::body::to_bytes(body, limit).await
@@ -136,6 +184,41 @@ pub fn error_response(status: StatusCode, code: &str, message: &str) -> Response
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_raw_and_encoded_dot_segments() {
+        for path in [
+            "/public/../admin",
+            "/public/%2e%2e/admin",
+            "/public/%2E%2E/admin",
+            "/public/.%2e/admin",
+            "/public/%2e./admin",
+            "/%2e/admin",
+            "/public/..",
+            "/public/%2F..",
+            "/public/%5C..",
+            "..",
+        ] {
+            assert!(path_has_dot_segments(path), "expected rejection for {path}");
+        }
+    }
+
+    #[test]
+    fn detects_backslash_dot_segments() {
+        for path in ["/public\\..\\admin", "/public/..\\admin"] {
+            assert!(path_has_dot_segments(path), "expected rejection for {path}");
+        }
+    }
+
+    #[test]
+    fn accepts_harmless_paths_and_encoded_slashes() {
+        for path in ["/a.b", "/api/v1/users", "/v1.0/x", "/public/a%2Fb", "/", ""] {
+            assert!(
+                !path_has_dot_segments(path),
+                "expected acceptance for {path}"
+            );
+        }
+    }
 
     #[test]
     fn strips_hop_by_hop_and_connection_listed_headers() {

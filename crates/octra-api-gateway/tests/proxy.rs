@@ -187,6 +187,38 @@ async fn unknown_route_is_404() {
 }
 
 #[tokio::test]
+async fn rejects_dot_segment_paths_before_routing() {
+    let (addr, calls) = spawn_mock("public").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "public",
+        &format!("http://{addr}"),
+        false,
+        "/public",
+        true,
+    )
+    .await;
+    gateway.reload().await;
+
+    for path in ["/public/../admin", "/public/%2e%2e/admin"] {
+        let (status, _, json) = gateway.send(get(path)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+        assert_eq!(json["error"]["code"], "invalid_path", "path: {path}");
+        assert_eq!(
+            json["error"]["message"], "path must not contain dot segments",
+            "path: {path}"
+        );
+    }
+
+    let forwarded = calls.lock().unwrap().clone();
+    assert!(
+        forwarded.is_empty(),
+        "upstream must not receive dot-segment paths: {forwarded:?}"
+    );
+}
+
+#[tokio::test]
 async fn no_target_is_502_and_dead_target_is_502() {
     let gateway = gateway().await;
     let service = gateway

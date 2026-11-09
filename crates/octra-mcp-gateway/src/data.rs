@@ -5,7 +5,7 @@
 //! DELETE terminates the gateway session. Every request other than
 //! `initialize` is bound to an `Mcp-Session-Id` created by `initialize`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use axum::Json;
@@ -405,10 +405,9 @@ async fn tools_list(
         .list_servers()
         .await
         .map_err(storage_error)?;
-    let visible = match scope {
-        Some(scope) => scope.visible_server_ids.clone(),
-        None => visible_server_ids(&servers),
-    };
+    let visible = request_visible_server_ids(state, &servers, scope)
+        .await
+        .map_err(storage_error)?;
 
     let mut tools = Vec::new();
     for entry in &catalog {
@@ -573,20 +572,18 @@ async fn resolve_tool(
         return Err(not_found());
     };
 
-    // The global aggregate only routes tools its listeners expose; a scoped
-    // endpoint only routes tools of its selected server (and sources).
-    let visible = match scope {
-        Some(scope) => scope.visible_server_ids.clone(),
-        None => {
-            let servers = state
-                .storage
-                .mcp
-                .list_servers()
-                .await
-                .map_err(storage_error)?;
-            visible_server_ids(&servers)
-        }
-    };
+    // Only the endpoint's auth-compatible servers are addressable. A global
+    // aggregate therefore cannot call a server whose effective strategy
+    // differs from its own.
+    let servers = state
+        .storage
+        .mcp
+        .list_servers()
+        .await
+        .map_err(storage_error)?;
+    let visible = request_visible_server_ids(state, &servers, scope)
+        .await
+        .map_err(storage_error)?;
     if !visible.contains(&server.id) {
         return Err(not_found());
     }
@@ -901,6 +898,94 @@ fn scoped_visible_server_ids(servers: &[McpServer], scope: &McpServer) -> HashSe
     visible
 }
 
+/// The effective auth strategy id of each server in an aggregate endpoint.
+///
+/// A server follows its explicit strategy only while that strategy still
+/// exists and is enabled; otherwise the enabled default strategy applies.
+/// `None` means the server falls back to MCP API keys (or anonymous access
+/// when no key exists).
+struct EffectiveAuthStrategies {
+    default_id: Option<String>,
+    by_server: HashMap<String, Option<String>>,
+}
+
+impl EffectiveAuthStrategies {
+    /// The strategy an aggregate endpoint itself authenticates with.
+    fn endpoint_strategy_id(&self, scope: Option<&RouteScope>) -> Option<&str> {
+        match scope {
+            Some(scope) => self
+                .by_server
+                .get(&scope.server.id)
+                .and_then(|strategy| strategy.as_deref()),
+            None => self.default_id.as_deref(),
+        }
+    }
+
+    /// Keeps only the servers whose effective strategy matches the endpoint's,
+    /// so an aggregate endpoint cannot expose a server authenticated by a
+    /// different (possibly weaker) strategy.
+    fn retain_compatible(
+        &self,
+        visible: HashSet<String>,
+        endpoint_strategy_id: Option<&str>,
+    ) -> HashSet<String> {
+        visible
+            .into_iter()
+            .filter(|server_id| {
+                self.by_server
+                    .get(server_id)
+                    .is_some_and(|strategy| strategy.as_deref() == endpoint_strategy_id)
+            })
+            .collect()
+    }
+}
+
+async fn load_effective_auth_strategies(
+    storage: &octra_storage::Storage,
+    servers: &[McpServer],
+) -> octra_core::Result<EffectiveAuthStrategies> {
+    let default = storage.mcp.get_default_auth_strategy().await?;
+    let strategies = storage.mcp.list_auth_strategies().await?;
+    let enabled: HashSet<&str> = strategies
+        .iter()
+        .filter(|strategy| strategy.enabled)
+        .map(|strategy| strategy.id.as_str())
+        .collect();
+    let default_id = default.as_ref().map(|strategy| strategy.id.as_str());
+    let by_server = servers
+        .iter()
+        .map(|server| {
+            let effective = server
+                .auth_strategy_id
+                .as_deref()
+                .filter(|id| enabled.contains(id))
+                .or(default_id)
+                .map(str::to_string);
+            (server.id.clone(), effective)
+        })
+        .collect();
+    Ok(EffectiveAuthStrategies {
+        default_id: default_id.map(str::to_string),
+        by_server,
+    })
+}
+
+/// The servers a request may see: the endpoint's topology-visible servers,
+/// narrowed to those whose effective auth strategy matches the endpoint's.
+async fn request_visible_server_ids(
+    state: &McpDataState,
+    servers: &[McpServer],
+    scope: Option<&RouteScope>,
+) -> octra_core::Result<HashSet<String>> {
+    let visible = match scope {
+        Some(scope) => scope.visible_server_ids.clone(),
+        None => visible_server_ids(servers),
+    };
+    let strategies = load_effective_auth_strategies(&state.storage, servers).await?;
+    let endpoint_strategy_id = strategies.endpoint_strategy_id(scope);
+    Ok(strategies.retain_compatible(visible, endpoint_strategy_id))
+}
+
 async fn record(
     state: &McpDataState,
     server: &McpServer,
@@ -1017,6 +1102,15 @@ async fn handle_get_inner(
             .map(|listener| scoped_visible_server_ids(&servers, listener))
             .unwrap_or_else(|| visible_server_ids(&servers)),
     };
+    let strategies = match load_effective_auth_strategies(&state.storage, &servers).await {
+        Ok(strategies) => strategies,
+        Err(err) => {
+            tracing::warn!(%err, "cannot load MCP auth strategies for the GET stream");
+            return keepalive_only();
+        }
+    };
+    let endpoint_strategy_id = strategies.endpoint_strategy_id(scope);
+    let visible = strategies.retain_compatible(visible, endpoint_strategy_id);
 
     let (sender, receiver) = mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
     let (cancel, cancel_rx) = tokio::sync::watch::channel(false);
