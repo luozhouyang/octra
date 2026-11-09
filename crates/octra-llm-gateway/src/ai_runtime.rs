@@ -22,6 +22,7 @@ use serde_json::Value;
 
 /// One provider dispatch target produced by flattening nested model groups.
 struct FlattenedTarget {
+    source_target_id: String,
     provider_id: String,
     upstream_model: String,
     account_id: Option<String>,
@@ -88,6 +89,7 @@ pub fn runtime_data_from_ai(
         routes: Vec::new(),
         targets: Vec::new(),
         target_semantic_descriptions: std::collections::BTreeMap::new(),
+        policy_target_ids: std::collections::BTreeMap::new(),
         accounts: Vec::new(),
         virtual_keys,
     };
@@ -180,6 +182,9 @@ fn map_models(
 
         for (index, target) in flattened.into_iter().enumerate() {
             let target_id = format!("ai-target:{model_id}:{index}");
+            runtime
+                .policy_target_ids
+                .insert(target_id.clone(), target.source_target_id.clone());
             if let Some(description) = target
                 .semantic_description
                 .as_deref()
@@ -254,13 +259,7 @@ fn map_policies(compiled: &CompiledControlPlane, now: DateTime<Utc>, runtime: &m
                     .map(|model| model.model.name.clone())
                     .or_else(|| attachment.scope_id.clone()),
             ),
-            AiPolicyScope::Target => {
-                tracing::warn!(
-                    attachment = %attachment.id,
-                    "target-scoped allowlist is not enforced at target granularity"
-                );
-                continue;
-            }
+            AiPolicyScope::Target => ("target", attachment.scope_id.clone()),
         };
         runtime.policies.push(Policy {
             id: format!("ai-policy:{}", policy.id),
@@ -320,6 +319,7 @@ fn flatten_targets(
 
         if let Some(provider) = &target.provider {
             out.push(FlattenedTarget {
+                source_target_id: target.target.id.clone(),
                 provider_id: provider.provider_id.clone(),
                 upstream_model: provider.upstream_model.clone(),
                 account_id: provider.account_id.clone(),

@@ -149,6 +149,7 @@ async fn gemini_count_tokens(
         model: &model,
         provider_id: None,
         provider_name: None,
+        target_id: None,
     };
     if !snapshot.permits_model_in(&policy) {
         let error =
@@ -208,6 +209,7 @@ async fn gemini_list_models(state: State<LlmDataState>, request: Incoming) -> Ll
                 model: &model.id,
                 provider_id: None,
                 provider_name: None,
+                target_id: None,
             }) && snapshot.virtual_key_permits_model(virtual_key_id.as_deref(), &model.id)
         })
         .map(|model| {
@@ -251,6 +253,7 @@ async fn list_models(state: State<LlmDataState>, request: Incoming) -> LlmRespon
                 model: &model.id,
                 provider_id: None,
                 provider_name: None,
+                target_id: None,
             }) && snapshot.virtual_key_permits_model(virtual_key_id.as_deref(), &model.id)
         })
         .map(|model| {
@@ -549,6 +552,7 @@ async fn handle(
         model: &requested_model,
         provider_id: None,
         provider_name: None,
+        target_id: None,
     };
     let model_error = if !snapshot.permits_model_in(&model_policy) {
         Some(
@@ -670,6 +674,7 @@ async fn handle(
             model: &ir.model,
             provider_id: None,
             provider_name: None,
+            target_id: None,
         };
         let effective_error = if !snapshot.permits_model_in(&effective_policy) {
             Some(
@@ -1003,6 +1008,7 @@ async fn execute(
             model: requested_model,
             provider_id: Some(&provider.id),
             provider_name: Some(&provider.name),
+            target_id: target.policy_target_id.as_deref(),
         };
         if !snapshot.permits_provider_in(&provider_policy) {
             last_error = Some(

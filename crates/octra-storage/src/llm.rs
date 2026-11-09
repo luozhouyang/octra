@@ -278,6 +278,10 @@ pub struct LlmRuntimeData {
     /// AI-native target descriptions keyed by synthesised runtime target id.
     /// Legacy rows leave this empty; only the AI-native mapping populates it.
     pub target_semantic_descriptions: std::collections::BTreeMap<String, String>,
+    /// AI control-plane target ids keyed by synthesised runtime target id.
+    /// Target-scoped allowlists use the original id; legacy rows leave this
+    /// empty.
+    pub policy_target_ids: std::collections::BTreeMap<String, String>,
     pub accounts: Vec<LlmProviderAccountRecord>,
     pub virtual_keys: Vec<LlmVirtualKeyRecord>,
 }

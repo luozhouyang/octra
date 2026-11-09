@@ -41,6 +41,7 @@ pub struct PolicyContext<'a> {
     pub model: &'a str,
     pub provider_id: Option<&'a str>,
     pub provider_name: Option<&'a str>,
+    pub target_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,7 @@ pub struct RuntimeSnapshot {
     policy_virtual_keys: BTreeMap<String, PolicyLimits>,
     policy_providers: BTreeMap<String, PolicyLimits>,
     policy_models: BTreeMap<String, PolicyLimits>,
+    policy_targets: BTreeMap<String, PolicyLimits>,
     virtual_keys: BTreeMap<String, VirtualKeyPolicy>,
     consumer_groups: BTreeMap<String, Vec<String>>,
 }
@@ -148,6 +150,7 @@ impl RuntimeSnapshot {
         let mut policy_virtual_keys: BTreeMap<String, PolicyLimits> = BTreeMap::new();
         let mut policy_providers: BTreeMap<String, PolicyLimits> = BTreeMap::new();
         let mut policy_models: BTreeMap<String, PolicyLimits> = BTreeMap::new();
+        let mut policy_targets: BTreeMap<String, PolicyLimits> = BTreeMap::new();
         for policy in &data.policies {
             let scope = policy.scope.as_str();
             let target = match (scope, policy.consumer_id.as_deref()) {
@@ -156,6 +159,7 @@ impl RuntimeSnapshot {
                 ("virtual_key", Some(id)) => Some((&mut policy_virtual_keys, id)),
                 ("provider", Some(id)) => Some((&mut policy_providers, id)),
                 ("model", Some(id)) => Some((&mut policy_models, id)),
+                ("target", Some(id)) => Some((&mut policy_targets, id)),
                 _ => None,
             };
             match target {
@@ -219,6 +223,7 @@ impl RuntimeSnapshot {
             policy_virtual_keys,
             policy_providers,
             policy_models,
+            policy_targets,
             virtual_keys,
             consumer_groups,
         }
@@ -288,6 +293,14 @@ impl RuntimeSnapshot {
         {
             return false;
         }
+        if let Some(target_id) = context.target_id
+            && !self
+                .policy_targets
+                .get(target_id)
+                .is_none_or(|limits| permits(&limits.models, &[context.model]))
+        {
+            return false;
+        }
         true
     }
 
@@ -353,6 +366,14 @@ impl RuntimeSnapshot {
                 .policy_providers
                 .get(id)
                 .is_none_or(|limits| permits(&limits.providers, &candidates))
+        {
+            return false;
+        }
+        if let Some(target_id) = context.target_id
+            && !self.policy_targets.get(target_id).is_none_or(|limits| {
+                permits(&limits.providers, &candidates)
+                    && (context.model.is_empty() || permits(&limits.models, &[context.model]))
+            })
         {
             return false;
         }

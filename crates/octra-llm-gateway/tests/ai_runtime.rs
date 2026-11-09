@@ -442,6 +442,11 @@ async fn scoped_allowlists_apply_to_groups_keys_models_and_providers() {
             allowlist_policy("key-allow", "Key Allow", &["other-model"]),
             allowlist_policy("provider-allow", "Provider Allow", &["chat-model"]),
             {
+                let mut policy = allowlist_policy("target-allow", "Target Allow", &["chat-model"]);
+                policy.config = json!({"allowed_providers": ["provider-1"]});
+                policy
+            },
+            {
                 let mut policy = allowlist_policy("model-allow", "Model Allow", &["chat-model"]);
                 policy.config = json!({"allowed_providers": ["provider-1"]});
                 policy
@@ -467,6 +472,12 @@ async fn scoped_allowlists_apply_to_groups_keys_models_and_providers() {
                 Some("provider-1"),
             ),
             attachment(
+                "target-attachment",
+                "target-allow",
+                AiPolicyScope::Target,
+                Some("target-1"),
+            ),
+            attachment(
                 "model-attachment",
                 "model-allow",
                 AiPolicyScope::Model,
@@ -476,7 +487,11 @@ async fn scoped_allowlists_apply_to_groups_keys_models_and_providers() {
     };
 
     let runtime = runtime_data_from_ai(&data, Vec::new()).unwrap();
-    assert_eq!(runtime.policies.len(), 4);
+    assert_eq!(runtime.policies.len(), 5);
+    assert_eq!(
+        runtime.policy_target_ids.get("ai-target:model-1:0"),
+        Some(&"target-1".to_string())
+    );
     let snapshot = RuntimeSnapshot::build(runtime);
     let base = octra_llm_gateway::runtime::PolicyContext {
         consumer_id: None,
@@ -485,6 +500,7 @@ async fn scoped_allowlists_apply_to_groups_keys_models_and_providers() {
         model: "chat-model",
         provider_id: Some("provider-1"),
         provider_name: Some("Provider One"),
+        target_id: Some("target-1"),
     };
     assert!(snapshot.permits_model_in(&base));
     assert!(snapshot.permits_provider_in(&base));
@@ -513,6 +529,19 @@ async fn scoped_allowlists_apply_to_groups_keys_models_and_providers() {
         ..base.clone()
     };
     assert!(!snapshot.permits_provider_in(&wrong_provider));
+
+    let denied_target = octra_llm_gateway::runtime::PolicyContext {
+        provider_id: Some("provider-2"),
+        provider_name: Some("Provider Two"),
+        target_id: Some("target-1"),
+        ..base.clone()
+    };
+    assert!(!snapshot.permits_provider_in(&denied_target));
+    let other_target = octra_llm_gateway::runtime::PolicyContext {
+        target_id: Some("target-2"),
+        ..base.clone()
+    };
+    assert!(snapshot.permits_provider_in(&other_target));
 }
 
 #[tokio::test]

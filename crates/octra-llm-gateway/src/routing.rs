@@ -22,6 +22,8 @@ pub struct Target {
     pub weight: u32,
     pub priority: i64,
     pub semantic_description: Option<String>,
+    /// AI control-plane target id used by target-scoped policies, when known.
+    pub policy_target_id: Option<String>,
 }
 
 impl Target {
@@ -372,6 +374,7 @@ impl RoutePlan {
                 weight: record.weight.clamp(1, 1000) as u32,
                 priority: record.priority,
                 semantic_description: data.target_semantic_descriptions.get(&record.id).cloned(),
+                policy_target_id: data.policy_target_ids.get(&record.id).cloned(),
             });
         }
 
@@ -556,6 +559,7 @@ mod tests {
             routes: Vec::new(),
             targets,
             target_semantic_descriptions: BTreeMap::new(),
+            policy_target_ids: BTreeMap::new(),
             accounts: Vec::new(),
             virtual_keys: Vec::new(),
         };
@@ -592,6 +596,7 @@ mod tests {
             weight: 1,
             priority: 0,
             semantic_description: None,
+            policy_target_id: None,
         }
     }
 
