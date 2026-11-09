@@ -97,6 +97,21 @@ fn set_cookies(headers: &HeaderMap) -> Vec<String> {
         .collect()
 }
 
+fn cookie_pair(cookies: &[String], name: &str) -> (String, String) {
+    let value = |suffix: &str| {
+        cookies
+            .iter()
+            .find_map(|cookie| {
+                cookie
+                    .strip_prefix(&format!("{name}{suffix}="))
+                    .and_then(|rest| rest.split(';').next())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| panic!("missing cookie {name}{suffix}: {cookies:?}"))
+    };
+    (value(""), value(".sig"))
+}
+
 #[tokio::test]
 async fn sets_sticky_cookie_and_honors_it_on_follow_up_requests() {
     let (addr_a, _calls_a) = spawn_mock("sticky-a").await;
@@ -122,17 +137,16 @@ async fn sets_sticky_cookie_and_honors_it_on_follow_up_requests() {
         selected == "sticky-a" || selected == "sticky-b",
         "unexpected upstream {selected}"
     );
-    assert_eq!(
-        set_cookies(&headers),
-        vec![format!(
-            "session={selected}; Path=/api; HttpOnly; SameSite=Lax"
-        )]
-    );
+    let cookies = set_cookies(&headers);
+    assert_eq!(cookies.len(), 2);
+    assert!(cookies.iter().any(|cookie| cookie.ends_with("; Path=/api; HttpOnly; SameSite=Lax")));
+    let (target, signature) = cookie_pair(&cookies, "session");
+    assert_eq!(target, selected);
 
     let mut follow_up = get("/");
     follow_up.headers_mut().insert(
         header::COOKIE,
-        header_default(&format!("session={selected}")),
+        header_default(&format!("session={target}; session.sig={signature}")),
     );
     let (status, headers, json) = gateway.send(follow_up).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -165,21 +179,30 @@ async fn resets_invalid_sticky_cookie_to_the_selected_target() {
     let (status, headers, json) = gateway.send(request).await;
     assert_eq!(status, StatusCode::CREATED);
     let selected = json["server"].as_str().expect("upstream name in response");
-    assert_eq!(
-        set_cookies(&headers),
-        vec![format!(
-            "session={selected}; Path=/sticky; HttpOnly; SameSite=Lax"
-        )]
-    );
+    let cookies = set_cookies(&headers);
+    assert_eq!(cookies.len(), 2);
+    let (target, signature) = cookie_pair(&cookies, "session");
+    assert_eq!(target, selected);
 
     let mut follow_up = get("/");
     follow_up.headers_mut().insert(
         header::COOKIE,
-        header_default(&format!("session={selected}")),
+        header_default(&format!("session={target}; session.sig={signature}")),
     );
     let (status, _, json) = gateway.send(follow_up).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(json["server"].as_str(), Some(selected));
+
+    // A tampered target id with the original signature is rejected and both
+    // cookies are reset to the newly selected target.
+    let mut tampered_request = get("/");
+    tampered_request.headers_mut().insert(
+        header::COOKIE,
+        header_default(&format!("session={selected}tampered; session.sig={signature}")),
+    );
+    let (status, headers, _) = gateway.send(tampered_request).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(set_cookies(&headers).len(), 2);
 }
 
 #[tokio::test]
@@ -228,7 +251,11 @@ async fn preserves_upstream_set_cookie_headers() {
     );
     assert!(
         cookies.contains(&"kong=cookie-target; Path=/; HttpOnly; SameSite=Lax".to_string()),
-        "sticky cookie was not appended: {cookies:?}"
+        "sticky target cookie was not appended: {cookies:?}"
+    );
+    assert!(
+        cookies.iter().any(|cookie| cookie.starts_with("kong.sig=")),
+        "sticky signature cookie was not appended: {cookies:?}"
     );
 }
 

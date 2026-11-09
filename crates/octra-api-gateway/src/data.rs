@@ -436,8 +436,16 @@ pub async fn proxy(
     // Set (or reset) the sticky cookie when the request has no cookie or the
     // presented value does not name an eligible target.
     let sticky_cookie = endpoint.sticky_cookie().filter(|cookie| {
+        let signature_name = format!("{}.sig", cookie.name);
         request_cookie(&parts.headers, &cookie.name)
-            .is_none_or(|value| !attempts.iter().any(|endpoint| endpoint.id == value))
+            .and_then(|target| {
+                request_cookie(&parts.headers, &signature_name)
+                    .filter(|signature| {
+                        verify_sticky_signature(&state.sticky_secret, target, signature)
+                    })
+                    .map(|_| target)
+            })
+            .is_none_or(|target| !attempts.iter().any(|endpoint| endpoint.id == target))
     });
     let retry_limit = 1 + usize::try_from(
         dispatch
@@ -680,12 +688,21 @@ pub async fn proxy(
 
             if let Some(cookie) = &sticky_cookie
                 && let Some(target) = response_parts.extensions.get::<UpstreamTarget>()
-                && let Ok(value) = HeaderValue::from_str(&format!(
+            {
+                if let Ok(value) = HeaderValue::from_str(&format!(
                     "{}={}; Path={}; HttpOnly; SameSite=Lax",
                     cookie.name, target.id, cookie.path
-                ))
-            {
-                response_parts.headers.append(header::SET_COOKIE, value);
+                )) {
+                    response_parts.headers.append(header::SET_COOKIE, value);
+                }
+                if let Ok(value) = HeaderValue::from_str(&format!(
+                    "{}.sig={}; Path={}; HttpOnly; SameSite=Lax",
+                    cookie.name,
+                    sticky_signature(&state.sticky_secret, &target.id),
+                    cookie.path
+                )) {
+                    response_parts.headers.append(header::SET_COOKIE, value);
+                }
             }
 
             let response_body_plugins =
@@ -1221,6 +1238,25 @@ fn response_target(parts: &axum::http::response::Parts) -> String {
 }
 
 /// Reads one cookie value from the request `Cookie` header(s).
+fn sticky_signature(secret: &[u8; 32], target: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key");
+    mac.update(target.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn verify_sticky_signature(secret: &[u8; 32], target: &str, signature: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let Ok(signature) = hex::decode(signature) else {
+        return false;
+    };
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key");
+    mac.update(target.as_bytes());
+    mac.verify_slice(&signature).is_ok()
+}
+
 fn request_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get_all(header::COOKIE)

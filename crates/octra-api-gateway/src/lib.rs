@@ -42,6 +42,8 @@ pub struct ApiDataState {
     pub client_ip: Arc<ClientIpResolver>,
     pub metrics: Arc<ApiMetrics>,
     pub events: Option<Arc<dyn EventPublisher>>,
+    /// Process-local key for signing sticky-target cookies.
+    pub(crate) sticky_secret: Arc<[u8; 32]>,
 }
 
 impl ApiDataState {
@@ -74,6 +76,7 @@ impl ApiDataState {
             client_ip,
             metrics,
             events: None,
+            sticky_secret: Arc::new(rand::random::<[u8; 32]>()),
         }
     }
 
