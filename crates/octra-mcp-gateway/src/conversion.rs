@@ -6,20 +6,26 @@
 //! and JSON body inputs. Calls are executed with the shared reqwest client; no
 //! MCP upstream connection is opened for these servers.
 //!
-//! Supported subset: OpenAPI 3.0/3.1 documents in JSON or YAML with inline or
-//! component-referenced parameters and request bodies using `application/json`
-//! (or a `+json` media type). Cookie parameters, `multipart` and form bodies,
-//! and non-local schema references are not converted. Local `$ref` values in
-//! schemas are preserved rather than inlined.
+//! Supported subset: OpenAPI 3.0/3.1 documents in JSON or YAML with path,
+//! query, header, and cookie parameters using the OpenAPI styles, request
+//! bodies in JSON, form-urlencoded, multipart, or plain text, and external
+//! `$ref` values resolved from local files or HTTP(S) URLs. Local component
+//! `$ref` values in schemas are preserved rather than inlined.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use octra_mcp_core::domain::{McpServer, McpTool, secret_reference, validate_secret_reference};
 use octra_mcp_core::protocol::CallToolResult;
 use openapiv3::{
-    OpenAPI, Operation, Parameter, ParameterSchemaOrContent, PathItem, ReferenceOr, RequestBody,
-    Schema,
+    OpenAPI, Operation, Parameter, ParameterSchemaOrContent, PathItem, PathStyle, QueryStyle,
+    ReferenceOr, RequestBody, Schema, SchemaKind, Type,
 };
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, Url};
@@ -32,6 +38,10 @@ use crate::client::McpError;
 pub const OPENAPI_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Upper bound on an OpenAPI document, inline or fetched.
 pub const OPENAPI_DOCUMENT_MAX_BYTES: usize = 10 * 1024 * 1024;
+/// Maximum external reference hops while resolving one document.
+pub const OPENAPI_REF_MAX_DEPTH: usize = 8;
+/// Maximum documents (root plus external) loaded while resolving one parse.
+pub const OPENAPI_REF_MAX_DOCUMENTS: usize = 16;
 /// Upper bound on the body returned by a generated HTTP tool.
 pub const HTTP_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
 const AUTH_BEARER: &str = "bearer";
@@ -47,6 +57,10 @@ pub struct OpenApiConfig {
     /// Remote JSON or YAML document, fetched on create/update/refresh only.
     #[serde(default)]
     pub document_url: Option<String>,
+    /// Directory used to resolve relative external `$ref` paths when the
+    /// document itself is inline. Defaults to the location of `document_url`.
+    #[serde(default, alias = "base_dir", alias = "document_base")]
+    pub document_base_dir: Option<String>,
     /// Base URL used when the document's first server URL is relative.
     #[serde(default)]
     pub base_url: Option<String>,
@@ -141,6 +155,15 @@ impl OpenApiConfig {
         if let Some(url) = document_url {
             validate_absolute_http_url("config.openapi.document_url", url)?;
         }
+        if let Some(base_dir) = self
+            .document_base_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            && base_dir.contains('\0')
+        {
+            return Err("config.openapi.document_base_dir is not a valid path".into());
+        }
         if let Some(base_url) = self.base_url.as_deref() {
             let base_url = base_url.trim();
             if !base_url.is_empty() {
@@ -156,6 +179,14 @@ impl OpenApiConfig {
     /// The effective configured base URL, if one was supplied.
     pub fn base_url(&self) -> Option<&str> {
         self.base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    /// The configured directory for relative external references.
+    pub fn document_base_dir(&self) -> Option<&str> {
+        self.document_base_dir
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -239,7 +270,12 @@ impl ConvertedTool {
 /// the relative URL (or an empty base). Server conversion validates that a
 /// configured `base_url` fills the gap before persisting tools.
 pub fn parse_openapi(document: &str) -> Result<Vec<ConvertedTool>, String> {
-    let openapi = parse_document(document)?;
+    let value = parse_document_value(document)?;
+    // `parse_openapi` has no configured document location, so it cannot
+    // resolve external references. Reject them instead of silently dropping
+    // operations whose path item or parameter stays unresolved.
+    reject_external_refs(&value)?;
+    let openapi = openapi_from_value(value)?;
     // The parser itself is lenient about a missing base URL; server
     // conversion validates it before persisting generated tools.
     let base_url = effective_base(&openapi, Some("")).unwrap_or_default();
@@ -256,7 +292,7 @@ fn convert_parsed(openapi: OpenAPI, base_url: &str) -> Result<Vec<ConvertedTool>
         };
         for (method, operation) in item.iter() {
             let mut converted =
-                convert_operation(&openapi, path, method, item, operation, base_url);
+                convert_operation(&openapi, path, method, item, operation, base_url)?;
             converted.name = unique_name(&mut used_names, converted.name);
             tools.push(converted);
         }
@@ -268,10 +304,28 @@ fn convert_parsed(openapi: OpenAPI, base_url: &str) -> Result<Vec<ConvertedTool>
     Ok(tools)
 }
 
-/// Builds persistable tools for a conversion server, applying its base URL and
-/// outbound auth. Errors are safe to return to control-plane callers.
-pub fn build_tools(config: &OpenApiConfig, document: &str) -> Result<Vec<ConvertedTool>, String> {
-    let openapi = parse_document(document)?;
+/// Builds persistable tools for a conversion server without an HTTP client.
+///
+/// Local file references are resolved relative to `document_base_dir`;
+/// external HTTP(S) references require [`build_tools_with_http`] or
+/// [`generate_tools`].
+pub async fn build_tools(
+    config: &OpenApiConfig,
+    document: &str,
+) -> Result<Vec<ConvertedTool>, String> {
+    build_tools_with_http(None, config, document).await
+}
+
+/// Builds persistable tools, resolving external references with `http`.
+pub async fn build_tools_with_http(
+    http: Option<&reqwest::Client>,
+    config: &OpenApiConfig,
+    document: &str,
+) -> Result<Vec<ConvertedTool>, String> {
+    let value = ExternalRefResolver::new(http, config)?
+        .resolve_document(document)
+        .await?;
+    let openapi = openapi_from_value(value)?;
     let base_url = effective_base(&openapi, config.base_url())?;
     let auth = config.auth.as_ref().map(OpenApiAuth::to_json);
     let mut tools = convert_parsed(openapi, &base_url)?;
@@ -332,34 +386,497 @@ pub async fn generate_tools(
     config: &OpenApiConfig,
 ) -> Result<Vec<ConvertedTool>, String> {
     let document = load_document(http, config).await?;
-    build_tools(config, &document)
+    build_tools_with_http(Some(http), config, &document).await
 }
 
-// ----- parsing -----------------------------------------------------------
+// ----- parsing and external references -----------------------------------
 
-fn parse_document(document: &str) -> Result<OpenAPI, String> {
+fn parse_document_value(document: &str) -> Result<Value, String> {
     let trimmed = document.trim();
     if trimmed.is_empty() {
         return Err("OpenAPI document is empty".into());
     }
 
-    let json_error = match serde_json::from_str::<OpenAPI>(trimmed) {
-        Ok(openapi) => return validate_version(openapi),
+    let json_error = match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => return Ok(value),
         Err(err) => err,
     };
 
-    let converted = serde_yaml::from_str::<serde_yaml::Value>(trimmed)
+    serde_yaml::from_str::<serde_yaml::Value>(trimmed)
         .map_err(|yaml_error| {
             format!("invalid OpenAPI document: JSON error: {json_error}; YAML error: {yaml_error}")
         })
         .and_then(|value| {
             serde_json::to_value(value).map_err(|err| format!("invalid YAML document: {err}"))
         })
-        .and_then(|value| {
-            serde_json::from_value::<OpenAPI>(value)
-                .map_err(|err| format!("invalid OpenAPI document: {err}"))
-        })?;
-    validate_version(converted)
+}
+
+fn openapi_from_value(value: Value) -> Result<OpenAPI, String> {
+    let openapi: OpenAPI =
+        serde_json::from_value(value).map_err(|err| format!("invalid OpenAPI document: {err}"))?;
+    validate_version(openapi)
+}
+
+fn reject_external_refs(value: &Value) -> Result<(), String> {
+    match value {
+        Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                let (document, _) = split_reference(reference);
+                if !document.is_empty() {
+                    return Err(format!(
+                        "external OpenAPI reference '{reference}' requires document_url \
+                         or document_base_dir"
+                    ));
+                }
+            }
+            for value in object.values() {
+                reject_external_refs(value)?;
+            }
+        }
+        Value::Array(items) => {
+            for value in items {
+                reject_external_refs(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn split_reference(reference: &str) -> (&str, &str) {
+    match reference.split_once('#') {
+        Some((document, fragment)) => (document, fragment),
+        None => (reference, ""),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum DocumentBase {
+    Url(Url),
+    Directory(PathBuf),
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DocumentSource {
+    Url(Url),
+    File(PathBuf),
+}
+
+impl DocumentSource {
+    fn cache_key(&self) -> String {
+        match self {
+            DocumentSource::Url(url) => format!("url:{url}"),
+            DocumentSource::File(path) => format!("file:{}", path.display()),
+        }
+    }
+}
+
+struct ExternalRefResolver<'a> {
+    http: Option<&'a reqwest::Client>,
+    base: DocumentBase,
+    cache: HashMap<String, Arc<Value>>,
+    documents: usize,
+}
+
+impl<'a> ExternalRefResolver<'a> {
+    fn new(http: Option<&'a reqwest::Client>, config: &OpenApiConfig) -> Result<Self, String> {
+        let base = if let Some(url) = config
+            .document_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            DocumentBase::Url(
+                Url::parse(url)
+                    .map_err(|err| format!("invalid config.openapi.document_url: {err}"))?,
+            )
+        } else if let Some(directory) = config.document_base_dir() {
+            let directory = PathBuf::from(directory);
+            let directory = if directory.is_absolute() {
+                directory
+            } else {
+                std::env::current_dir()
+                    .map_err(|err| format!("cannot resolve document_base_dir: {err}"))?
+                    .join(directory)
+            };
+            DocumentBase::Directory(directory)
+        } else {
+            DocumentBase::None
+        };
+        Ok(Self {
+            http,
+            base,
+            cache: HashMap::new(),
+            // The root document counts toward the per-parse document budget.
+            documents: 1,
+        })
+    }
+
+    async fn resolve_document(&mut self, document: &str) -> Result<Value, String> {
+        let root = Arc::new(parse_document_value(document)?);
+        let base = self.base.clone();
+        let mut stack = HashSet::new();
+        self.resolve_value(
+            (*root).clone(),
+            base,
+            root,
+            "inline".to_string(),
+            true,
+            0,
+            &mut stack,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_value<'b>(
+        &'b mut self,
+        value: Value,
+        base: DocumentBase,
+        document_root: Arc<Value>,
+        document_key: String,
+        is_root: bool,
+        depth: usize,
+        stack: &'b mut HashSet<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'b>>
+    where
+        'a: 'b,
+    {
+        Box::pin(async move {
+            match value {
+                Value::Object(mut object) => {
+                    if let Some(reference) = object
+                        .get("$ref")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                    {
+                        return self
+                            .resolve_reference(
+                                &reference,
+                                base,
+                                document_root,
+                                document_key,
+                                is_root,
+                                depth,
+                                stack,
+                            )
+                            .await;
+                    }
+                    for value in object.values_mut() {
+                        let resolved = self
+                            .resolve_value(
+                                value.clone(),
+                                base.clone(),
+                                document_root.clone(),
+                                document_key.clone(),
+                                is_root,
+                                depth,
+                                stack,
+                            )
+                            .await?;
+                        *value = resolved;
+                    }
+                    Ok(Value::Object(object))
+                }
+                Value::Array(items) => {
+                    let mut resolved = Vec::with_capacity(items.len());
+                    for item in items {
+                        resolved.push(
+                            self.resolve_value(
+                                item,
+                                base.clone(),
+                                document_root.clone(),
+                                document_key.clone(),
+                                is_root,
+                                depth,
+                                stack,
+                            )
+                            .await?,
+                        );
+                    }
+                    Ok(Value::Array(resolved))
+                }
+                other => Ok(other),
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_reference(
+        &mut self,
+        reference: &str,
+        base: DocumentBase,
+        document_root: Arc<Value>,
+        document_key: String,
+        is_root: bool,
+        depth: usize,
+        stack: &mut HashSet<String>,
+    ) -> Result<Value, String> {
+        let (target_document, fragment) = split_reference(reference);
+        if target_document.is_empty() {
+            if is_root {
+                // Local references in the root document are preserved; the
+                // OpenAPI parser resolves component parameters and bodies and
+                // schema `$ref` values stay intact in the input schema.
+                return Ok(json!({"$ref": reference}));
+            }
+            self.check_depth(reference, depth)?;
+            let cycle_key = format!("{document_key}#{fragment}");
+            enter_reference(&mut *stack, &cycle_key)?;
+            let target = resolve_json_pointer(&document_root, fragment)?;
+            let resolved = self
+                .resolve_value(
+                    target,
+                    base,
+                    document_root,
+                    document_key,
+                    false,
+                    depth + 1,
+                    stack,
+                )
+                .await;
+            stack.remove(&cycle_key);
+            return resolved;
+        }
+
+        self.check_depth(reference, depth)?;
+        let source = resolve_document_source(&base, target_document)?;
+        let target_key = source.cache_key();
+        let cycle_key = format!("{target_key}#{fragment}");
+        enter_reference(&mut *stack, &cycle_key)?;
+        let target_document_root = self.load_source(&source).await?;
+        let target = resolve_json_pointer(&target_document_root, fragment)?;
+        let target_base = match &source {
+            DocumentSource::Url(url) => DocumentBase::Url(url.clone()),
+            DocumentSource::File(path) => DocumentBase::Directory(
+                path.parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("/")),
+            ),
+        };
+        let resolved = self
+            .resolve_value(
+                target,
+                target_base,
+                target_document_root,
+                target_key,
+                false,
+                depth + 1,
+                stack,
+            )
+            .await;
+        stack.remove(&cycle_key);
+        resolved
+    }
+
+    fn check_depth(&self, reference: &str, depth: usize) -> Result<(), String> {
+        if depth >= OPENAPI_REF_MAX_DEPTH {
+            return Err(format!(
+                "external OpenAPI reference depth exceeds {OPENAPI_REF_MAX_DEPTH} at '{reference}'"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn load_source(&mut self, source: &DocumentSource) -> Result<Arc<Value>, String> {
+        let key = source.cache_key();
+        if let Some(document) = self.cache.get(&key) {
+            return Ok(document.clone());
+        }
+        if self.documents >= OPENAPI_REF_MAX_DOCUMENTS {
+            return Err(format!(
+                "external OpenAPI references exceed {OPENAPI_REF_MAX_DOCUMENTS} documents"
+            ));
+        }
+        let document = match source {
+            DocumentSource::File(path) => {
+                let bytes = std::fs::read(path).map_err(|err| {
+                    format!(
+                        "cannot read external OpenAPI document '{}': {err}",
+                        path.display()
+                    )
+                })?;
+                if bytes.len() > OPENAPI_DOCUMENT_MAX_BYTES {
+                    return Err(format!(
+                        "external OpenAPI document '{}' exceeds {OPENAPI_DOCUMENT_MAX_BYTES} bytes",
+                        path.display()
+                    ));
+                }
+                String::from_utf8(bytes).map_err(|_| {
+                    format!(
+                        "external OpenAPI document '{}' is not valid UTF-8",
+                        path.display()
+                    )
+                })?
+            }
+            DocumentSource::Url(url) => {
+                let http = self.http.ok_or_else(|| {
+                    format!(
+                        "cannot resolve external OpenAPI reference '{url}': \
+                         no HTTP client is available"
+                    )
+                })?;
+                tokio::time::timeout(OPENAPI_FETCH_TIMEOUT, async {
+                    let mut response = http.get(url.as_str()).send().await.map_err(|err| {
+                        format!(
+                            "cannot fetch external OpenAPI document '{url}': {}",
+                            err.without_url()
+                        )
+                    })?;
+                    let status = response.status();
+                    if !status.is_success() {
+                        return Err(format!(
+                            "external OpenAPI document '{url}' returned HTTP {}",
+                            status.as_u16()
+                        ));
+                    }
+                    let (bytes, truncated) =
+                        read_response_bytes(&mut response, OPENAPI_DOCUMENT_MAX_BYTES)
+                            .await
+                            .map_err(|err| {
+                                format!(
+                                    "cannot read external OpenAPI document '{url}': {}",
+                                    err.without_url()
+                                )
+                            })?;
+                    if truncated {
+                        return Err(format!(
+                            "external OpenAPI document '{url}' exceeds \
+                             {OPENAPI_DOCUMENT_MAX_BYTES} bytes"
+                        ));
+                    }
+                    String::from_utf8(bytes).map_err(|_| {
+                        format!("external OpenAPI document '{url}' is not valid UTF-8")
+                    })
+                })
+                .await
+                .map_err(|_| format!("timed out fetching external OpenAPI document '{url}'"))??
+            }
+        };
+        let value = Arc::new(
+            parse_document_value(&document)
+                .map_err(|err| format!("invalid external OpenAPI document '{key}': {err}"))?,
+        );
+        self.documents += 1;
+        self.cache.insert(key, value.clone());
+        Ok(value)
+    }
+}
+
+fn enter_reference(stack: &mut HashSet<String>, key: &str) -> Result<(), String> {
+    if !stack.insert(key.to_string()) {
+        return Err(format!(
+            "cycle detected in external OpenAPI reference '{key}'"
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_document_source(base: &DocumentBase, reference: &str) -> Result<DocumentSource, String> {
+    if is_absolute_http_url(reference) {
+        return Url::parse(reference)
+            .map(DocumentSource::Url)
+            .map_err(|err| format!("invalid external OpenAPI reference URL '{reference}': {err}"));
+    }
+    if reference.contains(':') && !reference.starts_with('.') {
+        return Err(format!(
+            "unsupported external OpenAPI reference scheme in '{reference}'"
+        ));
+    }
+    match base {
+        DocumentBase::Url(url) => {
+            let joined = url.join(reference).map_err(|err| {
+                format!("invalid external OpenAPI reference '{reference}': {err}")
+            })?;
+            if !is_absolute_http_url(joined.as_str()) {
+                return Err(format!(
+                    "unsupported external OpenAPI reference URL '{}'",
+                    joined.as_str()
+                ));
+            }
+            Ok(DocumentSource::Url(joined))
+        }
+        DocumentBase::Directory(directory) => {
+            let path = Path::new(reference);
+            let joined = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                directory.join(path)
+            };
+            let canonical = std::fs::canonicalize(&joined).map_err(|err| {
+                format!("cannot resolve external OpenAPI reference '{reference}': {err}")
+            })?;
+            Ok(DocumentSource::File(canonical))
+        }
+        DocumentBase::None => Err(format!(
+            "external OpenAPI reference '{reference}' requires document_url or document_base_dir"
+        )),
+    }
+}
+
+fn resolve_json_pointer(document: &Value, fragment: &str) -> Result<Value, String> {
+    let pointer = fragment.strip_prefix('/').unwrap_or(fragment);
+    if pointer.is_empty() {
+        return Ok(document.clone());
+    }
+    let mut current = document;
+    for token in pointer.split('/') {
+        let token = decode_pointer_token(token);
+        current = match current {
+            Value::Object(object) => object.get(&token).ok_or_else(|| {
+                format!("cannot resolve external OpenAPI reference fragment '#/{pointer}'")
+            })?,
+            Value::Array(items) => {
+                let index = token.parse::<usize>().map_err(|_| {
+                    format!("invalid array index in OpenAPI reference fragment '#/{pointer}'")
+                })?;
+                items.get(index).ok_or_else(|| {
+                    format!("cannot resolve external OpenAPI reference fragment '#/{pointer}'")
+                })?
+            }
+            _ => {
+                return Err(format!(
+                    "cannot resolve external OpenAPI reference fragment '#/{pointer}'"
+                ));
+            }
+        };
+    }
+    Ok(current.clone())
+}
+
+fn decode_pointer_token(token: &str) -> String {
+    let decoded = percent_decode(token);
+    decoded.replace("~1", "/").replace("~0", "~")
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            decoded.push(high * 16 + low);
+            index += 3;
+            continue;
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn validate_version(openapi: OpenAPI) -> Result<OpenAPI, String> {
@@ -414,7 +931,7 @@ fn convert_operation(
     path_item: &PathItem,
     operation: &Operation,
     base_url: &str,
-) -> ConvertedTool {
+) -> Result<ConvertedTool, String> {
     let mut properties = Map::new();
     let mut required = Vec::new();
     let mut parameter_mappings = Vec::new();
@@ -429,6 +946,7 @@ fn convert_operation(
             "path" => "path",
             "query" => "query",
             "header" => "header",
+            "cookie" => "cookie",
             _ => continue,
         };
         let arg = format!("{prefix}_{}", data.name);
@@ -442,6 +960,10 @@ fn convert_operation(
             "name": data.name,
             "in": location,
             "required": is_required,
+            "style": parameter_style(parameter),
+            "explode": parameter_explode(parameter),
+            "allow_reserved": parameter_allow_reserved(parameter),
+            "schema_type": parameter_schema_type(openapi, parameter),
         }));
     }
 
@@ -452,7 +974,7 @@ fn convert_operation(
         .request_body
         .as_ref()
         .and_then(|request_body| resolve_request_body(openapi, request_body))
-        && let Some((schema, media_type)) = json_request_body(request_body)
+        && let Some((schema, media_type)) = request_body_input(request_body)?
     {
         properties.insert("body".into(), schema);
         has_body = true;
@@ -490,14 +1012,14 @@ fn convert_operation(
         http_config.insert("content_type".into(), json!(content_type));
     }
 
-    ConvertedTool {
+    Ok(ConvertedTool {
         name: tool_name(operation, method, path),
         description,
         schema: Value::Object(input_schema),
         http_method: method.to_ascii_uppercase(),
         http_path: path.to_string(),
         http_config: Value::Object(http_config),
-    }
+    })
 }
 
 fn combined_parameters<'a>(
@@ -595,6 +1117,109 @@ fn parameter_schema(parameter: &Parameter) -> Value {
     }
 }
 
+fn parameter_style(parameter: &Parameter) -> &'static str {
+    match parameter {
+        Parameter::Query { style, .. } => match style {
+            QueryStyle::Form => "form",
+            QueryStyle::SpaceDelimited => "spaceDelimited",
+            QueryStyle::PipeDelimited => "pipeDelimited",
+            QueryStyle::DeepObject => "deepObject",
+        },
+        Parameter::Header { .. } => "simple",
+        Parameter::Path { style, .. } => match style {
+            PathStyle::Simple => "simple",
+            PathStyle::Label => "label",
+            PathStyle::Matrix => "matrix",
+        },
+        Parameter::Cookie { .. } => "form",
+    }
+}
+
+fn parameter_explode(parameter: &Parameter) -> bool {
+    parameter
+        .parameter_data_ref()
+        .explode
+        .unwrap_or_else(|| matches!(parameter_location(parameter), "query" | "cookie"))
+}
+
+fn parameter_allow_reserved(parameter: &Parameter) -> bool {
+    match parameter {
+        Parameter::Query { allow_reserved, .. } => *allow_reserved,
+        _ => false,
+    }
+}
+
+fn parameter_schema_type(openapi: &OpenAPI, parameter: &Parameter) -> &'static str {
+    let schema = match &parameter.parameter_data_ref().format {
+        ParameterSchemaOrContent::Schema(schema) => schema,
+        ParameterSchemaOrContent::Content(content) => {
+            match content
+                .values()
+                .next()
+                .and_then(|media| media.schema.as_ref())
+            {
+                Some(schema) => schema,
+                None => return "primitive",
+            }
+        }
+    };
+    schema_type_label(openapi, schema, 0)
+}
+
+fn schema_type_label(
+    openapi: &OpenAPI,
+    schema: &ReferenceOr<Schema>,
+    depth: usize,
+) -> &'static str {
+    if depth > OPENAPI_REF_MAX_DEPTH {
+        return "primitive";
+    }
+    match schema {
+        ReferenceOr::Reference { reference } => {
+            let Some(name) = component_name(reference, "#/components/schemas/") else {
+                return "primitive";
+            };
+            let Some(resolved) = openapi
+                .components
+                .as_ref()
+                .and_then(|components| components.schemas.get(name))
+            else {
+                return "primitive";
+            };
+            schema_type_label(openapi, resolved, depth + 1)
+        }
+        ReferenceOr::Item(schema) => match &schema.schema_kind {
+            SchemaKind::Type(Type::Array(_)) => "array",
+            SchemaKind::Type(Type::Object(_)) => "object",
+            SchemaKind::Any(any) => match any.typ.as_deref() {
+                Some("array") => "array",
+                Some("object") => "object",
+                _ => "primitive",
+            },
+            SchemaKind::OneOf { one_of } => schema_type_from_composition(openapi, one_of, depth),
+            SchemaKind::AllOf { all_of } => schema_type_from_composition(openapi, all_of, depth),
+            SchemaKind::AnyOf { any_of } => schema_type_from_composition(openapi, any_of, depth),
+            _ => "primitive",
+        },
+    }
+}
+
+fn schema_type_from_composition(
+    openapi: &OpenAPI,
+    schemas: &[ReferenceOr<Schema>],
+    depth: usize,
+) -> &'static str {
+    let mut kind = "primitive";
+    for schema in schemas {
+        match schema_type_label(openapi, schema, depth + 1) {
+            "object" => return "object",
+            "array" if kind == "primitive" => kind = "array",
+            _ => {}
+        }
+    }
+    kind
+}
+
 fn schema_value(schema: &ReferenceOr<Schema>) -> Value {
     match schema {
         ReferenceOr::Reference { reference } => json!({"$ref": reference}),
@@ -604,29 +1229,76 @@ fn schema_value(schema: &ReferenceOr<Schema>) -> Value {
     }
 }
 
-fn json_request_body(request_body: &RequestBody) -> Option<(Value, String)> {
-    request_body
+fn request_body_input(request_body: &RequestBody) -> Result<Option<(Value, String)>, String> {
+    if request_body.content.is_empty() {
+        return Ok(None);
+    }
+    let selected = request_body
         .content
         .iter()
-        .find(|(media_type, _)| is_json_media_type(media_type))
-        .map(|(media_type, media)| {
-            let schema = media
-                .schema
-                .as_ref()
-                .map(schema_value)
-                .unwrap_or_else(|| json!({}));
-            (schema, media_type.clone())
+        .filter_map(|(media_type, media)| {
+            request_body_media_priority(media_type).map(|priority| (priority, media_type, media))
         })
+        .min_by_key(|(priority, _, _)| *priority);
+    let Some((_, media_type, media)) = selected else {
+        return Err(format!(
+            "unsupported OpenAPI request body media types: {}",
+            request_body
+                .content
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
+    let schema = media.schema.as_ref().map(schema_value).unwrap_or_else(|| {
+        if is_text_media_type(media_type) {
+            json!({"type": "string"})
+        } else {
+            json!({"type": "object"})
+        }
+    });
+    Ok(Some((schema, media_type.clone())))
 }
 
-fn is_json_media_type(media_type: &str) -> bool {
-    let essence = media_type
+fn request_body_media_priority(media_type: &str) -> Option<u8> {
+    if is_json_media_type(media_type) {
+        Some(0)
+    } else if is_form_media_type(media_type) {
+        Some(1)
+    } else if is_multipart_media_type(media_type) {
+        Some(2)
+    } else if is_text_media_type(media_type) {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+fn media_type_essence(media_type: &str) -> String {
+    media_type
         .split(';')
         .next()
         .unwrap_or_default()
         .trim()
-        .to_ascii_lowercase();
+        .to_ascii_lowercase()
+}
+
+fn is_json_media_type(media_type: &str) -> bool {
+    let essence = media_type_essence(media_type);
     essence == "application/json" || essence.ends_with("+json")
+}
+
+fn is_form_media_type(media_type: &str) -> bool {
+    media_type_essence(media_type) == "application/x-www-form-urlencoded"
+}
+
+fn is_multipart_media_type(media_type: &str) -> bool {
+    media_type_essence(media_type) == "multipart/form-data"
+}
+
+fn is_text_media_type(media_type: &str) -> bool {
+    media_type_essence(media_type) == "text/plain"
 }
 
 fn tool_name(operation: &Operation, method: &str, path: &str) -> String {
@@ -680,21 +1352,54 @@ fn unique_name(used: &mut HashSet<String>, candidate: String) -> String {
 
 // ----- HTTP execution ----------------------------------------------------
 
+/// One part of a `multipart/form-data` request body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultipartPart {
+    pub name: String,
+    pub text: Option<String>,
+    pub bytes: Option<Vec<u8>>,
+    pub content_type: Option<String>,
+    pub filename: Option<String>,
+}
+
+/// The encoded body of an outbound generated HTTP request.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HttpRequestBody {
+    Json(Value),
+    Form(Vec<(String, String)>),
+    Multipart(Vec<MultipartPart>),
+    Text(String),
+}
+
 /// A concrete outbound HTTP request derived from one tool call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpRequestPlan {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub body: Option<Value>,
+    pub body: Option<HttpRequestBody>,
+}
+
+#[derive(Debug, Clone)]
+struct QueryPair {
+    name: String,
+    value: String,
+    allow_reserved: bool,
+}
+
+enum SerializedValue {
+    Primitive(String),
+    Array(Vec<String>),
+    Object(Vec<(String, String)>),
 }
 
 /// Builds the outbound request for a generated HTTP tool.
 ///
-/// Path arguments are percent-encoded into `{name}` placeholders, query
-/// arguments are appended to the URL, header arguments become request headers,
-/// and the optional `body` argument is serialized as JSON. Authentication is
-/// applied last so it cannot be overridden by caller-supplied headers.
+/// Path arguments are serialized according to their OpenAPI style, query
+/// arguments use their declared style/explode rules, header and cookie
+/// arguments become request headers, and the optional `body` argument uses the
+/// selected media type. Authentication is applied last so it cannot be
+/// overridden by caller-supplied headers.
 pub fn build_http_request(tool: &McpTool, arguments: &Value) -> Result<HttpRequestPlan, String> {
     if !tool.is_http() {
         return Err(format!("tool '{}' is not an HTTP tool", tool.name));
@@ -726,8 +1431,9 @@ pub fn build_http_request(tool: &McpTool, arguments: &Value) -> Result<HttpReque
     };
 
     let mut path = path.to_string();
-    let mut query = Vec::new();
+    let mut query: Vec<QueryPair> = Vec::new();
     let mut headers = Vec::new();
+    let mut cookies: Vec<(String, String)> = Vec::new();
     let mut body = None;
 
     let parameters = config
@@ -757,23 +1463,40 @@ pub fn build_http_request(tool: &McpTool, arguments: &Value) -> Result<HttpReque
         let Some(value) = value else {
             continue;
         };
+        let style = parameter
+            .get("style")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| default_style(location));
+        let explode = parameter
+            .get("explode")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| default_explode(location));
+        let allow_reserved = parameter
+            .get("allow_reserved")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         match location {
             "path" => {
-                let encoded = percent_encode(&join_scalars(value));
-                path = path.replace(&format!("{{{name}}}"), &encoded);
+                let serialized = serialize_path_parameter(name, value, style, explode);
+                path = path.replace(&format!("{{{name}}}"), &serialized);
             }
             "query" => {
-                for value in scalar_values(value) {
-                    query.push((name.to_string(), value));
-                }
+                push_query_parameter(&mut query, name, value, style, explode, allow_reserved);
             }
             "header" => {
-                let value = join_scalars(value);
+                let value = serialize_header_parameter(value, explode);
                 set_header(&mut headers, name, &value)?;
+            }
+            "cookie" => {
+                cookies.extend(serialize_cookie_parameter(name, value, explode));
             }
             _ => {}
         }
+    }
+
+    if !cookies.is_empty() {
+        merge_cookie_header(&mut headers, cookies)?;
     }
 
     if config.get("body").and_then(Value::as_bool).unwrap_or(false) {
@@ -782,16 +1505,24 @@ pub fn build_http_request(tool: &McpTool, arguments: &Value) -> Result<HttpReque
             .and_then(Value::as_bool)
             .unwrap_or(false);
         match arguments.get("body").filter(|value| !value.is_null()) {
-            Some(value) => body = Some(value.clone()),
+            Some(value) => {
+                let content_type = config
+                    .get("content_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("application/json");
+                body = Some(serialize_http_body(tool, value, content_type)?);
+            }
             None if body_required => return Err("missing required argument 'body'".into()),
             None => {}
         }
-        if body.is_some() {
+        if let Some(body) = &body {
             let content_type = config
                 .get("content_type")
                 .and_then(Value::as_str)
                 .unwrap_or("application/json");
-            set_header(&mut headers, CONTENT_TYPE.as_str(), content_type)?;
+            if matches!(body, HttpRequestBody::Json(_) | HttpRequestBody::Text(_)) {
+                set_header(&mut headers, CONTENT_TYPE.as_str(), content_type)?;
+            }
         }
     }
 
@@ -827,7 +1558,11 @@ pub fn build_http_request(tool: &McpTool, arguments: &Value) -> Result<HttpReque
                     .ok_or_else(|| {
                         "HTTP tool auth is missing a query parameter name".to_string()
                     })?;
-                query.push((param.to_string(), secret));
+                query.push(QueryPair {
+                    name: param.to_string(),
+                    value: secret,
+                    allow_reserved: false,
+                });
             }
             other => return Err(format!("unsupported HTTP tool auth type '{other}'")),
         }
@@ -835,12 +1570,7 @@ pub fn build_http_request(tool: &McpTool, arguments: &Value) -> Result<HttpReque
 
     let url = join_url(base_url, &path);
     let mut url = Url::parse(&url).map_err(|err| format!("invalid HTTP tool URL: {err}"))?;
-    if !query.is_empty() {
-        let mut pairs = url.query_pairs_mut();
-        for (name, value) in &query {
-            pairs.append_pair(name, value);
-        }
-    }
+    append_query(&mut url, &query);
 
     Ok(HttpRequestPlan {
         method: method.to_ascii_uppercase(),
@@ -848,6 +1578,410 @@ pub fn build_http_request(tool: &McpTool, arguments: &Value) -> Result<HttpReque
         headers,
         body,
     })
+}
+
+fn default_style(location: &str) -> &'static str {
+    match location {
+        "query" | "cookie" => "form",
+        _ => "simple",
+    }
+}
+
+fn default_explode(location: &str) -> bool {
+    matches!(location, "query" | "cookie")
+}
+
+fn serialize_value(value: &Value) -> SerializedValue {
+    match value {
+        Value::Array(items) => SerializedValue::Array(items.iter().map(scalar_text).collect()),
+        Value::Object(object) => SerializedValue::Object(
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), scalar_text(value)))
+                .collect(),
+        ),
+        other => SerializedValue::Primitive(scalar_text(other)),
+    }
+}
+
+fn scalar_text(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::Array(items) => items.iter().map(scalar_text).collect::<Vec<_>>().join(","),
+        Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn serialize_path_parameter(name: &str, value: &Value, style: &str, explode: bool) -> String {
+    match style {
+        "label" => match serialize_value(value) {
+            SerializedValue::Primitive(value) => format!(".{}", percent_encode(&value)),
+            SerializedValue::Array(items) => {
+                format!(
+                    ".{}",
+                    items
+                        .iter()
+                        .map(|value| percent_encode(value))
+                        .collect::<Vec<_>>()
+                        .join(".")
+                )
+            }
+            SerializedValue::Object(entries) if explode => format!(
+                ".{}",
+                entries
+                    .iter()
+                    .map(|(key, value)| format!(
+                        "{}={}",
+                        percent_encode(key),
+                        percent_encode(value)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            ),
+            SerializedValue::Object(entries) => format!(
+                ".{}",
+                entries
+                    .iter()
+                    .flat_map(|(key, value)| [percent_encode(key), percent_encode(value)])
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        },
+        "matrix" => match serialize_value(value) {
+            SerializedValue::Primitive(value) => {
+                format!(";{}={}", percent_encode(name), percent_encode(&value))
+            }
+            SerializedValue::Array(items) if explode => items
+                .iter()
+                .map(|value| format!(";{}={}", percent_encode(name), percent_encode(value)))
+                .collect::<Vec<_>>()
+                .join(""),
+            SerializedValue::Array(items) => format!(
+                ";{}={}",
+                percent_encode(name),
+                items
+                    .iter()
+                    .map(|value| percent_encode(value))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            SerializedValue::Object(entries) if explode => entries
+                .iter()
+                .map(|(key, value)| format!(";{}={}", percent_encode(key), percent_encode(value)))
+                .collect::<Vec<_>>()
+                .join(""),
+            SerializedValue::Object(entries) => format!(
+                ";{}={}",
+                percent_encode(name),
+                entries
+                    .iter()
+                    .flat_map(|(key, value)| [percent_encode(key), percent_encode(value)])
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        },
+        _ => match serialize_value(value) {
+            SerializedValue::Primitive(value) => percent_encode(&value),
+            SerializedValue::Array(items) => items
+                .iter()
+                .map(|value| percent_encode(value))
+                .collect::<Vec<_>>()
+                .join(","),
+            SerializedValue::Object(entries) if explode => entries
+                .iter()
+                .map(|(key, value)| format!("{}={}", percent_encode(key), percent_encode(value)))
+                .collect::<Vec<_>>()
+                .join(","),
+            SerializedValue::Object(entries) => entries
+                .iter()
+                .flat_map(|(key, value)| [percent_encode(key), percent_encode(value)])
+                .collect::<Vec<_>>()
+                .join(","),
+        },
+    }
+}
+
+fn push_query_parameter(
+    query: &mut Vec<QueryPair>,
+    name: &str,
+    value: &Value,
+    style: &str,
+    explode: bool,
+    allow_reserved: bool,
+) {
+    let push = |query: &mut Vec<QueryPair>, name: String, value: String| {
+        query.push(QueryPair {
+            name,
+            value,
+            allow_reserved,
+        });
+    };
+    match style {
+        "spaceDelimited" | "pipeDelimited" => {
+            let delimiter = if style == "spaceDelimited" { " " } else { "|" };
+            let value = match serialize_value(value) {
+                SerializedValue::Primitive(value) => value,
+                SerializedValue::Array(items) => items.join(delimiter),
+                SerializedValue::Object(entries) => entries
+                    .into_iter()
+                    .flat_map(|(key, value)| [key, value])
+                    .collect::<Vec<_>>()
+                    .join(delimiter),
+            };
+            push(query, name.to_string(), value);
+        }
+        "deepObject" => {
+            if let Value::Object(object) = value {
+                for (key, value) in object {
+                    let deep_name = format!("{name}[{key}]");
+                    if let Value::Object(nested) = value {
+                        for (nested_key, nested_value) in nested {
+                            push(
+                                query,
+                                format!("{deep_name}[{nested_key}]"),
+                                scalar_text(nested_value),
+                            );
+                        }
+                    } else {
+                        push(query, deep_name, scalar_text(value));
+                    }
+                }
+            } else {
+                push(query, name.to_string(), scalar_text(value));
+            }
+        }
+        "form" if explode => match serialize_value(value) {
+            SerializedValue::Primitive(value) => push(query, name.to_string(), value),
+            SerializedValue::Array(items) => {
+                for value in items {
+                    push(query, name.to_string(), value);
+                }
+            }
+            SerializedValue::Object(entries) => {
+                for (key, value) in entries {
+                    push(query, key, value);
+                }
+            }
+        },
+        _ => {
+            let value = match serialize_value(value) {
+                SerializedValue::Primitive(value) => value,
+                SerializedValue::Array(items) => items.join(","),
+                SerializedValue::Object(entries) => entries
+                    .into_iter()
+                    .flat_map(|(key, value)| [key, value])
+                    .collect::<Vec<_>>()
+                    .join(","),
+            };
+            push(query, name.to_string(), value);
+        }
+    }
+}
+
+fn serialize_header_parameter(value: &Value, explode: bool) -> String {
+    match serialize_value(value) {
+        SerializedValue::Primitive(value) => value,
+        SerializedValue::Array(items) => items.join(","),
+        SerializedValue::Object(entries) if explode => entries
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(","),
+        SerializedValue::Object(entries) => entries
+            .into_iter()
+            .flat_map(|(key, value)| [key, value])
+            .collect::<Vec<_>>()
+            .join(","),
+    }
+}
+
+fn serialize_cookie_parameter(name: &str, value: &Value, explode: bool) -> Vec<(String, String)> {
+    match serialize_value(value) {
+        SerializedValue::Primitive(value) => vec![(name.to_string(), value)],
+        SerializedValue::Array(items) if explode => items
+            .into_iter()
+            .map(|value| (name.to_string(), value))
+            .collect(),
+        SerializedValue::Array(items) => vec![(name.to_string(), items.join(","))],
+        SerializedValue::Object(entries) if explode => entries,
+        SerializedValue::Object(entries) => vec![(
+            name.to_string(),
+            entries
+                .into_iter()
+                .flat_map(|(key, value)| [key, value])
+                .collect::<Vec<_>>()
+                .join(","),
+        )],
+    }
+}
+
+fn merge_cookie_header(
+    headers: &mut Vec<(String, String)>,
+    cookies: Vec<(String, String)>,
+) -> Result<(), String> {
+    let existing_index = headers
+        .iter()
+        .position(|(name, _)| name.eq_ignore_ascii_case("cookie"));
+    let existing = existing_index
+        .map(|index| headers.remove(index).1)
+        .unwrap_or_default();
+    let seen: HashSet<String> = existing
+        .split(';')
+        .filter_map(|part| {
+            part.split_once('=')
+                .map(|(name, _)| name.trim().to_string())
+        })
+        .collect();
+    let mut merged: Vec<String> = if existing.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![existing.trim().to_string()]
+    };
+    for (name, value) in cookies {
+        if seen.contains(&name) {
+            continue;
+        }
+        merged.push(format!("{name}={value}"));
+    }
+    if !merged.is_empty() {
+        set_header(headers, "Cookie", &merged.join("; "))?;
+    }
+    Ok(())
+}
+
+fn append_query(url: &mut Url, pairs: &[QueryPair]) {
+    if pairs.is_empty() {
+        return;
+    }
+    let mut query = url.query().unwrap_or_default().to_string();
+    for pair in pairs {
+        if !query.is_empty() {
+            query.push('&');
+        }
+        query.push_str(&percent_encode(&pair.name));
+        query.push('=');
+        if pair.allow_reserved {
+            query.push_str(&percent_encode_allow_reserved(&pair.value));
+        } else {
+            query.push_str(&percent_encode(&pair.value));
+        }
+    }
+    url.set_query(Some(&query));
+}
+
+fn serialize_http_body(
+    tool: &McpTool,
+    value: &Value,
+    content_type: &str,
+) -> Result<HttpRequestBody, String> {
+    if is_json_media_type(content_type) {
+        Ok(HttpRequestBody::Json(value.clone()))
+    } else if is_form_media_type(content_type) {
+        Ok(HttpRequestBody::Form(form_fields(value)?))
+    } else if is_multipart_media_type(content_type) {
+        Ok(HttpRequestBody::Multipart(multipart_parts(tool, value)?))
+    } else if is_text_media_type(content_type) {
+        value
+            .as_str()
+            .map(|value| HttpRequestBody::Text(value.to_string()))
+            .ok_or_else(|| "text/plain body must be a string".to_string())
+    } else {
+        Err(format!(
+            "unsupported HTTP tool content type '{content_type}'"
+        ))
+    }
+}
+
+fn form_fields(value: &Value) -> Result<Vec<(String, String)>, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "form-urlencoded body must be a JSON object".to_string())?;
+    let mut fields = Vec::new();
+    for (name, value) in object {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    fields.push((name.clone(), scalar_text(item)));
+                }
+            }
+            Value::Object(entries) => {
+                for (key, value) in entries {
+                    fields.push((key.clone(), scalar_text(value)));
+                }
+            }
+            other => fields.push((name.clone(), scalar_text(other))),
+        }
+    }
+    Ok(fields)
+}
+
+fn multipart_parts(tool: &McpTool, value: &Value) -> Result<Vec<MultipartPart>, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "multipart body must be a JSON object".to_string())?;
+    let mut parts = Vec::new();
+    for (name, value) in object {
+        if let Value::Object(entries) = value
+            && let Some(encoded) = entries.get("content_base64").and_then(Value::as_str)
+        {
+            let bytes = BASE64_STANDARD.decode(encoded).map_err(|err| {
+                format!("multipart field '{name}' has invalid content_base64: {err}")
+            })?;
+            let content_type = entries
+                .get("content_type")
+                .or_else(|| entries.get("contentType"))
+                .or_else(|| entries.get("media_type"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| declared_multipart_content_type(tool, name));
+            let filename = entries
+                .get("filename")
+                .or_else(|| entries.get("file_name"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            parts.push(MultipartPart {
+                name: name.clone(),
+                text: None,
+                bytes: Some(bytes),
+                content_type,
+                filename,
+            });
+            continue;
+        }
+        let text = match value {
+            Value::Object(_) | Value::Array(_) => serde_json::to_string(value)
+                .map_err(|err| format!("cannot encode multipart field '{name}' as JSON: {err}"))?,
+            other => scalar_text(other),
+        };
+        parts.push(MultipartPart {
+            name: name.clone(),
+            text: Some(text),
+            bytes: None,
+            content_type: None,
+            filename: None,
+        });
+    }
+    Ok(parts)
+}
+
+fn declared_multipart_content_type(tool: &McpTool, field: &str) -> Option<String> {
+    let body = tool
+        .schema
+        .get("properties")
+        .and_then(|properties| properties.get("body"))?;
+    let property = body
+        .get("properties")
+        .and_then(|properties| properties.get(field))?;
+    property
+        .get("contentMediaType")
+        .or_else(|| property.get("x-contentMediaType"))
+        .or_else(|| property.get("contentEncoding"))
+        .or_else(|| property.get("x-contentEncoding"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) -> Result<(), String> {
@@ -859,25 +1993,41 @@ fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) -> R
     Ok(())
 }
 
-fn scalar_values(value: &Value) -> Vec<String> {
-    match value {
-        Value::Null => Vec::new(),
-        Value::Array(items) => items.iter().flat_map(scalar_values).collect(),
-        Value::String(value) => vec![value.clone()],
-        Value::Bool(value) => vec![value.to_string()],
-        Value::Number(value) => vec![value.to_string()],
-        Value::Object(_) => vec![value.to_string()],
-    }
-}
-
-fn join_scalars(value: &Value) -> String {
-    scalar_values(value).join(",")
-}
-
 fn percent_encode(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn percent_encode_allow_reserved(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let reserved = matches!(
+            byte,
+            b':' | b'/'
+                | b'?'
+                | b'['
+                | b']'
+                | b'@'
+                | b'!'
+                | b'$'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b'%'
+        );
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') || reserved {
             encoded.push(byte as char);
         } else {
             encoded.push_str(&format!("%{byte:02X}"));
@@ -958,10 +2108,43 @@ pub async fn execute_http_tool(
         .request(method, &plan.url)
         .timeout(timeout)
         .headers(headers);
-    if let Some(body) = &plan.body {
-        let encoded = serde_json::to_vec(body)
-            .map_err(|err| McpError::Internal(format!("cannot encode HTTP tool body: {err}")))?;
-        builder = builder.body(encoded);
+    match &plan.body {
+        Some(HttpRequestBody::Json(body)) => {
+            let encoded = serde_json::to_vec(body).map_err(|err| {
+                McpError::Internal(format!("cannot encode HTTP tool body: {err}"))
+            })?;
+            builder = builder.body(encoded);
+        }
+        Some(HttpRequestBody::Form(fields)) => {
+            builder = builder.form(fields);
+        }
+        Some(HttpRequestBody::Multipart(parts)) => {
+            let mut form = reqwest::multipart::Form::new();
+            for part in parts {
+                if let Some(bytes) = &part.bytes {
+                    let mut multipart_part = reqwest::multipart::Part::bytes(bytes.clone());
+                    if let Some(content_type) = &part.content_type {
+                        multipart_part = multipart_part.mime_str(content_type).map_err(|err| {
+                            McpError::Config(format!(
+                                "invalid multipart content type for field '{}': {err}",
+                                part.name
+                            ))
+                        })?;
+                    }
+                    if let Some(filename) = &part.filename {
+                        multipart_part = multipart_part.file_name(filename.clone());
+                    }
+                    form = form.part(part.name.clone(), multipart_part);
+                } else {
+                    form = form.text(part.name.clone(), part.text.clone().unwrap_or_default());
+                }
+            }
+            builder = builder.multipart(form);
+        }
+        Some(HttpRequestBody::Text(body)) => {
+            builder = builder.body(body.clone());
+        }
+        None => {}
     }
 
     let exchange = async {
@@ -1174,7 +2357,11 @@ mod tests {
         );
         assert_eq!(get.http_config["base_url"], "https://api.example.test/v1");
         assert_eq!(get.http_config["parameters"][0]["arg"], "path_petId");
+        assert_eq!(get.http_config["parameters"][0]["style"], "simple");
+        assert_eq!(get.http_config["parameters"][0]["explode"], false);
         assert_eq!(get.http_config["parameters"][1]["in"], "query");
+        assert_eq!(get.http_config["parameters"][1]["style"], "form");
+        assert_eq!(get.http_config["parameters"][1]["explode"], true);
         assert_eq!(get.http_config["body"], false);
 
         let post = tools.iter().find(|tool| tool.name == "create_pet").unwrap();
@@ -1183,6 +2370,64 @@ mod tests {
         assert_eq!(post.schema["required"], json!(["body"]));
         assert_eq!(post.http_config["body"], true);
         assert_eq!(post.http_config["content_type"], "application/json");
+    }
+
+    #[test]
+    fn records_parameter_serialization_metadata_and_cookie_inputs() {
+        let document = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "Styles", "version": "1"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/items/{itemId}": {
+                    "get": {
+                        "operationId": "styles",
+                        "parameters": [
+                            {"name": "itemId", "in": "path", "required": true, "schema": {"type": "string"}},
+                            {"name": "tags", "in": "query", "explode": false, "schema": {"type": "array", "items": {"type": "string"}}},
+                            {"name": "filter", "in": "query", "style": "deepObject", "schema": {"type": "object"}},
+                            {"name": "session", "in": "cookie", "required": true, "schema": {"type": "string"}},
+                            {"name": "X-Flags", "in": "header", "style": "simple", "schema": {"type": "array", "items": {"type": "string"}}}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        })
+        .to_string();
+        let tools = parse_openapi(&document).unwrap();
+        let config = &tools[0].http_config;
+        let parameters = config["parameters"].as_array().unwrap();
+        let by_name = |name: &str| {
+            parameters
+                .iter()
+                .find(|parameter| parameter["name"] == name)
+                .unwrap()
+        };
+        assert_eq!(by_name("itemId")["style"], "simple");
+        assert_eq!(by_name("itemId")["explode"], false);
+        assert_eq!(by_name("itemId")["schema_type"], "primitive");
+        assert_eq!(by_name("tags")["style"], "form");
+        assert_eq!(by_name("tags")["explode"], false);
+        assert_eq!(by_name("tags")["schema_type"], "array");
+        assert_eq!(by_name("filter")["style"], "deepObject");
+        assert_eq!(by_name("filter")["explode"], true);
+        assert_eq!(by_name("filter")["schema_type"], "object");
+        assert_eq!(by_name("session")["arg"], "cookie_session");
+        assert_eq!(by_name("session")["in"], "cookie");
+        assert_eq!(by_name("session")["style"], "form");
+        assert_eq!(by_name("session")["explode"], true);
+        assert_eq!(by_name("X-Flags")["style"], "simple");
+        assert_eq!(by_name("X-Flags")["explode"], false);
+        assert_eq!(by_name("X-Flags")["schema_type"], "array");
+        assert_eq!(
+            tools[0].schema["required"],
+            json!(["path_itemId", "cookie_session"])
+        );
+        assert_eq!(
+            tools[0].schema["properties"]["cookie_session"],
+            json!({"type": "string"})
+        );
     }
 
     #[test]
@@ -1202,12 +2447,13 @@ paths:
         '200':
           description: ok
 "#;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
         let config = OpenApiConfig {
             document: Some(yaml.to_string()),
             base_url: Some("https://api.example.test".into()),
             ..OpenApiConfig::default()
         };
-        let tools = build_tools(&config, yaml).unwrap();
+        let tools = runtime.block_on(build_tools(&config, yaml)).unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "listPets");
         assert_eq!(
@@ -1220,7 +2466,7 @@ paths:
             document: Some(yaml.to_string()),
             ..OpenApiConfig::default()
         };
-        let error = build_tools(&config, yaml).unwrap_err();
+        let error = runtime.block_on(build_tools(&config, yaml)).unwrap_err();
         assert!(error.contains("base_url is required"), "{error}");
     }
 
@@ -1282,6 +2528,24 @@ paths:
     }
 
     #[test]
+    fn rejects_external_refs_without_a_document_location() {
+        let document = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "External", "version": "1"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/pets": {"$ref": "./paths.yaml#/pets"}
+            }
+        })
+        .to_string();
+        let error = parse_openapi(&document).unwrap_err();
+        assert!(
+            error.contains("requires document_url or document_base_dir"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn validates_openapi_config_shape_and_auth() {
         let config = json!({
             "openapi": {
@@ -1306,9 +2570,22 @@ paths:
             }
         });
         assert!(OpenApiConfig::from_config(&config).is_err());
+
+        let config = json!({
+            "openapi": {
+                "document": "{}",
+                "document_base_dir": "/tmp/openapi"
+            }
+        });
+        let parsed = OpenApiConfig::from_config(&config).unwrap().unwrap();
+        assert_eq!(parsed.document_base_dir(), Some("/tmp/openapi"));
     }
 
     fn http_tool(config: Value) -> McpTool {
+        http_tool_with(config, "GET", "/pets/{petId}")
+    }
+
+    fn http_tool_with(config: Value, method: &str, path: &str) -> McpTool {
         McpTool {
             id: "tool-1".into(),
             server_id: "server-1".into(),
@@ -1316,12 +2593,20 @@ paths:
             description: "Get a pet".into(),
             schema: json!({"type": "object"}),
             kind: MCP_TOOL_KIND_HTTP.into(),
-            http_method: Some("GET".into()),
-            http_path: Some("/pets/{petId}".into()),
+            http_method: Some(method.into()),
+            http_path: Some(path.into()),
             http_config: config,
             enabled: true,
             created_at: "2026-01-01T00:00:00.000Z".into(),
         }
+    }
+
+    fn header_value<'a>(request: &'a HttpRequestPlan, name: &str) -> Option<&'a str> {
+        request
+            .headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     #[test]
@@ -1352,13 +2637,11 @@ paths:
             request.url,
             "https://api.example.test/pets/a%20b%2Fc?tag=one&tag=two"
         );
-        assert!(
-            request
-                .headers
-                .iter()
-                .any(|(name, value)| name == "x-tenant" && value == "team-a")
+        assert_eq!(header_value(&request, "x-tenant"), Some("team-a"));
+        assert_eq!(
+            request.body,
+            Some(HttpRequestBody::Json(json!({"name": "Fido"})))
         );
-        assert_eq!(request.body, Some(json!({"name": "Fido"})));
 
         let error = build_http_request(&http_tool(config), &json!({"path_petId": "1"}));
         assert!(error.unwrap_err().contains("X-Tenant"));
@@ -1385,12 +2668,7 @@ paths:
             &json!({"header_X-Api-Key": "caller-value"}),
         )
         .unwrap();
-        assert!(
-            request
-                .headers
-                .iter()
-                .any(|(name, value)| name == "x-api-key" && value == "secret-value")
-        );
+        assert_eq!(header_value(&request, "x-api-key"), Some("secret-value"));
 
         let config = json!({
             "base_url": "https://api.example.test",
@@ -1409,5 +2687,502 @@ paths:
         let mut tool = http_tool(json!({}));
         tool.kind = MCP_TOOL_KIND_MCP.into();
         assert!(build_http_request(&tool, &json!({})).is_err());
+    }
+
+    #[test]
+    fn serializes_path_parameters_by_style_and_explode() {
+        let cases = [
+            ("simple", false, json!(["a", "b c"]), "/items/a,b%20c"),
+            (
+                "simple",
+                false,
+                json!({"role": "admin", "firstName": "Alex"}),
+                "/items/firstName,Alex,role,admin",
+            ),
+            (
+                "simple",
+                true,
+                json!({"role": "admin", "firstName": "Alex"}),
+                "/items/firstName=Alex,role=admin",
+            ),
+            ("label", false, json!(["a", "b", "c"]), "/items/.a.b.c"),
+            (
+                "label",
+                false,
+                json!({"role": "admin", "firstName": "Alex"}),
+                "/items/.firstName,Alex,role,admin",
+            ),
+            (
+                "label",
+                true,
+                json!({"role": "admin", "firstName": "Alex"}),
+                "/items/.firstName=Alex.role=admin",
+            ),
+            ("matrix", false, json!(["a", "b", "c"]), "/items/;id=a,b,c"),
+            (
+                "matrix",
+                true,
+                json!(["a", "b", "c"]),
+                "/items/;id=a;id=b;id=c",
+            ),
+            (
+                "matrix",
+                true,
+                json!({"role": "admin", "firstName": "Alex"}),
+                "/items/;firstName=Alex;role=admin",
+            ),
+            ("matrix", false, json!(5), "/items/;id=5"),
+        ];
+        for (style, explode, value, expected) in cases {
+            let config = json!({
+                "base_url": "https://api.example.test",
+                "parameters": [{
+                    "arg": "path_id",
+                    "name": "id",
+                    "in": "path",
+                    "required": true,
+                    "style": style,
+                    "explode": explode,
+                }],
+                "body": false
+            });
+            let request = build_http_request(
+                &http_tool_with(config, "GET", "/items/{id}"),
+                &json!({"path_id": value}),
+            )
+            .unwrap();
+            assert_eq!(
+                request.url,
+                format!("https://api.example.test{expected}"),
+                "{style} {explode}"
+            );
+        }
+    }
+
+    #[test]
+    fn serializes_query_parameters_by_style_and_explode() {
+        let config = json!({
+            "base_url": "https://api.example.test",
+            "parameters": [
+                {"arg": "query_tags", "name": "tags", "in": "query", "style": "form", "explode": true},
+                {"arg": "query_ids", "name": "ids", "in": "query", "style": "form", "explode": false},
+                {"arg": "query_filter", "name": "filter", "in": "query", "style": "form", "explode": true},
+                {"arg": "query_labels", "name": "labels", "in": "query", "style": "form", "explode": false},
+                {"arg": "query_spaced", "name": "spaced", "in": "query", "style": "spaceDelimited", "explode": false},
+                {"arg": "query_piped", "name": "piped", "in": "query", "style": "pipeDelimited", "explode": false},
+                {"arg": "query_deep", "name": "deep", "in": "query", "style": "deepObject", "explode": true},
+                {"arg": "query_raw", "name": "raw", "in": "query", "style": "form", "explode": true, "allow_reserved": true}
+            ],
+            "body": false
+        });
+        let request = build_http_request(
+            &http_tool_with(config, "GET", "/items"),
+            &json!({
+                "query_tags": ["one", "two"],
+                "query_ids": ["a", "b"],
+                "query_filter": {"role": "admin", "firstName": "Alex"},
+                "query_labels": {"role": "admin", "firstName": "Alex"},
+                "query_spaced": ["a b", "c"],
+                "query_piped": ["a", "b"],
+                "query_deep": {"role": "admin", "nested": {"first": "Alex"}},
+                "query_raw": "/v1/a b"
+            }),
+        )
+        .unwrap();
+        let url = &request.url;
+        assert!(url.contains("tags=one&tags=two"), "{url}");
+        assert!(url.contains("ids=a%2Cb"), "{url}");
+        assert!(url.contains("firstName=Alex"), "{url}");
+        assert!(url.contains("role=admin"), "{url}");
+        assert!(
+            url.contains("labels=firstName%2CAlex%2Crole%2Cadmin"),
+            "{url}"
+        );
+        assert!(url.contains("spaced=a%20b%20c"), "{url}");
+        assert!(url.contains("piped=a%7Cb"), "{url}");
+        assert!(url.contains("deep%5Brole%5D=admin"), "{url}");
+        assert!(url.contains("deep%5Bnested%5D%5Bfirst%5D=Alex"), "{url}");
+        assert!(url.contains("raw=/v1/a%20b"), "{url}");
+        assert!(!url.contains("raw=%2Fv1"), "{url}");
+    }
+
+    #[test]
+    fn serializes_header_and_cookie_parameters_and_merges_caller_cookies() {
+        let config = json!({
+            "base_url": "https://api.example.test",
+            "parameters": [
+                {"arg": "header_X-Flags", "name": "X-Flags", "in": "header", "style": "simple", "explode": false},
+                {"arg": "header_X-Prefs", "name": "X-Prefs", "in": "header", "style": "simple", "explode": true},
+                {"arg": "cookie_session", "name": "session", "in": "cookie", "required": true, "style": "form", "explode": true},
+                {"arg": "cookie_tags", "name": "tags", "in": "cookie", "style": "form", "explode": true},
+                {"arg": "cookie_roles", "name": "roles", "in": "cookie", "style": "form", "explode": true},
+                {"arg": "header_Cookie", "name": "Cookie", "in": "header", "style": "simple", "explode": false}
+            ],
+            "body": false
+        });
+        let request = build_http_request(
+            &http_tool_with(config, "GET", "/items"),
+            &json!({
+                "header_X-Flags": ["a", "b"],
+                "header_X-Prefs": {"role": "admin", "active": true},
+                "cookie_session": "generated",
+                "cookie_tags": ["one", "two"],
+                "cookie_roles": {"role": "admin", "active": true},
+                "header_Cookie": "caller=1; session=caller"
+            }),
+        )
+        .unwrap();
+        assert_eq!(header_value(&request, "x-flags"), Some("a,b"));
+        assert_eq!(
+            header_value(&request, "x-prefs"),
+            Some("active=true,role=admin")
+        );
+        assert_eq!(
+            header_value(&request, "cookie"),
+            Some("caller=1; session=caller; tags=one; tags=two; active=true; role=admin")
+        );
+    }
+
+    #[test]
+    fn builds_form_multipart_and_text_bodies() {
+        let form_config = json!({
+            "base_url": "https://api.example.test",
+            "parameters": [],
+            "body": true,
+            "body_required": true,
+            "content_type": "application/x-www-form-urlencoded"
+        });
+        let request = build_http_request(
+            &http_tool_with(form_config, "POST", "/form"),
+            &json!({"body": {
+                "name": "Fido",
+                "tags": ["a", "b"],
+                "meta": {"color": "brown"}
+            }}),
+        )
+        .unwrap();
+        let Some(HttpRequestBody::Form(fields)) = request.body else {
+            panic!("expected form body");
+        };
+        assert!(fields.contains(&("name".to_string(), "Fido".to_string())));
+        assert!(fields.contains(&("tags".to_string(), "a".to_string())));
+        assert!(fields.contains(&("tags".to_string(), "b".to_string())));
+        assert!(fields.contains(&("color".to_string(), "brown".to_string())));
+
+        let multipart_config = json!({
+            "base_url": "https://api.example.test",
+            "parameters": [],
+            "body": true,
+            "body_required": true,
+            "content_type": "multipart/form-data"
+        });
+        let mut multipart_tool = http_tool_with(multipart_config, "POST", "/multipart");
+        multipart_tool.schema = json!({
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "file": {"type": "string", "x-contentMediaType": "image/png"}
+                    }
+                }
+            }
+        });
+        let request = build_http_request(
+            &multipart_tool,
+            &json!({"body": {
+                "name": "Fido",
+                "file": {"content_base64": "aGk="},
+                "meta": {"a": 1},
+                "tags": ["x"]
+            }}),
+        )
+        .unwrap();
+        let Some(HttpRequestBody::Multipart(parts)) = request.body else {
+            panic!("expected multipart body");
+        };
+        let part = |name: &str| parts.iter().find(|part| part.name == name).unwrap();
+        assert_eq!(part("name").text.as_deref(), Some("Fido"));
+        assert_eq!(part("meta").text.as_deref(), Some("{\"a\":1}"));
+        assert_eq!(part("tags").text.as_deref(), Some("[\"x\"]"));
+        assert_eq!(part("file").bytes.as_deref(), Some(b"hi".as_slice()));
+        assert_eq!(part("file").content_type.as_deref(), Some("image/png"));
+
+        let text_config = json!({
+            "base_url": "https://api.example.test",
+            "parameters": [],
+            "body": true,
+            "body_required": true,
+            "content_type": "text/plain"
+        });
+        let request = build_http_request(
+            &http_tool_with(text_config, "POST", "/text"),
+            &json!({"body": "hello world"}),
+        )
+        .unwrap();
+        assert_eq!(
+            request.body,
+            Some(HttpRequestBody::Text("hello world".to_string()))
+        );
+        assert_eq!(header_value(&request, "content-type"), Some("text/plain"));
+    }
+
+    #[test]
+    fn chooses_supported_request_body_media_types_and_rejects_unsupported_ones() {
+        let document = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "Bodies", "version": "1"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/bodies": {
+                    "post": {
+                        "operationId": "bodies",
+                        "requestBody": {
+                            "content": {
+                                "text/plain": {"schema": {"type": "string"}},
+                                "application/x-www-form-urlencoded": {"schema": {"type": "object"}},
+                                "application/json": {"schema": {"type": "object"}}
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        })
+        .to_string();
+        let tools = parse_openapi(&document).unwrap();
+        assert_eq!(tools[0].http_config["content_type"], "application/json");
+
+        let unsupported = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "Bodies", "version": "1"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/bodies": {
+                    "post": {
+                        "operationId": "bodies",
+                        "requestBody": {
+                            "content": {"application/xml": {"schema": {"type": "object"}}}
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        })
+        .to_string();
+        let error = parse_openapi(&unsupported).unwrap_err();
+        assert!(
+            error.contains("unsupported OpenAPI request body media types"),
+            "{error}"
+        );
+        assert!(error.contains("application/xml"), "{error}");
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "octra-openapi-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn resolves_local_file_external_refs() {
+        let directory = temp_dir("file-refs");
+        let shared = r#"
+components:
+  parameters:
+    Tag:
+      name: tag
+      in: query
+      schema:
+        type: string
+  requestBodies:
+    PetBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Pet'
+  schemas:
+    Pet:
+      type: object
+      properties:
+        name:
+          type: string
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      parameters:
+        - $ref: '#/components/parameters/Tag'
+      responses:
+        '200':
+          description: ok
+    post:
+      operationId: createPet
+      requestBody:
+        $ref: '#/components/requestBodies/PetBody'
+      responses:
+        '201':
+          description: created
+"#;
+        std::fs::write(directory.join("common.yaml"), shared).unwrap();
+        let document = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "External", "version": "1"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/pets": {"$ref": "./common.yaml#/paths/~1pets"}
+            }
+        })
+        .to_string();
+        let config = OpenApiConfig {
+            document: Some(document.clone()),
+            document_base_dir: Some(directory.display().to_string()),
+            ..OpenApiConfig::default()
+        };
+        let tools = build_tools(&config, &document).await.unwrap();
+        assert_eq!(tools.len(), 2);
+        let get = tools.iter().find(|tool| tool.name == "listPets").unwrap();
+        assert_eq!(get.http_config["parameters"][0]["name"], "tag");
+        assert_eq!(get.schema["properties"]["query_tag"]["type"], "string");
+        let post = tools.iter().find(|tool| tool.name == "createPet").unwrap();
+        assert_eq!(post.http_config["content_type"], "application/json");
+        assert_eq!(post.schema["properties"]["body"]["type"], "object");
+        assert_eq!(
+            post.schema["properties"]["body"]["properties"]["name"]["type"],
+            "string"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn resolves_http_external_refs_via_a_mock_server() {
+        use axum::{Json, Router, routing::get};
+        use tokio::net::TcpListener;
+
+        let app = Router::new().route(
+            "/shared.json",
+            get(|| async {
+                Json(json!({
+                    "components": {
+                        "parameters": {
+                            "Tag": {
+                                "name": "tag",
+                                "in": "query",
+                                "schema": {"type": "string"}
+                            }
+                        }
+                    }
+                }))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let document = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "HTTP refs", "version": "1"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "operationId": "remoteRef",
+                        "parameters": [{
+                            "$ref": format!("http://{address}/shared.json#/components/parameters/Tag")
+                        }],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        })
+        .to_string();
+        let config = OpenApiConfig {
+            document: Some(document.clone()),
+            ..OpenApiConfig::default()
+        };
+        let client = reqwest::Client::new();
+        let tools = build_tools_with_http(Some(&client), &config, &document)
+            .await
+            .unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].http_config["parameters"][0]["name"], "tag");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_external_ref_cycles_and_depth_limits() {
+        let cycle_directory = temp_dir("cycle-refs");
+        std::fs::write(
+            cycle_directory.join("a.yaml"),
+            "components:\n  parameters:\n    A:\n      $ref: './b.yaml#/components/parameters/B'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cycle_directory.join("b.yaml"),
+            "components:\n  parameters:\n    B:\n      $ref: './a.yaml#/components/parameters/A'\n",
+        )
+        .unwrap();
+        let document = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "Cycles", "version": "1"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "operationId": "cycle",
+                        "parameters": [{"$ref": "./a.yaml#/components/parameters/A"}],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        })
+        .to_string();
+        let config = OpenApiConfig {
+            document: Some(document.clone()),
+            document_base_dir: Some(cycle_directory.display().to_string()),
+            ..OpenApiConfig::default()
+        };
+        let error = build_tools(&config, &document).await.unwrap_err();
+        assert!(error.contains("cycle detected"), "{error}");
+        let _ = std::fs::remove_dir_all(cycle_directory);
+
+        let depth_directory = temp_dir("depth-refs");
+        for index in 0..12 {
+            let contents = if index == 11 {
+                "next:\n  value: end\n".to_string()
+            } else {
+                format!("next:\n  $ref: './d{}.yaml#/next'\n", index + 1)
+            };
+            std::fs::write(depth_directory.join(format!("d{index}.yaml")), contents).unwrap();
+        }
+        let document = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "Depth", "version": "1"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "operationId": "depth",
+                        "parameters": [{"$ref": "./d0.yaml#/next"}],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        })
+        .to_string();
+        let config = OpenApiConfig {
+            document: Some(document.clone()),
+            document_base_dir: Some(depth_directory.display().to_string()),
+            ..OpenApiConfig::default()
+        };
+        let error = build_tools(&config, &document).await.unwrap_err();
+        assert!(error.contains("depth exceeds"), "{error}");
+        let _ = std::fs::remove_dir_all(depth_directory);
     }
 }

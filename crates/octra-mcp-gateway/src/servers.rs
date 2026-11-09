@@ -2,17 +2,65 @@
 //! restart, tool discovery, and teardown on reload.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use octra_mcp_core::McpServer;
 use octra_storage::mcp::DiscoveredTool;
 use serde_json::{Map, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
+use tokio::task::JoinHandle;
 
 use crate::client::{
     McpError, UpstreamClient, as_stdio, call_tool, connect, initialize, list_all_tools,
 };
+
+/// Bounded per-server notification channel.
+pub const NOTIFICATION_CAPACITY: usize = 64;
+
+/// Broadcasts upstream notifications to every connected client stream.
+///
+/// Channels are created lazily for subscribers and publishers. Publishing
+/// with no subscribers drops the notification, which is expected: a server
+/// that changes its catalog while no client holds the GET channel open needs
+/// no delivery.
+#[derive(Default)]
+pub struct NotificationHub {
+    channels: StdMutex<HashMap<String, broadcast::Sender<Value>>>,
+}
+
+impl NotificationHub {
+    fn channels(&self) -> std::sync::MutexGuard<'_, HashMap<String, broadcast::Sender<Value>>> {
+        self.channels
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn subscribe(&self, server_id: &str) -> Option<broadcast::Receiver<Value>> {
+        let mut channels = self.channels();
+        let sender = channels.entry(server_id.to_string()).or_insert_with(|| {
+            let (sender, _) = broadcast::channel(NOTIFICATION_CAPACITY);
+            sender
+        });
+        Some(sender.subscribe())
+    }
+
+    pub fn publish(&self, server_id: &str, value: Value) {
+        let sender = self.channels().get(server_id).cloned();
+        if let Some(sender) = sender {
+            let _ = sender.send(value);
+        }
+    }
+
+    /// Drops the channel, ending existing receivers.
+    pub fn clear(&self, server_id: &str) {
+        self.channels().remove(server_id);
+    }
+
+    pub fn clear_all(&self) {
+        self.channels().clear();
+    }
+}
 
 /// A live connection plus the definition it was opened for.
 ///
@@ -28,9 +76,30 @@ struct Live {
 #[derive(Default)]
 pub struct ServerConnections {
     live: Mutex<HashMap<String, Live>>,
+    forwarding: Mutex<HashMap<String, JoinHandle<()>>>,
+    hub: Arc<NotificationHub>,
+    coordinator: OnceLock<Arc<crate::NotificationCoordinator>>,
 }
 
 impl ServerConnections {
+    pub fn new(hub: Arc<NotificationHub>) -> Self {
+        Self {
+            live: Mutex::new(HashMap::new()),
+            forwarding: Mutex::new(HashMap::new()),
+            hub,
+            coordinator: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn set_coordinator(&self, coordinator: Arc<crate::NotificationCoordinator>) {
+        let _ = self.coordinator.set(coordinator);
+    }
+
+    /// Subscribes to the notifications a server's live connection publishes.
+    pub fn notifications(&self, server_id: &str) -> Option<broadcast::Receiver<Value>> {
+        self.hub.subscribe(server_id)
+    }
+
     /// Returns a live client, starting and handshaking one if needed.
     ///
     /// The registry lock is never held across a handshake, child spawn, or
@@ -53,6 +122,7 @@ impl ServerConnections {
         }
 
         let client = connect(server, timeout, Some(http))?;
+        let notifications = client.subscribe_notifications();
         match tokio::time::timeout(timeout, initialize(client.as_ref(), timeout)).await {
             Ok(Ok(_)) => {}
             Ok(Err(err)) => {
@@ -65,17 +135,69 @@ impl ServerConnections {
             }
         }
 
-        let mut guard = self.live.lock().await;
-        if let Some(previous) = guard.insert(
-            server.id.clone(),
-            Live {
-                definition: server.clone(),
-                client: client.clone(),
-            },
-        ) {
-            previous.client.close();
+        {
+            let mut guard = self.live.lock().await;
+            if let Some(previous) = guard.insert(
+                server.id.clone(),
+                Live {
+                    definition: server.clone(),
+                    client: client.clone(),
+                },
+            ) {
+                previous.client.close();
+            }
         }
+        self.start_forwarding(&server.id, notifications).await;
         Ok(client)
+    }
+
+    /// Forwards one connection generation's notifications into the hub. A new
+    /// connection for the same server replaces the previous forwarder.
+    async fn start_forwarding(
+        &self,
+        server_id: &str,
+        receiver: Option<broadcast::Receiver<Value>>,
+    ) {
+        let Some(receiver) = receiver else {
+            return;
+        };
+        let hub = self.hub.clone();
+        let coordinator = self.coordinator.get().cloned();
+        let id = server_id.to_string();
+        let forward_key = id.clone();
+        let handle = tokio::spawn(async move {
+            let mut receiver = receiver;
+            loop {
+                match receiver.recv().await {
+                    Ok(value) => {
+                        if let Some(method) = value.get("method").and_then(Value::as_str) {
+                            let method = method.to_string();
+                            tracing::trace!(
+                                server = %id,
+                                method,
+                                "forwarding upstream MCP notification"
+                            );
+                            if let Some(coordinator) = coordinator.as_ref() {
+                                coordinator.on_list_changed(&id, &method);
+                            }
+                        }
+                        hub.publish(&id, value);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        tracing::warn!(
+                            server = %id,
+                            dropped,
+                            "dropped upstream MCP notifications"
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        let previous = self.forwarding.lock().await.insert(forward_key, handle);
+        if let Some(previous) = previous {
+            previous.abort();
+        }
     }
 
     /// Closes a client that failed to handshake, waiting for the stdio worker
@@ -93,6 +215,10 @@ impl ServerConnections {
     /// Drops the live client for a server; the next request reconnects.
     pub async fn invalidate(&self, server_id: &str) {
         let removed = self.live.lock().await.remove(server_id);
+        let forwarder = self.forwarding.lock().await.remove(server_id);
+        if let Some(forwarder) = forwarder {
+            forwarder.abort();
+        }
         if let Some(live) = removed {
             live.client.close();
         }
@@ -179,9 +305,20 @@ impl ServerConnections {
             .drain()
             .map(|(_, live)| live)
             .collect();
+        let forwarders: Vec<JoinHandle<()>> = self
+            .forwarding
+            .lock()
+            .await
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
+        for handle in forwarders {
+            handle.abort();
+        }
         for entry in live {
             entry.client.close();
         }
+        self.hub.clear_all();
     }
 
     pub async fn live_count(&self) -> usize {

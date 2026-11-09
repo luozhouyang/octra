@@ -2,15 +2,17 @@
 //! either `application/json` or `text/event-stream`, with the upstream's
 //! `Mcp-Session-Id` echoed on every request after `initialize`.
 
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use octra_data_plane::sse::SseDecoder;
+use octra_data_plane::sse::{SseDecoder, SseEvent};
 use octra_mcp_core::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
+use octra_mcp_core::protocol::methods;
 use octra_mcp_core::{McpServer, jsonrpc};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use tokio::sync::{broadcast, watch};
 
 use crate::client::{BoxFuture, McpError, UpstreamClient};
 
@@ -18,25 +20,61 @@ pub const SESSION_HEADER: &str = "mcp-session-id";
 pub const PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 const NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
+const NOTIFICATION_CAPACITY: usize = 64;
+const RECONNECT_BACKOFF_SECONDS: [u64; 6] = [1, 2, 5, 10, 20, 30];
+
+/// Shared state for the background upstream GET stream.
+struct NotificationState {
+    sender: broadcast::Sender<Value>,
+    closed: AtomicBool,
+    closed_tx: watch::Sender<bool>,
+}
+
+impl NotificationState {
+    fn new() -> Self {
+        let (sender, _) = broadcast::channel(NOTIFICATION_CAPACITY);
+        let (closed_tx, _) = watch::channel(false);
+        Self {
+            sender,
+            closed: AtomicBool::new(false),
+            closed_tx,
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let _ = self.closed_tx.send(true);
+    }
+}
 
 pub struct HttpClient {
+    server_id: String,
     url: String,
     client: reqwest::Client,
     headers: reqwest::header::HeaderMap,
     session_id: Mutex<Option<String>>,
     protocol_version: Mutex<Option<String>>,
     next_id: AtomicU64,
+    notifications: Arc<NotificationState>,
+    notification_stream_started: AtomicBool,
 }
 
 impl HttpClient {
     pub fn new(server: &McpServer, client: reqwest::Client) -> Self {
         Self {
+            server_id: server.id.clone(),
             url: server.url.clone().unwrap_or_default(),
             client,
             headers: build_headers(&server.headers),
             session_id: Mutex::new(None),
             protocol_version: Mutex::new(None),
             next_id: AtomicU64::new(1),
+            notifications: Arc::new(NotificationState::new()),
+            notification_stream_started: AtomicBool::new(false),
         }
     }
 
@@ -76,6 +114,50 @@ impl HttpClient {
         {
             *guard = Some(value.to_string());
         }
+    }
+
+    /// Starts the upstream notification GET stream after the session id is
+    /// known. The stream reconnects until the client is closed.
+    fn start_notification_stream(&self) {
+        if self
+            .notification_stream_started
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        let Some(session_id) = self.session_id() else {
+            self.notification_stream_started
+                .store(false, Ordering::SeqCst);
+            return;
+        };
+        if self.notifications.is_closed() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            self.notification_stream_started
+                .store(false, Ordering::SeqCst);
+            return;
+        };
+        let client = self.client.clone();
+        let url = self.url.clone();
+        let headers = self.headers.clone();
+        let protocol_version = self.protocol_version();
+        let server_id = self.server_id.clone();
+        let state = self.notifications.clone();
+        let closed_rx = self.notifications.closed_tx.subscribe();
+        runtime.spawn(async move {
+            run_notification_stream(
+                client,
+                url,
+                headers,
+                session_id,
+                protocol_version,
+                server_id,
+                state,
+                closed_rx,
+            )
+            .await;
+        });
     }
 
     async fn post(&self, payload: Value, timeout: Duration) -> Result<Value, McpError> {
@@ -171,6 +253,155 @@ fn transport_error(err: &reqwest::Error) -> McpError {
     } else {
         McpError::Transport(format!("upstream request failed: {err}"))
     }
+}
+
+fn reconnect_delay(attempt: usize) -> Duration {
+    let seconds = RECONNECT_BACKOFF_SECONDS[attempt.min(RECONNECT_BACKOFF_SECONDS.len() - 1)];
+    Duration::from_secs(seconds)
+}
+
+/// Runs the upstream GET SSE channel, reconnecting until the client closes.
+#[allow(clippy::too_many_arguments)]
+async fn run_notification_stream(
+    client: reqwest::Client,
+    url: String,
+    headers: reqwest::header::HeaderMap,
+    session_id: String,
+    protocol_version: Option<String>,
+    server_id: String,
+    state: Arc<NotificationState>,
+    mut closed_rx: watch::Receiver<bool>,
+) {
+    let mut attempt = 0usize;
+    loop {
+        if state.is_closed() {
+            return;
+        }
+
+        let mut request_headers = headers.clone();
+        request_headers.insert(
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static("text/event-stream"),
+        );
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&session_id) {
+            request_headers.insert(SESSION_HEADER, value);
+        }
+        if let Some(version) = protocol_version.as_deref()
+            && let Ok(value) = reqwest::header::HeaderValue::from_str(version)
+        {
+            request_headers.insert(PROTOCOL_VERSION_HEADER, value);
+        }
+
+        match client.get(&url).headers(request_headers).send().await {
+            Ok(mut response) => {
+                let status = response.status();
+                if status == StatusCode::METHOD_NOT_ALLOWED || status == StatusCode::NOT_FOUND {
+                    tracing::info!(
+                        server = %server_id,
+                        status = %status,
+                        "upstream does not expose an MCP notification stream; notifications disabled"
+                    );
+                    return;
+                }
+                if !status.is_success() {
+                    tracing::warn!(
+                        server = %server_id,
+                        status = %status,
+                        "upstream MCP notification stream returned an error"
+                    );
+                } else {
+                    attempt = 0;
+                    tracing::debug!(
+                        server = %server_id,
+                        "connected to upstream MCP notification stream"
+                    );
+                    let mut decoder = SseDecoder::new();
+                    loop {
+                        tokio::select! {
+                            chunk = response.chunk() => match chunk {
+                                Ok(Some(chunk)) => {
+                                    for event in decoder.push(&chunk) {
+                                        forward_event(&event, &state, &server_id);
+                                    }
+                                }
+                                Ok(None) => {
+                                    if let Some(event) = decoder.finish() {
+                                        forward_event(&event, &state, &server_id);
+                                    }
+                                    tracing::debug!(
+                                        server = %server_id,
+                                        "upstream MCP notification stream closed"
+                                    );
+                                    break;
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        server = %server_id,
+                                        error = %err,
+                                        "upstream MCP notification stream failed"
+                                    );
+                                    break;
+                                }
+                            },
+                            changed = closed_rx.changed() => {
+                                if changed.is_err() || *closed_rx.borrow() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    server = %server_id,
+                    error = %err,
+                    "cannot connect to the upstream MCP notification stream"
+                );
+            }
+        }
+
+        let delay = reconnect_delay(attempt);
+        attempt = attempt.saturating_add(1);
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            changed = closed_rx.changed() => {
+                if changed.is_err() || *closed_rx.borrow() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn forward_event(event: &SseEvent, state: &NotificationState, server_id: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
+        return;
+    };
+    for notification in notification_objects(value) {
+        let method = notification
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if state.sender.send(notification).is_ok() {
+            tracing::trace!(server = %server_id, method, "forwarded upstream MCP notification");
+        }
+    }
+}
+
+/// Extracts JSON-RPC notification objects (`method` present, `id` absent)
+/// from one SSE payload, which may be a batch.
+fn notification_objects(value: Value) -> Vec<Value> {
+    match value {
+        Value::Array(items) => items.into_iter().filter(is_notification).collect(),
+        other if is_notification(&other) => vec![other],
+        _ => Vec::new(),
+    }
+}
+
+fn is_notification(value: &Value) -> bool {
+    value.get("method").is_some() && value.get("id").is_none()
 }
 
 async fn read_text(response: &mut reqwest::Response) -> String {
@@ -354,6 +585,9 @@ impl UpstreamClient for HttpClient {
             {
                 *guard = Some(version.to_string());
             }
+            if method == methods::INITIALIZE {
+                self.start_notification_stream();
+            }
             Ok(result)
         })
     }
@@ -376,6 +610,10 @@ impl UpstreamClient for HttpClient {
             .and_then(|guard| guard.clone())
     }
 
+    fn subscribe_notifications(&self) -> Option<broadcast::Receiver<Value>> {
+        Some(self.notifications.sender.subscribe())
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -387,6 +625,13 @@ impl UpstreamClient for HttpClient {
         if let Ok(mut session) = self.session_id.lock() {
             *session = None;
         }
+        self.notifications.close();
+    }
+}
+
+impl Drop for HttpClient {
+    fn drop(&mut self) {
+        self.notifications.close();
     }
 }
 
@@ -472,5 +717,36 @@ mod tests {
         let document = transport_document(json!(1), &McpError::Timeout);
         assert_eq!(document["error"]["code"], -32006);
         assert_eq!(document["id"], 1);
+    }
+
+    #[test]
+    fn extracts_notifications_from_sse_payloads() {
+        let payload = json!([
+            {"jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": {"a": 1}},
+            {"jsonrpc": "2.0", "id": 3, "result": {}},
+            {"jsonrpc": "2.0", "id": 4, "method": "server/request"}
+        ]);
+        let notifications = notification_objects(payload);
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications[0]["method"],
+            "notifications/tools/list_changed"
+        );
+        assert_eq!(notifications[0]["params"]["a"], 1);
+
+        assert!(notification_objects(json!({"jsonrpc": "2.0", "id": 1, "result": {}})).is_empty());
+        assert_eq!(
+            notification_objects(json!({"jsonrpc": "2.0", "method": "notifications/message"}))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn reconnect_backoff_grows_and_caps() {
+        assert_eq!(reconnect_delay(0), Duration::from_secs(1));
+        assert_eq!(reconnect_delay(1), Duration::from_secs(2));
+        assert_eq!(reconnect_delay(2), Duration::from_secs(5));
+        assert_eq!(reconnect_delay(100), Duration::from_secs(30));
     }
 }

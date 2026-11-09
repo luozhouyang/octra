@@ -84,6 +84,12 @@ pub trait UpstreamClient: Send + Sync {
 
     fn protocol_version(&self) -> Option<String>;
 
+    /// Returns a receiver for server-initiated notifications. Transports
+    /// without a notification channel return `None`.
+    fn subscribe_notifications(&self) -> Option<tokio::sync::broadcast::Receiver<Value>> {
+        None
+    }
+
     /// Terminates the connection; later calls fail.
     fn close(&self);
 

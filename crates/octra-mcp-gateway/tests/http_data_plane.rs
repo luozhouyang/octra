@@ -2,15 +2,152 @@
 
 mod support;
 
+use std::time::Duration;
+
+use axum::body::Body;
 use axum::http::StatusCode;
+use futures_util::StreamExt;
+use octra_data_plane::sse::{SseDecoder, SseEvent};
 use octra_mcp_core::domain::default_server_mode;
 use octra_mcp_core::{NewMcpServer, Transport};
 use serde_json::json;
 use support::{
-    Gateway, UpstreamMode, create_consumer_group, create_key, create_keyed_consumer,
+    Gateway, Upstream, UpstreamMode, create_consumer_group, create_key, create_keyed_consumer,
     sign_test_token, start_api_mock, start_discovery, start_introspection, start_jwks,
     start_upstream, test_jwks,
 };
+
+struct SseStream {
+    stream: axum::body::BodyDataStream,
+    decoder: SseDecoder,
+    pending: std::collections::VecDeque<SseEvent>,
+}
+
+impl SseStream {
+    async fn next_event(&mut self, timeout: Duration) -> Option<SseEvent> {
+        if let Some(event) = self.pending.pop_front() {
+            return Some(event);
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(remaining, self.stream.next()).await {
+                Ok(Some(Ok(chunk))) => {
+                    self.pending.extend(self.decoder.push(&chunk));
+                    if let Some(event) = self.pending.pop_front() {
+                        return Some(event);
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    async fn expect_event(&mut self, timeout: Duration) -> SseEvent {
+        self.next_event(timeout)
+            .await
+            .expect("expected an SSE event")
+    }
+
+    /// Returns true when the body ends before any further event arrives.
+    async fn body_ended(&mut self, timeout: Duration) -> bool {
+        if !self.pending.is_empty() {
+            return false;
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            match tokio::time::timeout(remaining, self.stream.next()).await {
+                Ok(Some(Ok(chunk))) => {
+                    self.pending.extend(self.decoder.push(&chunk));
+                    if !self.pending.is_empty() {
+                        return false;
+                    }
+                }
+                Ok(Some(Err(_))) | Ok(None) => return true,
+                Err(_) => return false,
+            }
+        }
+    }
+}
+
+async fn open_sse(gateway: &Gateway, path: &str, session: Option<&str>) -> SseStream {
+    let mut builder = axum::http::Request::builder().method("GET").uri(path);
+    if let Some(session) = session {
+        builder = builder.header("mcp-session-id", session);
+    }
+    let response =
+        tower::ServiceExt::oneshot(gateway.data_router(), builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream")
+    );
+    SseStream {
+        stream: response.into_body().into_data_stream(),
+        decoder: SseDecoder::new(),
+        pending: std::collections::VecDeque::new(),
+    }
+}
+
+async fn wait_for_active_get(upstream: &Upstream, minimum: u64, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if upstream.state.active_get_streams() >= minimum {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "upstream GET streams did not reach {minimum}: {}",
+        upstream.state.active_get_streams()
+    );
+}
+
+async fn wait_for_idle_get(upstream: &Upstream, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if upstream.state.active_get_streams() == 0 {
+            // Give a connection still completing its handshake time to settle.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if upstream.state.active_get_streams() == 0 {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "upstream GET streams did not become idle: {}",
+        upstream.state.active_get_streams()
+    );
+}
+
+async fn wait_for_tool_lists(upstream: &Upstream, minimum: u64, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if upstream.state.tool_lists() >= minimum {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "upstream tools/list calls did not reach {minimum}: {}",
+        upstream.state.tool_lists()
+    );
+}
 
 fn tool_names(body: &serde_json::Value) -> Vec<String> {
     body["result"]["tools"]
@@ -3977,4 +4114,680 @@ async fn conversion_document_url_is_fetched_at_create_time() {
         vec!["fetchedTool"]
     );
     assert_eq!(api.state.requests.lock().unwrap().len(), 1);
+}
+
+fn conversion_styles_document(server_url: &str) -> String {
+    json!({
+        "openapi": "3.0.3",
+        "info": {"title": "Styles", "version": "1.0.0"},
+        "servers": [{"url": server_url}],
+        "paths": {
+            "/styles/{id}": {
+                "get": {
+                    "operationId": "styleTool",
+                    "parameters": [
+                        {
+                            "name": "id",
+                            "in": "path",
+                            "required": true,
+                            "style": "matrix",
+                            "explode": true,
+                            "schema": {"type": "array", "items": {"type": "string"}}
+                        },
+                        {
+                            "name": "filter",
+                            "in": "query",
+                            "style": "deepObject",
+                            "schema": {"type": "object"}
+                        },
+                        {
+                            "name": "letters",
+                            "in": "query",
+                            "style": "pipeDelimited",
+                            "explode": false,
+                            "schema": {"type": "array", "items": {"type": "string"}}
+                        },
+                        {
+                            "name": "raw",
+                            "in": "query",
+                            "allowReserved": true,
+                            "schema": {"type": "string"}
+                        },
+                        {
+                            "name": "X-Flags",
+                            "in": "header",
+                            "schema": {"type": "array", "items": {"type": "string"}}
+                        },
+                        {
+                            "name": "session",
+                            "in": "cookie",
+                            "required": true,
+                            "schema": {"type": "string"}
+                        },
+                        {
+                            "name": "prefs",
+                            "in": "cookie",
+                            "schema": {"type": "object"}
+                        }
+                    ],
+                    "responses": {"200": {"description": "ok"}}
+                }
+            },
+            "/form": {
+                "post": {
+                    "operationId": "formTool",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/x-www-form-urlencoded": {
+                                "schema": {"type": "object"}
+                            }
+                        }
+                    },
+                    "responses": {"200": {"description": "ok"}}
+                }
+            },
+            "/multipart": {
+                "post": {
+                    "operationId": "multipartTool",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "multipart/form-data": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "file": {"type": "string", "x-contentMediaType": "image/png"}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {"200": {"description": "ok"}}
+                }
+            },
+            "/text": {
+                "post": {
+                    "operationId": "textTool",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "text/plain": {"schema": {"type": "string"}}
+                        }
+                    },
+                    "responses": {"200": {"description": "ok"}}
+                }
+            }
+        }
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn conversion_serializes_styles_cookies_and_non_json_bodies() {
+    let api = start_api_mock().await;
+    let gateway = Gateway::new().await;
+    let server = create_conversion_server(
+        &gateway,
+        "styles",
+        "conversion-listener",
+        conversion_styles_document(&format!("{}/api", api.url())),
+        None,
+    )
+    .await;
+    assert_eq!(server["tool_count"], 4, "{server}");
+    let session = gateway.open_session(None).await;
+
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(2),
+            "tools/call",
+            json!({
+                "name": "styles__styleTool",
+                "arguments": {
+                    "path_id": ["a", "b"],
+                    "query_filter": {"role": "admin"},
+                    "query_letters": ["x", "y"],
+                    "query_raw": "/v1/a b",
+                    "header_X-Flags": ["a", "b"],
+                    "cookie_session": "s1",
+                    "cookie_prefs": {"theme": "dark"}
+                }
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request = api.state.requests.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(request.path, "/api/styles/;id=a;id=b");
+    assert!(
+        request.query.contains("filter%5Brole%5D=admin"),
+        "{}",
+        request.query
+    );
+    assert!(request.query.contains("letters=x%7Cy"), "{}", request.query);
+    assert!(request.query.contains("raw=/v1/a%20b"), "{}", request.query);
+    assert_eq!(
+        request
+            .headers
+            .get("x-flags")
+            .and_then(|value| value.to_str().ok()),
+        Some("a,b")
+    );
+    assert_eq!(
+        request
+            .headers
+            .get("cookie")
+            .and_then(|value| value.to_str().ok()),
+        Some("session=s1; theme=dark")
+    );
+
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(3),
+            "tools/call",
+            json!({
+                "name": "styles__formTool",
+                "arguments": {"body": {"name": "Fido", "tags": ["a", "b"]}}
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request = api.state.requests.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        request
+            .headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("application/x-www-form-urlencoded")
+    );
+    let form_body = request.body.as_str().unwrap();
+    assert!(form_body.contains("name=Fido"), "{form_body}");
+    assert!(form_body.contains("tags=a"), "{form_body}");
+    assert!(form_body.contains("tags=b"), "{form_body}");
+
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(4),
+            "tools/call",
+            json!({
+                "name": "styles__multipartTool",
+                "arguments": {
+                    "body": {
+                        "name": "Fido",
+                        "file": {"content_base64": "aGk="}
+                    }
+                }
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request = api.state.requests.lock().unwrap().last().cloned().unwrap();
+    let content_type = request
+        .headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap();
+    assert!(
+        content_type.starts_with("multipart/form-data; boundary="),
+        "{content_type}"
+    );
+    let multipart_body = request.body.as_str().unwrap();
+    assert!(multipart_body.contains("name=\"name\""), "{multipart_body}");
+    assert!(multipart_body.contains("Fido"), "{multipart_body}");
+    assert!(multipart_body.contains("name=\"file\""), "{multipart_body}");
+    assert!(
+        multipart_body.contains("Content-Type: image/png"),
+        "{multipart_body}"
+    );
+    assert!(multipart_body.contains("hi"), "{multipart_body}");
+
+    let (status, body) = gateway
+        .rpc(
+            &session,
+            json!(5),
+            "tools/call",
+            json!({
+                "name": "styles__textTool",
+                "arguments": {"body": "hello world"}
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request = api.state.requests.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(request.body.as_str(), Some("hello world"));
+    assert_eq!(
+        request
+            .headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/plain")
+    );
+
+    let unsupported = json!({
+        "openapi": "3.0.3",
+        "info": {"title": "Unsupported", "version": "1"},
+        "servers": [{"url": api.url()}],
+        "paths": {
+            "/xml": {
+                "post": {
+                    "operationId": "xmlTool",
+                    "requestBody": {
+                        "content": {"application/xml": {"schema": {"type": "object"}}}
+                    },
+                    "responses": {"200": {"description": "ok"}}
+                }
+            }
+        }
+    })
+    .to_string();
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "unsupported-body",
+                "type": "conversion-only",
+                "config": {"openapi": {"document": unsupported}}
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported OpenAPI request body media types"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn conversion_resolves_local_and_http_external_refs() {
+    let api = start_api_mock().await;
+    let gateway = Gateway::new().await;
+
+    let directory = std::env::temp_dir().join(format!(
+        "octra-openapi-integration-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("common.yaml"),
+        r#"
+paths:
+  /local-ref:
+    get:
+      operationId: localRefTool
+      parameters:
+        - $ref: '#/components/parameters/Tag'
+      responses:
+        '200':
+          description: ok
+components:
+  parameters:
+    Tag:
+      name: tag
+      in: query
+      schema:
+        type: string
+"#,
+    )
+    .unwrap();
+    let local_document = json!({
+        "openapi": "3.0.3",
+        "info": {"title": "Local refs", "version": "1"},
+        "servers": [{"url": "https://api.example.test"}],
+        "paths": {
+            "/local-ref": {"$ref": "./common.yaml#/paths/~1local-ref"}
+        }
+    })
+    .to_string();
+    let (status, server) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "local-ref",
+                "type": "conversion-only",
+                "config": {
+                    "openapi": {
+                        "document": local_document,
+                        "document_base_dir": directory.display().to_string()
+                    }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{server}");
+    assert_eq!(
+        conversion_tool_names(&gateway, server["id"].as_str().unwrap()).await,
+        vec!["localRefTool"]
+    );
+    let _ = std::fs::remove_dir_all(directory);
+
+    let (status, server) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "http-ref",
+                "type": "conversion-only",
+                "config": {
+                    "openapi": {"document_url": format!("{}/openapi-relative.json", api.url())}
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{server}");
+    assert_eq!(
+        conversion_tool_names(&gateway, server["id"].as_str().unwrap()).await,
+        vec!["httpRefTool"]
+    );
+    let requested = api
+        .state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| request.path.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        requested.contains(&"/openapi-relative.json".to_string()),
+        "{requested:?}"
+    );
+    assert!(
+        requested.contains(&"/openapi-shared.json".to_string()),
+        "{requested:?}"
+    );
+
+    let missing_ref_document = json!({
+        "openapi": "3.0.3",
+        "info": {"title": "Missing refs", "version": "1"},
+        "servers": [{"url": "https://api.example.test"}],
+        "paths": {
+            "/missing": {
+                "get": {
+                    "operationId": "missingRef",
+                    "parameters": [{
+                        "$ref": format!(
+                            "{}/missing-shared.json#/components/parameters/Tag",
+                            api.url()
+                        )
+                    }],
+                    "responses": {"200": {"description": "ok"}}
+                }
+            }
+        }
+    })
+    .to_string();
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "missing-ref",
+                "type": "conversion-only",
+                "config": {"openapi": {"document": missing_ref_document}}
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot resolve external OpenAPI reference fragment"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn upstream_catalog_change_reaches_get_stream_and_refreshes_tools() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("remote", &upstream).await;
+    wait_for_idle_get(&upstream, Duration::from_secs(3)).await;
+    let baseline_lists = upstream.state.tool_lists();
+
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(2),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "live"}}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "live", "{body}");
+    wait_for_active_get(&upstream, 1, Duration::from_secs(5)).await;
+
+    let mut stream = open_sse(&gateway, "/mcp", Some(&session)).await;
+    upstream.state.notify(
+        "notifications/tools/list_changed",
+        json!({"source": "upstream"}),
+    );
+
+    let event = stream.expect_event(Duration::from_secs(5)).await;
+    let notification: serde_json::Value = serde_json::from_str(&event.data).unwrap();
+    assert_eq!(notification["method"], "notifications/tools/list_changed");
+    assert_eq!(notification["params"]["source"], "upstream");
+
+    // The gateway refreshes the catalog once, then publishes its own notice.
+    wait_for_tool_lists(&upstream, baseline_lists + 1, Duration::from_secs(5)).await;
+    let refreshed = stream.expect_event(Duration::from_secs(5)).await;
+    let notification: serde_json::Value = serde_json::from_str(&refreshed.data).unwrap();
+    assert_eq!(notification["method"], "notifications/tools/list_changed");
+    assert!(notification.get("params").is_none(), "{notification}");
+
+    let (_, body) = gateway
+        .rpc(&session, json!(3), "tools/list", json!({}), None)
+        .await;
+    assert_eq!(tool_names(&body), vec!["remote__boom", "remote__echo"]);
+}
+
+#[tokio::test]
+async fn scoped_get_stream_only_forwards_visible_server_notifications() {
+    let first = start_upstream(UpstreamMode::Json).await;
+    let second = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("first", &first).await;
+    gateway.add_http_server("second", &second).await;
+    gateway.add_listener("front", &["first"]).await;
+    wait_for_idle_get(&first, Duration::from_secs(3)).await;
+    wait_for_idle_get(&second, Duration::from_secs(3)).await;
+
+    // Open one live upstream connection per server through its own endpoint.
+    for (name, message) in [("first", "one"), ("second", "two")] {
+        let session = gateway.open_session_at(&format!("/mcp/{name}"), None).await;
+        let (_, body) = gateway
+            .rpc_at(
+                &format!("/mcp/{name}"),
+                &session,
+                json!(2),
+                "tools/call",
+                json!({"name": format!("{name}__echo"), "arguments": {"message": message}}),
+                None,
+            )
+            .await;
+        assert_eq!(body["result"]["content"][0]["text"], message, "{body}");
+    }
+    wait_for_active_get(&first, 1, Duration::from_secs(5)).await;
+    wait_for_active_get(&second, 1, Duration::from_secs(5)).await;
+
+    let session = gateway.open_session_at("/mcp/front", None).await;
+    let mut stream = open_sse(&gateway, "/mcp/front", Some(&session)).await;
+
+    // The second server is not a source of the listener.
+    second
+        .state
+        .notify("notifications/message", json!({"source": "second"}));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        stream
+            .next_event(Duration::from_millis(100))
+            .await
+            .is_none()
+    );
+
+    first
+        .state
+        .notify("notifications/message", json!({"source": "first"}));
+    let event = stream.expect_event(Duration::from_secs(5)).await;
+    let notification: serde_json::Value = serde_json::from_str(&event.data).unwrap();
+    assert_eq!(notification["method"], "notifications/message");
+    assert_eq!(notification["params"]["source"], "first");
+}
+
+#[tokio::test]
+async fn get_stream_stays_keepalive_only_without_a_valid_session() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("remote", &upstream).await;
+
+    let mut missing = open_sse(&gateway, "/mcp", None).await;
+    let mut unknown = open_sse(&gateway, "/mcp", Some("unknown-session")).await;
+    assert!(
+        missing
+            .next_event(Duration::from_millis(200))
+            .await
+            .is_none()
+    );
+    assert!(
+        unknown
+            .next_event(Duration::from_millis(200))
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn upstream_notification_stream_reconnects_after_close() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("remote", &upstream).await;
+    wait_for_idle_get(&upstream, Duration::from_secs(3)).await;
+
+    // The next live GET stream closes after one event; the transport must
+    // reconnect and keep delivering later notifications.
+    upstream.state.close_get_after_notification(true);
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(2),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "live"}}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "live", "{body}");
+    wait_for_active_get(&upstream, 1, Duration::from_secs(5)).await;
+    let connections = upstream.state.get_connections();
+
+    let mut stream = open_sse(&gateway, "/mcp", Some(&session)).await;
+    upstream
+        .state
+        .notify("notifications/message", json!({"seq": 1}));
+
+    let event = stream.expect_event(Duration::from_secs(5)).await;
+    let notification: serde_json::Value = serde_json::from_str(&event.data).unwrap();
+    assert_eq!(notification["params"]["seq"], 1);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline {
+        if upstream.state.get_connections() > connections
+            && upstream.state.active_get_streams() >= 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        upstream.state.get_connections() > connections,
+        "the notification stream did not reconnect"
+    );
+
+    upstream
+        .state
+        .notify("notifications/message", json!({"seq": 2}));
+    let event = stream.expect_event(Duration::from_secs(5)).await;
+    let notification: serde_json::Value = serde_json::from_str(&event.data).unwrap();
+    assert_eq!(notification["params"]["seq"], 2);
+}
+
+#[tokio::test]
+async fn reload_stops_notification_forwarding_without_panicking() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("remote", &upstream).await;
+    wait_for_idle_get(&upstream, Duration::from_secs(3)).await;
+
+    let session = gateway.open_session(None).await;
+    let (_, body) = gateway
+        .rpc(
+            &session,
+            json!(2),
+            "tools/call",
+            json!({"name": "remote__echo", "arguments": {"message": "live"}}),
+            None,
+        )
+        .await;
+    assert_eq!(body["result"]["content"][0]["text"], "live", "{body}");
+    wait_for_active_get(&upstream, 1, Duration::from_secs(5)).await;
+
+    let mut stream = open_sse(&gateway, "/mcp", Some(&session)).await;
+    gateway.runtime.reload().await.unwrap();
+    wait_for_idle_get(&upstream, Duration::from_secs(3)).await;
+
+    upstream
+        .state
+        .notify("notifications/message", json!({"seq": 1}));
+    assert!(
+        stream
+            .next_event(Duration::from_millis(300))
+            .await
+            .is_none()
+    );
+
+    // The session itself is still valid after a runtime reload.
+    let (status, body) = gateway
+        .rpc(&session, json!(3), "tools/list", json!({}), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn deleting_a_session_ends_open_notification_streams() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("remote", &upstream).await;
+
+    let session = gateway.open_session(None).await;
+    let mut stream = open_sse(&gateway, "/mcp", Some(&session)).await;
+
+    let request = axum::http::Request::builder()
+        .method("DELETE")
+        .uri("/mcp")
+        .header("mcp-session-id", &session)
+        .body(Body::empty())
+        .unwrap();
+    let response = tower::ServiceExt::oneshot(gateway.data_router(), request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    assert!(
+        stream.body_ended(Duration::from_secs(3)).await,
+        "the GET stream must end when its session is deleted"
+    );
 }

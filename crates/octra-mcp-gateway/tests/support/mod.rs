@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,11 +15,14 @@ use axum::extract::{Form, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
+use bytes::Bytes;
+use futures_util::stream;
 use http_body_util::BodyExt;
 use octra_config::OctraConfig;
 use octra_mcp_gateway::{McpControlState, McpDataState, McpRuntime};
 use octra_storage::Storage;
 use serde_json::{Value, json};
+use tokio::sync::broadcast;
 pub struct Upstream {
     pub addr: SocketAddr,
     pub state: MockState,
@@ -432,6 +436,35 @@ async fn handle_api(
             }
         }))
         .into_response(),
+        "/openapi-relative.json" => Json(json!({
+            "openapi": "3.0.3",
+            "info": {"title": "Relative refs", "version": "1.0.0"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/ref": {
+                    "get": {
+                        "operationId": "httpRefTool",
+                        "parameters": [
+                            {"$ref": "openapi-shared.json#/components/parameters/Tag"}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }))
+        .into_response(),
+        "/openapi-shared.json" => Json(json!({
+            "components": {
+                "parameters": {
+                    "Tag": {
+                        "name": "tag",
+                        "in": "query",
+                        "schema": {"type": "string"}
+                    }
+                }
+            }
+        }))
+        .into_response(),
         "/text" => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/plain")],
@@ -476,10 +509,48 @@ pub struct MockState {
     pub calls: Arc<Mutex<Vec<String>>>,
     pub auth: Arc<Mutex<Vec<Option<String>>>>,
     pub session: String,
+    notifications: broadcast::Sender<Value>,
+    get_connections: Arc<AtomicU64>,
+    active_get_streams: Arc<AtomicU64>,
+    close_get_after_notification: Arc<AtomicBool>,
+    tool_lists: Arc<AtomicU64>,
+}
+
+impl MockState {
+    /// Pushes one notification to every open upstream GET stream.
+    pub fn notify(&self, method: &str, params: Value) {
+        let _ = self.notifications.send(json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }));
+    }
+
+    /// Number of upstream GET streams opened so far, including reconnects.
+    pub fn get_connections(&self) -> u64 {
+        self.get_connections.load(Ordering::Relaxed)
+    }
+
+    /// Number of upstream GET streams currently held open.
+    pub fn active_get_streams(&self) -> u64 {
+        self.active_get_streams.load(Ordering::Relaxed)
+    }
+
+    /// Makes the next upstream GET stream close after delivering one event.
+    pub fn close_get_after_notification(&self, close: bool) {
+        self.close_get_after_notification
+            .store(close, Ordering::SeqCst);
+    }
+
+    /// Number of `tools/list` calls the mock answered.
+    pub fn tool_lists(&self) -> u64 {
+        self.tool_lists.load(Ordering::Relaxed)
+    }
 }
 
 /// Starts a mock Streamable HTTP MCP server on `127.0.0.1:0`.
 pub async fn start_upstream(mode: UpstreamMode) -> Upstream {
+    let (notifications, _) = broadcast::channel(16);
     let state = MockState {
         mode,
         calls: Arc::new(Mutex::new(Vec::new())),
@@ -488,10 +559,15 @@ pub async fn start_upstream(mode: UpstreamMode) -> Upstream {
             "session-{}",
             AtomicU64::new(1).fetch_add(1, Ordering::Relaxed)
         ),
+        notifications,
+        get_connections: Arc::new(AtomicU64::new(0)),
+        active_get_streams: Arc::new(AtomicU64::new(0)),
+        close_get_after_notification: Arc::new(AtomicBool::new(false)),
+        tool_lists: Arc::new(AtomicU64::new(0)),
     };
 
     let app = Router::new()
-        .route("/mcp", post(handle))
+        .route("/mcp", post(handle).get(handle_get))
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -503,6 +579,74 @@ pub async fn start_upstream(mode: UpstreamMode) -> Upstream {
         addr,
         state,
         handle,
+    }
+}
+
+/// Serves the optional upstream-to-client notification stream.
+async fn handle_get(State(state): State<MockState>) -> Response {
+    state.get_connections.fetch_add(1, Ordering::Relaxed);
+    let receiver = state.notifications.subscribe();
+    let close_after_one = state
+        .close_get_after_notification
+        .swap(false, Ordering::SeqCst);
+    let active = ActiveGet {
+        streams: state.active_get_streams.clone(),
+    };
+    active.add();
+
+    struct GetState {
+        receiver: broadcast::Receiver<Value>,
+        close_after_one: bool,
+        _active: ActiveGet,
+    }
+
+    let events = stream::unfold(
+        Some(GetState {
+            receiver,
+            close_after_one,
+            _active: active,
+        }),
+        |slot| async move {
+            let mut current = slot?;
+            loop {
+                match current.receiver.recv().await {
+                    Ok(value) => {
+                        let payload = format!("event: message\ndata: {value}\n\n");
+                        let next = if current.close_after_one {
+                            None
+                        } else {
+                            Some(current)
+                        };
+                        return Some((Ok::<_, Infallible>(Bytes::from(payload)), next));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/event-stream")],
+        Body::from_stream(events),
+    )
+        .into_response()
+}
+
+struct ActiveGet {
+    streams: Arc<AtomicU64>,
+}
+
+impl ActiveGet {
+    fn add(&self) {
+        self.streams.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Drop for ActiveGet {
+    fn drop(&mut self) {
+        self.streams.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -522,6 +666,9 @@ async fn handle(State(state): State<MockState>, headers: HeaderMap, body: Body) 
     };
     let method = request["method"].as_str().unwrap_or_default();
     let params = request.get("params").cloned().unwrap_or(Value::Null);
+    if method == "tools/list" {
+        state.tool_lists.fetch_add(1, Ordering::Relaxed);
+    }
 
     let response = match method {
         "initialize" => json!({

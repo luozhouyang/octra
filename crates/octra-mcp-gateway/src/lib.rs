@@ -14,14 +14,19 @@ pub mod http;
 pub mod servers;
 pub mod stdio;
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use axum::Router;
 use octra_config::OctraConfig;
 use octra_core::{Error, Result};
+use octra_mcp_core::jsonrpc;
+use octra_mcp_core::protocol::methods;
 use octra_storage::Storage;
-use servers::ServerConnections;
+use serde_json::Value;
+use servers::{NotificationHub, ServerConnections};
+use tokio::sync::broadcast;
 
 use crate::client::McpError;
 
@@ -39,7 +44,148 @@ pub struct McpRuntime {
     pub storage: Arc<Storage>,
     pub config: Arc<OctraConfig>,
     http: reqwest::Client,
-    servers: ServerConnections,
+    servers: Arc<ServerConnections>,
+    notifications: Arc<NotificationHub>,
+    refresh: Arc<RefreshContext>,
+    coordinator: Arc<NotificationCoordinator>,
+}
+
+/// Everything a notice-triggered refresh needs, without holding the runtime.
+pub(crate) struct RefreshContext {
+    storage: Arc<Storage>,
+    config: Arc<OctraConfig>,
+    http: reqwest::Client,
+    servers: Weak<ServerConnections>,
+}
+
+impl RefreshContext {
+    /// Connects to a server, lists its tools, persists them, and records the
+    /// negotiated protocol revision. The discovery connection is closed after
+    /// the run; cached connections of the same server are dropped.
+    async fn refresh(&self, server_id: &str) -> Result<DiscoveryStats> {
+        let server = self
+            .storage
+            .mcp
+            .get_server(server_id)
+            .await?
+            .ok_or_else(|| McpError::Config(format!("MCP server {server_id} does not exist")))
+            .map_err(runtime_error)?;
+
+        let servers = self
+            .servers
+            .upgrade()
+            .ok_or_else(|| Error::Runtime("MCP runtime is shutting down".to_string()))?;
+        let discovery = servers
+            .discover(
+                &server,
+                Duration::from_secs(self.config.mcp.request_timeout_secs.max(1)),
+                &self.http,
+            )
+            .await
+            .map_err(runtime_error)?;
+        let tools = self
+            .storage
+            .mcp
+            .replace_tools(&server.id, &discovery.tools)
+            .await?;
+        self.storage
+            .mcp
+            .mark_server_seen(&server.id, &discovery.protocol_version)
+            .await?;
+        servers.invalidate(&server.id).await;
+
+        tracing::info!(
+            server = %server.name,
+            tools = tools.len(),
+            protocol_version = %discovery.protocol_version,
+            "discovered MCP tools"
+        );
+
+        Ok(DiscoveryStats {
+            server_id: server.id,
+            protocol_version: discovery.protocol_version,
+            upstream_name: discovery.server_name,
+            tools: tools.len(),
+        })
+    }
+}
+
+/// Debounces catalog-change notices and refreshes one server at a time.
+pub struct NotificationCoordinator {
+    hub: Arc<NotificationHub>,
+    refresh: Arc<RefreshContext>,
+    debounce: Duration,
+    pending: Mutex<HashSet<String>>,
+}
+
+impl NotificationCoordinator {
+    fn new(hub: Arc<NotificationHub>, refresh: Arc<RefreshContext>, debounce: Duration) -> Self {
+        Self {
+            hub,
+            refresh,
+            debounce,
+            pending: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Handles one upstream notification. Only catalog-change methods trigger
+    /// a refresh; everything else is forwarded by the caller.
+    pub(crate) fn on_list_changed(self: &Arc<Self>, server_id: &str, method: &str) {
+        if method != methods::LIST_CHANGED && method != methods::RESOURCES_LIST_CHANGED {
+            return;
+        }
+        tracing::info!(
+            server = %server_id,
+            method,
+            "upstream MCP catalog changed"
+        );
+
+        let inserted = {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            pending.insert(server_id.to_string())
+        };
+        if !inserted {
+            return;
+        }
+
+        let this = self.clone();
+        let id = server_id.to_string();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            self.pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&id);
+            return;
+        };
+        runtime.spawn(async move {
+            tokio::time::sleep(this.debounce).await;
+            this.pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&id);
+            match this.refresh.refresh(&id).await {
+                Ok(stats) => {
+                    tracing::info!(
+                        server = %id,
+                        tools = stats.tools,
+                        "refreshed MCP tools after a catalog change"
+                    );
+                    this.hub
+                        .publish(&id, jsonrpc::notification(methods::LIST_CHANGED, None));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        server = %id,
+                        error = %err,
+                        "MCP tool refresh after a catalog change failed"
+                    );
+                }
+            }
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -75,11 +221,29 @@ impl McpRuntime {
     /// Builds the runtime. Upstream servers start lazily: on the first request,
     /// a discovery run, or an explicit refresh.
     pub async fn bootstrap(storage: Arc<Storage>, config: Arc<OctraConfig>) -> Result<Self> {
+        let http = octra_data_plane::http_client(&config);
+        let notifications = Arc::new(NotificationHub::default());
+        let servers = Arc::new(ServerConnections::new(notifications.clone()));
+        let refresh = Arc::new(RefreshContext {
+            storage: storage.clone(),
+            config: config.clone(),
+            http: http.clone(),
+            servers: Arc::downgrade(&servers),
+        });
+        let coordinator = Arc::new(NotificationCoordinator::new(
+            notifications.clone(),
+            refresh.clone(),
+            Duration::from_millis(500),
+        ));
+        servers.set_coordinator(coordinator.clone());
         Ok(Self {
-            http: octra_data_plane::http_client(&config),
+            http,
             storage,
             config,
-            servers: ServerConnections::default(),
+            servers,
+            notifications,
+            refresh,
+            coordinator,
         })
     }
 
@@ -108,47 +272,24 @@ impl McpRuntime {
         &self.servers
     }
 
+    /// Subscribes to a server's notification channel. The channel is created
+    /// on demand so a client GET stream can open before the upstream connects.
+    pub fn notifications(&self, server_id: &str) -> Option<broadcast::Receiver<Value>> {
+        self.notifications.subscribe(server_id)
+    }
+
+    /// Refreshes a server's tools after an upstream catalog change. The
+    /// refresh is debounced and runs in the background.
+    pub fn on_tool_list_changed(&self, server_id: &str) {
+        self.coordinator
+            .on_list_changed(server_id, methods::LIST_CHANGED);
+    }
+
     /// Connects to a server, lists its tools, persists them, and records the
     /// negotiated protocol revision. The discovery connection is closed after
     /// the run; cached connections of the same server are dropped.
     pub(crate) async fn refresh_server(&self, server_id: &str) -> Result<DiscoveryStats> {
-        let server = self
-            .storage
-            .mcp
-            .get_server(server_id)
-            .await?
-            .ok_or_else(|| McpError::Config(format!("MCP server {server_id} does not exist")))
-            .map_err(runtime_error)?;
-
-        let discovery = self
-            .servers
-            .discover(&server, self.request_timeout(), self.http())
-            .await
-            .map_err(runtime_error)?;
-        let tools = self
-            .storage
-            .mcp
-            .replace_tools(&server.id, &discovery.tools)
-            .await?;
-        self.storage
-            .mcp
-            .mark_server_seen(&server.id, &discovery.protocol_version)
-            .await?;
-        self.servers.invalidate(&server.id).await;
-
-        tracing::info!(
-            server = %server.name,
-            tools = tools.len(),
-            protocol_version = %discovery.protocol_version,
-            "discovered MCP tools"
-        );
-
-        Ok(DiscoveryStats {
-            server_id: server.id,
-            protocol_version: discovery.protocol_version,
-            upstream_name: discovery.server_name,
-            tools: tools.len(),
-        })
+        self.refresh.refresh(server_id).await
     }
 
     /// Reloads the snapshot after a control plane mutation. Failure to reload

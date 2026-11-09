@@ -33,6 +33,8 @@ use octra_mcp_core::protocol::{
 use octra_mcp_core::{CallToolParams, ListToolsResult, McpServer, McpTool, Tool};
 use octra_storage::mcp::InvocationRecord;
 use serde_json::{Map, Value, json};
+use tokio::sync::{broadcast, mpsc};
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::McpDataState;
 use crate::auth::{AuthError, Caller, authenticate, resolve_strategy};
@@ -314,7 +316,7 @@ async fn initialize(
     let result = InitializeResult {
         protocol_version: version,
         capabilities: ServerCapabilities {
-            tools: Some(json!({ "listChanged": false })),
+            tools: Some(json!({ "listChanged": true })),
             ..Default::default()
         },
         server_info: Implementation {
@@ -981,21 +983,143 @@ async fn handle_get_inner(
     if let Err(err) = authenticate_request(&state, &headers, scope).await {
         return auth_failure(err);
     }
-    if let Err(error) = require_session(&state, &headers).await {
-        return json_error_status(StatusCode::NOT_FOUND, error);
+
+    let session = match header_str(&headers, &SESSION_HEADER) {
+        Some(session_id) => match state.storage.mcp.get_session(&session_id).await {
+            Ok(Some(session)) if session.status == session_status::OPEN => Some(session),
+            Ok(_) => None,
+            Err(err) => {
+                tracing::warn!(%err, "cannot load MCP session for the GET stream");
+                None
+            }
+        },
+        None => None,
+    };
+    // Clients may probe the GET channel before initializing; keep the stream
+    // open with keepalives instead of failing the request.
+    let Some(session) = session else {
+        return keepalive_only();
+    };
+
+    let servers = match state.storage.mcp.list_servers().await {
+        Ok(servers) => servers,
+        Err(err) => {
+            tracing::warn!(%err, "cannot list MCP servers for the GET stream");
+            return keepalive_only();
+        }
+    };
+    let visible = match scope {
+        Some(scope) => scope.visible_server_ids.clone(),
+        None => servers
+            .iter()
+            .find(|server| server.id == session.server_id)
+            .filter(|server| server.mode == MCP_SERVER_MODE_LISTENER)
+            .map(|listener| scoped_visible_server_ids(&servers, listener))
+            .unwrap_or_else(|| visible_server_ids(&servers)),
+    };
+
+    let (sender, receiver) = mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
+    let (cancel, cancel_rx) = tokio::sync::watch::channel(false);
+    for server_id in visible {
+        let Some(mut notifications) = state.runtime.notifications(&server_id) else {
+            continue;
+        };
+        let sender = sender.clone();
+        let mut cancel_rx = cancel_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    item = notifications.recv() => match item {
+                        Ok(value) => {
+                            if !is_notification(&value) {
+                                continue;
+                            }
+                            let method = value
+                                .get("method")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string();
+                            let Ok(data) = serde_json::to_string(&value) else {
+                                continue;
+                            };
+                            tracing::trace!(
+                                server = %server_id,
+                                method,
+                                "delivering MCP notification"
+                            );
+                            let event = Event::default().event("message").data(data);
+                            if sender.send(Ok(event)).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                            tracing::debug!(
+                                server = %server_id,
+                                dropped,
+                                "skipped lagged MCP notifications"
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    },
+                    changed = cancel_rx.changed() => {
+                        if changed.is_err() || *cancel_rx.borrow() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
     }
 
-    // Octra pushes no server-initiated notifications yet; the stream exists
-    // so clients that hold the optional GET channel open can detect a dead
-    // gateway through keepalives.
-    let stream = stream::pending::<Result<Event, std::convert::Infallible>>();
-    Sse::new(stream)
+    let storage = state.storage.clone();
+    let session_id = session.id.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(500));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if !session_is_open(&storage, &session_id).await {
+                        let _ = cancel.send(true);
+                        return;
+                    }
+                }
+                _ = sender.closed() => {
+                    let _ = cancel.send(true);
+                    return;
+                }
+            }
+        }
+    });
+
+    Sse::new(ReceiverStream::new(receiver))
         .keep_alive(
             KeepAlive::new()
                 .interval(SSE_KEEPALIVE)
                 .text("octra-mcp-keepalive"),
         )
         .into_response()
+}
+
+fn keepalive_only() -> Response {
+    Sse::new(stream::pending::<Result<Event, std::convert::Infallible>>())
+        .keep_alive(
+            KeepAlive::new()
+                .interval(SSE_KEEPALIVE)
+                .text("octra-mcp-keepalive"),
+        )
+        .into_response()
+}
+
+fn is_notification(value: &Value) -> bool {
+    value.get("method").is_some() && value.get("id").is_none()
+}
+
+async fn session_is_open(storage: &octra_storage::Storage, session_id: &str) -> bool {
+    matches!(
+        storage.mcp.get_session(session_id).await,
+        Ok(Some(session)) if session.status == session_status::OPEN
+    )
 }
 
 async fn handle_delete(State(state): State<McpDataState>, headers: HeaderMap) -> Response {

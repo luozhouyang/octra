@@ -27,9 +27,11 @@ use octra_mcp_core::jsonrpc::{JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, c
 use octra_mcp_core::{McpServer, StdioConfig};
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::client::{BoxFuture, McpError, UpstreamClient};
+
+const NOTIFICATION_CAPACITY: usize = 64;
 
 enum Outgoing {
     Request {
@@ -80,6 +82,7 @@ pub struct StdioClient {
     next_id: AtomicU64,
     outgoing: mpsc::UnboundedSender<Outgoing>,
     shared: Arc<Shared>,
+    notifications: broadcast::Sender<Value>,
 }
 
 impl StdioClient {
@@ -142,6 +145,7 @@ impl StdioClient {
             .map_err(|err| McpError::Transport(format!("cannot read child stdout: {err}")))?;
 
         let (outgoing, receiver) = mpsc::unbounded_channel();
+        let (notifications, _) = broadcast::channel(NOTIFICATION_CAPACITY);
         let shared = Arc::new(Shared {
             closed: AtomicBool::new(false),
             abandoned: Mutex::new(Vec::new()),
@@ -153,6 +157,7 @@ impl StdioClient {
             pending: HashMap::new(),
             outgoing: receiver,
             shared: shared.clone(),
+            notifications: notifications.clone(),
         };
         if let Err(err) = std::thread::Builder::new()
             .name(format!("mcp-stdio-{}", server.name))
@@ -168,6 +173,7 @@ impl StdioClient {
             next_id: AtomicU64::new(1),
             outgoing,
             shared,
+            notifications,
         })
     }
 
@@ -224,6 +230,7 @@ struct Worker {
     pending: HashMap<u64, oneshot::Sender<JsonRpcResponse>>,
     outgoing: mpsc::UnboundedReceiver<Outgoing>,
     shared: Arc<Shared>,
+    notifications: broadcast::Sender<Value>,
 }
 
 impl Worker {
@@ -340,9 +347,33 @@ impl Worker {
     }
 
     fn dispatch(&mut self, line: &str) {
-        for (id, response) in parse_responses(line) {
-            if let Some(reply) = self.pending.remove(&id) {
-                let _ = reply.send(response);
+        for message in JsonRpcMessage::parse_stream_frame(line) {
+            match message {
+                JsonRpcMessage::Response(response) => {
+                    if let Some(id) = response.id.as_u64()
+                        && let Some(reply) = self.pending.remove(&id)
+                    {
+                        let _ = reply.send(response);
+                    }
+                }
+                JsonRpcMessage::Request(request) if request.is_notification() => {
+                    let method = request.method.clone();
+                    let Ok(value) = serde_json::to_value(&request) else {
+                        continue;
+                    };
+                    if self.notifications.send(value).is_err() {
+                        tracing::debug!(
+                            server = %self.name,
+                            method,
+                            "dropped MCP notification without subscribers"
+                        );
+                    }
+                }
+                JsonRpcMessage::Request(request) => {
+                    // Octra advertises no client capabilities, so a server
+                    // request (roots, sampling) has nothing to answer with.
+                    tracing::debug!(method = %request.method, "ignoring server request");
+                }
             }
         }
     }
@@ -367,22 +398,6 @@ impl Worker {
             }
         }
     }
-}
-
-/// Parses one stdout line into `(request id, response)` pairs.
-fn parse_responses(line: &str) -> Vec<(u64, JsonRpcResponse)> {
-    JsonRpcMessage::parse_stream_frame(line)
-        .into_iter()
-        .filter_map(|message| match message {
-            JsonRpcMessage::Response(response) => response.id.as_u64().map(|id| (id, response)),
-            JsonRpcMessage::Request(request) => {
-                // Octra advertises no client capabilities, so a server request
-                // (roots, sampling) has nothing to answer with.
-                tracing::debug!(method = %request.method, "ignoring server request");
-                None
-            }
-        })
-        .collect()
 }
 
 fn error_response(reason: &str) -> JsonRpcResponse {
@@ -458,6 +473,10 @@ impl UpstreamClient for StdioClient {
         None
     }
 
+    fn subscribe_notifications(&self) -> Option<broadcast::Receiver<Value>> {
+        Some(self.notifications.subscribe())
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -470,5 +489,67 @@ impl UpstreamClient for StdioClient {
 impl Drop for StdioClient {
     fn drop(&mut self) {
         // Dropping the sender disconnects the worker, which kills the child.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOTIFICATION_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"mock","version":"0.1.0"}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{"source":"stdio"}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+      ;;
+  esac
+done
+"#;
+
+    #[tokio::test]
+    async fn forwards_notifications_from_the_worker() {
+        let server = McpServer {
+            id: "stdio-notifications".to_string(),
+            name: "stdio-notifications".to_string(),
+            transport: octra_mcp_core::Transport::Stdio,
+            mode: octra_mcp_core::domain::MCP_SERVER_MODE_UPSTREAM_SERVER.to_string(),
+            sources: Vec::new(),
+            route_path: None,
+            acl_allow_when: Vec::new(),
+            acl_deny_when: Vec::new(),
+            auth_strategy_id: None,
+            command: Some("sh".to_string()),
+            url: None,
+            enabled: true,
+            config: json!({"args": ["-c", NOTIFICATION_SCRIPT]}),
+            headers: serde_json::Map::new(),
+            protocol_version: None,
+            last_seen_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let client = StdioClient::spawn(&server, Duration::from_secs(5)).unwrap();
+        let mut notifications = client
+            .subscribe_notifications()
+            .expect("stdio exposes notifications");
+
+        let init = crate::client::initialize(&client, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(init.protocol_version, "2025-06-18");
+
+        let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+            .await
+            .expect("notification arrives")
+            .expect("notification channel stays open");
+        assert_eq!(notification["method"], "notifications/tools/list_changed");
+        assert_eq!(notification["params"]["source"], "stdio");
+        assert!(notification.get("id").is_none());
+
+        client.close();
     }
 }
