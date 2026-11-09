@@ -28,6 +28,7 @@ pub async fn pinned_client(raw: &str) -> Result<reqwest::Client, String> {
     let target = resolve_safe(raw).await?;
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .connect_timeout(PINNED_CONNECT_TIMEOUT)
         .timeout(PINNED_REQUEST_TIMEOUT);
     if let Some((host, address)) = target.pin {
