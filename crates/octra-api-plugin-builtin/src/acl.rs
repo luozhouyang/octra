@@ -260,4 +260,3 @@ mod tests {
         assert!(matches!(action, PluginAction::Continue));
     }
 }
-

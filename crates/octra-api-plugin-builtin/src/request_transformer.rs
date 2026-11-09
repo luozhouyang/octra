@@ -509,4 +509,3 @@ mod tests {
         assert!(RequestTransformerFactory.create("test", config).is_ok());
     }
 }
-

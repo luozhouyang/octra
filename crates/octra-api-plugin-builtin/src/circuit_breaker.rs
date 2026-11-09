@@ -340,4 +340,3 @@ mod tests {
         assert!(error.message.contains("failure_threshold"));
     }
 }
-

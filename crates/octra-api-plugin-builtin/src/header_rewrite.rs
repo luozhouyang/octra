@@ -196,4 +196,3 @@ mod tests {
         assert!(error.message.contains("invalid header name"));
     }
 }
-

@@ -426,4 +426,3 @@ mod tests {
         assert!(plugin(json!({"origins": ["["]})).is_err());
     }
 }
-

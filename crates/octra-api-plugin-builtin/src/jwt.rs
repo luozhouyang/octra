@@ -741,4 +741,3 @@ mod tests {
         assert_unauthorized(action, "Bearer realm=\"internal\"").await;
     }
 }
-

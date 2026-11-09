@@ -364,4 +364,3 @@ mod tests {
         assert!(ResponseTransformerFactory.create("test", config).is_ok());
     }
 }
-

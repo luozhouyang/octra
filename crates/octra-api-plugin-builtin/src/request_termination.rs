@@ -260,4 +260,3 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 }
-
