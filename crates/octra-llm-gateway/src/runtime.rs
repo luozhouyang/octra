@@ -362,10 +362,10 @@ impl RuntimeSnapshot {
             return false;
         }
         if let Some(id) = context.provider_id
-            && !self
-                .policy_providers
-                .get(id)
-                .is_none_or(|limits| permits(&limits.providers, &candidates))
+            && !self.policy_providers.get(id).is_none_or(|limits| {
+                permits(&limits.providers, &candidates)
+                    && (context.model.is_empty() || permits(&limits.models, &[context.model]))
+            })
         {
             return false;
         }

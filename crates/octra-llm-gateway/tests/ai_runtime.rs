@@ -543,6 +543,12 @@ async fn scoped_allowlists_apply_to_groups_keys_models_and_providers() {
         ..base.clone()
     };
     assert!(snapshot.permits_provider_in(&other_target));
+
+    let provider_model_denied = octra_llm_gateway::runtime::PolicyContext {
+        model: "other-model",
+        ..base.clone()
+    };
+    assert!(!snapshot.permits_provider_in(&provider_model_denied));
 }
 
 #[tokio::test]
