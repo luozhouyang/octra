@@ -75,13 +75,17 @@ impl VkReservationLedger {
                 active.get(&request.key).copied().unwrap_or_default();
             if let Some(limit) = request.limit_tokens {
                 let used = request.usage_tokens.saturating_add(reserved_tokens);
-                if used > limit || (used == limit && request.tokens == 0) {
+                if used.saturating_add(request.tokens) > limit
+                    || (used == limit && request.tokens == 0)
+                {
                     return None;
                 }
             }
             if let Some(limit) = request.limit_cost_micros {
                 let used = request.usage_cost_micros.saturating_add(reserved_cost);
-                if used > limit || (used == limit && request.cost_micros == 0) {
+                if used.saturating_add(request.cost_micros) > limit
+                    || (used == limit && request.cost_micros == 0)
+                {
                     return None;
                 }
             }
