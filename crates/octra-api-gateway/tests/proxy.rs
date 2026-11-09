@@ -136,6 +136,69 @@ async fn route_response_buffering_false_skips_body_plugins() {
 }
 
 #[tokio::test]
+async fn non_idempotent_requests_retry_a_connect_failure() {
+    let (addr, _calls) = spawn_mock("live").await;
+    let gateway = gateway().await;
+    let service = gateway
+        .storage
+        .api
+        .create_service(&CreateService {
+            id: Some("svc-retry".into()),
+            name: "svc-retry".into(),
+            host: Some("up-retry".into()),
+            retries: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let upstream = gateway
+        .storage
+        .api
+        .create_upstream(&CreateUpstream {
+            id: Some("up-retry".into()),
+            name: "up-retry".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for (id, target) in [
+        ("dead", "127.0.0.1:9".to_string()),
+        ("live", addr.to_string()),
+    ] {
+        gateway
+            .storage
+            .api
+            .create_target(&CreateTarget {
+                id: Some(id.into()),
+                upstream_id: upstream.id.clone(),
+                target,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    gateway
+        .storage
+        .api
+        .create_route(&CreateRoute {
+            id: Some("retry-route".into()),
+            service_id: Some(service.id),
+            paths: Some(vec!["/api".into()]),
+            strip_path: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    let mut request = request("POST", "/api/retry");
+    *request.body_mut() = Body::from("retry-body");
+    let (status, _, json) = gateway.send(request).await;
+    assert_eq!(status, StatusCode::CREATED, "{json}");
+    assert_eq!(json["body"], "retry-body");
+}
+
+#[tokio::test]
 async fn round_robins_across_two_targets() {
     let (addr_a, _calls_a) = spawn_mock("a").await;
     let (addr_b, _calls_b) = spawn_mock("b").await;

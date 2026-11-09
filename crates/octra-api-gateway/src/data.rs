@@ -456,10 +456,10 @@ pub async fn proxy(
     )
     .unwrap_or(usize::MAX);
     attempts.truncate(attempts.len().min(retry_limit));
-    // A non-idempotent method cannot be replayed. Without request buffering the
-    // body cannot be replayed for an idempotent method either, so both keep a
-    // single attempt.
-    if !is_idempotent(method.as_str()) || !dispatch.route.route.request_buffering {
+    // Without request buffering the body cannot be replayed, so keep one
+    // attempt. Non-idempotent methods are buffered and may retry only a
+    // connection failure, before any request bytes reached the upstream.
+    if !dispatch.route.route.request_buffering {
         attempts.truncate(1);
     }
 
@@ -1332,6 +1332,7 @@ async fn forward(
     let base_headers = parts.headers.clone();
 
     let total_attempts = attempts.len();
+    let non_idempotent = !is_idempotent(method.as_str());
     let mut last_error: Option<String> = None;
 
     let default_connect_timeout = Duration::from_secs(state.config.gateway.connect_timeout_secs);
@@ -1447,6 +1448,9 @@ async fn forward(
                     endpoint.report_tcp_failure();
                 }
                 last_error = Some(classify_reqwest_error(&err));
+                if non_idempotent && !err.is_connect() {
+                    break;
+                }
             }
         }
     }
