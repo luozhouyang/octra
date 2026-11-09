@@ -114,6 +114,8 @@ fn matches_any(ip: IpAddr, rules: &[String]) -> bool {
     })
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for IpRestrictionPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,3 +265,4 @@ mod tests {
         assert!(matches!(action, PluginAction::Continue));
     }
 }
+

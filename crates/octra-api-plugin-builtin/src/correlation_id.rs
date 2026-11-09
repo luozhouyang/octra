@@ -189,6 +189,8 @@ impl ApiGatewayPlugin for CorrelationIdPlugin {
     }
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for CorrelationIdPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,3 +222,4 @@ mod tests {
         );
     }
 }
+

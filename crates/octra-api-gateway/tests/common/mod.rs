@@ -151,6 +151,8 @@ impl ApiGatewayPlugin for StreamingTestPlugin {
     }
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for StreamingTestPlugin {}
+
 struct StreamingTestFactory;
 
 impl ApiGatewayPluginFactory for StreamingTestFactory {

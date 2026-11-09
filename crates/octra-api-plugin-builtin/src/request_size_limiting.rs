@@ -107,6 +107,8 @@ impl ApiGatewayPlugin for RequestSizeLimitingPlugin {
     }
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for RequestSizeLimitingPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,3 +253,4 @@ mod tests {
         );
     }
 }
+

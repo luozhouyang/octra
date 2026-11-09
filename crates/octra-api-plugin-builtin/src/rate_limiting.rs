@@ -568,6 +568,8 @@ fn window_reset(period: Period, now: i64) -> i64 {
     }
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for RateLimitingPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,3 +605,4 @@ mod tests {
         assert_eq!(plugin.manifest().name, "rate-limiting");
     }
 }
+

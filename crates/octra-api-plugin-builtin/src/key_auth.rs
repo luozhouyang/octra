@@ -274,6 +274,8 @@ fn strip_body_key(headers: &HeaderMap, body: Bytes, name: &str) -> Bytes {
     body
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for KeyAuthPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,3 +685,4 @@ mod tests {
         );
     }
 }
+

@@ -129,6 +129,8 @@ impl ApiGatewayPlugin for RequestTerminationPlugin {
     }
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for RequestTerminationPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,3 +260,4 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 }
+

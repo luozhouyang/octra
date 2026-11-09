@@ -324,6 +324,8 @@ fn cast(raw: &str, json_type: Option<&str>) -> Value {
     }
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for ResponseTransformerPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,3 +364,4 @@ mod tests {
         assert!(ResponseTransformerFactory.create("test", config).is_ok());
     }
 }
+

@@ -114,6 +114,8 @@ impl ApiGatewayPlugin for AclPlugin {
     }
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for AclPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,3 +260,4 @@ mod tests {
         assert!(matches!(action, PluginAction::Continue));
     }
 }
+

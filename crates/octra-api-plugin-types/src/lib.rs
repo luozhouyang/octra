@@ -723,15 +723,13 @@ pub trait ApiGatewayBackgroundPlugin: Send + Sync {
     }
 }
 
-impl<T: ApiGatewayPlugin + ?Sized> ApiGatewayBackgroundPlugin for T {}
-
 /// Kong's API gateway plugin contracts.
 ///
 /// The seven phases are `certificate`, `rewrite`, `access`, `response`,
 /// `header_filter`, `body_filter`, and `log`. There is no separate request-body
 /// filter and no error phase.
 #[async_trait]
-pub trait ApiGatewayPlugin: Send + Sync {
+pub trait ApiGatewayPlugin: ApiGatewayBackgroundPlugin + Send + Sync {
     fn manifest(&self) -> &PluginManifest;
 
     /// TLS handshake phase. Kept for Kong parity; the host does not invoke it

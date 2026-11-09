@@ -14,7 +14,7 @@ use bytes::Bytes;
 use octra_api_core::PluginInstance;
 use octra_api_core::{Route, Service};
 use octra_api_plugin_types::{
-    AccessContext, ApiGatewayBackgroundPlugin, ApiGatewayPlugin, ApiGatewayPluginFactory,
+    AccessContext, ApiGatewayPlugin, ApiGatewayPluginFactory,
     BodyFilterContext, Capability, EntityQuery, EventSubscriber, FailPolicy, GatewayEvent,
     GatewayState, HeaderFilterContext, JobInvocation, LogContext, LogLevel, PluginAction,
     PluginError, PluginHost, PluginManifest, PluginPhase, PluginServiceSource, PluginStorage,
@@ -1353,6 +1353,8 @@ mod tests {
             self.record("log");
         }
     }
+
+    impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for StubPlugin {}
 
     struct StubFactory {
         spec: StubSpec,

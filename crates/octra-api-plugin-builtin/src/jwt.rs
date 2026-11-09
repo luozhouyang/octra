@@ -303,6 +303,8 @@ impl JwtPlugin {
     }
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for JwtPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,3 +741,4 @@ mod tests {
         assert_unauthorized(action, "Bearer realm=\"internal\"").await;
     }
 }
+

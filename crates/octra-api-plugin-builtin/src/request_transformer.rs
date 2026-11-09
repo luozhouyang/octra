@@ -461,6 +461,8 @@ fn transform_multipart(config: &Config, headers: &HeaderMap, body: &[u8]) -> Byt
     Bytes::from(multipart.to_bytes())
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for RequestTransformerPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,3 +509,4 @@ mod tests {
         assert!(RequestTransformerFactory.create("test", config).is_ok());
     }
 }
+

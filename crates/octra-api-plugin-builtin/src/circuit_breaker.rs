@@ -187,6 +187,8 @@ fn open_circuit(retry_after: u64) -> Response {
     response
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for CircuitBreakerPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,3 +340,4 @@ mod tests {
         assert!(error.message.contains("failure_threshold"));
     }
 }
+

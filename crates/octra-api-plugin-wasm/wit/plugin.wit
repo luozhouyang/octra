@@ -221,14 +221,10 @@ interface plugin-api {
         body-info,
         admin-request,
         admin-response,
-        event,
-        job,
     };
 
     configure: func(config-json: string) -> result<_, string>;
     on-admin-request: func(req: admin-request) -> result<admin-response, string>;
-    on-event: func(event: event) -> result<_, string>;
-    on-job: func(job: job) -> result<_, string>;
     on-rewrite: func(req: request) -> result<action, string>;
     on-access: func(req: request) -> result<action, string>;
     on-response: func(resp: response) -> result<response-action, string>;
@@ -241,7 +237,15 @@ interface plugin-api {
     on-log: func(entry: log-entry);
 }
 
+interface background-api {
+    use types.{event, job};
+
+    on-event: func(event: event) -> result<_, string>;
+    on-job: func(job: job) -> result<_, string>;
+}
+
 world plugin {
     import host;
     export plugin-api;
+    export background-api;
 }

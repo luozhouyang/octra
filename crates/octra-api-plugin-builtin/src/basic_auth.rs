@@ -138,6 +138,8 @@ impl ApiGatewayPlugin for BasicAuthPlugin {
     }
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for BasicAuthPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,3 +365,4 @@ mod tests {
         );
     }
 }
+

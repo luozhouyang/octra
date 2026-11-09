@@ -161,6 +161,8 @@ fn apply(ops: &HeaderOps, headers: &mut HeaderMap) {
     }
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for HeaderRewritePlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,3 +196,4 @@ mod tests {
         assert!(error.message.contains("invalid header name"));
     }
 }
+

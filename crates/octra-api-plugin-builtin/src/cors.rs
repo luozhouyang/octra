@@ -402,6 +402,8 @@ fn number(value: f64) -> String {
     }
 }
 
+impl octra_api_plugin_types::ApiGatewayBackgroundPlugin for CorsPlugin {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,3 +426,4 @@ mod tests {
         assert!(plugin(json!({"origins": ["["]})).is_err());
     }
 }
+
