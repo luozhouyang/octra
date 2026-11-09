@@ -33,7 +33,7 @@ flowchart TB
 - Phases: the contract uses Kong's seven phases exactly: `certificate`, `rewrite`, `access`, `response`, `header_filter`, `body_filter`, and `log`. `certificate` remains dormant until the API listener terminates TLS. There is no `request`, `upstream_request`, `response_body`, or `error` phase.
 - Request bodies are not filtered as chunks. A plugin reads or replaces the complete request body in `access` through `request_body()` / `set_request_body()`, matching `kong.request.get_body()` and `kong.service.request.set_body()`.
 - Response bodies use `body_filter`: every body plugin receives the current `chunk` and `eof` on every body event, in priority order. A plugin mutates `chunk` directly (including setting it to `None`). A full-body plugin buffers chunks in its request-scoped plugin context and writes the complete result back at EOF; the host does not pre-buffer and provides no shared full-body cache. Multiple full-body plugins buffer independently.
-- `body_filter` runs after response headers are committed. A late failure truncates or aborts the body and cannot return a structured `500`.
+- `body_filter` runs after response headers are committed. A late failure truncates or aborts the body and cannot return a structured `500`. WASM body filters receive the same chunk/EOF contract and use host `body-append` / `body-take` functions for request-scoped full-body buffering; host instances are serialized per plugin, so the buffer is keyed by request id.
 - Route-level `request_buffering` and `response_buffering` are removed.
 - Scope precedence: the 12 Kong combinations from consumer + route + service down to global. Consumer and consumer-group instances are deferred until after authentication.
 - Ordering: manifest priority descending, then plugin name ascending; `ordering.before` / `ordering.after` can override.
@@ -51,7 +51,7 @@ flowchart TB
 ## Runtime tiers
 
 - **Native:** first-party Rust factories registered in the daemon. They have full host access and no WASM overhead.
-- **WASM:** third-party components with a WIT ABI, a manifest, approved capabilities, fuel/memory/timeout/body limits, and a host-owned per-plugin SQLite database. The API plugin contract version is 3 (Kong seven phases and chunk/EOF body filtering); the LLM plugin contract version is 6.
+- **WASM:** third-party components with a WIT ABI, a manifest, approved capabilities, fuel/memory/timeout/body limits, and a host-owned per-plugin SQLite database. The API plugin contract version is 3 (Kong seven phases, chunk/EOF body filtering, and a separate background event/job interface); the LLM plugin contract version is 6.
 - **Install/upgrade:** artifacts are stored with a hash, optional Ed25519 signature, manifest, and approved capabilities. A plugin instance is compiled only after the artifact passes layout and signature policy. Uninstall keeps plugin data unless `purge=true`; destructive migrations need explicit approval.
 
 ## Storage
