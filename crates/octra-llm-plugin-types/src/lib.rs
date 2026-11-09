@@ -325,6 +325,13 @@ pub struct LlmLogContext<'a> {
 pub trait LlmPlugin: Send + Sync {
     fn manifest(&self) -> &PluginManifest;
 
+    /// Whether response/stream output can contain values restored from
+    /// sensitive upstream placeholders. Cache plugins must not persist such
+    /// content. Irreversible redaction returns false.
+    fn restores_sensitive_content(&self) -> bool {
+        false
+    }
+
     async fn on_request(&self, _cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
         Ok(LlmAction::Continue)
     }

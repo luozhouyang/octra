@@ -517,9 +517,11 @@ pub async fn proxy(
 
     let request_headers = parts.headers.clone();
     let original_uri = parts.uri.clone();
+    let upstream_host = endpoint.host_header().map(str::to_string);
     let context = ForwardContext {
         client_addr: Some(peer),
         host: host.as_deref(),
+        upstream_host: upstream_host.as_deref(),
         scheme: forwarded_scheme(&request_headers),
         request_id: &request_id,
     };
@@ -926,6 +928,7 @@ struct Dispatch {
 struct ForwardContext<'a> {
     client_addr: Option<SocketAddr>,
     host: Option<&'a str>,
+    upstream_host: Option<&'a str>,
     scheme: &'a str,
     request_id: &'a str,
 }
@@ -1295,6 +1298,8 @@ async fn forward(
             context
                 .host
                 .and_then(|host| HeaderValue::from_str(host).ok())
+        } else if let Some(upstream_host) = context.upstream_host {
+            HeaderValue::from_str(upstream_host).ok()
         } else {
             HeaderValue::from_str(&endpoint_authority(&endpoint.url)).ok()
         };

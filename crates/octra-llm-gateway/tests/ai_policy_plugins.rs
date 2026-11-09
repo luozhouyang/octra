@@ -308,8 +308,7 @@ async fn reload_with_extra_compiles_executable_chains() {
             "llm-system-prompt",
             "llm-prompt-guard",
             "llm-pii-redaction",
-            "llm-prompt-compress",
-            "llm-semantic-cache"
+            "llm-prompt-compress"
         ]
     );
     assert_eq!(chain[0].scope, octra_llm_plugin_types::LlmScope::Global);
@@ -319,8 +318,10 @@ async fn reload_with_extra_compiles_executable_chains() {
     assert_eq!(chain[3].scope, octra_llm_plugin_types::LlmScope::Consumer);
     assert_eq!(chain[3].scope_id, "consumer-1");
     assert_eq!(chain[4].scope, octra_llm_plugin_types::LlmScope::Global);
-    assert_eq!(chain[5].scope, octra_llm_plugin_types::LlmScope::Model);
-    assert_eq!(chain[5].scope_id, "chat");
+    assert!(
+        chain.iter().all(|entry| entry.name != "llm-semantic-cache"),
+        "reversible PII must disable the semantic cache"
+    );
 
     // A caller outside the consumer scope only sees global and model rules.
     let unbound = runtime.effective_chain(None, None, &[], "chat", None);

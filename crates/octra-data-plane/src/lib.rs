@@ -38,6 +38,11 @@ pub fn http_client(config: &OctraConfig) -> Client {
             config.gateway.connect_timeout_secs.max(1),
         ))
         .pool_idle_timeout(Duration::from_secs(90))
+        // The data plane is a proxy: upstream redirects are returned to the
+        // caller (or treated as upstream errors) rather than followed with
+        // the same credentials. This also prevents an SSRF allow-list from
+        // being bypassed by a redirect to a metadata endpoint.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to build the configured HTTP client; using defaults");

@@ -512,31 +512,9 @@ impl RuntimeSnapshot {
                 },
             );
         }
-        for model in &self.data.models {
-            if !model.enabled {
-                continue;
-            }
-            let Some(provider) = self.providers.get(&model.provider_id) else {
-                continue;
-            };
-            let protocol = model
-                .protocol
-                .as_deref()
-                .and_then(Protocol::parse)
-                .unwrap_or(provider.protocol);
-            listing
-                .entry(model.model_id.clone())
-                .or_insert_with(|| ModelListing {
-                    id: model.model_id.clone(),
-                    owned_by: provider.name.clone(),
-                    protocol,
-                    created: self.generated_at.timestamp(),
-                    description: model
-                        .display_name
-                        .clone()
-                        .unwrap_or_else(|| "Provider model".to_string()),
-                });
-        }
+        // Only names that resolve to a routing plan are advertised. Raw
+        // provider model ids are not directly routable and would produce
+        // `model_not_found` if a client selected one from this list.
         listing.into_values().collect()
     }
 }
@@ -844,7 +822,10 @@ mod tests {
         assert_eq!(plan.attempts(0).len(), 2);
         let listing = snapshot.model_listing();
         assert!(listing.iter().any(|model| model.id == "octra-default"));
-        assert!(listing.iter().any(|model| model.id == "m1"));
+        assert!(
+            !listing.iter().any(|model| model.id == "m1"),
+            "provider model ids are not routable and must not be advertised"
+        );
     }
 
     #[tokio::test]

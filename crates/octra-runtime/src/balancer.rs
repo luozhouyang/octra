@@ -565,6 +565,7 @@ pub struct TargetPool {
     cursor: AtomicU64,
     hash: HashConfig,
     health: HealthConfig,
+    host_header: Option<String>,
 }
 
 impl TargetPool {
@@ -592,7 +593,7 @@ impl TargetPool {
         seed: u64,
         health_store: &HealthStore,
     ) -> Self {
-        Self::with_config(
+        let mut pool = Self::with_config(
             algorithm_from_str(upstream.algorithm.as_str()),
             targets,
             scheme,
@@ -600,7 +601,14 @@ impl TargetPool {
             HashConfig::from_upstream(upstream),
             HealthConfig::from_value(&upstream.healthchecks),
             health_store,
-        )
+        );
+        pool.host_header = upstream
+            .host_header
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        pool
     }
 
     fn with_config(
@@ -636,6 +644,7 @@ impl TargetPool {
             cursor: AtomicU64::new(seed),
             hash,
             health,
+            host_header: None,
         }
     }
 
@@ -645,6 +654,11 @@ impl TargetPool {
 
     /// Cookie metadata for cookie-based consistent hashing. Returns `None`
     /// unless the upstream hashes on a non-empty cookie name.
+    /// Configured upstream `Host` header, when present.
+    pub fn host_header(&self) -> Option<&str> {
+        self.host_header.as_deref()
+    }
+
     pub fn sticky_cookie(&self) -> Option<StickyCookie> {
         if self.hash.hash_on != "cookie" || self.hash.hash_on_cookie.is_empty() {
             return None;

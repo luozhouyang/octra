@@ -1050,6 +1050,10 @@ impl LlmPlugin for Redaction {
         &self.manifest
     }
 
+    fn restores_sensitive_content(&self) -> bool {
+        self.reversible()
+    }
+
     async fn on_request(&self, cx: &mut LlmRequestContext<'_>) -> LlmPluginResult {
         let mut state = State {
             nonce: uuid::Uuid::new_v4().simple().to_string(),

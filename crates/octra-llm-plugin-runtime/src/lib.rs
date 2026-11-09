@@ -1101,6 +1101,18 @@ impl LlmPluginChains {
         }
         push(LlmScope::Global, "");
 
+        if entries
+            .iter()
+            .any(|entry| entry.plugin.restores_sensitive_content())
+            && entries
+                .iter()
+                .any(|entry| entry.name == "llm-semantic-cache")
+        {
+            entries.retain(|entry| entry.name != "llm-semantic-cache");
+            tracing::warn!(
+                "semantic cache disabled for this chain because reversible PII redaction is active"
+            );
+        }
         sort_entries(&mut entries);
         let chain = Arc::new(LlmPluginChain { entries });
         let mut cache = self.cache.lock();

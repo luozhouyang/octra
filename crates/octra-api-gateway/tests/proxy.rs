@@ -62,6 +62,38 @@ async fn proxies_with_rewrite_forwarded_headers_and_body() {
 }
 
 #[tokio::test]
+async fn upstream_host_header_overrides_the_target_authority() {
+    let (addr, _calls) = spawn_mock("a").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-host",
+        &format!("http://{addr}"),
+        false,
+        "/api",
+        true,
+    )
+    .await;
+    gateway
+        .storage
+        .api
+        .update_upstream(
+            "svc-host-up",
+            &octra_api_core::UpdateUpstream {
+                host_header: Some("api.internal".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    let (status, _, json) = gateway.send(request("GET", "/api/host-check")).await;
+    assert_eq!(status, StatusCode::CREATED, "{json}");
+    assert_eq!(json["host"], "api.internal");
+}
+
+#[tokio::test]
 async fn round_robins_across_two_targets() {
     let (addr_a, _calls_a) = spawn_mock("a").await;
     let (addr_b, _calls_b) = spawn_mock("b").await;

@@ -109,6 +109,15 @@ impl ServiceEndpoint {
             Self::Direct(_) => None,
         }
     }
+
+    /// Configured upstream `Host` header; pooled upstreams may override the
+    /// target authority. Direct services have no upstream row.
+    pub fn host_header(&self) -> Option<&str> {
+        match self {
+            Self::Pool(pool) => pool.host_header(),
+            Self::Direct(_) => None,
+        }
+    }
 }
 
 /// Immutable compiled view of the API gateway configuration.
@@ -642,6 +651,43 @@ mod tests {
                 path: "/api".into(),
             })
         );
+    }
+
+    #[test]
+    fn upstream_host_header_reaches_the_pool() {
+        let upstream = Upstream {
+            id: "u".into(),
+            name: "u".into(),
+            algorithm: Default::default(),
+            hash_on: "none".into(),
+            hash_fallback: "none".into(),
+            hash_on_header: String::new(),
+            hash_fallback_header: String::new(),
+            hash_on_cookie: String::new(),
+            hash_on_cookie_path: String::new(),
+            hash_on_query_arg: String::new(),
+            hash_fallback_query_arg: String::new(),
+            hash_on_uri_capture: String::new(),
+            hash_fallback_uri_capture: String::new(),
+            slots: 10000,
+            healthchecks: serde_json::json!({}),
+            host_header: Some("api.internal".into()),
+            tags: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let targets = vec![Target {
+            id: "t".into(),
+            upstream_id: "u".into(),
+            target: "127.0.0.2:9001".into(),
+            weight: 100,
+            tags: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        }];
+        let pool =
+            TargetPool::from_upstream(&upstream, &targets, "http", 0, &HealthStore::default());
+        assert_eq!(pool.host_header(), Some("api.internal"));
     }
 
     #[test]
