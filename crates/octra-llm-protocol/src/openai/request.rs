@@ -7,7 +7,7 @@ use octra_llm_core::{
 };
 use serde_json::json;
 
-const KNOWN_FIELDS: [&str; 20] = [
+const KNOWN_FIELDS: [&str; 17] = [
     "model",
     "messages",
     "tools",
@@ -25,15 +25,18 @@ const KNOWN_FIELDS: [&str; 20] = [
     "user",
     "functions",
     "function_call",
-    "n",
-    "presence_penalty",
-    "frequency_penalty",
 ];
 
 pub fn decode_request(value: Value) -> ProtocolResult<ChatRequest> {
     let object = value
         .as_object()
         .ok_or_else(|| ProtocolError::new("request body must be a JSON object"))?;
+
+    if object.get("n").and_then(Value::as_u64).is_some_and(|n| n > 1) {
+        return Err(ProtocolError::new(
+            "OpenAI `n` greater than 1 is not supported by this gateway",
+        ));
+    }
 
     let model = object
         .get("model")

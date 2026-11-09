@@ -1045,3 +1045,37 @@ fn gemini_thought_signatures_survive_ir_round_trips() {
         "sig-response"
     );
 }
+
+#[test]
+fn anthropic_top_level_metadata_and_cache_control_round_trip() {
+    let request = decode_request(
+        octra_llm_core::Protocol::Anthropic,
+        serde_json::json!({
+            "model": "claude",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hello"}],
+            "metadata": {"user_id": "u-1"},
+            "cache_control": {"type": "ephemeral"},
+            "service_tier": "standard_only"
+        }),
+    )
+    .unwrap();
+    let encoded = encode_request(octra_llm_core::Protocol::Anthropic, &request).unwrap();
+    assert_eq!(encoded["metadata"]["user_id"], "u-1");
+    assert_eq!(encoded["cache_control"]["type"], "ephemeral");
+    assert_eq!(encoded["service_tier"], "standard_only");
+}
+
+#[test]
+fn openai_rejects_multiple_choices() {
+    let error = decode_request(
+        octra_llm_core::Protocol::Openai,
+        serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hello"}],
+            "n": 2
+        }),
+    )
+    .expect_err("n > 1 is unsupported");
+    assert!(error.message.contains("n"));
+}

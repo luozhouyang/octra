@@ -11,7 +11,7 @@ use crate::common::decode_attachment;
 
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
-const KNOWN_FIELDS: [&str; 20] = [
+const KNOWN_FIELDS: [&str; 12] = [
     "model",
     "messages",
     "system",
@@ -24,14 +24,6 @@ const KNOWN_FIELDS: [&str; 20] = [
     "tools",
     "tool_choice",
     "thinking",
-    "metadata",
-    "service_tier",
-    "container",
-    "mcp_servers",
-    "output_format",
-    "betas",
-    "cache_control",
-    "context_management",
 ];
 
 pub fn decode_request(value: Value) -> ProtocolResult<ChatRequest> {
