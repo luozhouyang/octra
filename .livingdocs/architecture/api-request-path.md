@@ -33,7 +33,7 @@ flowchart LR
 ## Steps
 
 1. **Resolve the snapshot.** The handler takes the current `GatewayRuntime` snapshot. In-flight requests keep this snapshot even if a reload swaps a newer one.
-2. **Match.** The matcher evaluates protocol, host (exact or a single `*.` wildcard pattern), path (prefix or regex), method, and headers. Routes are ordered by `regex_priority` descending, longest path descending, then id ascending. A miss returns `404 no_route`, records metrics, writes an access log, and publishes an `api.request.completed` event when a subscriber exists.
+2. **Match.** The matcher evaluates protocol, host (exact or a leading `*.` wildcard pattern), path (prefix or regex), method, and headers. Routes are ordered by `regex_priority` descending, longest path descending, then id ascending. A miss returns `404 no_route`, records metrics, writes an access log, and publishes an `api.request.completed` event when a subscriber exists.
 3. **Pre-auth plugins.** The chain contains global, service, route, and non-consumer-specific instances. It can short-circuit before authentication; response plugins still run for the short-circuit.
 4. **Authenticate.** `key-auth`, `basic-auth`, `jwt`, and `acl` plugins resolve a consumer and credential. The chain is split at authentication so consumer- and consumer-group-scoped instances can replace the less specific instance in the post-auth pass, matching Kong's precedence.
 5. **Post-auth plugins.** The chain applies the 12-level Kong scope precedence and can modify headers, the URI, the method, or the body. It can short-circuit; response plugins still run.
