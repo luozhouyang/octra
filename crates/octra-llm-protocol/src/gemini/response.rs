@@ -36,6 +36,7 @@ pub fn decode_response(value: Value) -> ProtocolResult<ChatResponse> {
         .unwrap_or_default();
 
     let mut assistant = Vec::new();
+    let mut message_extra = Map::new();
     let mut has_tool_call = false;
     for (index, part) in parts.iter().enumerate() {
         if let Some(call) = part.get("functionCall") {
@@ -45,8 +46,21 @@ pub fn decode_response(value: Value) -> ProtocolResult<ChatResponse> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let id = format!("call_{name}_{index}");
+            if let Some(signature) = part
+                .get("thoughtSignature")
+                .and_then(Value::as_str)
+                .filter(|signature| !signature.is_empty())
+            {
+                let signatures = message_extra
+                    .entry("gemini_thought_signatures")
+                    .or_insert_with(|| json!({}));
+                if let Some(signatures) = signatures.as_object_mut() {
+                    signatures.insert(id.clone(), Value::String(signature.to_string()));
+                }
+            }
             assistant.push(AssistantContent::ToolCall {
-                id: format!("call_{name}_{index}"),
+                id,
                 name,
                 arguments: call.get("args").cloned().unwrap_or_else(|| json!({})),
                 kind: None,
@@ -61,7 +75,10 @@ pub fn decode_response(value: Value) -> ProtocolResult<ChatResponse> {
             {
                 assistant.push(AssistantContent::Reasoning {
                     text: text.to_string(),
-                    signature: None,
+                    signature: part
+                        .get("thoughtSignature")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 });
             } else {
                 assistant.push(AssistantContent::Text {
@@ -103,7 +120,7 @@ pub fn decode_response(value: Value) -> ProtocolResult<ChatResponse> {
             assistant,
             tool_results: Vec::new(),
             name: None,
-            extra: Map::new(),
+            extra: message_extra,
         },
         finish_reason,
         usage: decode_usage(object.get("usageMetadata")),
@@ -166,14 +183,37 @@ pub fn encode_response(response: &ChatResponse) -> ProtocolResult<Value> {
     for block in &response.message.assistant {
         match block {
             AssistantContent::Text { text } => parts.push(json!({"text": text})),
-            AssistantContent::Reasoning { text, .. } => {
-                parts.push(json!({"text": text, "thought": true}))
+            AssistantContent::Reasoning {
+                text,
+                signature,
+            } => {
+                let mut part = json!({"text": text, "thought": true});
+                if let Some(signature) = signature {
+                    part["thoughtSignature"] = json!(signature);
+                }
+                parts.push(part)
             }
             AssistantContent::ToolCall {
-                name, arguments, ..
-            } => parts.push(json!({
-                "functionCall": {"name": name, "args": arguments},
-            })),
+                id,
+                name,
+                arguments,
+                ..
+            } => {
+                let mut part = json!({
+                    "functionCall": {"name": name, "args": arguments},
+                });
+                if let Some(signature) = response
+                    .message
+                    .extra
+                    .get("gemini_thought_signatures")
+                    .and_then(Value::as_object)
+                    .and_then(|signatures| signatures.get(id))
+                    .and_then(Value::as_str)
+                {
+                    part["thoughtSignature"] = json!(signature);
+                }
+                parts.push(part)
+            }
             _ => {}
         }
     }

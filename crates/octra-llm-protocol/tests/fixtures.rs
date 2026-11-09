@@ -1003,3 +1003,45 @@ fn anthropic_accepts_string_content_and_reports_max_tokens() {
     .unwrap();
     assert_eq!(response.finish_reason, octra_llm_core::FinishReason::Length);
 }
+
+#[test]
+fn gemini_thought_signatures_survive_ir_round_trips() {
+    let request = decode_request(
+        octra_llm_core::Protocol::Gemini,
+        serde_json::json!({
+            "contents": [{
+                "role": "model",
+                "parts": [{
+                    "functionCall": {"name": "lookup", "args": {"q": "x"}},
+                    "thoughtSignature": "sig-call"
+                }]
+            }]
+        }),
+    )
+    .unwrap();
+    let encoded = encode_request(octra_llm_core::Protocol::Gemini, &request).unwrap();
+    assert_eq!(
+        encoded["contents"][0]["parts"][0]["thoughtSignature"],
+        "sig-call"
+    );
+
+    let response = decode_response(
+        octra_llm_core::Protocol::Gemini,
+        serde_json::json!({
+            "candidates": [{
+                "content": {"parts": [{
+                    "functionCall": {"name": "lookup", "args": {"q": "x"}},
+                    "thoughtSignature": "sig-response"
+                }]},
+                "finishReason": "STOP"
+            }],
+            "modelVersion": "gemini-2.5"
+        }),
+    )
+    .unwrap();
+    let encoded = encode_response(octra_llm_core::Protocol::Gemini, &response).unwrap();
+    assert_eq!(
+        encoded["candidates"][0]["content"]["parts"][0]["thoughtSignature"],
+        "sig-response"
+    );
+}

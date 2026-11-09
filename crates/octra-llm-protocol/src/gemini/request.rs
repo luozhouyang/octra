@@ -36,7 +36,12 @@ pub fn decode_request(value: Value) -> ProtocolResult<ChatRequest> {
         if role == "model" || role == "assistant" {
             let mut message = Message::new(Role::Assistant);
             for part in parts {
-                decode_model_part(part, &mut message.assistant, &mut call_ids);
+                decode_model_part(
+                    part,
+                    &mut message.assistant,
+                    &mut message.extra,
+                    &mut call_ids,
+                );
             }
             messages.push(message);
         } else {
@@ -273,6 +278,7 @@ fn decode_user_part(part: &Value) -> ContentPart {
 fn decode_model_part(
     part: &Value,
     assistant: &mut Vec<AssistantContent>,
+    extra: &mut Map<String, Value>,
     call_ids: &mut std::collections::HashMap<String, String>,
 ) {
     if let Some(call) = part.get("functionCall") {
@@ -283,6 +289,18 @@ fn decode_model_part(
             .to_string();
         let id = format!("call_{name}_{}", call_ids.len());
         call_ids.insert(name.clone(), id.clone());
+        if let Some(signature) = part
+            .get("thoughtSignature")
+            .and_then(Value::as_str)
+            .filter(|signature| !signature.is_empty())
+        {
+            let signatures = extra
+                .entry("gemini_thought_signatures")
+                .or_insert_with(|| json!({}));
+            if let Some(signatures) = signatures.as_object_mut() {
+                signatures.insert(id.clone(), Value::String(signature.to_string()));
+            }
+        }
         assistant.push(AssistantContent::ToolCall {
             id,
             name,
@@ -299,7 +317,10 @@ fn decode_model_part(
         {
             assistant.push(AssistantContent::Reasoning {
                 text: text.to_string(),
-                signature: None,
+                signature: part
+                    .get("thoughtSignature")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             });
         } else {
             assistant.push(AssistantContent::Text {
@@ -335,14 +356,36 @@ pub fn encode_request(request: &ChatRequest) -> ProtocolResult<Value> {
                 for block in &message.assistant {
                     match block {
                         AssistantContent::Text { text } => parts.push(json!({"text": text})),
-                        AssistantContent::Reasoning { text, .. } => {
-                            parts.push(json!({"text": text, "thought": true}))
+                        AssistantContent::Reasoning {
+                            text,
+                            signature,
+                        } => {
+                            let mut part = json!({"text": text, "thought": true});
+                            if let Some(signature) = signature {
+                                part["thoughtSignature"] = json!(signature);
+                            }
+                            parts.push(part)
                         }
                         AssistantContent::ToolCall {
-                            name, arguments, ..
-                        } => parts.push(json!({
-                            "functionCall": {"name": name, "args": arguments},
-                        })),
+                            id,
+                            name,
+                            arguments,
+                            ..
+                        } => {
+                            let mut part = json!({
+                                "functionCall": {"name": name, "args": arguments},
+                            });
+                            if let Some(signature) = message
+                                .extra
+                                .get("gemini_thought_signatures")
+                                .and_then(Value::as_object)
+                                .and_then(|signatures| signatures.get(id))
+                                .and_then(Value::as_str)
+                            {
+                                part["thoughtSignature"] = json!(signature);
+                            }
+                            parts.push(part)
+                        }
                         _ => {}
                     }
                 }
