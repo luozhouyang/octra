@@ -31,6 +31,7 @@ flowchart TB
 ## API plugins
 
 - Phases: the contract declares `certificate`, `rewrite`, `request`, `upstream_request`, `response`, `response_body`, `error`, and `log`. The HTTP data plane currently executes `request`, `upstream_request`, `response`, `response_body`, `error`, and `log`; `certificate` and `rewrite` are reserved and not invoked yet.
+- Response-body plugins are buffered by default. A plugin that returns true from `streams_response_body` receives `on_response_body` chunks without a full-body buffer; a WASM API plugin opts in with `{"stream_response_body": true}` in its instance config. Full-document transformers such as `response-transformer` keep the buffered path.
 - Scope precedence: the 12 Kong combinations from consumer + route + service down to global. Consumer and consumer-group instances are deferred until after authentication.
 - Ordering: manifest priority descending, then plugin name ascending; `ordering.before` / `ordering.after` can override.
 - Fail policy: `fail_open` or `fail_closed` from the manifest; a closed failure returns a gateway error.
