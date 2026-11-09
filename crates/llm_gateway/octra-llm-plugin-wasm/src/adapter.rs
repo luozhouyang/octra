@@ -738,6 +738,9 @@ fn log_json(event: &LlmLogEvent<'_>) -> Value {
         "finish_reason": event.finish_reason,
         "streaming": event.streaming,
         "error": event.error,
+        "cache_status": event.cache_status,
+        "response_source": event.response_source,
+        "cost_micros": event.cost_micros,
     })
 }
 
@@ -837,6 +840,7 @@ mod tests {
             streaming: false,
             error: None,
             cache_status: None,
+            cost_micros: None,
             response_source: None,
         };
         let value = log_json(&event);

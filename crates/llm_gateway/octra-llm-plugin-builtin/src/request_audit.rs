@@ -123,6 +123,7 @@ impl RequestAudit {
             "finish_reason": event.finish_reason,
             "cache_status": event.cache_status,
             "response_source": event.response_source,
+            "cost_micros": event.cost_micros,
         });
         if self.include_client {
             record["client_ip"] = json!(meta.client_ip.map(|ip| ip.to_string()));
@@ -186,6 +187,7 @@ mod tests {
             streaming: true,
             error: Some("upstream hiccup"),
             cache_status: Some("hit"),
+            cost_micros: None,
             response_source: Some("cache"),
         }
     }

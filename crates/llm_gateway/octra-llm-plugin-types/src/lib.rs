@@ -364,6 +364,9 @@ pub struct LlmLogEvent<'a> {
     /// Provenance of a short-circuit response: `"cache"`, `"synthetic"` or
     /// `"termination"`; `None` for upstream responses.
     pub response_source: Option<&'a str>,
+    /// Host-computed cost in micro-USD. `None` when pricing is unavailable or
+    /// the request never produced a complete billable response.
+    pub cost_micros: Option<u64>,
 }
 
 pub struct LlmLogContext<'a> {

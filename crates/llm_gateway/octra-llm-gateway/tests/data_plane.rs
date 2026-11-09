@@ -13,15 +13,16 @@ use octra_api_plugin_types::{
     FailPolicy, PluginError, PluginKind, PluginManifest, PluginRuntimeKind,
 };
 use octra_config::SemanticEmbeddingConfig;
-use octra_llm_core::{AssistantContent, ChatResponse, Message, Role, Usage};
+use octra_llm_core::{AssistantContent, ChatResponse, Message, Role, StreamEvent, Usage};
 use octra_llm_gateway::LlmDataState;
 use octra_llm_gateway::keys::hash_key;
 use octra_llm_plugin_types::{
     LlmAction, LlmLogContext, LlmPlugin, LlmPluginFactory, LlmPluginResult, LlmRequestContext,
-    LlmResponseSource,
+    LlmResponseSource, LlmStreamContext, LlmStreamResult,
 };
 use octra_storage::{LlmUsageInput, LlmVirtualKeyInput};
 use serde_json::json;
+use tower::ServiceExt;
 
 fn openai_upstream_text(request: Captured) -> axum::response::Response {
     if request.body.get("stream").and_then(|v| v.as_bool()) == Some(true) {
@@ -2922,6 +2923,28 @@ struct CapturedShortCircuit {
     output_tokens: u64,
 }
 
+fn test_plugin_manifest(name: &str) -> PluginManifest {
+    PluginManifest {
+        name: name.to_string(),
+        version: "1.0.0".to_string(),
+        kind: PluginKind::Llm,
+        runtime: PluginRuntimeKind::Builtin,
+        priority: 0,
+        description: "data-plane test plugin".to_string(),
+        timeout_ms: 100,
+        fail_policy: FailPolicy::Closed,
+        phases: Vec::new(),
+        capabilities: Vec::new(),
+        config_schema: None,
+        api_version: "7".to_string(),
+        entities: Vec::new(),
+        migrations: Vec::new(),
+        admin_routes: Vec::new(),
+        subscriptions: Vec::new(),
+        jobs: Vec::new(),
+    }
+}
+
 struct SyntheticFactory {
     manifest: PluginManifest,
     captured: Arc<Mutex<Vec<CapturedShortCircuit>>>,
@@ -2983,25 +3006,7 @@ impl LlmPlugin for SyntheticPlugin {
 #[tokio::test]
 async fn synthetic_short_circuit_is_not_logged_as_a_cache_hit() {
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let manifest = PluginManifest {
-        name: "test-synthetic".to_string(),
-        version: "1.0.0".to_string(),
-        kind: PluginKind::Llm,
-        runtime: PluginRuntimeKind::Builtin,
-        priority: 0,
-        description: "synthetic short-circuit test plugin".to_string(),
-        timeout_ms: 100,
-        fail_policy: FailPolicy::Closed,
-        phases: Vec::new(),
-        capabilities: Vec::new(),
-        config_schema: None,
-        api_version: "7".to_string(),
-        entities: Vec::new(),
-        migrations: Vec::new(),
-        admin_routes: Vec::new(),
-        subscriptions: Vec::new(),
-        jobs: Vec::new(),
-    };
+    let manifest = test_plugin_manifest("test-synthetic");
     let harness = Harness::new_with_plugins(vec![Arc::new(SyntheticFactory {
         manifest,
         captured: captured.clone(),
@@ -3027,4 +3032,203 @@ async fn synthetic_short_circuit_is_not_logged_as_a_cache_hit() {
     assert_eq!(captured[0].cache_status, None);
     assert_eq!(captured[0].response_source.as_deref(), Some("synthetic"));
     assert_eq!(captured[0].output_tokens, 5);
+}
+
+#[derive(Clone, Debug, Default)]
+struct CapturedBilling {
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_micros: Option<u64>,
+}
+
+struct UsageMutatorFactory {
+    manifest: PluginManifest,
+    captured: Arc<Mutex<Vec<CapturedBilling>>>,
+}
+
+impl LlmPluginFactory for UsageMutatorFactory {
+    fn manifest(&self) -> PluginManifest {
+        self.manifest.clone()
+    }
+
+    fn create(&self, _config: serde_json::Value) -> Result<Arc<dyn LlmPlugin>, PluginError> {
+        Ok(Arc::new(UsageMutatorPlugin {
+            manifest: self.manifest.clone(),
+            captured: self.captured.clone(),
+        }))
+    }
+}
+
+struct UsageMutatorPlugin {
+    manifest: PluginManifest,
+    captured: Arc<Mutex<Vec<CapturedBilling>>>,
+}
+
+#[async_trait]
+impl LlmPlugin for UsageMutatorPlugin {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    async fn on_response(
+        &self,
+        cx: &mut octra_llm_plugin_types::LlmResponseContext<'_>,
+    ) -> LlmPluginResult {
+        cx.response.usage = Usage {
+            input_tokens: 999,
+            output_tokens: 999,
+            ..Usage::default()
+        };
+        Ok(LlmAction::Continue)
+    }
+
+    async fn on_stream_event(&self, cx: &mut LlmStreamContext<'_>) -> LlmStreamResult {
+        if matches!(cx.event, StreamEvent::Usage(_)) {
+            *cx.event = StreamEvent::Usage(Usage {
+                input_tokens: 999,
+                output_tokens: 999,
+                ..Usage::default()
+            });
+        }
+        Ok(octra_llm_plugin_types::LlmStreamAction::Continue)
+    }
+
+    async fn on_log(&self, cx: &LlmLogContext<'_>) {
+        self.captured.lock().unwrap().push(CapturedBilling {
+            input_tokens: cx.event.usage.input_tokens,
+            output_tokens: cx.event.usage.output_tokens,
+            cost_micros: cx.event.cost_micros,
+        });
+    }
+}
+
+async fn usage_mutator_harness() -> (Harness, MockUpstream, Arc<Mutex<Vec<CapturedBilling>>>) {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let harness = Harness::new_with_plugins(vec![Arc::new(UsageMutatorFactory {
+        manifest: test_plugin_manifest("test-usage-mutator"),
+        captured: captured.clone(),
+    })])
+    .await;
+    let upstream = MockUpstream::start(&harness.config, openai_upstream_text).await;
+    let provider = harness
+        .provider("openai-mock", "openai", &upstream.base_url, "bearer", 0)
+        .await;
+    harness
+        .route_to("octra-default", &[(provider.clone(), 0, 1)])
+        .await;
+    harness
+        .model_priced(
+            &provider,
+            "m",
+            r#"{"currency":"USD","input_per_million":10.0,"output_per_million":20.0}"#,
+        )
+        .await;
+    harness
+        .plugin_config("test-usage-mutator", "global", None, json!({}))
+        .await;
+    (harness, upstream, captured)
+}
+
+#[tokio::test]
+async fn plugin_cannot_change_non_streaming_billing_usage() {
+    let (harness, _upstream, captured) = usage_mutator_harness().await;
+    let (status, _, body) = post_json(
+        harness.data_router(),
+        COMPLETION_PATH,
+        &[],
+        openai_body("octra-default", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["usage"]["prompt_tokens"], 11);
+    assert_eq!(body["usage"]["completion_tokens"], 7);
+
+    let rows = wait_for_usage(&harness.storage, 1).await;
+    assert_eq!(rows[0].input_tokens, 11);
+    assert_eq!(rows[0].output_tokens, 7);
+    let captured = captured.lock().unwrap().clone();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].input_tokens, 11);
+    assert_eq!(captured[0].output_tokens, 7);
+    assert!(captured[0].cost_micros.unwrap_or_default() > 0);
+}
+
+#[tokio::test]
+async fn plugin_cannot_change_streaming_billing_usage() {
+    let (harness, _upstream, captured) = usage_mutator_harness().await;
+    let mut body = openai_body("octra-default", true);
+    body["stream_options"] = json!({"include_usage": true});
+    let (status, _, text) = send(
+        harness.data_router(),
+        axum::http::Method::POST,
+        COMPLETION_PATH,
+        &[],
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        text.contains("\"usage\":{\"completion_tokens\":4,\"prompt_tokens\":3,\"total_tokens\":7}"),
+        "stream: {text}"
+    );
+    assert!(!text.contains("999"), "stream: {text}");
+
+    let rows = wait_for_usage(&harness.storage, 1).await;
+    assert_eq!(rows[0].input_tokens, 3);
+    assert_eq!(rows[0].output_tokens, 4);
+    let captured = captured.lock().unwrap().clone();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].input_tokens, 3);
+    assert_eq!(captured[0].output_tokens, 4);
+    assert!(captured[0].cost_micros.unwrap_or_default() > 0);
+}
+
+#[tokio::test]
+async fn client_disconnect_records_a_499_usage_row() {
+    let (harness, _upstream) = openai_harness().await;
+    let mut body = openai_body("octra-default", true);
+    body["stream_options"] = json!({"include_usage": true});
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(COMPLETION_PATH)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    // Do not poll the body: dropping the response must trigger the stream
+    // disconnect guard.
+    let response = harness.data_router().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response);
+
+    let usage = wait_for_usage(&harness.storage, 1).await;
+    assert_eq!(usage.len(), 1, "usage rows: {usage:?}");
+    assert_eq!(usage[0].status_code, Some(499));
+    assert_eq!(
+        usage[0].error.as_deref(),
+        Some("client disconnected"),
+        "usage rows: {usage:?}"
+    );
+}
+
+#[tokio::test]
+async fn client_disconnect_still_runs_the_log_hook() {
+    let (harness, _upstream, captured) = usage_mutator_harness().await;
+    let mut body = openai_body("octra-default", true);
+    body["stream_options"] = json!({"include_usage": true});
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(COMPLETION_PATH)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let response = harness.data_router().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response);
+
+    let usage = wait_for_usage(&harness.storage, 1).await;
+    assert_eq!(usage[0].status_code, Some(499));
+    let captured = captured.lock().unwrap().clone();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].input_tokens, 0);
+    assert_eq!(captured[0].output_tokens, 0);
 }

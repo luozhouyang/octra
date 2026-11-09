@@ -452,6 +452,7 @@ mod tests {
             streaming: false,
             error: None,
             cache_status: None,
+            cost_micros: None,
             response_source: None,
         };
         let state = json!({ TOKEN_RESERVATION: reserved });

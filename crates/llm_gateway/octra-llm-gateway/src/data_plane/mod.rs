@@ -771,6 +771,7 @@ async fn handle(
                             error: None,
                             cache_status: is_cache.then_some("hit"),
                             response_source: Some(source.as_str()),
+                            cost_micros: is_cache.then_some(0),
                         };
                         chain.on_log(&meta, &event, &mut request_state).await;
                     }
@@ -813,6 +814,7 @@ async fn handle(
                             error: None,
                             cache_status: is_cache.then_some("hit"),
                             response_source: Some(source.as_str()),
+                            cost_micros: is_cache.then_some(0),
                         };
                         chain.on_log(&meta, &event, &mut request_state).await;
                     }
@@ -1244,6 +1246,7 @@ async fn execute(
                                 error: None,
                                 cache_status: None,
                                 response_source: None,
+                                cost_micros: tracker_cost_micros(&tracker),
                             };
                             chain.on_log(meta, &event, request_state).await;
                         }
@@ -1325,6 +1328,7 @@ async fn execute(
             streaming: false,
             error: Some(&error.message),
             cache_status: None,
+            cost_micros: None,
             response_source: None,
         };
         chain.on_log(meta, &event, request_state).await;
@@ -1355,6 +1359,7 @@ async fn log_rejection(
         streaming: false,
         error: Some(&error.message),
         cache_status: None,
+        cost_micros: None,
         response_source: None,
     };
     chain.on_log(meta, &event, state).await;
@@ -1424,6 +1429,15 @@ fn target_signal(snapshot: &RuntimeSnapshot, target: &Target, now_ms: i64) -> Ta
         quota_reset_in_ms,
         credential_expires_in_ms,
     }
+}
+
+fn tracker_cost_micros(tracker: &UsageTracker) -> Option<u64> {
+    tracker
+        .record
+        .pricing
+        .as_ref()
+        .and_then(|pricing| cost::compute(&tracker.record.usage, pricing))
+        .map(|cost| u64::try_from(cost.micros.max(0)).unwrap_or(u64::MAX))
 }
 
 /// Adds a completed request to the live account quota counter.
@@ -1597,6 +1611,9 @@ async fn try_attempt(
         }
         let mut response = runner.execute(ir.clone(), account_record).await?;
         response.model = requested_model.to_string();
+        // Billing usage is captured before the plugin chain. A plugin may
+        // change the client-facing response, but it cannot change the bill.
+        let billing_usage = response.usage.clone();
         let mut response_headers = LlmResponseHeaders::new();
         apply_response_chain(
             chain,
@@ -1607,12 +1624,13 @@ async fn try_attempt(
             request_state,
         )
         .await?;
+        response.usage = billing_usage.clone();
         if let Some(chain) = chain {
             chain
                 .on_final_response(meta, requested_model, &response, request_state)
                 .await;
         }
-        let usage = response.usage.clone();
+        let usage = billing_usage;
         let finish_reason = response.finish_reason;
         let body = translate::encode_response(ingress, &response)?;
         let mut response = json_response(body);
@@ -1731,6 +1749,8 @@ async fn try_attempt(
     // Clients see the model name they asked for, not the routed provider
     // model, so a model alias stays opaque.
     response.model = requested_model.to_string();
+    // Billing usage is captured before the plugin chain.
+    let billing_usage = response.usage.clone();
     let mut response_headers = LlmResponseHeaders::new();
     apply_response_chain(
         chain,
@@ -1741,12 +1761,13 @@ async fn try_attempt(
         request_state,
     )
     .await?;
+    response.usage = billing_usage.clone();
     if let Some(chain) = chain {
         chain
             .on_final_response(meta, requested_model, &response, request_state)
             .await;
     }
-    let usage = response.usage.clone();
+    let usage = billing_usage;
     let finish_reason = response.finish_reason;
     let body = translate::encode_response(ingress, &response)?;
     let mut response = json_response(body);

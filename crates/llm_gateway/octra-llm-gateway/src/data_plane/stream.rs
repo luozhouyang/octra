@@ -18,8 +18,8 @@ use futures_util::stream::{BoxStream, StreamExt, unfold};
 use octra_config::OctraConfig;
 use octra_data_plane::sse::SseDecoder;
 use octra_llm_core::{
-    AssistantContent, ChatResponse, FinishReason, GatewayError, Message, Protocol, Reasoning, Role,
-    StreamEvent, ToolCallKind, Usage, Value,
+    AssistantContent, ChatResponse, ErrorKind, FinishReason, GatewayError, Message, Protocol,
+    Reasoning, Role, StreamEvent, ToolCallKind, Usage, Value,
 };
 use octra_llm_plugin_runtime::LlmPluginChain;
 use octra_llm_plugin_types::{LlmLogEvent, LlmRequestMeta, LlmRequestState};
@@ -63,8 +63,10 @@ pub fn start(
         finished: false,
         saw_finish: false,
         usage: Usage::default(),
+        billing_usage: None,
         accumulator: StreamAccumulator::default(),
         pending_terminal: Vec::new(),
+        logged: false,
     };
 
     let body_stream = unfold(state, |mut state| async move {
@@ -142,6 +144,7 @@ pub fn start(
                         break;
                     }
                 };
+                state.capture_usage(&events);
                 let events = match state.plugins.clone() {
                     Some(chain) => {
                         let meta = state.meta.as_meta();
@@ -159,6 +162,9 @@ pub fn start(
                     None => events,
                 };
                 for event in &events {
+                    if matches!(event, StreamEvent::Usage(_)) {
+                        continue;
+                    }
                     state.encode(event, &mut out);
                 }
             }
@@ -635,8 +641,12 @@ struct BridgeState {
     finished: bool,
     saw_finish: bool,
     usage: Usage,
+    /// Usage captured from the raw upstream events, before the plugin chain.
+    /// This is the billing-authoritative value.
+    billing_usage: Option<Usage>,
     accumulator: StreamAccumulator,
     pending_terminal: Vec<StreamEvent>,
+    logged: bool,
 }
 
 impl BridgeState {
@@ -674,6 +684,15 @@ impl BridgeState {
             self.saw_finish = true;
         }
         self.accumulator.observe(event);
+    }
+
+    fn capture_usage(&mut self, events: &[StreamEvent]) {
+        for event in events {
+            if let StreamEvent::Usage(usage) = event {
+                self.billing_usage = Some(usage.clone());
+                self.accumulator.observe(event);
+            }
+        }
     }
 
     async fn run_stream_end(&mut self, out: &mut Vec<u8>) {
@@ -736,6 +755,7 @@ impl BridgeState {
                 reason: octra_llm_core::FinishReason::Stop,
             });
         }
+        self.capture_usage(&events);
         let events = match self.plugins.clone() {
             Some(chain) => {
                 let meta = self.meta.as_meta();
@@ -747,6 +767,9 @@ impl BridgeState {
             None => events,
         };
         for event in &events {
+            if matches!(event, StreamEvent::Usage(_)) {
+                continue;
+            }
             self.encode(event, &mut out);
         }
         Ok(out)
@@ -784,6 +807,10 @@ impl BridgeState {
             }
         };
         self.run_stream_end(&mut out).await;
+        if let Some(usage) = &self.billing_usage {
+            self.pending_terminal
+                .insert(0, StreamEvent::Usage(usage.clone()));
+        }
         let mut terminal = std::mem::take(&mut self.pending_terminal);
         terminal.sort_by_key(|event| match event {
             StreamEvent::Usage(_) => 0,
@@ -827,6 +854,7 @@ impl BridgeState {
     }
 
     async fn record(&mut self, error: Option<GatewayError>) {
+        self.logged = true;
         if let Some(reason) = self.accumulator.finish_reason {
             self.tracker.record.finish_reason =
                 Some(crate::usage::finish_reason_label(&reason).to_string());
@@ -838,10 +866,43 @@ impl BridgeState {
             &self.plugins,
             &self.meta,
             &mut self.plugin_state,
-            &self.usage,
+            self.billing_usage.as_ref().unwrap_or(&self.usage),
             error,
         )
         .await;
+    }
+}
+
+impl Drop for BridgeState {
+    fn drop(&mut self) {
+        if self.logged {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let storage = self.storage.clone();
+        let tracker = self.tracker.clone();
+        let account = self.account.clone();
+        let plugins = self.plugins.clone();
+        let meta = self.meta.clone();
+        let usage = self.billing_usage.clone().unwrap_or_default();
+        let mut plugin_state = std::mem::take(&mut self.plugin_state);
+        let error = GatewayError::new(499, ErrorKind::Internal, "client disconnected")
+            .with_code("client_disconnected");
+        handle.spawn(async move {
+            record_stream(
+                &storage,
+                &tracker,
+                &account,
+                &plugins,
+                &meta,
+                &mut plugin_state,
+                &usage,
+                Some(error),
+            )
+            .await;
+        });
     }
 }
 
@@ -865,6 +926,12 @@ async fn record_stream(
         }
         None => tracker.finish_with_status(200),
     }
+    let cost_micros = tracker
+        .record
+        .pricing
+        .as_ref()
+        .and_then(|pricing| crate::cost::compute(&tracker.record.usage, pricing))
+        .map(|cost| u64::try_from(cost.micros.max(0)).unwrap_or(u64::MAX));
     if let Some(account) = account {
         match tracker.record.error {
             Some(_) => account.observe_failure(),
@@ -875,14 +942,11 @@ async fn record_stream(
             .input_tokens
             .saturating_add(usage.output_tokens)
             .min(i64::MAX as u64) as i64;
-        let cost = tracker
-            .record
-            .pricing
-            .as_ref()
-            .and_then(|pricing| crate::cost::compute(usage, pricing))
-            .map(|cost| cost.micros)
-            .unwrap_or(0);
-        account.consume(1, tokens, cost);
+        account.consume(
+            1,
+            tokens,
+            i64::try_from(cost_micros.unwrap_or(0)).unwrap_or(i64::MAX),
+        );
     }
     if let Some(chain) = plugins.clone() {
         let request_meta = meta.as_meta();
@@ -901,6 +965,7 @@ async fn record_stream(
             error: tracker.record.error.as_deref(),
             cache_status: None,
             response_source: None,
+            cost_micros,
         };
         chain.on_log(&request_meta, &event, plugin_state).await;
     }
@@ -939,8 +1004,10 @@ pub fn start_events(
         finished: false,
         saw_finish: false,
         usage: Usage::default(),
+        billing_usage: None,
         accumulator: StreamAccumulator::default(),
         pending_terminal: Vec::new(),
+        logged: false,
     };
 
     let body_stream = unfold(state, |mut state| async move {
@@ -979,8 +1046,12 @@ struct EventBridgeState {
     finished: bool,
     saw_finish: bool,
     usage: Usage,
+    /// Usage captured from the raw upstream events, before the plugin chain.
+    /// This is the billing-authoritative value.
+    billing_usage: Option<Usage>,
     accumulator: StreamAccumulator,
     pending_terminal: Vec<StreamEvent>,
+    logged: bool,
 }
 
 impl EventBridgeState {
@@ -1003,6 +1074,7 @@ impl EventBridgeState {
                 Ok(Some(Ok(event))) => {
                     let mut out = Vec::new();
                     let events = vec![event];
+                    self.capture_usage(&events);
                     let events = match self.plugins.clone() {
                         Some(chain) => {
                             let meta = self.meta.as_meta();
@@ -1020,6 +1092,9 @@ impl EventBridgeState {
                         None => events,
                     };
                     for event in &events {
+                        if matches!(event, StreamEvent::Usage(_)) {
+                            continue;
+                        }
                         self.encode(event, &mut out);
                     }
                     if !out.is_empty() {
@@ -1062,6 +1137,15 @@ impl EventBridgeState {
             self.saw_finish = true;
         }
         self.accumulator.observe(event);
+    }
+
+    fn capture_usage(&mut self, events: &[StreamEvent]) {
+        for event in events {
+            if let StreamEvent::Usage(usage) = event {
+                self.billing_usage = Some(usage.clone());
+                self.accumulator.observe(event);
+            }
+        }
     }
 
     async fn run_stream_end(&mut self, out: &mut Vec<u8>) {
@@ -1113,6 +1197,7 @@ impl EventBridgeState {
             let events = vec![StreamEvent::Finish {
                 reason: octra_llm_core::FinishReason::Stop,
             }];
+            self.capture_usage(&events);
             let events = match self.plugins.clone() {
                 Some(chain) => {
                     let meta = self.meta.as_meta();
@@ -1131,10 +1216,17 @@ impl EventBridgeState {
                 None => events,
             };
             for event in &events {
+                if matches!(event, StreamEvent::Usage(_)) {
+                    continue;
+                }
                 self.encode(event, &mut out);
             }
         }
         self.run_stream_end(&mut out).await;
+        if let Some(usage) = &self.billing_usage {
+            self.pending_terminal
+                .insert(0, StreamEvent::Usage(usage.clone()));
+        }
         let mut terminal = std::mem::take(&mut self.pending_terminal);
         terminal.sort_by_key(|event| match event {
             StreamEvent::Usage(_) => 0,
@@ -1175,6 +1267,7 @@ impl EventBridgeState {
     }
 
     async fn record(&mut self, error: Option<GatewayError>) {
+        self.logged = true;
         if let Some(reason) = self.accumulator.finish_reason {
             self.tracker.record.finish_reason =
                 Some(crate::usage::finish_reason_label(&reason).to_string());
@@ -1186,10 +1279,43 @@ impl EventBridgeState {
             &self.plugins,
             &self.meta,
             &mut self.plugin_state,
-            &self.usage,
+            self.billing_usage.as_ref().unwrap_or(&self.usage),
             error,
         )
         .await;
+    }
+}
+
+impl Drop for EventBridgeState {
+    fn drop(&mut self) {
+        if self.logged {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let storage = self.storage.clone();
+        let tracker = self.tracker.clone();
+        let account = self.account.clone();
+        let plugins = self.plugins.clone();
+        let meta = self.meta.clone();
+        let usage = self.billing_usage.clone().unwrap_or_default();
+        let mut plugin_state = std::mem::take(&mut self.plugin_state);
+        let error = GatewayError::new(499, ErrorKind::Internal, "client disconnected")
+            .with_code("client_disconnected");
+        handle.spawn(async move {
+            record_stream(
+                &storage,
+                &tracker,
+                &account,
+                &plugins,
+                &meta,
+                &mut plugin_state,
+                &usage,
+                Some(error),
+            )
+            .await;
+        });
     }
 }
 

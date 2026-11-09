@@ -223,6 +223,7 @@ async fn runs_the_reference_component_through_the_host() {
         streaming: false,
         error: None,
         cache_status: None,
+        cost_micros: None,
         response_source: None,
     };
     let state = Value::Null;
