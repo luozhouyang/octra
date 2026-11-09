@@ -47,6 +47,7 @@ struct WasmPluginInner {
     limits: WasmLimits,
     gate: Arc<InflightGate>,
     stats: Arc<PluginStats>,
+    body_contexts: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
     instance: Mutex<Option<RuntimeInstance>>,
 }
 
@@ -115,6 +116,7 @@ impl WasmApiGatewayPlugin {
             limits,
             gate,
             stats,
+            body_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             instance: Mutex::new(None),
         });
         inner.ensure_instance()?;
@@ -293,6 +295,38 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
         }
     }
 
+    async fn header_filter(
+        &self,
+        cx: &mut octra_api_plugin_types::HeaderFilterContext<'_>,
+    ) -> Result<(), PluginError> {
+        let response = wit::Response {
+            request_id: cx.request_id.to_string(),
+            status: cx.status.as_u16(),
+            headers: header_pairs(cx.headers),
+            consumer_id: cx.consumer_id.map(str::to_string),
+            route_id: cx.route.id.clone(),
+            service_id: cx.service.id.clone(),
+        };
+        let action = self
+            .dispatch(move |inner| {
+                inner.call_header_filter(response).map(|action| {
+                    let outcome = if matches!(&action, wit::ResponseAction::Reject(_)) {
+                        Outcome::Reject
+                    } else {
+                        Outcome::Continue
+                    };
+                    (action, outcome)
+                })
+            })
+            .await?;
+        apply_response_mutation_parts(
+            cx.status,
+            cx.headers,
+            action,
+            self.inner.host.capabilities(),
+        )
+    }
+
     async fn rewrite(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let request = request_dto(cx);
         let action = self
@@ -338,6 +372,9 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
             })
             .await?;
         cx.chunk = output.map(Bytes::from);
+        if cx.eof {
+            self.inner.body_contexts.lock().remove(cx.request_id);
+        }
         Ok(())
     }
 
@@ -376,7 +413,12 @@ impl WasmPluginInner {
 
         let mut store = Store::new(
             self.component.engine(),
-            HostState::new(self.host.clone(), self.limits.max_memory_bytes),
+            HostState::new(
+                self.host.clone(),
+                self.limits.max_memory_bytes,
+                self.limits.max_body_bytes,
+                self.body_contexts.clone(),
+            ),
         );
         store.limiter(|state| &mut state.limits);
 
@@ -533,6 +575,33 @@ impl WasmPluginInner {
         };
         match result {
             Ok(Ok(chunk)) => Ok(chunk),
+            Ok(Err(message)) => Err(WasmCallError::Plugin(message)),
+            Err(error) => {
+                *guard = None;
+                Err(WasmCallError::Trap(error.to_string()))
+            }
+        }
+    }
+
+    fn call_header_filter(
+        &self,
+        response: wit::Response,
+    ) -> Result<wit::ResponseAction, WasmCallError> {
+        let _permit = self.gate.acquire();
+        let mut guard = self.instance.lock();
+        let result = {
+            let Some(instance) = guard.as_mut() else {
+                return Err(WasmCallError::Unavailable);
+            };
+            arm(&mut instance.store, &self.limits)?;
+            instance.store.data_mut().request_id = response.request_id.clone();
+            instance
+                .bindings
+                .octra_api_plugin_plugin_api()
+                .call_on_header_filter(&mut instance.store, &response)
+        };
+        match result {
+            Ok(Ok(action)) => Ok(action),
             Ok(Err(message)) => Err(WasmCallError::Plugin(message)),
             Err(error) => {
                 *guard = None;
@@ -820,8 +889,34 @@ fn apply_request_mutation(
     Ok(())
 }
 
+fn apply_response_mutation_parts(
+    status: &mut StatusCode,
+    headers: &mut HeaderMap,
+    action: wit::ResponseAction,
+    capabilities: &[Capability],
+) -> Result<(), PluginError> {
+    match action {
+        wit::ResponseAction::Continue(mutation) => {
+            apply_response_mutation_fields(status, headers, mutation, capabilities)
+        }
+        wit::ResponseAction::Reject(reject) => Err(PluginError::fail_closed(format!(
+            "header filter cannot replace the response: HTTP {}",
+            reject.status
+        ))),
+    }
+}
+
 fn apply_response_mutation(
     cx: &mut ResponseContext<'_>,
+    mutation: wit::ResponseMutation,
+    capabilities: &[Capability],
+) -> Result<(), PluginError> {
+    apply_response_mutation_fields(cx.status, cx.headers, mutation, capabilities)
+}
+
+fn apply_response_mutation_fields(
+    status: &mut StatusCode,
+    headers: &mut HeaderMap,
     mutation: wit::ResponseMutation,
     capabilities: &[Capability],
 ) -> Result<(), PluginError> {
@@ -834,19 +929,19 @@ fn apply_response_mutation(
         ));
     }
 
-    if let Some(status) = mutation.status {
-        *cx.status = parse_status(status)?;
+    if let Some(next) = mutation.status {
+        *status = parse_status(next)?;
     }
     for (name, value) in mutation.set_headers {
         let name = parse_header_name(&name)?;
         let value = HeaderValue::from_str(&value).map_err(|error| {
             PluginError::fail_closed(format!("plugin returned an invalid header value: {error}"))
         })?;
-        cx.headers.insert(name, value);
+        headers.insert(name, value);
     }
     for name in mutation.remove_headers {
         let name = parse_header_name(&name)?;
-        cx.headers.remove(&name);
+        headers.remove(&name);
     }
     Ok(())
 }

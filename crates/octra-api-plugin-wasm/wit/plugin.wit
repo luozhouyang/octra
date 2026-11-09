@@ -189,6 +189,10 @@ interface host {
     /// The identity that is currently authenticated, if any.
     current-auth: func() -> option<auth-identity>;
 
+    /// Request-scoped body storage for `body-filter` plugins.
+    body-append: func(data: list<u8>) -> result<_, string>;
+    body-take: func() -> result<list<u8>, string>;
+
     kv-get: func(key: string) -> result<option<string>, string>;
     kv-put: func(key: string, value: string, ttl-seconds: option<u32>) -> result<_, string>;
     kv-delete: func(key: string) -> result<bool, string>;

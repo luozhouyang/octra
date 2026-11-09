@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use octra_api_plugin_types::{
     Capability, EntityQuery, LogLevel as ApiLogLevel, PluginHost, PluginStorage,
 };
+use parking_lot::Mutex;
 use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -14,6 +16,8 @@ pub struct HostState {
     pub host: Arc<dyn PluginHost>,
     pub request_id: String,
     pub limits: StoreLimits,
+    body_contexts: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    max_body_bytes: usize,
     auth: AuthView,
     wasi: WasiCtx,
     wasi_table: ResourceTable,
@@ -30,13 +34,20 @@ struct AuthView {
 }
 
 impl HostState {
-    pub fn new(host: Arc<dyn PluginHost>, max_memory_bytes: usize) -> Self {
+    pub fn new(
+        host: Arc<dyn PluginHost>,
+        max_memory_bytes: usize,
+        max_body_bytes: usize,
+        body_contexts: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    ) -> Self {
         Self {
             host,
             request_id: String::new(),
             limits: StoreLimitsBuilder::new()
                 .memory_size(max_memory_bytes)
                 .build(),
+            body_contexts,
+            max_body_bytes,
             auth: AuthView::default(),
             wasi: WasiCtxBuilder::new().build(),
             wasi_table: ResourceTable::new(),
@@ -111,6 +122,26 @@ impl bindings::Host for HostState {
 
     fn current_auth(&mut self) -> Option<bindings::AuthIdentity> {
         self.auth.current.clone()
+    }
+
+    fn body_append(&mut self, data: Vec<u8>) -> Result<(), String> {
+        let mut contexts = self.body_contexts.lock();
+        let buffer = contexts.entry(self.request_id.clone()).or_default();
+        if buffer.len().saturating_add(data.len()) > self.max_body_bytes {
+            return Err(format!(
+                "body context exceeds {} bytes",
+                self.max_body_bytes
+            ));
+        }
+        buffer.extend_from_slice(&data);
+        Ok(())
+    }
+
+    fn body_take(&mut self) -> Result<Vec<u8>, String> {
+        self.body_contexts
+            .lock()
+            .remove(&self.request_id)
+            .ok_or_else(|| "no body context for this request".to_string())
     }
 
     fn kv_get(&mut self, key: String) -> Result<Option<String>, String> {
@@ -348,7 +379,12 @@ mod tests {
     }
 
     fn state(capabilities: Vec<Capability>) -> HostState {
-        HostState::new(Arc::new(TestHost { capabilities }), 1 << 20)
+        HostState::new(
+            Arc::new(TestHost { capabilities }),
+            1 << 20,
+            1 << 20,
+            Arc::new(Mutex::new(HashMap::new())),
+        )
     }
 
     fn identity(consumer: &str) -> wit::AuthIdentity {
