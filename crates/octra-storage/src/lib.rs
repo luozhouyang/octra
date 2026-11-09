@@ -907,6 +907,7 @@ mod tests {
             quota_unit: "requests".into(),
             quota_period: "none".into(),
             quota_used: 0,
+            quota_reset_at: None,
             cooldown_until: None,
             enabled: true,
             oauth_status: "authorized".into(),

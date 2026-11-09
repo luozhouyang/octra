@@ -135,7 +135,7 @@ fn map_accounts(data: &AiControlPlaneData, timestamp: &str, runtime: &mut LlmRun
             quota_unit: account.quota_unit.clone(),
             quota_period: account.quota_period.clone(),
             quota_used: account.quota_used,
-            quota_reset_at: None,
+            quota_reset_at: account.quota_reset_at.clone(),
             cooldown_until: account.cooldown_until.clone(),
             last_error: None,
             credential_kind: account.credential_kind.clone(),

@@ -17,8 +17,8 @@ const PROVIDER_COLUMNS: &str = "id, name, protocol, base_url, auth_ref, capabili
      config_json, enabled, created_at, updated_at";
 
 const ACCOUNT_COLUMNS: &str = "id, provider_id, name, credential_kind, secret_ref, oauth_ref, \
-     weight, priority, quota_limit, quota_unit, quota_period, quota_used, cooldown_until, \
-     enabled, oauth_status, oauth_expires_at, config_json, created_at, updated_at";
+     weight, priority, quota_limit, quota_unit, quota_period, quota_used, quota_reset_at, \
+     cooldown_until, enabled, oauth_status, oauth_expires_at, config_json, created_at, updated_at";
 
 const MODEL_COLUMNS: &str = "id, name, kind, capabilities_json, formats_json, route_paths_json, \
      balancer_json, enabled, created_at, updated_at";
@@ -104,6 +104,7 @@ fn account_from_row(row: &SqliteRow) -> Result<AiProviderAccount> {
         quota_unit: row.get("quota_unit"),
         quota_period: row.get("quota_period"),
         quota_used: row.get("quota_used"),
+        quota_reset_at: row.get("quota_reset_at"),
         cooldown_until: row.get("cooldown_until"),
         enabled: row.get::<i64, _>("enabled") != 0,
         oauth_status: row.get("oauth_status"),
@@ -439,10 +440,11 @@ impl AiStore {
         sqlx::query(
             "INSERT INTO ai_provider_accounts
                  (id, provider_id, name, credential_kind, secret_ref, oauth_ref, weight,
-                  priority, quota_limit, quota_unit, quota_period, quota_used, cooldown_until,
-                  enabled, oauth_status, oauth_expires_at, config_json, created_at, updated_at)
+                  priority, quota_limit, quota_unit, quota_period, quota_used, quota_reset_at,
+                  cooldown_until, enabled, oauth_status, oauth_expires_at, config_json,
+                  created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19)
+                     ?17, ?18, ?19, ?20)
              ON CONFLICT(id) DO UPDATE SET
                  provider_id = excluded.provider_id,
                  name = excluded.name,
@@ -455,6 +457,7 @@ impl AiStore {
                  quota_unit = excluded.quota_unit,
                  quota_period = excluded.quota_period,
                  quota_used = excluded.quota_used,
+                 quota_reset_at = excluded.quota_reset_at,
                  cooldown_until = excluded.cooldown_until,
                  enabled = excluded.enabled,
                  config_json = excluded.config_json,
@@ -472,6 +475,7 @@ impl AiStore {
         .bind(&account.quota_unit)
         .bind(&account.quota_period)
         .bind(account.quota_used)
+        .bind(&account.quota_reset_at)
         .bind(&account.cooldown_until)
         .bind(i64::from(account.enabled))
         .bind(&account.oauth_status)
@@ -757,7 +761,7 @@ impl AiStore {
     pub async fn reset_account_quota(&self, id: &str) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE ai_provider_accounts
-             SET quota_used = 0, cooldown_until = NULL,
+             SET quota_used = 0, quota_reset_at = NULL, cooldown_until = NULL,
                  updated_at = CAST(strftime('%s', 'now') AS INTEGER)
              WHERE id = ?1",
         )
@@ -818,18 +822,18 @@ impl AiStore {
         Ok(())
     }
 
-    /// Persists a rolled quota period by resetting the counter. `reset_at` is
-    /// accepted for call-site compatibility but not stored: the AI account
-    /// schema has no quota reset timestamp, so period-end persistence is
-    /// recomputed at process start.
-    pub async fn roll_account_quota(&self, id: &str, _reset_at: &str) -> Result<()> {
+    /// Persists a rolled quota period by resetting the counter and storing the
+    /// next period boundary so a restart does not revive stale usage.
+    pub async fn roll_account_quota(&self, id: &str, reset_at: &str) -> Result<()> {
         sqlx::query(
             "UPDATE ai_provider_accounts
              SET quota_used = 0,
+                 quota_reset_at = ?2,
                  updated_at = CAST(strftime('%s', 'now') AS INTEGER)
              WHERE id = ?1",
         )
         .bind(id)
+        .bind(reset_at)
         .execute(self.ai_pool())
         .await
         .map_err(|err| write_error("cannot roll ai account quota", err))?;
@@ -1152,6 +1156,7 @@ mod tests {
             quota_unit: "requests".to_string(),
             quota_period: "day".to_string(),
             quota_used: 0,
+            quota_reset_at: None,
             cooldown_until: None,
             enabled: true,
             oauth_status: "none".to_string(),
@@ -1600,6 +1605,11 @@ mod tests {
             .unwrap();
         let rolled = store.get_account("account-tokens").await.unwrap().unwrap();
         assert_eq!(rolled.quota_used, 0, "rollover resets the counter");
+        assert_eq!(
+            rolled.quota_reset_at.as_deref(),
+            Some("2030-02-01T00:00:00.000Z"),
+            "rollover stores the next period boundary"
+        );
 
         assert!(store.reset_account_quota("account-cost").await.unwrap());
         let reset = store.get_account("account-cost").await.unwrap().unwrap();

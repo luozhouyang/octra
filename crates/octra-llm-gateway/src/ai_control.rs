@@ -443,6 +443,7 @@ impl AccountInput {
             quota_unit: self.quota_unit.unwrap_or_else(|| "requests".to_string()),
             quota_period: self.quota_period.unwrap_or_else(|| "none".to_string()),
             quota_used: self.quota_used.unwrap_or(0),
+            quota_reset_at: None,
             cooldown_until: self.cooldown_until,
             enabled: self.enabled.unwrap_or(true),
             // OAuth state is server-managed; account CRUD must not set it.

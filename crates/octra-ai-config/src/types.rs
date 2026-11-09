@@ -87,6 +87,9 @@ pub struct AiProviderAccount {
     pub quota_unit: String,
     pub quota_period: String,
     pub quota_used: i64,
+    /// Server-managed end of the current quota period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_at: Option<String>,
     pub cooldown_until: Option<String>,
     pub enabled: bool,
     /// Server-managed OAuth state. Clients cannot set it through account CRUD.

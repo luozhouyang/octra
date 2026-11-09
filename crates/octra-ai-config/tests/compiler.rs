@@ -36,6 +36,7 @@ fn account(id: &str, provider_id: &str) -> AiProviderAccount {
         quota_unit: "requests".to_string(),
         quota_period: "none".to_string(),
         quota_used: 0,
+        quota_reset_at: None,
         cooldown_until: None,
         enabled: true,
         oauth_status: "none".to_string(),
