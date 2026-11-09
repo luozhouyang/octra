@@ -80,7 +80,36 @@ impl AiControlState {
     }
 
     async fn reload_runtime(&self) -> AiResult<()> {
-        self.refresh().await.map_err(AiError::internal)
+        if let Some(runtime) = &self.runtime {
+            runtime.reload().await.map_err(AiError::internal)?;
+            let issues = runtime.snapshot().await.issues.clone();
+            if !issues.is_empty() {
+                let detail = issues
+                    .iter()
+                    .map(|issue| format!("{}: {}", issue.provider_id, issue.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(AiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("runtime rejected the control plane: {detail}"),
+                ));
+            }
+        }
+        if let Some(plugin_runtime) = &self.plugin_runtime {
+            let data = self
+                .storage
+                .ai
+                .load_control_plane()
+                .await
+                .map_err(AiError::internal)?;
+            let extra =
+                crate::ai_policy_plugins::plugin_data_from_ai(&data, plugin_runtime.registry());
+            plugin_runtime
+                .reload_with_extra(extra)
+                .await
+                .map_err(AiError::internal)?;
+        }
+        Ok(())
     }
 
     /// Loads and compiles the current control plane and records the report in
@@ -642,14 +671,15 @@ async fn apply(State(state): State<AiControlState>) -> AiResult<Response> {
         snapshot_json,
         applied_at: Some(timestamp),
     };
+    state.reload_runtime().await?;
+
+    // Record the revision only after the runtime accepted the configuration.
     state
         .storage
         .ai
         .insert_revision(&revision)
         .await
         .map_err(AiError::internal)?;
-
-    state.reload_runtime().await?;
 
     Ok(Json(json!({
         "ok": true,

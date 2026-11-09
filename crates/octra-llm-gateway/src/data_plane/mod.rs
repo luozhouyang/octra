@@ -570,10 +570,14 @@ async fn handle(
     };
     let mut request_state = LlmRequestState::new();
     let mut response_headers = LlmResponseHeaders::new();
-    let request_chain = state
-        .plugins
-        .as_ref()
-        .map(|plugins| plugins.request_chain(consumer_id, virtual_key_id.as_deref(), &ir.model));
+    let request_chain = state.plugins.as_ref().map(|plugins| {
+        plugins.request_chain(
+            consumer_id,
+            virtual_key_id.as_deref(),
+            consumer_group_ids,
+            &ir.model,
+        )
+    });
     let mut cached_response: Option<ChatResponse> = None;
     if let Some(chain) = &request_chain {
         let rejection = match chain
@@ -1082,6 +1086,7 @@ async fn execute(
                 plugins.provider_chain(
                     meta.consumer_id,
                     meta.virtual_key_id,
+                    meta.consumer_group_ids,
                     requested_model,
                     &provider.id,
                 )

@@ -116,8 +116,8 @@ fn policy(id: &str) -> AiPolicy {
     AiPolicy {
         id: id.to_string(),
         name: format!("policy-{id}"),
-        policy_type: AiPolicyType::Allowlist,
-        config: json!({ "allow": ["*"] }),
+        policy_type: AiPolicyType::SystemPrompt,
+        config: json!({ "prompt": "Be concise." }),
         enabled: true,
         created_at: 0,
         updated_at: 0,

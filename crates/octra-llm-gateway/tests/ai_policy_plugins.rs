@@ -299,7 +299,7 @@ async fn reload_with_extra_compiles_executable_chains() {
     let extra = plugin_data_from_ai(&data, runtime.registry());
     runtime.reload_with_extra(extra).await.unwrap();
 
-    let chain = runtime.effective_chain(Some("consumer-1"), None, "chat", None);
+    let chain = runtime.effective_chain(Some("consumer-1"), None, &[], "chat", None);
     let names: Vec<&str> = chain.iter().map(|entry| entry.name.as_str()).collect();
     assert_eq!(
         names,
@@ -323,7 +323,7 @@ async fn reload_with_extra_compiles_executable_chains() {
     assert_eq!(chain[5].scope_id, "chat");
 
     // A caller outside the consumer scope only sees global and model rules.
-    let unbound = runtime.effective_chain(None, None, "chat", None);
+    let unbound = runtime.effective_chain(None, None, &[], "chat", None);
     let unbound_names: Vec<&str> = unbound.iter().map(|entry| entry.name.as_str()).collect();
     assert_eq!(
         unbound_names,
@@ -350,7 +350,7 @@ async fn runtime_chain_enforces_the_rate_limit_policy() {
     let extra = plugin_data_from_ai(&data, runtime.registry());
     runtime.reload_with_extra(extra).await.unwrap();
 
-    let chain = runtime.request_chain(None, None, "chat");
+    let chain = runtime.request_chain(None, None, &[], "chat");
     let meta = LlmRequestMeta {
         request_id: "request-1",
         ingress: Protocol::Openai,
@@ -396,7 +396,7 @@ async fn runtime_chain_enforces_the_prompt_guard_policy() {
     let extra = plugin_data_from_ai(&data, runtime.registry());
     runtime.reload_with_extra(extra).await.unwrap();
 
-    let chain = runtime.request_chain(None, None, "chat");
+    let chain = runtime.request_chain(None, None, &[], "chat");
     let meta = LlmRequestMeta {
         request_id: "request-1",
         ingress: Protocol::Openai,
@@ -429,5 +429,46 @@ async fn runtime_chain_enforces_the_prompt_guard_policy() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn consumer_group_policies_compile_and_apply_to_group_members() {
+    let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
+    let registry = Arc::new(octra_llm_plugin_builtin::registry());
+    let runtime = LlmPluginRuntime::bootstrap(storage, registry)
+        .await
+        .unwrap();
+
+    let mut data = control_plane();
+    data.policies.push(policy(
+        "policy-group",
+        AiPolicyType::RequestAudit,
+        json!({}),
+    ));
+    data.attachments.push(attachment(
+        "attachment-group",
+        "policy-group",
+        AiPolicyScope::ConsumerGroup,
+        Some("group-1"),
+    ));
+
+    let extra = plugin_data_from_ai(&data, runtime.registry());
+    // Before ConsumerGroup existed in LlmScope this reload failed and silently
+    // disabled every other AI policy.
+    runtime.reload_with_extra(extra).await.unwrap();
+
+    let member = runtime.effective_chain(None, None, &["group-1".to_string()], "chat", None);
+    let member_names: Vec<&str> = member.iter().map(|entry| entry.name.as_str()).collect();
+    assert!(
+        member_names.contains(&"llm-request-audit"),
+        "group policy must be visible: {member_names:?}"
+    );
+
+    let outsider = runtime.effective_chain(None, None, &["group-2".to_string()], "chat", None);
+    let outsider_names: Vec<&str> = outsider.iter().map(|entry| entry.name.as_str()).collect();
+    assert!(
+        !outsider_names.contains(&"llm-request-audit"),
+        "outsider must not gain the group policy: {outsider_names:?}"
     );
 }

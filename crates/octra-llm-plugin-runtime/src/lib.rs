@@ -470,7 +470,13 @@ struct LlmEntry {
 }
 
 type ScopeKey = (LlmScope, String);
-type ChainKey = (Option<String>, Option<String>, String, Option<String>);
+type ChainKey = (
+    Option<String>,
+    Option<String>,
+    Vec<String>,
+    String,
+    Option<String>,
+);
 
 /// Errors surfaced by a chain: configuration/execution failures from a plugin,
 /// or a deliberate rejection carrying the error the client should see.
@@ -1043,15 +1049,20 @@ impl LlmPluginChains {
         &self,
         consumer_id: Option<&str>,
         virtual_key_id: Option<&str>,
+        consumer_group_ids: &[String],
         model: &str,
         provider_id: Option<&str>,
     ) -> Arc<LlmPluginChain> {
         if !self.has_any {
             return self.empty.clone();
         }
+        let mut groups = consumer_group_ids.to_vec();
+        groups.sort();
+        groups.dedup();
         let key = (
             consumer_id.map(str::to_string),
             virtual_key_id.map(str::to_string),
+            groups.clone(),
             model.to_string(),
             provider_id.map(str::to_string),
         );
@@ -1072,11 +1083,17 @@ impl LlmPluginChains {
             }
         };
 
+        // ADR 0018 precedence: virtual key > consumer > consumer group >
+        // target > model > provider > global. Target is applied by the
+        // provider chain once a target has been selected.
+        if let Some(virtual_key_id) = virtual_key_id {
+            push(LlmScope::VirtualKey, virtual_key_id);
+        }
         if let Some(consumer_id) = consumer_id {
             push(LlmScope::Consumer, consumer_id);
         }
-        if let Some(virtual_key_id) = virtual_key_id {
-            push(LlmScope::VirtualKey, virtual_key_id);
+        for group_id in &groups {
+            push(LlmScope::ConsumerGroup, group_id);
         }
         push(LlmScope::Model, model);
         if let Some(provider_id) = provider_id {
@@ -1377,11 +1394,12 @@ impl LlmPluginRuntime {
         &self,
         consumer_id: Option<&str>,
         virtual_key_id: Option<&str>,
+        consumer_group_ids: &[String],
         model: &str,
     ) -> Arc<LlmPluginChain> {
         self.chains
             .read()
-            .chain_for(consumer_id, virtual_key_id, model, None)
+            .chain_for(consumer_id, virtual_key_id, consumer_group_ids, model, None)
     }
 
     /// Chain including the provider scope, used once a target is selected.
@@ -1389,12 +1407,17 @@ impl LlmPluginRuntime {
         &self,
         consumer_id: Option<&str>,
         virtual_key_id: Option<&str>,
+        consumer_group_ids: &[String],
         model: &str,
         provider_id: &str,
     ) -> Arc<LlmPluginChain> {
-        self.chains
-            .read()
-            .chain_for(consumer_id, virtual_key_id, model, Some(provider_id))
+        self.chains.read().chain_for(
+            consumer_id,
+            virtual_key_id,
+            consumer_group_ids,
+            model,
+            Some(provider_id),
+        )
     }
 
     pub fn has_plugins(&self) -> bool {
@@ -1410,12 +1433,19 @@ impl LlmPluginRuntime {
         &self,
         consumer_id: Option<&str>,
         virtual_key_id: Option<&str>,
+        consumer_group_ids: &[String],
         model: &str,
         provider_id: Option<&str>,
     ) -> Vec<LlmChainEntry> {
         self.chains
             .read()
-            .chain_for(consumer_id, virtual_key_id, model, provider_id)
+            .chain_for(
+                consumer_id,
+                virtual_key_id,
+                consumer_group_ids,
+                model,
+                provider_id,
+            )
             .describe()
     }
 }
@@ -1569,9 +1599,9 @@ mod tests {
         let chains = LlmPluginChains::compile(data, &registry).unwrap();
         // The global config wins for unbound callers; the consumer config
         // replaces it rather than running twice.
-        let chain = chains.chain_for(None, None, "m", None);
+        let chain = chains.chain_for(None, None, &[], "m", None);
         assert_eq!(chain.names().collect::<Vec<_>>(), vec!["mark"]);
-        let chain = chains.chain_for(Some("consumer-1"), None, "m", None);
+        let chain = chains.chain_for(Some("consumer-1"), None, &[], "m", None);
         assert_eq!(chain.names().collect::<Vec<_>>(), vec!["mark"]);
     }
 
@@ -1582,7 +1612,7 @@ mod tests {
             configs: vec![config("c1", "p1", "global", "")],
         };
         let chains = LlmPluginChains::compile(data, &registry()).unwrap();
-        let chain = chains.chain_for(None, None, "m", None);
+        let chain = chains.chain_for(None, None, &[], "m", None);
         let mut request = ChatRequest::new("m", Vec::new());
         let meta = LlmRequestMeta {
             request_id: "r",
@@ -1663,7 +1693,7 @@ mod tests {
             configs: vec![config("c1", "p1", "global", "")],
         };
         let chains = LlmPluginChains::compile(data, &registry).unwrap();
-        let chain = chains.chain_for(None, None, "m", None);
+        let chain = chains.chain_for(None, None, &[], "m", None);
         let meta = LlmRequestMeta {
             request_id: "r",
             ingress: Protocol::Openai,
@@ -1756,7 +1786,7 @@ mod tests {
             ],
         };
         let chains = LlmPluginChains::compile(data, &registry).unwrap();
-        let chain = chains.chain_for(None, None, "m", None);
+        let chain = chains.chain_for(None, None, &[], "m", None);
         let meta = LlmRequestMeta {
             request_id: "r",
             ingress: Protocol::Openai,
@@ -1849,7 +1879,7 @@ mod tests {
         };
         LlmPluginChains::compile(data, &registry)
             .unwrap()
-            .chain_for(None, None, "m", None)
+            .chain_for(None, None, &[], "m", None)
     }
 
     #[tokio::test]
@@ -1925,7 +1955,7 @@ mod tests {
         };
         let chain = LlmPluginChains::compile(data, &registry)
             .unwrap()
-            .chain_for(None, None, "m", None);
+            .chain_for(None, None, &[], "m", None);
         let meta = LlmRequestMeta {
             request_id: "r",
             ingress: Protocol::Openai,
@@ -2040,7 +2070,7 @@ mod tests {
             configs: vec![config("c1", "p1", "global", "")],
         };
         let chains = LlmPluginChains::compile(data, &registry).unwrap();
-        let chain = chains.chain_for(None, None, "m", None);
+        let chain = chains.chain_for(None, None, &[], "m", None);
         let meta = LlmRequestMeta {
             request_id: "r",
             ingress: Protocol::Openai,
@@ -2094,7 +2124,7 @@ mod tests {
         let counters: Arc<dyn LlmCounterStore> = Arc::new(MemoryCounterStore::default());
         let chains =
             LlmPluginChains::compile_with(data, &registry, &metrics, &state, &counters).unwrap();
-        let chain = chains.chain_for(None, None, "m", None);
+        let chain = chains.chain_for(None, None, &[], "m", None);
         let mut request = ChatRequest::new("m", Vec::new());
         let mut state = LlmRequestState::new();
         chain
@@ -2258,7 +2288,7 @@ mod tests {
         };
         let chains = LlmPluginChains::compile(data, &registry()).unwrap();
         let described = chains
-            .chain_for(Some("consumer-1"), None, "m", None)
+            .chain_for(Some("consumer-1"), None, &[], "m", None)
             .describe();
         assert_eq!(described.len(), 1);
         assert_eq!(described[0].name, "mark");
@@ -2366,7 +2396,7 @@ mod tests {
         };
         LlmPluginChains::compile(data, &registry)
             .unwrap()
-            .chain_for(None, None, "m", None)
+            .chain_for(None, None, &[], "m", None)
     }
 
     fn assistant_response(id: &str, model: &str, text: &str) -> ChatResponse {

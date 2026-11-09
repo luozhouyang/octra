@@ -667,6 +667,7 @@ async fn plugin_effective_chain(
     let chain = plugins.effective_chain(
         query.consumer_id.as_deref(),
         query.virtual_key_id.as_deref(),
+        &[],
         model,
         query.provider_id.as_deref(),
     );
@@ -1044,6 +1045,13 @@ async fn ensure_scope_target(
             .storage
             .api
             .get_consumer(id)
+            .await
+            .map_err(ApiError::internal)?
+            .is_some(),
+        LlmScope::ConsumerGroup => state
+            .storage
+            .api
+            .get_consumer_group(id)
             .await
             .map_err(ApiError::internal)?
             .is_some(),

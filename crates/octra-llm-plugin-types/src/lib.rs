@@ -29,6 +29,7 @@ pub use counters::{
 pub enum LlmScope {
     Global,
     Consumer,
+    ConsumerGroup,
     VirtualKey,
     Model,
     Provider,
@@ -39,6 +40,7 @@ impl LlmScope {
         match self {
             Self::Global => "global",
             Self::Consumer => "consumer",
+            Self::ConsumerGroup => "consumer_group",
             Self::VirtualKey => "virtual_key",
             Self::Model => "model",
             Self::Provider => "provider",
@@ -49,6 +51,7 @@ impl LlmScope {
         match value {
             "global" => Some(Self::Global),
             "consumer" => Some(Self::Consumer),
+            "consumer_group" | "consumer-group" => Some(Self::ConsumerGroup),
             "virtual_key" | "virtual-key" => Some(Self::VirtualKey),
             "model" => Some(Self::Model),
             "provider" => Some(Self::Provider),
@@ -376,9 +379,10 @@ pub struct LlmPluginCreateContext<'a> {
 /// Scopes every plugin supports unless it narrows the set. Request-stage
 /// plugins should exclude `Provider`, because the request chain is built
 /// before a provider is selected.
-pub const ALL_LLM_SCOPES: [LlmScope; 5] = [
+pub const ALL_LLM_SCOPES: [LlmScope; 6] = [
     LlmScope::Global,
     LlmScope::Consumer,
+    LlmScope::ConsumerGroup,
     LlmScope::VirtualKey,
     LlmScope::Model,
     LlmScope::Provider,
@@ -386,9 +390,10 @@ pub const ALL_LLM_SCOPES: [LlmScope; 5] = [
 
 /// Scopes for plugins that only participate in the client-facing request,
 /// response and stream chain.
-pub const REQUEST_LLM_SCOPES: [LlmScope; 4] = [
+pub const REQUEST_LLM_SCOPES: [LlmScope; 5] = [
     LlmScope::Global,
     LlmScope::Consumer,
+    LlmScope::ConsumerGroup,
     LlmScope::VirtualKey,
     LlmScope::Model,
 ];
