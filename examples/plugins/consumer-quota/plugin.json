@@ -1,5 +1,5 @@
 {
-  "api_version": "2",
+  "api_version": "3",
   "name": "consumer-quota",
   "version": "1.0.0",
   "kind": "api",

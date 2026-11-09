@@ -2,7 +2,7 @@
 //!
 //! The flow:
 //!   1. Host applies `migrations/000_base.sql` at install time.
-//!   2. `on_request` atomically increments `quota_usage` for the current
+//!   2. `on_access` atomically increments `quota_usage` for the current
 //!      fixed window and rejects with 429 once the limit is exceeded.
 //!   3. The counter lives in the plugin's own `data.db`, so it survives
 //!      restarts and upgrades.
@@ -57,7 +57,7 @@ impl ApiPlugin for ConsumerQuota {
         Ok(Self { config })
     }
 
-    fn on_request(&self, cx: &mut RequestContext) -> Result<Decision, Error> {
+    fn on_access(&self, cx: &mut RequestContext) -> Result<Decision, Error> {
         let now = cx.now_unix();
         let window_start = now - now.rem_euclid(self.config.window_seconds);
 

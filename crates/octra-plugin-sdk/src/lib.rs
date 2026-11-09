@@ -115,6 +115,9 @@ pub trait Host: Send + Sync {
     fn now_unix(&self) -> i64;
     fn instance_id(&self) -> String;
     fn log(&self, level: LogLevel, message: &str);
+    fn body_append(&self, data: &[u8]) -> Result<(), String>;
+    fn body_take(&self) -> Result<Vec<u8>, String>;
+
     fn kv_get(&self, key: &str) -> Result<Option<String>, String>;
     fn kv_put(&self, key: &str, value: &str, ttl_seconds: Option<u32>) -> Result<(), String>;
     fn kv_delete(&self, key: &str) -> Result<bool, String>;
@@ -187,6 +190,7 @@ pub struct Request {
     pub consumer_id: Option<String>,
     pub route_id: String,
     pub service_id: String,
+    pub body: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -262,6 +266,7 @@ pub struct RequestMutation {
     pub query: Option<String>,
     pub set_headers: Vec<(String, String)>,
     pub remove_headers: Vec<String>,
+    pub body: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -385,6 +390,7 @@ pub struct RequestContext {
     query: Option<String>,
     set_headers: Vec<(String, String)>,
     remove_headers: Vec<String>,
+    body: Option<Vec<u8>>,
 }
 
 impl RequestContext {
@@ -395,6 +401,7 @@ impl RequestContext {
             query: None,
             set_headers: Vec::new(),
             remove_headers: Vec::new(),
+            body: None,
         }
     }
 
@@ -450,6 +457,14 @@ impl RequestContext {
         self.remove_headers.push(name.into());
     }
 
+    pub fn request_body(&self) -> Option<&[u8]> {
+        self.request.body.as_deref()
+    }
+
+    pub fn set_request_body(&mut self, body: impl Into<Vec<u8>>) {
+        self.body = Some(body.into());
+    }
+
     #[doc(hidden)]
     pub fn __take_mutations(&mut self) -> RequestMutation {
         RequestMutation {
@@ -457,6 +472,7 @@ impl RequestContext {
             query: self.query.take(),
             set_headers: std::mem::take(&mut self.set_headers),
             remove_headers: std::mem::take(&mut self.remove_headers),
+            body: self.body.take(),
         }
     }
 }
@@ -587,6 +603,7 @@ impl UpstreamContext {
             query: self.query.take(),
             set_headers: std::mem::take(&mut self.set_headers),
             remove_headers: std::mem::take(&mut self.remove_headers),
+            body: None,
         }
     }
 }
@@ -644,6 +661,7 @@ pub struct ResponseBodyContext {
     request_id: String,
     status: Option<u16>,
     headers: Vec<(String, String)>,
+    consumer_id: Option<String>,
     route_id: String,
     service_id: String,
     target_url: String,
@@ -655,26 +673,43 @@ impl ResponseBodyContext {
             request_id: response.request_id,
             status: Some(response.status),
             headers: response.headers,
+            consumer_id: response.consumer_id,
             route_id: response.route_id,
             service_id: response.service_id,
             target_url: String::new(),
         }
     }
 
-    pub fn from_chunk(
+    pub fn from_body_info(
         request_id: String,
+        status: u16,
+        headers: Vec<(String, String)>,
+        consumer_id: Option<String>,
         route_id: String,
         service_id: String,
         target_url: String,
     ) -> Self {
         Self {
             request_id,
-            status: None,
-            headers: Vec::new(),
+            status: Some(status),
+            headers,
+            consumer_id,
             route_id,
             service_id,
             target_url,
         }
+    }
+
+    pub fn consumer_id(&self) -> Option<&str> {
+        self.consumer_id.as_deref()
+    }
+
+    pub fn append_body(&self, data: &[u8]) -> Result<(), Error> {
+        host().body_append(data).map_err(Error::internal)
+    }
+
+    pub fn take_body(&self) -> Result<Vec<u8>, Error> {
+        host().body_take().map_err(Error::internal)
     }
 
     pub fn request_id(&self) -> &str {
@@ -847,19 +882,7 @@ pub trait ApiPlugin: Sized + Send + 'static {
         Ok(Decision::Continue)
     }
 
-    fn on_request(&self, _context: &mut RequestContext) -> Result<Decision, Error> {
-        Ok(Decision::Continue)
-    }
-
-    fn on_request_body(
-        &self,
-        _context: &mut RequestBodyContext,
-        body: Vec<u8>,
-    ) -> Result<BodyDecision, Error> {
-        Ok(BodyDecision::Continue(body))
-    }
-
-    fn on_upstream_request(&self, _context: &mut UpstreamContext) -> Result<Decision, Error> {
+    fn on_access(&self, _context: &mut RequestContext) -> Result<Decision, Error> {
         Ok(Decision::Continue)
     }
 
@@ -867,24 +890,17 @@ pub trait ApiPlugin: Sized + Send + 'static {
         Ok(ResponseDecision::Continue)
     }
 
-    fn on_response_buffer(
-        &self,
-        _context: &mut ResponseBodyContext,
-        body: Vec<u8>,
-    ) -> Result<BodyDecision, Error> {
-        Ok(BodyDecision::Continue(body))
+    fn on_header_filter(&self, _context: &mut ResponseContext) -> Result<ResponseDecision, Error> {
+        Ok(ResponseDecision::Continue)
     }
 
-    fn on_response_chunk(
+    fn on_body_filter(
         &self,
         _context: &mut ResponseBodyContext,
-        chunk: Vec<u8>,
-    ) -> Result<BodyDecision, Error> {
-        Ok(BodyDecision::Continue(chunk))
-    }
-
-    fn on_error(&self, _context: &mut ErrorContext) -> Result<ErrorDecision, Error> {
-        Ok(ErrorDecision::Continue)
+        chunk: Option<Vec<u8>>,
+        _eof: bool,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        Ok(chunk)
     }
 
     fn on_log(&self, _entry: &LogEntry) {}
@@ -936,6 +952,14 @@ macro_rules! export_plugin {
                     $crate::LogLevel::Error => WitLevel::Error,
                 };
                 $bindings::octra::api_plugin::host::log(level, message);
+            }
+
+            fn body_append(&self, data: &[u8]) -> ::std::result::Result<(), ::std::string::String> {
+                $bindings::octra::api_plugin::host::body_append(data)
+            }
+
+            fn body_take(&self) -> ::std::result::Result<::std::vec::Vec<u8>, ::std::string::String> {
+                $bindings::octra::api_plugin::host::body_take()
             }
 
             fn kv_get(&self, key: &str) -> ::std::result::Result<::std::option::Option<::std::string::String>, ::std::string::String> {
@@ -1017,6 +1041,70 @@ macro_rules! export_plugin {
         #[allow(non_camel_case_types)]
         struct __OctraPluginExport;
 
+        fn __octra_decision(
+            context: &mut $crate::RequestContext,
+            decision: $crate::Decision,
+        ) -> ::std::result::Result<$bindings::octra::api_plugin::types::Action, ::std::string::String> {
+            match decision {
+                $crate::Decision::Continue => {
+                    let mutation = context.__take_mutations();
+                    ::std::result::Result::Ok(
+                        $bindings::octra::api_plugin::types::Action::Continue(
+                            $bindings::octra::api_plugin::types::RequestMutation {
+                                path: mutation.path,
+                                query: mutation.query,
+                                set_headers: mutation.set_headers,
+                                remove_headers: mutation.remove_headers,
+                                body: mutation.body,
+                            },
+                        ),
+                    )
+                }
+                $crate::Decision::Reject(response) => {
+                    ::std::result::Result::Ok(
+                        $bindings::octra::api_plugin::types::Action::Reject(
+                            $bindings::octra::api_plugin::types::Reject {
+                                status: response.status,
+                                headers: response.headers,
+                                body: response.body,
+                            },
+                        ),
+                    )
+                }
+            }
+        }
+
+        fn __octra_response_decision(
+            mut context: $crate::ResponseContext,
+            decision: $crate::ResponseDecision,
+        ) -> ::std::result::Result<$bindings::octra::api_plugin::types::ResponseAction, ::std::string::String> {
+            match decision {
+                $crate::ResponseDecision::Continue => {
+                    let mutation = context.__take_mutations();
+                    ::std::result::Result::Ok(
+                        $bindings::octra::api_plugin::types::ResponseAction::Continue(
+                            $bindings::octra::api_plugin::types::ResponseMutation {
+                                status: mutation.status,
+                                set_headers: mutation.set_headers,
+                                remove_headers: mutation.remove_headers,
+                            },
+                        ),
+                    )
+                }
+                $crate::ResponseDecision::Reject(response) => {
+                    ::std::result::Result::Ok(
+                        $bindings::octra::api_plugin::types::ResponseAction::Reject(
+                            $bindings::octra::api_plugin::types::Reject {
+                                status: response.status,
+                                headers: response.headers,
+                                body: response.body,
+                            },
+                        ),
+                    )
+                }
+            }
+        }
+
         impl $bindings::exports::octra::api_plugin::plugin_api::Guest for __OctraPluginExport {
             fn configure(config_json: ::std::string::String) -> ::std::result::Result<(), ::std::string::String> {
                 $crate::__install_host(::std::boxed::Box::new(__OctraPluginHost));
@@ -1031,6 +1119,183 @@ macro_rules! export_plugin {
                 ::std::result::Result::Ok(())
             }
 
+            fn on_admin_request(
+                request: $bindings::octra::api_plugin::types::AdminRequest,
+            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::AdminResponse, ::std::string::String> {
+                let request = $crate::AdminRequest {
+                    request_id: request.request_id,
+                    method: request.method,
+                    path: request.path,
+                    query: request.query,
+                    headers: request.headers,
+                    params: request.params,
+                    body: request.body,
+                };
+                let response = {
+                    let state = __OCTRA_PLUGIN_STATE
+                        .lock()
+                        .map_err(|_| "plugin state lock poisoned".to_string())?;
+                    let plugin = state
+                        .as_ref()
+                        .ok_or_else(|| "plugin is not configured".to_string())?;
+                    <$plugin as $crate::ApiPlugin>::on_admin_request(plugin, &request)
+                        .map_err(|error| error.to_string())?
+                };
+                ::std::result::Result::Ok($bindings::octra::api_plugin::types::AdminResponse {
+                    status: response.status,
+                    headers: response.headers,
+                    body: response.body,
+                })
+            }
+
+            fn on_rewrite(
+                request: $bindings::octra::api_plugin::types::Request,
+            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::Action, ::std::string::String> {
+                let mut context = $crate::RequestContext::new($crate::Request {
+                    request_id: request.request_id,
+                    method: request.method,
+                    path: request.path,
+                    query: request.query,
+                    headers: request.headers,
+                    client_ip: request.client_ip,
+                    consumer_id: request.consumer_id,
+                    route_id: request.route_id,
+                    service_id: request.service_id,
+                    body: request.body,
+                });
+                let decision = {
+                    let state = __OCTRA_PLUGIN_STATE
+                        .lock()
+                        .map_err(|_| "plugin state lock poisoned".to_string())?;
+                    let plugin = state
+                        .as_ref()
+                        .ok_or_else(|| "plugin is not configured".to_string())?;
+                    <$plugin as $crate::ApiPlugin>::on_rewrite(plugin, &mut context)
+                        .map_err(|error| error.to_string())?
+                };
+                __octra_decision(&mut context, decision)
+            }
+
+            fn on_access(
+                request: $bindings::octra::api_plugin::types::Request,
+            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::Action, ::std::string::String> {
+                let mut context = $crate::RequestContext::new($crate::Request {
+                    request_id: request.request_id,
+                    method: request.method,
+                    path: request.path,
+                    query: request.query,
+                    headers: request.headers,
+                    client_ip: request.client_ip,
+                    consumer_id: request.consumer_id,
+                    route_id: request.route_id,
+                    service_id: request.service_id,
+                    body: request.body,
+                });
+                let decision = {
+                    let state = __OCTRA_PLUGIN_STATE
+                        .lock()
+                        .map_err(|_| "plugin state lock poisoned".to_string())?;
+                    let plugin = state
+                        .as_ref()
+                        .ok_or_else(|| "plugin is not configured".to_string())?;
+                    <$plugin as $crate::ApiPlugin>::on_access(plugin, &mut context)
+                        .map_err(|error| error.to_string())?
+                };
+                __octra_decision(&mut context, decision)
+            }
+
+            fn on_response(
+                response: $bindings::octra::api_plugin::types::Response,
+            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::ResponseAction, ::std::string::String> {
+                let mut context = $crate::ResponseContext::new($crate::ResponseInfo {
+                    request_id: response.request_id,
+                    status: response.status,
+                    headers: response.headers,
+                    consumer_id: response.consumer_id,
+                    route_id: response.route_id,
+                    service_id: response.service_id,
+                });
+                let decision = {
+                    let state = __OCTRA_PLUGIN_STATE
+                        .lock()
+                        .map_err(|_| "plugin state lock poisoned".to_string())?;
+                    let plugin = state
+                        .as_ref()
+                        .ok_or_else(|| "plugin is not configured".to_string())?;
+                    <$plugin as $crate::ApiPlugin>::on_response(plugin, &mut context)
+                        .map_err(|error| error.to_string())?
+                };
+                __octra_response_decision(context, decision)
+            }
+
+            fn on_header_filter(
+                response: $bindings::octra::api_plugin::types::Response,
+            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::ResponseAction, ::std::string::String> {
+                let mut context = $crate::ResponseContext::new($crate::ResponseInfo {
+                    request_id: response.request_id,
+                    status: response.status,
+                    headers: response.headers,
+                    consumer_id: response.consumer_id,
+                    route_id: response.route_id,
+                    service_id: response.service_id,
+                });
+                let decision = {
+                    let state = __OCTRA_PLUGIN_STATE
+                        .lock()
+                        .map_err(|_| "plugin state lock poisoned".to_string())?;
+                    let plugin = state
+                        .as_ref()
+                        .ok_or_else(|| "plugin is not configured".to_string())?;
+                    <$plugin as $crate::ApiPlugin>::on_header_filter(plugin, &mut context)
+                        .map_err(|error| error.to_string())?
+                };
+                __octra_response_decision(context, decision)
+            }
+
+            fn on_body_filter(
+                info: $bindings::octra::api_plugin::types::BodyInfo,
+                chunk: ::std::option::Option<::std::vec::Vec<u8>>,
+                eof: bool,
+            ) -> ::std::result::Result<::std::option::Option<::std::vec::Vec<u8>>, ::std::string::String> {
+                let mut context = $crate::ResponseBodyContext::from_body_info(
+                    info.request_id,
+                    info.status,
+                    info.headers,
+                    info.consumer_id,
+                    info.route_id,
+                    info.service_id,
+                    info.target_url,
+                );
+                let state = __OCTRA_PLUGIN_STATE
+                    .lock()
+                    .map_err(|_| "plugin state lock poisoned".to_string())?;
+                let plugin = state
+                    .as_ref()
+                    .ok_or_else(|| "plugin is not configured".to_string())?;
+                <$plugin as $crate::ApiPlugin>::on_body_filter(plugin, &mut context, chunk, eof)
+                    .map_err(|error| error.to_string())
+            }
+
+            fn on_log(entry: $bindings::octra::api_plugin::types::LogEntry) {
+                let entry = $crate::LogEntry {
+                    request_id: entry.request_id,
+                    method: entry.method,
+                    path: entry.path,
+                    status: entry.status,
+                    latency_ms: entry.latency_ms,
+                    consumer_id: entry.consumer_id,
+                    route_id: entry.route_id,
+                    service_id: entry.service_id,
+                };
+                if let ::std::result::Result::Ok(state) = __OCTRA_PLUGIN_STATE.lock() {
+                    if let ::std::option::Option::Some(plugin) = state.as_ref() {
+                        <$plugin as $crate::ApiPlugin>::on_log(plugin, &entry);
+                    }
+                }
+            }
+        }
+
+        impl $bindings::exports::octra::api_plugin::background_api::Guest for __OctraPluginExport {
             fn on_event(
                 event: $bindings::octra::api_plugin::types::Event,
             ) -> ::std::result::Result<(), ::std::string::String> {
@@ -1071,425 +1336,9 @@ macro_rules! export_plugin {
                 <$plugin as $crate::ApiPlugin>::on_job(plugin, &job)
                     .map_err(|error| error.to_string())
             }
-
-            fn on_admin_request(
-                request: $bindings::octra::api_plugin::types::AdminRequest,
-            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::AdminResponse, ::std::string::String> {
-                let request = $crate::AdminRequest {
-                    request_id: request.request_id,
-                    method: request.method,
-                    path: request.path,
-                    query: request.query,
-                    headers: request.headers,
-                    params: request.params,
-                    body: request.body,
-                };
-                let response = {
-                    let state = __OCTRA_PLUGIN_STATE
-                        .lock()
-                        .map_err(|_| "plugin state lock poisoned".to_string())?;
-                    let plugin = state
-                        .as_ref()
-                        .ok_or_else(|| "plugin is not configured".to_string())?;
-                    <$plugin as $crate::ApiPlugin>::on_admin_request(plugin, &request)
-                        .map_err(|error| error.to_string())?
-                };
-                ::std::result::Result::Ok($bindings::octra::api_plugin::types::AdminResponse {
-                    status: response.status,
-                    headers: response.headers,
-                    body: response.body,
-                })
-            }
-
-            fn on_request(
-                request: $bindings::octra::api_plugin::types::Request,
-            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::Action, ::std::string::String> {
-                let mut context = $crate::RequestContext::new($crate::Request {
-                    request_id: request.request_id,
-                    method: request.method,
-                    path: request.path,
-                    query: request.query,
-                    headers: request.headers,
-                    client_ip: request.client_ip,
-                    consumer_id: request.consumer_id,
-                    route_id: request.route_id,
-                    service_id: request.service_id,
-                });
-                let decision = {
-                    let state = __OCTRA_PLUGIN_STATE
-                        .lock()
-                        .map_err(|_| "plugin state lock poisoned".to_string())?;
-                    let plugin = state
-                        .as_ref()
-                        .ok_or_else(|| "plugin is not configured".to_string())?;
-                    <$plugin as $crate::ApiPlugin>::on_request(plugin, &mut context)
-                        .map_err(|error| error.to_string())?
-                };
-                match decision {
-                    $crate::Decision::Continue => {
-                        let mutation = context.__take_mutations();
-                        ::std::result::Result::Ok($bindings::octra::api_plugin::types::Action::Continue(
-                            $bindings::octra::api_plugin::types::RequestMutation {
-                                path: mutation.path,
-                                query: mutation.query,
-                                set_headers: mutation.set_headers,
-                                remove_headers: mutation.remove_headers,
-                            },
-                        ))
-                    }
-                    $crate::Decision::Reject(response) => {
-                        ::std::result::Result::Ok($bindings::octra::api_plugin::types::Action::Reject(
-                            $bindings::octra::api_plugin::types::Reject {
-                                status: response.status,
-                                headers: response.headers,
-                                body: response.body,
-                            },
-                        ))
-                    }
-                }
-            }
-
-            fn on_response(
-                response: $bindings::octra::api_plugin::types::Response,
-            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::ResponseAction, ::std::string::String> {
-                let mut context = $crate::ResponseContext::new($crate::ResponseInfo {
-                    request_id: response.request_id,
-                    status: response.status,
-                    headers: response.headers,
-                    consumer_id: response.consumer_id,
-                    route_id: response.route_id,
-                    service_id: response.service_id,
-                });
-                let decision = {
-                    let state = __OCTRA_PLUGIN_STATE
-                        .lock()
-                        .map_err(|_| "plugin state lock poisoned".to_string())?;
-                    let plugin = state
-                        .as_ref()
-                        .ok_or_else(|| "plugin is not configured".to_string())?;
-                    <$plugin as $crate::ApiPlugin>::on_response(plugin, &mut context)
-                        .map_err(|error| error.to_string())?
-                };
-                match decision {
-                    $crate::ResponseDecision::Continue => {
-                        let mutation = context.__take_mutations();
-                        ::std::result::Result::Ok(
-                            $bindings::octra::api_plugin::types::ResponseAction::Continue(
-                                $bindings::octra::api_plugin::types::ResponseMutation {
-                                    status: mutation.status,
-                                    set_headers: mutation.set_headers,
-                                    remove_headers: mutation.remove_headers,
-                                },
-                            ),
-                        )
-                    }
-                    $crate::ResponseDecision::Reject(response) => {
-                        ::std::result::Result::Ok(
-                            $bindings::octra::api_plugin::types::ResponseAction::Reject(
-                                $bindings::octra::api_plugin::types::Reject {
-                                    status: response.status,
-                                    headers: response.headers,
-                                    body: response.body,
-                                },
-                            ),
-                        )
-                    }
-                }
-            }
-
-            fn on_rewrite(
-                request: $bindings::octra::api_plugin::types::Request,
-            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::Action, ::std::string::String> {
-                let mut context = $crate::RequestContext::new($crate::Request {
-                    request_id: request.request_id,
-                    method: request.method,
-                    path: request.path,
-                    query: request.query,
-                    headers: request.headers,
-                    client_ip: request.client_ip,
-                    consumer_id: request.consumer_id,
-                    route_id: request.route_id,
-                    service_id: request.service_id,
-                });
-                let decision = {
-                    let state = __OCTRA_PLUGIN_STATE
-                        .lock()
-                        .map_err(|_| "plugin state lock poisoned".to_string())?;
-                    let plugin = state
-                        .as_ref()
-                        .ok_or_else(|| "plugin is not configured".to_string())?;
-                    <$plugin as $crate::ApiPlugin>::on_rewrite(plugin, &mut context)
-                        .map_err(|error| error.to_string())?
-                };
-                match decision {
-                    $crate::Decision::Continue => {
-                        let mutation = context.__take_mutations();
-                        ::std::result::Result::Ok($bindings::octra::api_plugin::types::Action::Continue(
-                            $bindings::octra::api_plugin::types::RequestMutation {
-                                path: mutation.path,
-                                query: mutation.query,
-                                set_headers: mutation.set_headers,
-                                remove_headers: mutation.remove_headers,
-                            },
-                        ))
-                    }
-                    $crate::Decision::Reject(response) => {
-                        ::std::result::Result::Ok($bindings::octra::api_plugin::types::Action::Reject(
-                            $bindings::octra::api_plugin::types::Reject {
-                                status: response.status,
-                                headers: response.headers,
-                                body: response.body,
-                            },
-                        ))
-                    }
-                }
-            }
-
-            fn on_request_body(
-                request: $bindings::octra::api_plugin::types::Request,
-                body: ::std::vec::Vec<u8>,
-            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::RequestBodyAction, ::std::string::String> {
-                let mut context = $crate::RequestBodyContext::new($crate::Request {
-                    request_id: request.request_id,
-                    method: request.method,
-                    path: request.path,
-                    query: request.query,
-                    headers: request.headers,
-                    client_ip: request.client_ip,
-                    consumer_id: request.consumer_id,
-                    route_id: request.route_id,
-                    service_id: request.service_id,
-                });
-                let decision = {
-                    let state = __OCTRA_PLUGIN_STATE
-                        .lock()
-                        .map_err(|_| "plugin state lock poisoned".to_string())?;
-                    let plugin = state
-                        .as_ref()
-                        .ok_or_else(|| "plugin is not configured".to_string())?;
-                    <$plugin as $crate::ApiPlugin>::on_request_body(plugin, &mut context, body)
-                        .map_err(|error| error.to_string())?
-                };
-                match decision {
-                    $crate::BodyDecision::Continue(body) => {
-                        let (set_headers, remove_headers) = context.__take_headers();
-                        ::std::result::Result::Ok(
-                            $bindings::octra::api_plugin::types::RequestBodyAction::Continue(
-                                $bindings::octra::api_plugin::types::RequestBodyResult {
-                                    body,
-                                    set_headers,
-                                    remove_headers,
-                                },
-                            ),
-                        )
-                    }
-                    $crate::BodyDecision::Reject(response) => {
-                        ::std::result::Result::Ok(
-                            $bindings::octra::api_plugin::types::RequestBodyAction::Reject(
-                                $bindings::octra::api_plugin::types::Reject {
-                                    status: response.status,
-                                    headers: response.headers,
-                                    body: response.body,
-                                },
-                            ),
-                        )
-                    }
-                }
-            }
-
-            fn on_upstream_request(
-                request: $bindings::octra::api_plugin::types::UpstreamRequest,
-            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::Action, ::std::string::String> {
-                let mut context = $crate::UpstreamContext::new($crate::UpstreamRequest {
-                    request_id: request.request_id,
-                    method: request.method,
-                    path: request.path,
-                    query: request.query,
-                    headers: request.headers,
-                    consumer_id: request.consumer_id,
-                    route_id: request.route_id,
-                    service_id: request.service_id,
-                    target_url: request.target_url,
-                });
-                let decision = {
-                    let state = __OCTRA_PLUGIN_STATE
-                        .lock()
-                        .map_err(|_| "plugin state lock poisoned".to_string())?;
-                    let plugin = state
-                        .as_ref()
-                        .ok_or_else(|| "plugin is not configured".to_string())?;
-                    <$plugin as $crate::ApiPlugin>::on_upstream_request(plugin, &mut context)
-                        .map_err(|error| error.to_string())?
-                };
-                match decision {
-                    $crate::Decision::Continue => {
-                        let mutation = context.__take_mutations();
-                        ::std::result::Result::Ok($bindings::octra::api_plugin::types::Action::Continue(
-                            $bindings::octra::api_plugin::types::RequestMutation {
-                                path: mutation.path,
-                                query: mutation.query,
-                                set_headers: mutation.set_headers,
-                                remove_headers: mutation.remove_headers,
-                            },
-                        ))
-                    }
-                    $crate::Decision::Reject(response) => {
-                        ::std::result::Result::Ok($bindings::octra::api_plugin::types::Action::Reject(
-                            $bindings::octra::api_plugin::types::Reject {
-                                status: response.status,
-                                headers: response.headers,
-                                body: response.body,
-                            },
-                        ))
-                    }
-                }
-            }
-
-            fn on_response_buffer(
-                response: $bindings::octra::api_plugin::types::Response,
-                body: ::std::vec::Vec<u8>,
-            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::BodyAction, ::std::string::String> {
-                let mut context = $crate::ResponseBodyContext::from_response($crate::ResponseInfo {
-                    request_id: response.request_id,
-                    status: response.status,
-                    headers: response.headers,
-                    consumer_id: response.consumer_id,
-                    route_id: response.route_id,
-                    service_id: response.service_id,
-                });
-                let decision = {
-                    let state = __OCTRA_PLUGIN_STATE
-                        .lock()
-                        .map_err(|_| "plugin state lock poisoned".to_string())?;
-                    let plugin = state
-                        .as_ref()
-                        .ok_or_else(|| "plugin is not configured".to_string())?;
-                    <$plugin as $crate::ApiPlugin>::on_response_buffer(plugin, &mut context, body)
-                        .map_err(|error| error.to_string())?
-                };
-                match decision {
-                    $crate::BodyDecision::Continue(body) => {
-                        ::std::result::Result::Ok(
-                            $bindings::octra::api_plugin::types::BodyAction::Continue(body),
-                        )
-                    }
-                    $crate::BodyDecision::Reject(response) => {
-                        ::std::result::Result::Ok(
-                            $bindings::octra::api_plugin::types::BodyAction::Reject(
-                                $bindings::octra::api_plugin::types::Reject {
-                                    status: response.status,
-                                    headers: response.headers,
-                                    body: response.body,
-                                },
-                            ),
-                        )
-                    }
-                }
-            }
-
-            fn on_response_chunk(
-                info: $bindings::octra::api_plugin::types::BodyInfo,
-                chunk: ::std::vec::Vec<u8>,
-            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::BodyAction, ::std::string::String> {
-                let mut context = $crate::ResponseBodyContext::from_chunk(
-                    info.request_id,
-                    info.route_id,
-                    info.service_id,
-                    info.target_url,
-                );
-                let decision = {
-                    let state = __OCTRA_PLUGIN_STATE
-                        .lock()
-                        .map_err(|_| "plugin state lock poisoned".to_string())?;
-                    let plugin = state
-                        .as_ref()
-                        .ok_or_else(|| "plugin is not configured".to_string())?;
-                    <$plugin as $crate::ApiPlugin>::on_response_chunk(plugin, &mut context, chunk)
-                        .map_err(|error| error.to_string())?
-                };
-                match decision {
-                    $crate::BodyDecision::Continue(chunk) => {
-                        ::std::result::Result::Ok(
-                            $bindings::octra::api_plugin::types::BodyAction::Continue(chunk),
-                        )
-                    }
-                    $crate::BodyDecision::Reject(response) => {
-                        ::std::result::Result::Ok(
-                            $bindings::octra::api_plugin::types::BodyAction::Reject(
-                                $bindings::octra::api_plugin::types::Reject {
-                                    status: response.status,
-                                    headers: response.headers,
-                                    body: response.body,
-                                },
-                            ),
-                        )
-                    }
-                }
-            }
-
-            fn on_error(
-                error: $bindings::octra::api_plugin::types::ErrorInfo,
-            ) -> ::std::result::Result<$bindings::octra::api_plugin::types::ErrorAction, ::std::string::String> {
-                let mut context = $crate::ErrorContext::new($crate::ErrorInfo {
-                    request_id: error.request_id,
-                    method: error.method,
-                    path: error.path,
-                    query: error.query,
-                    headers: error.headers,
-                    consumer_id: error.consumer_id,
-                    route_id: error.route_id,
-                    service_id: error.service_id,
-                    target_url: error.target_url,
-                    message: error.message,
-                });
-                let decision = {
-                    let state = __OCTRA_PLUGIN_STATE
-                        .lock()
-                        .map_err(|_| "plugin state lock poisoned".to_string())?;
-                    let plugin = state
-                        .as_ref()
-                        .ok_or_else(|| "plugin is not configured".to_string())?;
-                    <$plugin as $crate::ApiPlugin>::on_error(plugin, &mut context)
-                        .map_err(|error| error.to_string())?
-                };
-                match decision {
-                    $crate::ErrorDecision::Continue => {
-                        ::std::result::Result::Ok(
-                            $bindings::octra::api_plugin::types::ErrorAction::Continue,
-                        )
-                    }
-                    $crate::ErrorDecision::Respond(response) => {
-                        ::std::result::Result::Ok(
-                            $bindings::octra::api_plugin::types::ErrorAction::Respond(
-                                $bindings::octra::api_plugin::types::Reject {
-                                    status: response.status,
-                                    headers: response.headers,
-                                    body: response.body,
-                                },
-                            ),
-                        )
-                    }
-                }
-            }
-
-            fn on_log(entry: $bindings::octra::api_plugin::types::LogEntry) {
-                let entry = $crate::LogEntry {
-                    request_id: entry.request_id,
-                    method: entry.method,
-                    path: entry.path,
-                    status: entry.status,
-                    latency_ms: entry.latency_ms,
-                    consumer_id: entry.consumer_id,
-                    route_id: entry.route_id,
-                    service_id: entry.service_id,
-                };
-                if let ::std::result::Result::Ok(state) = __OCTRA_PLUGIN_STATE.lock() {
-                    if let ::std::option::Option::Some(plugin) = state.as_ref() {
-                        <$plugin as $crate::ApiPlugin>::on_log(plugin, &entry);
-                    }
-                }
-            }
         }
+
+
 
         // Use the generated, version-agnostic `export!` helper with an explicit
         // type root. The canonical-ABI macro is named after the WIT package
