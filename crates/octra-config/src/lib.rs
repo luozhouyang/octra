@@ -1,7 +1,8 @@
 //! Configuration loading and local workspace path resolution.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
@@ -55,6 +56,9 @@ pub struct GatewayConfig {
 pub struct LlmConfig {
     pub request_timeout_secs: u64,
     pub stream_idle_timeout_secs: u64,
+    /// Require a live virtual key even when no key is configured. The default
+    /// keeps the loopback-local open mode; set this for any shared deployment.
+    pub require_key: bool,
     /// Header carrying a stable session id for account affinity.
     pub session_header: String,
     /// Header carrying a client intent hint for routing.
@@ -83,6 +87,12 @@ pub struct SemanticEmbeddingConfig {
 pub struct McpConfig {
     pub request_timeout_secs: u64,
     pub tool_call_timeout_secs: u64,
+    /// Require a live MCP API key or OIDC token even when no key is
+    /// configured. The default keeps the loopback-local open mode.
+    pub require_key: bool,
+    /// Extra browser origins allowed to call the MCP endpoint. Loopback
+    /// origins are always accepted; any other Origin is rejected.
+    pub allowed_origins: Vec<String>,
 }
 
 /// Local agent discovery and configuration hosting.
@@ -213,6 +223,7 @@ impl Default for LlmConfig {
         Self {
             request_timeout_secs: 120,
             stream_idle_timeout_secs: 120,
+            require_key: false,
             session_header: "x-octra-session".to_string(),
             intent_header: "x-octra-intent".to_string(),
             account_cooldown_secs: 60,
@@ -238,6 +249,8 @@ impl Default for McpConfig {
         Self {
             request_timeout_secs: 60,
             tool_call_timeout_secs: 120,
+            require_key: false,
+            allowed_origins: Vec::new(),
         }
     }
 }
@@ -335,7 +348,18 @@ impl Workspace {
                 "cannot create workspace {}: {err}",
                 self.home.display()
             ))
-        })
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.home, fs::Permissions::from_mode(0o700)).map_err(|err| {
+                Error::Config(format!(
+                    "cannot restrict workspace permissions {}: {err}",
+                    self.home.display()
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     pub fn config_file(&self) -> PathBuf {
@@ -384,6 +408,18 @@ pub fn load_or_create(workspace: &Workspace) -> Result<OctraConfig> {
     let path = workspace.config_file();
 
     let mut config = if path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path)
+                .map(|m| m.permissions().mode() & 0o777)
+                .unwrap_or(0);
+            if mode != 0o600 {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|err| {
+                    Error::Config(format!("cannot restrict {}: {err}", path.display()))
+                })?;
+            }
+        }
         let raw = fs::read_to_string(&path)
             .map_err(|err| Error::Config(format!("cannot read {}: {err}", path.display())))?;
         toml::from_str(&raw)
@@ -392,14 +428,38 @@ pub fn load_or_create(workspace: &Workspace) -> Result<OctraConfig> {
         let config = OctraConfig::default();
         let raw = toml::to_string_pretty(&config)
             .map_err(|err| Error::Config(format!("cannot serialize default config: {err}")))?;
-        fs::write(&path, raw)
-            .map_err(|err| Error::Config(format!("cannot write {}: {err}", path.display())))?;
+        write_private_config(&path, &raw)?;
         config
     };
 
     apply_env_overrides(&mut config);
     validate(&config)?;
     Ok(config)
+}
+
+/// The config file may contain OTLP authorization headers, so it is created
+/// owner-only and repaired on every load.
+fn write_private_config(path: &Path, raw: &str) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|err| Error::Config(format!("cannot write {}: {err}", path.display())))?;
+    file.write_all(raw.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|err| Error::Config(format!("cannot write {}: {err}", path.display())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|err| Error::Config(format!("cannot restrict {}: {err}", path.display())))?;
+    }
+    Ok(())
 }
 
 fn apply_env_overrides(config: &mut OctraConfig) {

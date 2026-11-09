@@ -7,6 +7,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::StatusCode;
 use futures_util::StreamExt;
+use octra_config::OctraConfig;
 use octra_data_plane::sse::{SseDecoder, SseEvent};
 use octra_mcp_core::domain::default_server_mode;
 use octra_mcp_core::{NewMcpServer, Transport};
@@ -4937,4 +4938,83 @@ async fn deleting_a_session_ends_open_notification_streams() {
         stream.body_ended(Duration::from_secs(3)).await,
         "the GET stream must end when its session is deleted"
     );
+}
+
+#[tokio::test]
+async fn rejects_cross_origin_and_non_json_requests() {
+    let gateway = Gateway::new().await;
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {}}
+    });
+
+    let (status, body) = gateway
+        .post_mcp_with_origin(initialize.clone(), "http://evil.example")
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "origin_not_allowed");
+
+    let (status, body) = gateway
+        .post_mcp_with_origin(initialize.clone(), "http://127.0.0.1:3000")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["jsonrpc"], "2.0", "{body}");
+    assert_ne!(body["error"]["code"], "origin_not_allowed", "{body}");
+
+    let (status, _, body) = gateway
+        .post_mcp_with_content_type(initialize, None, None, "text/plain")
+        .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{body}");
+}
+
+#[tokio::test]
+async fn require_key_rejects_open_installations() {
+    let mut config = OctraConfig::default();
+    config.mcp.require_key = true;
+    let gateway = Gateway::new_with_config(config).await;
+    let (status, _, body) = gateway
+        .post_mcp(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}}
+            }),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+#[tokio::test]
+async fn disabling_the_last_api_key_does_not_reopen_the_endpoint() {
+    let gateway = Gateway::new().await;
+    let key = create_key(&gateway, "agent").await;
+    let records = gateway.storage.mcp.list_api_keys().await.unwrap();
+    assert_eq!(records.len(), 1);
+    gateway
+        .storage
+        .mcp
+        .set_api_key_enabled(&records[0].id, false)
+        .await
+        .unwrap();
+
+    for presented in [None, Some(key.as_str())] {
+        let (status, _, body) = gateway
+            .post_mcp(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18", "capabilities": {}}
+                }),
+                presented,
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    }
 }

@@ -1135,6 +1135,17 @@ impl McpStore {
             .map_err(|err| storage_error("cannot count mcp api keys", err))?;
         Ok(count > 0)
     }
+
+    /// Whether the installation has ever been configured with an API key.
+    /// Disabled/expired keys still count, so revocation can fail closed rather
+    /// than silently reopening the gateway.
+    pub async fn has_any_api_keys(&self) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mcp_api_keys")
+            .fetch_one(self.mcp_pool())
+            .await
+            .map_err(|err| storage_error("cannot count mcp api keys", err))?;
+        Ok(count > 0)
+    }
 }
 
 fn decode_server(row: &SqliteRow) -> McpServer {

@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -16,6 +17,8 @@ pub fn load_or_create(path: &Path) -> Result<String> {
     }
 
     if path.exists() {
+        ensure_not_symlink(path)?;
+        ensure_private_permissions(path)?;
         let token = fs::read_to_string(path)
             .with_context(|| format!("cannot read control token {}", path.display()))?;
         let token = token.trim();
@@ -37,14 +40,73 @@ pub fn load_or_create(path: &Path) -> Result<String> {
 }
 
 fn write_private(path: &Path, token: &str) -> Result<()> {
-    fs::write(path, format!("{token}\n"))?;
-
-    #[cfg(unix)]
+    ensure_not_symlink(path)?;
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        fs::create_dir_all(parent)?;
     }
 
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if path.exists() {
+        options.truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("cannot create control token {}", path.display()))?;
+    file.write_all(format!("{token}\n").as_bytes())?;
+    file.sync_all()?;
+    ensure_private_permissions(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_not_symlink(path: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!(
+            "control token path {} must be a regular file, not a symlink or special file",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_not_symlink(path: &Path) -> Result<()> {
+    if path.exists() && !path.is_file() {
+        anyhow::bail!(
+            "control token path {} must be a regular file",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_private_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -62,6 +124,21 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(!first.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_token_files() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.token");
+        std::fs::write(&target, "existing\n").unwrap();
+        let link = dir.path().join("control.token");
+        symlink(&target, &link).unwrap();
+
+        let error = load_or_create(&link).unwrap_err().to_string();
+        assert!(error.contains("symlink"), "{error}");
     }
 
     #[cfg(unix)]

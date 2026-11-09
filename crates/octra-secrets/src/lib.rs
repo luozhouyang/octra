@@ -14,6 +14,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -608,6 +609,26 @@ fn load_keychain_set() -> Result<Option<MasterKeySet>, String> {
 }
 
 fn load_key_file_set(path: &Path) -> Result<MasterKeySet, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot read master key file {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "master key file {} must be a regular file, not a symlink",
+            path.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+                format!(
+                    "cannot restrict master key file permissions {}: {error}",
+                    path.display()
+                )
+            })?;
+        }
+    }
     let raw = fs::read_to_string(path)
         .map_err(|error| format!("cannot read master key file {}: {error}", path.display()))?;
     let trimmed = raw.trim();
@@ -705,21 +726,69 @@ fn write_key_file_set(
     let bytes = serde_json::to_vec(&document)
         .map_err(|error| format!("cannot encode master key file {}: {error}", path.display()))?;
 
+    // Keep the previous key set as a recovery copy before replacing the file.
+    if path.exists() {
+        let backup = backup_path(path);
+        fs::copy(path, &backup).map_err(|error| {
+            format!(
+                "cannot back up master key file {} to {}: {error}",
+                path.display(),
+                backup.display()
+            )
+        })?;
+        restrict_key_file(&backup)?;
+    }
+
+    // Write to a sibling and rename, so a crash cannot leave a truncated key
+    // file that makes every sealed secret unreadable.
+    let temporary = temporary_key_path(path);
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options
-        .open(path)
-        .map_err(|error| format!("cannot create master key file {}: {error}", path.display()))?;
-    file.write_all(&bytes)
-        .and_then(|()| file.write_all(b"\n"))
-        .and_then(|()| file.sync_all())
-        .map_err(|error| format!("cannot write master key file {}: {error}", path.display()))?;
+    let mut file = options.open(&temporary).map_err(|error| {
+        format!(
+            "cannot create temporary master key file {}: {error}",
+            temporary.display()
+        )
+    })?;
+    let result = (|| -> Result<(), String> {
+        file.write_all(&bytes)
+            .and_then(|()| file.write_all(b"\n"))
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("cannot write master key file: {error}"))?;
+        drop(file);
+        restrict_key_file(&temporary)?;
+        replace_file(&temporary, path)?;
+        sync_parent(path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
 
+fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".bak");
+    PathBuf::from(name)
+}
+
+fn temporary_key_path(path: &Path) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".tmp-{}-{}", std::process::id(), nanos));
+    PathBuf::from(name)
+}
+
+fn restrict_key_file(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -730,7 +799,37 @@ fn write_key_file_set(
             )
         })?;
     }
+    Ok(())
+}
 
+fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        // Windows rename does not replace an existing file.
+        if destination.exists() {
+            fs::remove_file(destination).map_err(|error| {
+                format!(
+                    "cannot replace master key file {}: {error}",
+                    destination.display()
+                )
+            })?;
+        }
+    }
+    fs::rename(source, destination).map_err(|error| {
+        format!(
+            "cannot replace master key file {}: {error}",
+            destination.display()
+        )
+    })
+}
+
+fn sync_parent(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent()
+        && let Ok(directory) = fs::File::open(parent)
+    {
+        let _ = directory.sync_all();
+    }
     Ok(())
 }
 

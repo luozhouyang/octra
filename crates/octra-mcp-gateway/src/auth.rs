@@ -195,6 +195,7 @@ pub async fn authenticate(
     http: Option<&reqwest::Client>,
     headers: &HeaderMap,
     strategy: Option<&McpAuthStrategy>,
+    require_key: bool,
 ) -> Result<Caller, AuthError> {
     if let Some(strategy) = strategy
         && strategy.enabled
@@ -202,36 +203,33 @@ pub async fn authenticate(
     {
         return authenticate_oidc(storage, http, headers, strategy).await;
     }
-    authenticate_api_key(storage, headers).await
+    authenticate_api_key(storage, headers, require_key).await
 }
 
-/// API-key authentication, unchanged from the pre-OIDC behaviour.
-async fn authenticate_api_key(storage: &Storage, headers: &HeaderMap) -> Result<Caller, AuthError> {
+/// API-key authentication. Open local mode applies only when no key has ever
+/// been configured; disabling or expiring the last key fails closed.
+async fn authenticate_api_key(
+    storage: &Storage,
+    headers: &HeaderMap,
+    require_key: bool,
+) -> Result<Caller, AuthError> {
     // Resolution does not depend on the key-gating flag for correctness: an
     // unknown or inactive key is rejected whenever one is presented, and an
     // absent key is only tolerated when no enabled keys exist.
     let presented = presented_key(headers);
     if !storage.mcp.has_enabled_api_keys().await? {
-        return match presented {
-            Some(key)
-                if storage
-                    .mcp
-                    .find_active_api_key(&hash_key(&key))
-                    .await?
-                    .is_some() =>
-            {
-                let record = storage
-                    .mcp
-                    .find_active_api_key(&hash_key(&key))
-                    .await?
-                    .expect("key resolved above");
-                caller_from_key(storage, record).await
-            }
-            // An invalid key is rejected even in open mode: silently ignoring
-            // it would hide a misconfiguration.
-            Some(_) => Err(AuthError::Invalid),
-            None => Ok(Caller::anonymous()),
-        };
+        if let Some(key) = presented {
+            let record = storage
+                .mcp
+                .find_active_api_key(&hash_key(&key))
+                .await?
+                .ok_or(AuthError::Invalid)?;
+            return caller_from_key(storage, record).await;
+        }
+        if require_key || storage.mcp.has_any_api_keys().await? {
+            return Err(AuthError::Missing);
+        }
+        return Ok(Caller::anonymous());
     }
 
     let presented = presented.ok_or(AuthError::Missing)?;
@@ -1085,7 +1083,7 @@ mod tests {
     #[tokio::test]
     async fn open_mode_accepts_anonymous_and_explicit_keys() {
         let storage = Storage::connect_in_memory().await.unwrap();
-        let caller = authenticate(&storage, None, &HeaderMap::new(), None)
+        let caller = authenticate(&storage, None, &HeaderMap::new(), None, false)
             .await
             .unwrap();
         assert_eq!(caller, Caller::anonymous());
@@ -1096,7 +1094,7 @@ mod tests {
             HeaderValue::from_static("Bearer octra_unknown"),
         );
         assert!(matches!(
-            authenticate(&storage, None, &headers, None).await,
+            authenticate(&storage, None, &headers, None, false).await,
             Err(AuthError::Invalid)
         ));
     }
@@ -1123,7 +1121,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            authenticate(&storage, None, &HeaderMap::new(), None).await,
+            authenticate(&storage, None, &HeaderMap::new(), None, false).await,
             Err(AuthError::Missing)
         ));
 
@@ -1133,7 +1131,7 @@ mod tests {
             HeaderValue::from_static("Bearer octra_wrong"),
         );
         assert!(matches!(
-            authenticate(&storage, None, &headers, None).await,
+            authenticate(&storage, None, &headers, None, false).await,
             Err(AuthError::Invalid)
         ));
 
@@ -1142,7 +1140,9 @@ mod tests {
             API_KEY_HEADER,
             HeaderValue::from_str(&key).expect("ascii key"),
         );
-        let caller = authenticate(&storage, None, &headers, None).await.unwrap();
+        let caller = authenticate(&storage, None, &headers, None, false)
+            .await
+            .unwrap();
         assert_eq!(caller.consumer_id.as_deref(), Some("c1"));
         assert_eq!(caller.consumer_name.as_deref(), Some("consumer-one"));
         assert!(caller.key_id.is_some());
@@ -1200,13 +1200,17 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(API_KEY_HEADER, HeaderValue::from_str(&key).unwrap());
-        let caller = authenticate(&storage, None, &headers, None).await.unwrap();
+        let caller = authenticate(&storage, None, &headers, None, false)
+            .await
+            .unwrap();
         assert_eq!(caller.consumer_group_ids, vec![group.id.clone()]);
         assert_eq!(caller.consumer_group_names, vec![group.name.clone()]);
 
         let mut headers = HeaderMap::new();
         headers.insert(API_KEY_HEADER, HeaderValue::from_str(&unscoped).unwrap());
-        let caller = authenticate(&storage, None, &headers, None).await.unwrap();
+        let caller = authenticate(&storage, None, &headers, None, false)
+            .await
+            .unwrap();
         assert!(caller.consumer_id.is_none());
         assert!(caller.consumer_name.is_none());
         assert!(caller.consumer_group_ids.is_empty());

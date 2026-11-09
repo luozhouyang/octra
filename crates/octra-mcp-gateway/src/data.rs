@@ -156,6 +156,16 @@ async fn handle_post_inner(
     scope: Option<RouteScope>,
     path: String,
 ) -> Response {
+    if let Some(response) = reject_cross_origin(&state, &headers) {
+        return response;
+    }
+    if !is_json_content_type(&headers) {
+        return error_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            "MCP requests must use Content-Type: application/json",
+        );
+    }
     let caller = match authenticate_request(&state, &headers, scope.as_ref()).await {
         Ok(caller) => caller,
         Err(err) => return auth_failure(err),
@@ -1065,6 +1075,9 @@ async fn handle_get_inner(
     headers: HeaderMap,
     scope: Option<&RouteScope>,
 ) -> Response {
+    if let Some(response) = reject_cross_origin(&state, &headers) {
+        return response;
+    }
     if let Err(err) = authenticate_request(&state, &headers, scope).await {
         return auth_failure(err);
     }
@@ -1237,6 +1250,9 @@ async fn handle_delete_inner(
     headers: HeaderMap,
     scope: Option<&RouteScope>,
 ) -> Response {
+    if let Some(response) = reject_cross_origin(&state, &headers) {
+        return response;
+    }
     if let Err(err) = authenticate_request(&state, &headers, scope).await {
         return auth_failure(err);
     }
@@ -1296,6 +1312,54 @@ fn json_error_status(status: StatusCode, error: JsonRpcError) -> Response {
     with_session((status, Json(body)).into_response(), None)
 }
 
+/// Browsers attach an Origin header to cross-site requests. Rejecting an
+/// untrusted Origin blocks DNS-rebinding and simple-request CSRF against a
+/// localhost MCP endpoint; non-browser clients normally omit the header.
+fn reject_cross_origin(state: &McpDataState, headers: &HeaderMap) -> Option<Response> {
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if origin_allowed(origin, &state.config.mcp.allowed_origins) {
+        return None;
+    }
+    tracing::warn!(%origin, "rejected MCP request from an untrusted Origin");
+    Some(error_response(
+        StatusCode::FORBIDDEN,
+        "origin_not_allowed",
+        "request Origin is not allowed",
+    ))
+}
+
+fn origin_allowed(origin: &str, allowed: &[String]) -> bool {
+    if allowed.iter().any(|value| value == "*" || value == origin) {
+        return true;
+    }
+    let Ok(url) = reqwest::Url::parse(origin) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    matches!(
+        url.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("::1")
+    )
+}
+
+fn is_json_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))
+        })
+}
+
 /// Selects the request's auth strategy and authenticates the caller.
 async fn authenticate_request(
     state: &McpDataState,
@@ -1308,6 +1372,7 @@ async fn authenticate_request(
         Some(state.runtime.http()),
         headers,
         strategy.as_ref(),
+        state.config.mcp.require_key,
     )
     .await
 }

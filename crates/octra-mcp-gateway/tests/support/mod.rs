@@ -770,9 +770,13 @@ impl Gateway {
     }
 
     pub async fn new_with_tool_timeout(tool_call_timeout_secs: u64) -> Self {
-        let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
         let mut config = OctraConfig::default();
         config.mcp.tool_call_timeout_secs = tool_call_timeout_secs;
+        Self::new_with_config(config).await
+    }
+
+    pub async fn new_with_config(config: OctraConfig) -> Self {
+        let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
         let config = Arc::new(config);
         let runtime = Arc::new(
             McpRuntime::bootstrap(storage.clone(), config.clone())
@@ -1015,6 +1019,20 @@ impl Gateway {
         let headers = response.headers().clone();
         let (status, value) = decode(response).await;
         (status, headers, value)
+    }
+
+    pub async fn post_mcp_with_origin(&self, body: Value, origin: &str) -> (StatusCode, Value) {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ORIGIN, origin)
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(self.data_router(), request)
+            .await
+            .unwrap();
+        decode(response).await
     }
 
     /// Initializes a session and returns its id.

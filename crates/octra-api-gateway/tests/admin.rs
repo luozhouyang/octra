@@ -271,6 +271,9 @@ async fn kong_plural_credential_paths() {
     let (status, _, page) = gateway.send_control(get("/admin/key-auths")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(page["data"].as_array().unwrap().len(), 1);
+    // The plaintext key is returned once on create and never again.
+    assert!(page["data"][0].get("key").is_none());
+    assert_eq!(page["data"][0]["key_present"], true);
 
     let (status, _, fetched) = gateway
         .send_control(get(&format!(
@@ -280,6 +283,50 @@ async fn kong_plural_credential_paths() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fetched["consumer"]["id"], consumer_id);
+    assert!(fetched.get("key").is_none());
+    assert_eq!(fetched["key_present"], true);
+}
+
+#[tokio::test]
+async fn jwt_secrets_are_not_re_readable() {
+    let gateway = gateway().await;
+    let (_, _, consumer) = gateway
+        .send_control(json_request(
+            "POST",
+            "/admin/consumers",
+            json!({"username": "jwt-user"}),
+        ))
+        .await;
+    let consumer_id = consumer["id"].as_str().unwrap().to_string();
+
+    let (status, _, created) = gateway
+        .send_control(json_request(
+            "POST",
+            "/admin/jwts",
+            json!({
+                "consumer_id": consumer_id,
+                "key": "issuer-key",
+                "secret": "super-secret-value",
+                "algorithm": "HS256"
+            }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(created.get("secret").is_none());
+    assert_eq!(created["secret_present"], true);
+    let id = created["id"].as_str().unwrap();
+
+    let (status, _, page) = gateway.send_control(get("/admin/jwts")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page["data"][0].get("secret").is_none());
+    assert_eq!(page["data"][0]["secret_present"], true);
+
+    let (status, _, fetched) = gateway
+        .send_control(get(&format!("/admin/jwts/{id}")))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(fetched.get("secret").is_none());
+    assert_eq!(fetched["secret_present"], true);
 }
 
 #[tokio::test]

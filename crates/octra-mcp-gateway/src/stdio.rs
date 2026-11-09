@@ -33,6 +33,23 @@ use crate::client::{BoxFuture, McpError, UpstreamClient};
 
 const NOTIFICATION_CAPACITY: usize = 64;
 
+/// Environment variables a stdio MCP server needs to start normally. Secrets
+/// and OCTRA_* variables are deliberately excluded.
+const MINIMAL_ENV: [&str; 12] = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "SHELL",
+    "SYSTEMROOT",
+];
+
 enum Outgoing {
     Request {
         line: Vec<u8>,
@@ -114,6 +131,16 @@ impl StdioClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        // MCP servers are third-party code. Never inherit the daemon
+        // environment: it may contain OCTRA_MASTER_KEY, the control token, or
+        // cloud credentials. Only a small allow-list and explicitly configured
+        // values reach the child.
+        cmd.env_clear();
+        for key in MINIMAL_ENV {
+            if let Ok(value) = std::env::var(key) {
+                cmd.env(key, value);
+            }
+        }
         cmd.env("OCTRA_MCP_SERVER", &server.name);
         if let Some(cwd) = options.cwd.as_deref() {
             cmd.current_dir(Path::new(cwd));

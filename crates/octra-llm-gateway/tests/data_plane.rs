@@ -730,9 +730,9 @@ async fn virtual_key_authentication() {
         openai_body("octra-default", false),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    // No live key remains, so presenting any key (even an expired one) falls
-    // back to anonymous local access.
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // An expired key still counts as configured: the installation must fail
+    // closed instead of silently reopening anonymous local access.
     let (status, _, body) = post_json(
         harness.data_router(),
         COMPLETION_PATH,
@@ -740,7 +740,7 @@ async fn virtual_key_authentication() {
         openai_body("octra-default", false),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "body {body}");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body {body}");
 
     // The deleted key remains listed with its last use recorded.
     let keys = harness.storage.llm.list_virtual_keys().await.unwrap();

@@ -133,7 +133,7 @@ async fn gemini_count_tokens(
     model: String,
 ) -> Response {
     let snapshot = state.runtime.snapshot().await;
-    let key = match authorize(&snapshot, &incoming).await {
+    let key = match authorize(&snapshot, &incoming, state.config.llm.require_key).await {
         Ok(key) => key,
         Err(error) => return protocol_response(Protocol::Gemini, &error),
     };
@@ -173,14 +173,15 @@ async fn gemini_count_tokens(
 async fn gemini_list_models(state: State<LlmDataState>, request: Incoming) -> LlmResponse {
     let state = state.0;
     let snapshot = state.runtime.snapshot().await;
-    let (consumer_id, virtual_key_id) = match authorize(&snapshot, &request).await {
-        Ok(Some(key)) => {
-            touch(&state, &key.id).await;
-            (key.consumer_id.clone(), Some(key.id))
-        }
-        Ok(None) => (None, None),
-        Err(error) => return LlmResponse(protocol_response(Protocol::Gemini, &error)),
-    };
+    let (consumer_id, virtual_key_id) =
+        match authorize(&snapshot, &request, state.config.llm.require_key).await {
+            Ok(Some(key)) => {
+                touch(&state, &key.id).await;
+                (key.consumer_id.clone(), Some(key.id))
+            }
+            Ok(None) => (None, None),
+            Err(error) => return LlmResponse(protocol_response(Protocol::Gemini, &error)),
+        };
     let models: Vec<Value> = snapshot
         .model_listing()
         .into_iter()
@@ -202,16 +203,17 @@ async fn gemini_list_models(state: State<LlmDataState>, request: Incoming) -> Ll
 async fn list_models(state: State<LlmDataState>, request: Incoming) -> LlmResponse {
     let state = state.0;
     let snapshot = state.runtime.snapshot().await;
-    let (consumer_id, virtual_key_id) = match authorize(&snapshot, &request).await {
-        Ok(Some(key)) => {
-            touch(&state, &key.id).await;
-            (key.consumer_id.clone(), Some(key.id))
-        }
-        Ok(None) => (None, None),
-        Err(error) => {
-            return LlmResponse(protocol_response(error_protocol(&request), &error));
-        }
-    };
+    let (consumer_id, virtual_key_id) =
+        match authorize(&snapshot, &request, state.config.llm.require_key).await {
+            Ok(Some(key)) => {
+                touch(&state, &key.id).await;
+                (key.consumer_id.clone(), Some(key.id))
+            }
+            Ok(None) => (None, None),
+            Err(error) => {
+                return LlmResponse(protocol_response(error_protocol(&request), &error));
+            }
+        };
     let model_api = wants_anthropic(&request);
     let data: Vec<Value> = snapshot
         .model_listing()
@@ -260,7 +262,7 @@ async fn count_tokens(
 ) -> LlmResponse {
     let state = state.0;
     let snapshot = state.runtime.snapshot().await;
-    match authorize(&snapshot, &request).await {
+    match authorize(&snapshot, &request, state.config.llm.require_key).await {
         Ok(Some(key)) => touch(&state, &key.id).await,
         Ok(None) => {}
         Err(error) => {
@@ -362,12 +364,18 @@ fn header_str<'a>(request: &'a Incoming, name: &str) -> Option<&'a str> {
 async fn authorize(
     snapshot: &RuntimeSnapshot,
     request: &Incoming,
+    require_key: bool,
 ) -> Result<Option<octra_storage::LlmVirtualKeyRecord>, GatewayError> {
     let presented = presented_key(
         header_str(request, header::AUTHORIZATION.as_str()),
         header_str(request, "x-api-key"),
     );
-    match keys::authenticate(&snapshot.data.virtual_keys, presented, Utc::now()) {
+    match keys::authenticate(
+        &snapshot.data.virtual_keys,
+        presented,
+        Utc::now(),
+        require_key,
+    ) {
         KeyOutcome::Anonymous => Ok(None),
         KeyOutcome::Authorized(key) => Ok(Some(*key)),
         KeyOutcome::Rejected(reason) => {
@@ -455,7 +463,7 @@ async fn handle(
     stream_override: Option<bool>,
 ) -> Response {
     let snapshot = state.runtime.snapshot().await;
-    let key = match authorize(&snapshot, &request).await {
+    let key = match authorize(&snapshot, &request, state.config.llm.require_key).await {
         Ok(key) => key,
         Err(error) => return protocol_response(ingress, &error),
     };

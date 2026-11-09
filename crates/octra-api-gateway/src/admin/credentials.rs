@@ -91,7 +91,7 @@ pub async fn create_keyauth(
     input.validate()?;
     let credential = state.storage.api.create_credential(&input).await?;
     reload_all(&state).await?;
-    Ok((StatusCode::CREATED, Json(keyauth_view(&credential)?)))
+    Ok((StatusCode::CREATED, Json(keyauth_issued_view(&credential)?)))
 }
 
 pub async fn create_keyauth_for_consumer(
@@ -112,7 +112,7 @@ pub async fn create_keyauth_for_consumer(
     input.validate()?;
     let credential = state.storage.api.create_credential(&input).await?;
     reload_all(&state).await?;
-    Ok((StatusCode::CREATED, Json(keyauth_view(&credential)?)))
+    Ok((StatusCode::CREATED, Json(keyauth_issued_view(&credential)?)))
 }
 
 pub async fn update_keyauth(
@@ -134,10 +134,13 @@ pub async fn upsert_keyauth(
 ) -> AdminResult<Json<Value>> {
     let mut body = read_json_body(payload)?;
     normalize_fk(&mut body, "consumer", "consumer_id");
-    let credential = if state.storage.api.get_credential(&id).await?.is_some() {
+    let (credential, created) = if state.storage.api.get_credential(&id).await?.is_some() {
         let input: UpdateKeyauthCredential = deserialize(body)?;
         input.validate()?;
-        state.storage.api.update_credential(&id, &input).await?
+        (
+            state.storage.api.update_credential(&id, &input).await?,
+            false,
+        )
     } else {
         set_id(&mut body, &id);
         let mut input: CreateKeyauthCredential = deserialize(body)?;
@@ -145,10 +148,14 @@ pub async fn upsert_keyauth(
             input.key = Some(generate_api_key().plaintext);
         }
         input.validate()?;
-        state.storage.api.create_credential(&input).await?
+        (state.storage.api.create_credential(&input).await?, true)
     };
     reload_all(&state).await?;
-    Ok(Json(keyauth_view(&credential)?))
+    if created {
+        Ok(Json(keyauth_issued_view(&credential)?))
+    } else {
+        Ok(Json(keyauth_view(&credential)?))
+    }
 }
 
 pub async fn delete_keyauth(
@@ -562,8 +569,14 @@ pub async fn delete_acl(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Redacted KeyAuth view. The plaintext key is returned only by the create
+/// endpoints, never by list/get/update responses.
 fn keyauth_view(credential: &octra_api_core::KeyauthCredential) -> AdminResult<Value> {
     let mut value = to_value(credential)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("key");
+        object.insert("key_present".into(), Value::Bool(true));
+    }
     with_ref(
         &mut value,
         "consumer",
@@ -572,8 +585,24 @@ fn keyauth_view(credential: &octra_api_core::KeyauthCredential) -> AdminResult<V
     Ok(value)
 }
 
+/// One-time KeyAuth create view, including the generated plaintext key.
+fn keyauth_issued_view(credential: &octra_api_core::KeyauthCredential) -> AdminResult<Value> {
+    let mut value = to_value(credential)?;
+    with_ref(
+        &mut value,
+        "consumer",
+        Some(credential.consumer_id.as_str()),
+    );
+    Ok(value)
+}
+
+/// Redacted BasicAuth view. The stored bcrypt hash is not returned again.
 fn basicauth_view(credential: &octra_api_core::BasicauthCredential) -> AdminResult<Value> {
     let mut value = to_value(credential)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("password");
+        object.insert("password_set".into(), Value::Bool(true));
+    }
     with_ref(
         &mut value,
         "consumer",
@@ -582,8 +611,14 @@ fn basicauth_view(credential: &octra_api_core::BasicauthCredential) -> AdminResu
     Ok(value)
 }
 
+/// Redacted JWT view. The HMAC secret is not returned again; RSA public keys
+/// are public and stay visible.
 fn jwt_view(credential: &octra_api_core::JwtSecret) -> AdminResult<Value> {
     let mut value = to_value(credential)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("secret");
+        object.insert("secret_present".into(), Value::Bool(true));
+    }
     with_ref(
         &mut value,
         "consumer",
