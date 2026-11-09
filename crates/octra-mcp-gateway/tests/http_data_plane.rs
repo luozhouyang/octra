@@ -4710,6 +4710,50 @@ components:
         conversion_tool_names(&gateway, server["id"].as_str().unwrap()).await,
         vec!["localRefTool"]
     );
+    let outside = directory
+        .parent()
+        .unwrap()
+        .join(format!("octra-outside-{}.yaml", uuid::Uuid::new_v4()));
+    std::fs::write(
+        &outside,
+        "paths:\n  /outside:\n    get:\n      operationId: outsideTool\n",
+    )
+    .unwrap();
+    let escaped_document = json!({
+        "openapi": "3.0.3",
+        "info": {"title": "Escaped ref", "version": "1"},
+        "servers": [{"url": "https://api.example.test"}],
+        "paths": {
+            "/outside": {"$ref": format!("../{}", outside.file_name().unwrap().to_string_lossy())}
+        }
+    })
+    .to_string();
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({
+                "name": "escaped-ref",
+                "type": "conversion-only",
+                "config": {
+                    "openapi": {
+                        "document": escaped_document,
+                        "document_base_dir": directory.display().to_string()
+                    }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("escapes document_base_dir"),
+        "{body}"
+    );
+    let _ = std::fs::remove_file(outside);
+
     let _ = std::fs::remove_dir_all(directory);
 
     let (status, server) = gateway

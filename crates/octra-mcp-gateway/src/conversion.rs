@@ -476,6 +476,8 @@ impl DocumentSource {
 struct ExternalRefResolver<'a> {
     http: Option<&'a reqwest::Client>,
     base: DocumentBase,
+    /// Canonical directory that local external references may not escape.
+    file_root: Option<PathBuf>,
     cache: HashMap<String, Arc<Value>>,
     documents: usize,
 }
@@ -505,9 +507,18 @@ impl<'a> ExternalRefResolver<'a> {
         } else {
             DocumentBase::None
         };
+        let file_root = match &base {
+            DocumentBase::Directory(directory) => Some(
+                std::fs::canonicalize(directory).map_err(|err| {
+                    format!("cannot resolve config.openapi.document_base_dir: {err}")
+                })?,
+            ),
+            _ => None,
+        };
         Ok(Self {
             http,
             base,
+            file_root,
             cache: HashMap::new(),
             // The root document counts toward the per-parse document budget.
             documents: 1,
@@ -692,6 +703,14 @@ impl<'a> ExternalRefResolver<'a> {
         }
         let document = match source {
             DocumentSource::File(path) => {
+                if let Some(root) = &self.file_root
+                    && !path.starts_with(root)
+                {
+                    return Err(format!(
+                        "external OpenAPI document '{}' escapes document_base_dir",
+                        path.display()
+                    ));
+                }
                 let bytes = std::fs::read(path).map_err(|err| {
                     format!(
                         "cannot read external OpenAPI document '{}': {err}",

@@ -74,11 +74,10 @@ impl ApiGatewayPluginFactory for RateLimitingFactory {
         })?;
         validate(&config)?;
         if !matches!(config.policy, Policy::Local) {
-            tracing::warn!(
-                plugin_id = id,
-                policy = config.policy.as_str(),
-                "rate-limiting policy is not supported; falling back to local counters"
-            );
+            return Err(PluginError::fail_closed(format!(
+                "rate-limiting policy '{}' is not supported; only 'local' is implemented",
+                config.policy.as_str()
+            )));
         }
         LIMITERS
             .get_or_init(|| Mutex::new(HashMap::new()))
@@ -588,6 +587,11 @@ mod tests {
         assert!(
             RateLimitingFactory
                 .create("test", json!({"minute": 1, "limit_by": "header"}))
+                .is_err()
+        );
+        assert!(
+            RateLimitingFactory
+                .create("test", json!({"minute": 1, "policy": "redis"}))
                 .is_err()
         );
     }

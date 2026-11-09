@@ -196,10 +196,23 @@ impl RouteMatcher {
     /// Finds the best enabled route for a request.
     pub fn match_route(&self, input: &MatchInput<'_>) -> Option<RouteMatch> {
         let host = input.host.map(normalize_host).unwrap_or_default();
-        let candidates = self
-            .by_host
-            .get(host.as_str())
-            .or_else(|| self.by_host.get(""))?;
+        let mut candidates = Vec::new();
+        if let Some(exact) = self.by_host.get(host.as_str()) {
+            candidates.extend(exact.iter().copied());
+        }
+        for (pattern, indexes) in &self.by_host {
+            if pattern.starts_with("*.") && host_matches(pattern, &host) {
+                candidates.extend(indexes.iter().copied());
+            }
+        }
+        if let Some(agnostic) = self.by_host.get("") {
+            candidates.extend(agnostic.iter().copied());
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        if candidates.is_empty() {
+            return None;
+        }
 
         candidates
             .iter()
@@ -308,7 +321,7 @@ impl CompiledRoute {
 
         if !self.hosts.is_empty() {
             let host = input.host.map(normalize_host).unwrap_or_default();
-            if !self.hosts.iter().any(|expected| expected == &host) {
+            if !self.hosts.iter().any(|expected| host_matches(expected, &host)) {
                 return None;
             }
         }
@@ -394,6 +407,18 @@ pub fn strip_matched_prefix(path: &str, prefix: &str) -> String {
     }
 }
 
+/// Host match with a single leading wildcard label (`*.example.com`).
+fn host_matches(pattern: &str, host: &str) -> bool {
+    if pattern == host {
+        return true;
+    }
+    let Some(suffix) = pattern.strip_prefix("*.") else {
+        return false;
+    };
+    host.strip_suffix(suffix)
+        .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +497,23 @@ mod tests {
         );
         assert_eq!(
             matched_id(&matcher, Some("other.example.com"), "/x", "GET"),
+            None
+        );
+    }
+
+    #[test]
+    fn matches_single_label_wildcard_hosts() {
+        let services = vec![service("s1")];
+        let mut r = route("r1", Some("s1"));
+        r.hosts = vec!["*.example.com".into()];
+        let matcher = RouteMatcher::compile(&services, &[r]);
+
+        assert_eq!(
+            matched_id(&matcher, Some("api.example.com:8080"), "/x", "GET").as_deref(),
+            Some("r1")
+        );
+        assert_eq!(
+            matched_id(&matcher, Some("example.com"), "/x", "GET"),
             None
         );
     }
