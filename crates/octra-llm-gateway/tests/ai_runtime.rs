@@ -426,6 +426,96 @@ async fn reload_picks_up_new_ai_routes() {
 }
 
 #[tokio::test]
+async fn scoped_allowlists_apply_to_groups_keys_models_and_providers() {
+    let data = AiControlPlaneData {
+        providers: vec![provider("provider-1", "Provider One", "openai")],
+        accounts: vec![account("account-1", "provider-1", "Account One")],
+        models: vec![model("model-1", "chat-model", AiModelKind::Model)],
+        targets: vec![provider_target(
+            "target-1",
+            "model-1",
+            "provider-1",
+            "upstream-1",
+        )],
+        policies: vec![
+            allowlist_policy("group-allow", "Group Allow", &["other-model"]),
+            allowlist_policy("key-allow", "Key Allow", &["other-model"]),
+            allowlist_policy("provider-allow", "Provider Allow", &["chat-model"]),
+            {
+                let mut policy = allowlist_policy("model-allow", "Model Allow", &["chat-model"]);
+                policy.config = json!({"allowed_providers": ["provider-1"]});
+                policy
+            },
+        ],
+        attachments: vec![
+            attachment(
+                "group-attachment",
+                "group-allow",
+                AiPolicyScope::ConsumerGroup,
+                Some("group-1"),
+            ),
+            attachment(
+                "key-attachment",
+                "key-allow",
+                AiPolicyScope::VirtualKey,
+                Some("key-1"),
+            ),
+            attachment(
+                "provider-attachment",
+                "provider-allow",
+                AiPolicyScope::Provider,
+                Some("provider-1"),
+            ),
+            attachment(
+                "model-attachment",
+                "model-allow",
+                AiPolicyScope::Model,
+                Some("model-1"),
+            ),
+        ],
+    };
+
+    let runtime = runtime_data_from_ai(&data, Vec::new()).unwrap();
+    assert_eq!(runtime.policies.len(), 4);
+    let snapshot = RuntimeSnapshot::build(runtime);
+    let base = octra_llm_gateway::runtime::PolicyContext {
+        consumer_id: None,
+        consumer_group_ids: &[],
+        virtual_key_id: Some("key-2"),
+        model: "chat-model",
+        provider_id: Some("provider-1"),
+        provider_name: Some("Provider One"),
+    };
+    assert!(snapshot.permits_model_in(&base));
+    assert!(snapshot.permits_provider_in(&base));
+
+    let restricted_group = octra_llm_gateway::runtime::PolicyContext {
+        consumer_group_ids: &["group-1".to_string()],
+        ..base.clone()
+    };
+    assert!(!snapshot.permits_model_in(&restricted_group));
+
+    let other_group = octra_llm_gateway::runtime::PolicyContext {
+        consumer_group_ids: &["group-2".to_string()],
+        ..base.clone()
+    };
+    assert!(snapshot.permits_model_in(&other_group));
+
+    let restricted_key = octra_llm_gateway::runtime::PolicyContext {
+        virtual_key_id: Some("key-1"),
+        ..base.clone()
+    };
+    assert!(!snapshot.permits_model_in(&restricted_key));
+
+    let wrong_provider = octra_llm_gateway::runtime::PolicyContext {
+        provider_id: Some("provider-2"),
+        provider_name: Some("Provider Two"),
+        ..base.clone()
+    };
+    assert!(!snapshot.permits_provider_in(&wrong_provider));
+}
+
+#[tokio::test]
 async fn provider_target_metadata_reaches_runtime_profile_and_pricing() {
     let mut target = provider_target("target-1", "model-1", "provider-1", "upstream-1");
     target.context_window = Some(128_000);

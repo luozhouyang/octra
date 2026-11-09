@@ -31,7 +31,7 @@ use crate::cost;
 use crate::error::{LlmResult, chain_error, protocol_response};
 use crate::keys::{self, KeyOutcome, presented_key};
 use crate::routing::{RoutingIntent, Target, TargetSignal, rank_targets};
-use crate::runtime::{LlmDataState, RuntimeSnapshot};
+use crate::runtime::{LlmDataState, PolicyContext, RuntimeSnapshot};
 use crate::similarity;
 use crate::upstream::Upstream;
 use crate::usage::{self, UsageTracker};
@@ -139,7 +139,18 @@ async fn gemini_count_tokens(
     };
     let consumer_id = key.as_ref().and_then(|key| key.consumer_id.as_deref());
     let virtual_key_id = key.as_ref().map(|key| key.id.as_str());
-    if !snapshot.permits_model(consumer_id, &model) {
+    let consumer_group_ids = consumer_id
+        .map(|id| snapshot.consumer_group_ids(id))
+        .unwrap_or(&[]);
+    let policy = PolicyContext {
+        consumer_id,
+        consumer_group_ids,
+        virtual_key_id,
+        model: &model,
+        provider_id: None,
+        provider_name: None,
+    };
+    if !snapshot.permits_model_in(&policy) {
         let error =
             GatewayError::forbidden(format!("consumer is not allowed to use model '{model}'"))
                 .with_code("model_forbidden");
@@ -182,12 +193,22 @@ async fn gemini_list_models(state: State<LlmDataState>, request: Incoming) -> Ll
             Ok(None) => (None, None),
             Err(error) => return LlmResponse(protocol_response(Protocol::Gemini, &error)),
         };
+    let consumer_group_ids = consumer_id
+        .as_deref()
+        .map(|id| snapshot.consumer_group_ids(id))
+        .unwrap_or(&[]);
     let models: Vec<Value> = snapshot
         .model_listing()
         .into_iter()
         .filter(|model| {
-            snapshot.permits_model(consumer_id.as_deref(), &model.id)
-                && snapshot.virtual_key_permits_model(virtual_key_id.as_deref(), &model.id)
+            snapshot.permits_model_in(&PolicyContext {
+                consumer_id: consumer_id.as_deref(),
+                consumer_group_ids,
+                virtual_key_id: virtual_key_id.as_deref(),
+                model: &model.id,
+                provider_id: None,
+                provider_name: None,
+            }) && snapshot.virtual_key_permits_model(virtual_key_id.as_deref(), &model.id)
         })
         .map(|model| {
             json!({
@@ -214,13 +235,23 @@ async fn list_models(state: State<LlmDataState>, request: Incoming) -> LlmRespon
                 return LlmResponse(protocol_response(error_protocol(&request), &error));
             }
         };
+    let consumer_group_ids = consumer_id
+        .as_deref()
+        .map(|id| snapshot.consumer_group_ids(id))
+        .unwrap_or(&[]);
     let model_api = wants_anthropic(&request);
     let data: Vec<Value> = snapshot
         .model_listing()
         .into_iter()
         .filter(|model| {
-            snapshot.permits_model(consumer_id.as_deref(), &model.id)
-                && snapshot.virtual_key_permits_model(virtual_key_id.as_deref(), &model.id)
+            snapshot.permits_model_in(&PolicyContext {
+                consumer_id: consumer_id.as_deref(),
+                consumer_group_ids,
+                virtual_key_id: virtual_key_id.as_deref(),
+                model: &model.id,
+                provider_id: None,
+                provider_name: None,
+            }) && snapshot.virtual_key_permits_model(virtual_key_id.as_deref(), &model.id)
         })
         .map(|model| {
             if model_api {
@@ -508,7 +539,18 @@ async fn handle(
         return with_request_id(protocol_response(ingress, &error), &request_id);
     }
 
-    let model_error = if !snapshot.permits_model(consumer_id, &requested_model) {
+    let consumer_group_ids = consumer_id
+        .map(|id| snapshot.consumer_group_ids(id))
+        .unwrap_or(&[]);
+    let model_policy = PolicyContext {
+        consumer_id,
+        consumer_group_ids,
+        virtual_key_id: virtual_key_id.as_deref(),
+        model: &requested_model,
+        provider_id: None,
+        provider_name: None,
+    };
+    let model_error = if !snapshot.permits_model_in(&model_policy) {
         Some(
             GatewayError::forbidden(format!(
                 "consumer is not allowed to use model '{requested_model}'"
@@ -553,9 +595,6 @@ async fn handle(
     let session = header_str(&request, &state.config.llm.session_header).map(str::to_string);
     let user_agent = header_str(&request, "user-agent");
     let intent = header_str(&request, &state.config.llm.intent_header);
-    let consumer_group_ids = consumer_id
-        .map(|id| snapshot.consumer_group_ids(id))
-        .unwrap_or(&[]);
     let meta = LlmRequestMeta {
         request_id: &request_id,
         ingress,
@@ -624,7 +663,15 @@ async fn handle(
                 &request_id,
             );
         }
-        let effective_error = if !snapshot.permits_model(consumer_id, &ir.model) {
+        let effective_policy = PolicyContext {
+            consumer_id,
+            consumer_group_ids,
+            virtual_key_id: virtual_key_id.as_deref(),
+            model: &ir.model,
+            provider_id: None,
+            provider_name: None,
+        };
+        let effective_error = if !snapshot.permits_model_in(&effective_policy) {
             Some(
                 GatewayError::forbidden(format!(
                     "consumer is not allowed to use model '{}'",
@@ -949,7 +996,15 @@ async fn execute(
             );
             continue;
         }
-        if !snapshot.permits_provider(meta.consumer_id, &provider.id, &provider.name) {
+        let provider_policy = PolicyContext {
+            consumer_id: meta.consumer_id,
+            consumer_group_ids: meta.consumer_group_ids,
+            virtual_key_id: meta.virtual_key_id,
+            model: requested_model,
+            provider_id: Some(&provider.id),
+            provider_name: Some(&provider.name),
+        };
+        if !snapshot.permits_provider_in(&provider_policy) {
             last_error = Some(
                 GatewayError::forbidden(format!(
                     "consumer is not allowed to use provider '{}'",

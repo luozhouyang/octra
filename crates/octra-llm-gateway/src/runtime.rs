@@ -31,6 +31,18 @@ pub struct ModelProfile {
     pub reasoning: Option<bool>,
 }
 
+/// Request identifiers used to evaluate scoped allowlists. Fields that are
+/// not known yet are left empty; the corresponding scope is then skipped.
+#[derive(Debug, Clone, Default)]
+pub struct PolicyContext<'a> {
+    pub consumer_id: Option<&'a str>,
+    pub consumer_group_ids: &'a [String],
+    pub virtual_key_id: Option<&'a str>,
+    pub model: &'a str,
+    pub provider_id: Option<&'a str>,
+    pub provider_name: Option<&'a str>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshot {
     pub generated_at: DateTime<Utc>,
@@ -42,6 +54,10 @@ pub struct RuntimeSnapshot {
     pub issues: Vec<ProviderIssue>,
     policy_global: PolicyLimits,
     policy_consumers: BTreeMap<String, PolicyLimits>,
+    policy_consumer_groups: BTreeMap<String, PolicyLimits>,
+    policy_virtual_keys: BTreeMap<String, PolicyLimits>,
+    policy_providers: BTreeMap<String, PolicyLimits>,
+    policy_models: BTreeMap<String, PolicyLimits>,
     virtual_keys: BTreeMap<String, VirtualKeyPolicy>,
     consumer_groups: BTreeMap<String, Vec<String>>,
 }
@@ -128,10 +144,23 @@ impl RuntimeSnapshot {
 
         let mut policy_global = PolicyLimits::default();
         let mut policy_consumers: BTreeMap<String, PolicyLimits> = BTreeMap::new();
+        let mut policy_consumer_groups: BTreeMap<String, PolicyLimits> = BTreeMap::new();
+        let mut policy_virtual_keys: BTreeMap<String, PolicyLimits> = BTreeMap::new();
+        let mut policy_providers: BTreeMap<String, PolicyLimits> = BTreeMap::new();
+        let mut policy_models: BTreeMap<String, PolicyLimits> = BTreeMap::new();
         for policy in &data.policies {
-            match &policy.consumer_id {
-                Some(consumer_id) => policy_consumers
-                    .entry(consumer_id.clone())
+            let scope = policy.scope.as_str();
+            let target = match (scope, policy.consumer_id.as_deref()) {
+                ("consumer", Some(id)) => Some((&mut policy_consumers, id)),
+                ("consumer_group", Some(id)) => Some((&mut policy_consumer_groups, id)),
+                ("virtual_key", Some(id)) => Some((&mut policy_virtual_keys, id)),
+                ("provider", Some(id)) => Some((&mut policy_providers, id)),
+                ("model", Some(id)) => Some((&mut policy_models, id)),
+                _ => None,
+            };
+            match target {
+                Some((map, id)) => map
+                    .entry(id.to_string())
                     .or_default()
                     .merge(&policy.document),
                 None => policy_global.merge(&policy.document),
@@ -186,6 +215,10 @@ impl RuntimeSnapshot {
             issues,
             policy_global,
             policy_consumers,
+            policy_consumer_groups,
+            policy_virtual_keys,
+            policy_providers,
+            policy_models,
             virtual_keys,
             consumer_groups,
         }
@@ -199,18 +232,63 @@ impl RuntimeSnapshot {
             .unwrap_or(&[])
     }
 
-    /// Whether the consumer may use the requested model. Global and
-    /// consumer-scoped policies both apply; a model must pass every policy
-    /// dimension that names models.
+    /// Whether the consumer may use the requested model, using every scope
+    /// whose identifiers are known at this point in the request.
     pub fn permits_model(&self, consumer_id: Option<&str>, model: &str) -> bool {
-        if !permits(&self.policy_global.models, &[model]) {
+        self.permits_model_in(&PolicyContext {
+            consumer_id,
+            model,
+            ..PolicyContext::default()
+        })
+    }
+
+    /// Model permission with consumer-group, virtual-key, provider and model
+    /// scopes applied when present.
+    pub fn permits_model_in(&self, context: &PolicyContext<'_>) -> bool {
+        if !permits(&self.policy_global.models, &[context.model]) {
             return false;
         }
-        consumer_id.is_none_or(|consumer_id| {
-            self.policy_consumers
+        if let Some(consumer_id) = context.consumer_id
+            && !self
+                .policy_consumers
                 .get(consumer_id)
-                .is_none_or(|limits| permits(&limits.models, &[model]))
-        })
+                .is_none_or(|limits| permits(&limits.models, &[context.model]))
+        {
+            return false;
+        }
+        for group_id in context.consumer_group_ids {
+            if !self
+                .policy_consumer_groups
+                .get(group_id)
+                .is_none_or(|limits| permits(&limits.models, &[context.model]))
+            {
+                return false;
+            }
+        }
+        if let Some(key_id) = context.virtual_key_id
+            && !self
+                .policy_virtual_keys
+                .get(key_id)
+                .is_none_or(|limits| permits(&limits.models, &[context.model]))
+        {
+            return false;
+        }
+        if !self
+            .policy_models
+            .get(context.model)
+            .is_none_or(|limits| permits(&limits.models, &[context.model]))
+        {
+            return false;
+        }
+        if let Some(provider_id) = context.provider_id
+            && !self
+                .policy_providers
+                .get(provider_id)
+                .is_none_or(|limits| permits(&limits.models, &[context.model]))
+        {
+            return false;
+        }
+        true
     }
 
     /// Whether the consumer may route to a provider, matched by id or name.
@@ -220,15 +298,65 @@ impl RuntimeSnapshot {
         provider_id: &str,
         provider_name: &str,
     ) -> bool {
+        self.permits_provider_in(&PolicyContext {
+            consumer_id,
+            provider_id: Some(provider_id),
+            provider_name: Some(provider_name),
+            ..PolicyContext::default()
+        })
+    }
+
+    /// Provider permission with consumer-group, virtual-key, model and
+    /// provider scopes applied when present.
+    pub fn permits_provider_in(&self, context: &PolicyContext<'_>) -> bool {
+        let provider_id = context.provider_id.unwrap_or_default();
+        let provider_name = context.provider_name.unwrap_or_default();
         let candidates = [provider_id, provider_name];
         if !permits(&self.policy_global.providers, &candidates) {
             return false;
         }
-        consumer_id.is_none_or(|consumer_id| {
-            self.policy_consumers
+        if let Some(consumer_id) = context.consumer_id
+            && !self
+                .policy_consumers
                 .get(consumer_id)
                 .is_none_or(|limits| permits(&limits.providers, &candidates))
-        })
+        {
+            return false;
+        }
+        for group_id in context.consumer_group_ids {
+            if !self
+                .policy_consumer_groups
+                .get(group_id)
+                .is_none_or(|limits| permits(&limits.providers, &candidates))
+            {
+                return false;
+            }
+        }
+        if let Some(key_id) = context.virtual_key_id
+            && !self
+                .policy_virtual_keys
+                .get(key_id)
+                .is_none_or(|limits| permits(&limits.providers, &candidates))
+        {
+            return false;
+        }
+        if !context.model.is_empty()
+            && !self
+                .policy_models
+                .get(context.model)
+                .is_none_or(|limits| permits(&limits.providers, &candidates))
+        {
+            return false;
+        }
+        if let Some(id) = context.provider_id
+            && !self
+                .policy_providers
+                .get(id)
+                .is_none_or(|limits| permits(&limits.providers, &candidates))
+        {
+            return false;
+        }
+        true
     }
 
     pub fn virtual_key_policy(&self, id: &str) -> Option<&VirtualKeyPolicy> {

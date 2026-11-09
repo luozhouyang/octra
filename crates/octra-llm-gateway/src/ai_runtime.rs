@@ -239,16 +239,34 @@ fn map_policies(compiled: &CompiledControlPlane, now: DateTime<Utc>, runtime: &m
         if policy.policy_type != AiPolicyType::Allowlist {
             continue;
         }
-        let (scope, consumer_id) = match attachment.scope {
+        let (scope, scope_id) = match attachment.scope {
             AiPolicyScope::Global => ("global", None),
             AiPolicyScope::Consumer => ("consumer", attachment.scope_id.clone()),
-            _ => continue,
+            AiPolicyScope::ConsumerGroup => ("consumer_group", attachment.scope_id.clone()),
+            AiPolicyScope::VirtualKey => ("virtual_key", attachment.scope_id.clone()),
+            AiPolicyScope::Provider => ("provider", attachment.scope_id.clone()),
+            AiPolicyScope::Model => (
+                "model",
+                attachment
+                    .scope_id
+                    .as_ref()
+                    .and_then(|id| compiled.models.get(id))
+                    .map(|model| model.model.name.clone())
+                    .or_else(|| attachment.scope_id.clone()),
+            ),
+            AiPolicyScope::Target => {
+                tracing::warn!(
+                    attachment = %attachment.id,
+                    "target-scoped allowlist is not enforced at target granularity"
+                );
+                continue;
+            }
         };
         runtime.policies.push(Policy {
             id: format!("ai-policy:{}", policy.id),
             name: policy.name.clone(),
             scope: scope.to_string(),
-            consumer_id,
+            consumer_id: scope_id,
             document: policy.config.clone(),
             created_at: now,
             updated_at: now,
