@@ -985,9 +985,9 @@ impl McpStore {
         .bind(id)
         .bind(server_id)
         .bind(protocol_version)
-            .execute(self.mcp_pool())
-            .await
-            .map_err(|err| storage_error("cannot insert mcp session", err))?;
+        .execute(self.mcp_pool())
+        .await
+        .map_err(|err| storage_error("cannot insert mcp session", err))?;
         self.get_session(id)
             .await?
             .ok_or_else(|| Error::Storage("mcp session vanished after insert".to_string()))
