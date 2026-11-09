@@ -35,7 +35,7 @@ Rejected alternatives:
 - Delivery is eventually consistent rather than immediate.
 
 **Follow-ups:**
-- Expose delivery lag and retry counts in the plugin operational view as the event surface grows.
+- Add notification replay/at-least-once delivery for clients that reconnect after a tool-list change, if the event surface grows.
 
 ## Verification
 
@@ -47,6 +47,7 @@ Rejected alternatives:
 - Events with no matching subscriber do not create rows.
 - Retention deletes only completed or failed events and leaves pending events untouched.
 - `crates/octra-plugin-events/src/lib.rs` unit tests cover matching delivery, retry/backoff and max attempts, the no-subscriber skip path, and scheduled-job success/error/timeout.
+- `/admin/events/stats` and the desktop Plugins card expose pending/failed/retrying deliveries and the oldest pending age.
 
 # References
 

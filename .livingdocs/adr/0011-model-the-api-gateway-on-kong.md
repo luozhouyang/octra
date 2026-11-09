@@ -38,7 +38,7 @@ We will model the API gateway on Kong's concepts and keep the implementation in 
 
 - Kong's Nginx data path, Lua plugin ABI, declarative `kong.conf` runtime, and full Admin API compatibility. Octra's Admin API is shape-compatible, not a drop-in Kong replacement.
 - Kong Enterprise features (workspaces, RBAC, Dev Portal, Vitals) and multi-node control planes.
-- Sticky-session cookies in v0.1. The data plane does not set or honor a sticky cookie yet.
+- Sticky sessions for cookie-hashed upstreams: the first successful response sets the configured cookie to the selected target id, and subsequent requests with that cookie pin to it until the target becomes ineligible.
 
 ## Rejected alternatives
 

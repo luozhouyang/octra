@@ -37,7 +37,8 @@ flowchart LR
 - **LLM request audit:** content-free request metadata plus `cache_status` (`hit` for cached responses, otherwise null/absent). Semantic cache lookups log `hit`/`miss` with the match kind at debug level; semantic routing logs target scores at debug level; clients also see `X-Octra-Cache: hit|miss`.
 - **MCP invocations:** server, tool, consumer, request id, status, duration, error.
 - **Metrics:** API request counts/latency/status and upstream errors; JSON at `/admin/metrics`, Prometheus at `/admin/metrics/prometheus`; LLM plugin stage metrics at `/admin/llm/plugins/metrics`; plugin metrics at `/admin/plugin-metrics`.
-- **Events and jobs:** outbox rows and delivery attempts at `/admin/events`; job schedule and last result at `/admin/jobs`.
+- **Events and jobs:** outbox rows and delivery attempts at `/admin/events`; aggregate pending/delivered/failed events, pending/failed/retrying deliveries, oldest pending age, and total attempts at `/admin/events/stats`; job schedule and last result at `/admin/jobs`.
+- **OTLP:** optional `[telemetry.otlp]` exports API and event metrics as OTLP/HTTP JSON to `{endpoint}/v1/metrics` on a configurable interval. Export failures are logged without stopping the daemon.
 - **Tracing:** `octra-observability` initializes `tracing` with pretty or JSON output and an env-filter level.
 
 ## Retention
@@ -58,9 +59,8 @@ A window of `0` keeps rows forever. `llm_usage_days` must be `0` or at least 32 
 
 ## Known gaps
 
-- The plugin operational view does not expose event delivery lag or retry counts yet (ADR 0009 follow-up).
 - The API metrics store is in-memory; a daemon restart resets counters.
-- There is no OTLP export or external metrics sink; the local JSON/Prometheus endpoints are the boundary.
+- OTLP export is HTTP/JSON only; there is no OTLP/gRPC or protobuf path, and plugin-stage metrics are not exported.
 - Reload failures and MCP connection restarts are logged but not counted in a dedicated metric.
 
 ## Drift instrument

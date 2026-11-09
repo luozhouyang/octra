@@ -36,7 +36,7 @@ flowchart LR
 **Not adopted**
 
 - Kong's Nginx data path, Lua plugin ABI/PDK, workspaces, RBAC, Dev Portal, Vitals, and full Admin API compatibility.
-- Sticky-session cookies. The `least-connections` and `latency` selectors are implemented with in-flight and latency-EWMA signals.
+- Sticky-session cookies are implemented for cookie-hashed upstreams; `least-connections` and `latency` use in-flight and latency-EWMA signals.
 - A declarative Kong configuration file as the source of truth; SQLite is the source of truth.
 
 **Current status**
@@ -105,7 +105,7 @@ magpie remains the primary LLM product reference. Kong AI Gateway 2.x contribute
 - Kong AI Gateway 2.x's A2A `AI Agent` entity; Octra's coding-agent configuration remains a separate `coding_agents` domain.
 - Enterprise workspaces, RBAC, and multi-tenant control-plane semantics.
 
-**Current status:** Phase 43 is AI-native only: control API, full policy execution, all magpie routing strategies, semantic routing with optional embeddings, streaming cache, Vertex and Bedrock Converse adapters with optional SigV4, AI-native account OAuth with encrypted, rotatable, retirable tokens, desktop controls and loopback callbacks, cache/routing observability, provider query parameters and protocol presets, full CRUD CLI, and typed forms for AI, API Gateway, MCP, and consumer-policy entities. The `ai_*` schema, compiler, storage store, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, AI-native runtime mapping, per-target context/capability/pricing metadata, built-in policy execution for every policy type including PromptGuard, PromptCompress, and SemanticCache, semantic target routing over AI-native descriptions with embedding vectors and lexical fallback, provider query parameters and presets, streaming cache population and SSE replay, account OAuth endpoints, complete CLI CRUD, Kong-shaped MCP routes/CEL/OIDC discovery+introspection/OpenAPI conversion, daemon version handshakes, and the AI Control page are implemented and tested. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed. Signed/notarized release execution and full OpenAPI serialization parity remain future work. See ADR 0018 and [LLM Control Plane](llm-control-plane.md).
+**Current status:** Phase 47 is AI-native only: control API, full policy execution, all magpie routing strategies, semantic routing with optional embeddings, streaming cache, Vertex and Bedrock Converse adapters with optional SigV4, AI-native account OAuth with encrypted, rotatable, retirable tokens, desktop controls and loopback callbacks, cache/routing observability, provider query parameters and protocol presets, full CRUD CLI, and typed forms for AI, API Gateway, MCP, and consumer-policy entities. The `ai_*` schema, compiler, storage store, `/api/v1/ai/*` CRUD, validate/preview/apply/revisions/rollback, revision snapshots, transactional replace, AI-native runtime mapping, per-target context/capability/pricing metadata, built-in policy execution for every policy type including PromptGuard, PromptCompress, and SemanticCache, semantic target routing over AI-native descriptions with embedding vectors and lexical fallback, provider query parameters and presets, streaming cache population and SSE replay, account OAuth endpoints, complete CLI CRUD, Kong-shaped MCP routes/CEL/OIDC discovery+introspection/OpenAPI conversion/notifications, API sticky sessions, event-delivery metrics + optional OTLP, daemon version handshakes, and the AI Control page are implemented and tested. The legacy model tables, `/admin/llm/*` model endpoints, `legacy`/`shadow`/`on` modes, and import-legacy path are removed. Signed/notarized release execution and OpenAPI 3.1 edge-case parity remain future work. See ADR 0018 and [LLM Control Plane](llm-control-plane.md).
 
 ## MCP gateway — Kong AI MCP Proxy
 
@@ -122,9 +122,9 @@ magpie remains the primary LLM product reference. Kong AI Gateway 2.x contribute
 - Kong's tag-based `listener` aggregation beyond explicit `sources`, and non-HTTP upstream modes beyond stdio/HTTP.
 - Kong auth plugins beyond OIDC JWKS/discovery/introspection and Octra MCP API keys; no private_key_jwt, mTLS, revocation, or token acquisition.
 - Kong's plugin-based MCP proxy model; Octra's MCP gateway is a first-class router, and API/LLM plugin chains do not run on MCP traffic.
-- Full OpenAPI serialization styles (`explode`, `deepObject`), cookie/multipart bodies, and external `$ref`s in conversion mode.
+- OpenAPI 3.1-only schema constructs, recursive/cyclic external schemas, multipart `encoding` metadata, nested `deepObject` beyond one level, and `file:` external references.
 - MCP protocol revision `2025-11-25`; Octra negotiates `2025-06-18`, `2025-03-26`, and `2024-11-05`.
-- Server-initiated notifications, tool-list change notifications, session sharing, and non-HTTP upstreams beyond stdio.
+- Resource/prompt subscription notifications, notification replay, stdio server-initiated requests, session sharing, and non-HTTP upstreams beyond stdio.
 
 **Current status**
 
@@ -141,12 +141,13 @@ magpie remains the primary LLM product reference. Kong AI Gateway 2.x contribute
 | Consumer/group/default tool ACL | Implemented | `mcp_tool_acls`, `acl_allows_scoped` |
 | CEL allow/deny ACL | Implemented | `cel-interpreter`, server `acl_*_when_json` |
 | OIDC auth strategy | Implemented, JWKS + discovery + introspection | `mcp_auth_strategies`, `auth.rs` |
-| OpenAPI-to-MCP conversion | Implemented subset | JSON/YAML 3.x, path/query/header/body; `conversion.rs` |
+| OpenAPI-to-MCP conversion | Implemented subset | JSON/YAML 3.x, path/query/header/cookie/body styles, external refs; `conversion.rs` |
+| Server-initiated notifications | Implemented, live-only | HTTP GET SSE + stdio forwarding, `tools/list_changed` refresh |
 | Invocation audit | Implemented | `mcp_invocations` |
 
 ## Desktop and control plane
 
-The UI is a live control-plane console with targeted editors. Overview, API Gateway, LLM Gateway, MCP Gateway, Agents, Plugins, and Settings all read live data. AI Control, API Gateway, MCP, and consumer policies expose typed-form CRUD; agents, LLM plugin enable/disable, and PII model actions retain their mutation surfaces. The Tauri host holds the control token, exposes one path- and method-allow-listed bridge command plus daemon lifecycle commands, adds a narrow loopback OAuth callback listener, and can supervise a bundled daemon sidecar (ADR 0015).
+The UI is a live control-plane console with targeted editors. Overview, API Gateway, LLM Gateway, MCP Gateway, Agents, Plugins, and Settings all read live data. AI Control, API Gateway, MCP, and consumer policies expose typed-form CRUD; agents, LLM plugin enable/disable, PII model actions, and event-delivery statistics retain their mutation/observability surfaces. The Tauri host holds the control token, exposes one path- and method-allow-listed bridge command plus daemon lifecycle commands, adds a narrow loopback OAuth callback listener, checks daemon/desktop version compatibility, and can supervise a bundled daemon sidecar (ADR 0015).
 
 ## Sources
 
