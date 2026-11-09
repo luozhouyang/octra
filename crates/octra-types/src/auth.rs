@@ -21,6 +21,13 @@ pub async fn require_bearer(
     request: Request,
     next: Next,
 ) -> Response {
+    // The identity challenge is intentionally unauthenticated: the desktop
+    // host must verify the daemon before it sends the bearer token over a
+    // loopback TCP connection that could belong to a port squatter.
+    if request.uri().path() == "/api/v1/system/identity" {
+        return next.run(request).await;
+    }
+
     let authorized = request
         .headers()
         .get(header::AUTHORIZATION)

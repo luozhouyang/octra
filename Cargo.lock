@@ -4177,11 +4177,15 @@ name = "octra-desktop-daemon"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "hex",
+ "hmac 0.12.1",
  "nix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -4508,6 +4512,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
+ "hex",
+ "hmac 0.12.1",
  "http-body-util",
  "octra-config",
  "octra-core",
@@ -4515,6 +4521,7 @@ dependencies = [
  "octra-storage",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "subtle",
  "tokio",

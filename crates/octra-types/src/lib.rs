@@ -19,6 +19,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 pub fn core_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/system/health", get(routes::health))
+        .route("/api/v1/system/identity", get(routes::identity))
         .route("/api/v1/system/config", get(routes::get_config))
         .route("/api/v1/system/overview", get(overview::overview))
         .route("/api/v1/system/reload", post(routes::reload))

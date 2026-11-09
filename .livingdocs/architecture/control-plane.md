@@ -59,7 +59,7 @@ The UI is therefore a **live console plus targeted editors**. AI Control has typ
 
 ## Tauri bridge
 
-The host reads `OCTRA_CONTROL_TOKEN` or `$OCTRA_HOME/control.token`, resolves `daemon.control_bind` from `$OCTRA_HOME/config.toml`, and exposes one `daemon_request(method, path, body)` command. It accepts only `/api/v1/` and `/admin/` paths and GET/POST/PUT/DELETE. The webview calls it through `desktopFetch`; the shared `ControlApiClient` is otherwise identical to browser mode.
+The desktop host's daemon manager never sends the control token over a fresh loopback connection until the listener proves it knows that token. It sends a random nonce to the public `/api/v1/system/identity` endpoint and verifies the HMAC-SHA256 proof; only then does it issue the bearer-authenticated health request. A port squatter therefore sees the nonce but never the token. The Tauri host reads `OCTRA_CONTROL_TOKEN` or `$OCTRA_HOME/control.token`, resolves `daemon.control_bind` from `$OCTRA_HOME/config.toml`, and exposes one `daemon_request(method, path, body)` command. It accepts only `/api/v1/` and `/admin/` paths and GET/POST/PUT/DELETE. The webview calls it through `desktopFetch`; the shared `ControlApiClient` is otherwise identical to browser mode.
 
 ## CLI
 
@@ -71,4 +71,4 @@ Control mutations pass through the audit middleware. API, LLM, and MCP mutating 
 
 ## Drift instrument
 
-Drift caught by: inspection of `apps/desktop/src/app/App.tsx`, `apps/desktop/src/lib/control-api.ts`, `apps/desktop/src-tauri/src/lib.rs`, `crates/octra-cli/src/main.rs`, and the control routers in `crates/octra-*`. A future test should assert that every page's queries hit a documented control path and that the Tauri allow-list rejects everything else.
+Drift caught by: inspection of `apps/desktop/src/app/App.tsx`, `apps/desktop/src/lib/control-api.ts`, `apps/desktop/src-tauri/src/lib.rs`, `crates/octra-cli/src/main.rs`, and the control routers in `crates/octra-*`; the identity/probe tests in `crates/octra-types/src/routes.rs` and `crates/octra-desktop-daemon/src/lib.rs`. A future test should assert that every page's queries hit a documented control path and that the Tauri allow-list rejects everything else.

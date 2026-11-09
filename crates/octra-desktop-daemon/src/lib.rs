@@ -17,6 +17,8 @@ use serde::Serialize;
 const DAEMON_BINARY_ENV: &str = "OCTRA_DAEMON_BIN";
 const START_TIMEOUT_ENV: &str = "OCTRA_DAEMON_START_TIMEOUT_MS";
 const HEALTH_PATH: &str = "/api/v1/system/health";
+const IDENTITY_PATH: &str = "/api/v1/system/identity";
+const IDENTITY_NONCE_HEADER: &str = "x-octra-nonce";
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const START_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -418,6 +420,9 @@ fn probe_health(control_bind: &str, home: &Path, timeout: Duration) -> HealthPro
     let Some(token) = control_token(home) else {
         return HealthProbe::default();
     };
+    if !probe_identity(&address, &token, timeout) {
+        return HealthProbe::default();
+    }
     let Ok(mut stream) = TcpStream::connect_timeout(&address, timeout) else {
         return HealthProbe::default();
     };
@@ -437,6 +442,79 @@ fn probe_health(control_bind: &str, home: &Path, timeout: Duration) -> HealthPro
     parse_health_response(&response)
 }
 
+fn identity_proof(token: &str, nonce: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("HMAC accepts keys of any length");
+    mac.update(b"octra-control-identity-v1:");
+    mac.update(nonce.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn verify_identity_response(response: &[u8], token: &str, nonce: &str) -> bool {
+    let Some(header_end) = find_header_end(response) else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&response[..header_end]);
+    if !(head.starts_with("HTTP/1.1 2") || head.starts_with("HTTP/1.0 2")) {
+        return false;
+    }
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(&response[header_end..]) else {
+        return false;
+    };
+    body.get("nonce").and_then(|value| value.as_str()) == Some(nonce)
+        && body.get("proof").and_then(|value| value.as_str())
+            == Some(identity_proof(token, nonce).as_str())
+}
+
+fn probe_identity(address: &SocketAddr, token: &str, timeout: Duration) -> bool {
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let Ok(mut stream) = TcpStream::connect_timeout(address, timeout) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    let request = format!(
+        "GET {IDENTITY_PATH} HTTP/1.1\r\nHost: {address}\r\n{IDENTITY_NONCE_HEADER}: {nonce}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    read_response(&mut stream)
+        .is_some_and(|response| verify_identity_response(&response, token, &nonce))
+}
+
+async fn probe_identity_async(address: &SocketAddr, token: &str, timeout: Duration) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let request = format!(
+        "GET {IDENTITY_PATH} HTTP/1.1\r\nHost: {address}\r\n{IDENTITY_NONCE_HEADER}: {nonce}\r\nConnection: close\r\n\r\n"
+    );
+    let probe = async {
+        let mut stream = tokio::net::TcpStream::connect(address).await.ok()?;
+        stream.write_all(request.as_bytes()).await.ok()?;
+        let mut response = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let count = stream.read(&mut buffer).await.ok()?;
+            if count == 0 {
+                return Some(response);
+            }
+            response.extend_from_slice(&buffer[..count]);
+            if response_complete(&response) || response.len() >= MAX_HEALTH_RESPONSE_BYTES {
+                return Some(response);
+            }
+        }
+    };
+    match tokio::time::timeout(timeout, probe).await {
+        Ok(Some(response)) => verify_identity_response(&response, token, &nonce),
+        _ => false,
+    }
+}
+
 fn resolve_address(control_bind: &str) -> Option<SocketAddr> {
     control_bind.to_socket_addrs().ok()?.next()
 }
@@ -450,6 +528,9 @@ async fn probe_health_async(control_bind: &str, home: &Path, timeout: Duration) 
     let Some(token) = control_token(home) else {
         return HealthProbe::default();
     };
+    if !probe_identity_async(&address, &token, timeout).await {
+        return HealthProbe::default();
+    }
     let request = format!(
         "GET {HEALTH_PATH} HTTP/1.1\r\nHost: {control_bind}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
     );
@@ -677,6 +758,7 @@ mod tests {
     #[derive(Clone)]
     struct MockState {
         expected: String,
+        token: String,
         healthy_after: Duration,
         started: Instant,
         available: Arc<AtomicBool>,
@@ -700,12 +782,30 @@ mod tests {
         let available = Arc::new(AtomicBool::new(true));
         let state = MockState {
             expected: format!("Bearer {token}"),
+            token: token.to_string(),
             healthy_after,
             started: Instant::now(),
             available: available.clone(),
             version: version.map(str::to_string),
         };
         let app = Router::new()
+            .route(
+                IDENTITY_PATH,
+                get(
+                    |State(state): State<MockState>, headers: HeaderMap| async move {
+                        let nonce = headers
+                            .get(IDENTITY_NONCE_HEADER)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        let proof = identity_proof(&state.token, &nonce);
+                        (
+                            StatusCode::OK,
+                            Json(json!({"nonce": nonce, "proof": proof})),
+                        )
+                    },
+                ),
+            )
             .route(
                 HEALTH_PATH,
                 get(
@@ -854,12 +954,39 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 1024];
-            let _ = stream.read(&mut request);
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .unwrap();
+            // First connection: identity challenge. Second: authenticated
+            // health check.
+            for step in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let count = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..count]);
+                if step == 0 {
+                    let nonce = request
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case(IDENTITY_NONCE_HEADER)
+                                .then(|| value.trim().to_string())
+                        })
+                        .unwrap();
+                    let body = format!(
+                        "{{\"nonce\":\"{nonce}\",\"proof\":\"{}\"}}",
+                        identity_proof("status-token", &nonce)
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                } else {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .unwrap();
+                }
+            }
         });
 
         let home = TempDir::new().unwrap();
@@ -874,6 +1001,44 @@ mod tests {
         assert!(status.healthy);
         assert!(status.running);
         assert_eq!(status.pid, None);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn status_never_sends_the_token_to_an_unverified_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let count = stream.read(&mut request).unwrap();
+            sender
+                .send(String::from_utf8_lossy(&request[..count]).to_string())
+                .unwrap();
+            // A port squatter can answer the identity request, but cannot
+            // forge the HMAC proof.
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+
+        let home = TempDir::new().unwrap();
+        write_token(home.path(), "do-not-leak-this-token");
+        let mut manager = DaemonManager::with_binary(
+            home.path().to_path_buf(),
+            address.to_string(),
+            home.path().join("missing"),
+        );
+
+        let status = manager.status();
+        assert!(!status.healthy);
+
+        let request = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization:"),
+            "the desktop host leaked the bearer token to an unverified listener: {request}"
+        );
         server.join().unwrap();
     }
 
