@@ -918,6 +918,18 @@ async fn ai_account_oauth_lifecycle() {
         "account list must expose the OAuth expiry"
     );
 
+    let account_path = format!("/api/v1/ai/accounts/{account_id}");
+    let (status, updated) = call_shared(
+        &router,
+        Method::PUT,
+        &account_path,
+        Some(json!({"name": "acct-renamed", "credential_kind": "oauth"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {updated}");
+    assert_eq!(updated["oauth_status"], "authorized");
+    assert_eq!(updated["oauth_expires_at"], completed["oauth_expires_at"]);
+
     let (status, refreshed) =
         call_shared(&router, Method::POST, &format!("{base}/refresh"), None).await;
     assert_eq!(status, StatusCode::OK, "body: {refreshed}");

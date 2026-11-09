@@ -939,7 +939,11 @@ async fn update_account(
         .await
         .map_err(AiError::internal)?
         .ok_or_else(|| AiError::not_found("account", &id))?;
-    let account = input.into_record(id, existing.provider_id, existing.created_at, now());
+    let mut account = input.into_record(id, existing.provider_id, existing.created_at, now());
+    // OAuth status is owned by the OAuth endpoints; a general account edit must
+    // not silently turn an authorized account back into a static one.
+    account.oauth_status = existing.oauth_status;
+    account.oauth_expires_at = existing.oauth_expires_at;
     state
         .storage
         .ai
