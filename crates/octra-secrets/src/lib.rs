@@ -153,7 +153,25 @@ impl MasterKeySet {
         }
 
         if key_file.exists() {
-            return load_key_file_set(key_file);
+            return match load_key_file_set(key_file) {
+                Ok(set) => Ok(set),
+                Err(primary_error) => {
+                    let backup = backup_path(key_file);
+                    match load_key_file_set(&backup) {
+                        Ok(mut set) => {
+                            tracing::warn!(
+                                path = %key_file.display(),
+                                error = %primary_error,
+                                "master key file is invalid; recovered from the backup copy"
+                            );
+                            restore_key_file(key_file, &backup)?;
+                            set.persistence = Persistence::File(key_file.to_path_buf());
+                            Ok(set)
+                        }
+                        Err(_) => Err(primary_error),
+                    }
+                }
+            };
         }
 
         if !allow_create {
@@ -702,6 +720,25 @@ fn load_key_file_set(path: &Path) -> Result<MasterKeySet, String> {
     ))
 }
 
+fn restore_key_file(primary: &Path, backup: &Path) -> Result<(), String> {
+    let raw = fs::read(backup).map_err(|error| {
+        format!(
+            "cannot read master key backup {}: {error}",
+            backup.display()
+        )
+    })?;
+    let temporary = temporary_key_path(primary);
+    fs::write(&temporary, raw).map_err(|error| {
+        format!(
+            "cannot write recovered master key {}: {error}",
+            temporary.display()
+        )
+    })?;
+    restrict_key_file(&temporary)?;
+    replace_file(&temporary, primary)?;
+    Ok(())
+}
+
 fn write_key_file_set(
     path: &Path,
     active: &str,
@@ -916,6 +953,29 @@ mod tests {
         assert_eq!(set.active_key_id(), key_id);
         let error = SecretBox::from_key_set(set).open(&sealed).unwrap_err();
         assert!(error.contains("authentication"));
+    }
+
+    #[test]
+    fn corrupt_key_file_recovers_from_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_file = directory.path().join("master.key");
+        let key = MasterKey::generate().unwrap();
+        let active = key.key_id();
+        let mut keys = BTreeMap::new();
+        keys.insert(active.clone(), key);
+        // The second write creates the `.bak` recovery copy.
+        write_key_file_set(&key_file, &active, &keys).unwrap();
+        write_key_file_set(&key_file, &active, &keys).unwrap();
+        std::fs::write(&key_file, b"not a master key").unwrap();
+
+        let recovered = MasterKeySet::load_or_create(&key_file, false, false).unwrap();
+        assert_eq!(recovered.active_key_id(), active);
+        assert!(
+            std::fs::read_to_string(&key_file)
+                .unwrap()
+                .contains("\"keys\""),
+            "recovered primary file must be rewritten from the backup"
+        );
     }
 
     #[test]
