@@ -703,15 +703,21 @@ impl<'a> ExternalRefResolver<'a> {
         }
         let document = match source {
             DocumentSource::File(path) => {
+                let canonical = std::fs::canonicalize(path).map_err(|err| {
+                    format!(
+                        "cannot resolve external OpenAPI document '{}': {err}",
+                        path.display()
+                    )
+                })?;
                 if let Some(root) = &self.file_root
-                    && !path.starts_with(root)
+                    && !canonical.starts_with(root)
                 {
                     return Err(format!(
                         "external OpenAPI document '{}' escapes document_base_dir",
                         path.display()
                     ));
                 }
-                let bytes = std::fs::read(path).map_err(|err| {
+                let bytes = std::fs::read(&canonical).map_err(|err| {
                     format!(
                         "cannot read external OpenAPI document '{}': {err}",
                         path.display()

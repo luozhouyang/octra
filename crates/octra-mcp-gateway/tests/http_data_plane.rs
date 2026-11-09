@@ -4785,6 +4785,46 @@ components:
             .contains("escapes document_base_dir"),
         "{body}"
     );
+
+    #[cfg(unix)]
+    {
+        let link = directory.join("linked.yaml");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let symlink_document = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "Symlink ref", "version": "1"},
+            "servers": [{"url": "https://api.example.test"}],
+            "paths": {
+                "/outside": {"$ref": "./linked.yaml#/paths/~1outside"}
+            }
+        })
+        .to_string();
+        let (status, body) = gateway
+            .control(
+                "POST",
+                "/api/v1/mcp/servers",
+                json!({
+                    "name": "symlink-ref",
+                    "type": "conversion-only",
+                    "config": {
+                        "openapi": {
+                            "document": symlink_document,
+                            "document_base_dir": directory.display().to_string()
+                        }
+                    }
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("escapes document_base_dir"),
+            "{body}"
+        );
+    }
+
     let _ = std::fs::remove_file(outside);
 
     let _ = std::fs::remove_dir_all(directory);
