@@ -1,6 +1,6 @@
 // ABI contract for third-party API Gateway plugins.
 
-package octra:api-plugin@2.0.0;
+package octra:api-plugin@3.0.0;
 
 interface types {
     enum log-level {
@@ -21,6 +21,7 @@ interface types {
         consumer-id: option<string>,
         route-id: string,
         service-id: string,
+        body: option<list<u8>>,
     }
 
     record reject {
@@ -34,6 +35,7 @@ interface types {
         query: option<string>,
         set-headers: list<tuple<string, string>>,
         remove-headers: list<string>,
+        body: option<list<u8>>,
     }
 
     variant action {
@@ -86,6 +88,9 @@ interface types {
 
     record body-info {
         request-id: string,
+        status: u16,
+        headers: list<tuple<string, string>>,
+        consumer-id: option<string>,
         route-id: string,
         service-id: string,
         target-url: string,
@@ -209,12 +214,7 @@ interface plugin-api {
         action,
         response-action,
         log-entry,
-        upstream-request,
         body-info,
-        request-body-action,
-        body-action,
-        error-info,
-        error-action,
         admin-request,
         admin-response,
         event,
@@ -226,13 +226,14 @@ interface plugin-api {
     on-event: func(event: event) -> result<_, string>;
     on-job: func(job: job) -> result<_, string>;
     on-rewrite: func(req: request) -> result<action, string>;
-    on-request: func(req: request) -> result<action, string>;
-    on-request-body: func(req: request, body: list<u8>) -> result<request-body-action, string>;
-    on-upstream-request: func(req: upstream-request) -> result<action, string>;
+    on-access: func(req: request) -> result<action, string>;
     on-response: func(resp: response) -> result<response-action, string>;
-    on-response-buffer: func(resp: response, body: list<u8>) -> result<body-action, string>;
-    on-response-chunk: func(info: body-info, chunk: list<u8>) -> result<body-action, string>;
-    on-error: func(err: error-info) -> result<error-action, string>;
+    on-header-filter: func(resp: response) -> result<response-action, string>;
+    on-body-filter: func(
+        info: body-info,
+        chunk: option<list<u8>>,
+        eof: bool,
+    ) -> result<option<list<u8>>, string>;
     on-log: func(entry: log-entry);
 }
 

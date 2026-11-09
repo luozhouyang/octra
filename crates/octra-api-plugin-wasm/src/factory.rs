@@ -99,11 +99,7 @@ impl ApiGatewayPluginFactory for WasmPluginFactory {
 
     fn phases(&self) -> Vec<PluginPhase> {
         if self.manifest.phases.is_empty() {
-            vec![
-                PluginPhase::Request,
-                PluginPhase::Response,
-                PluginPhase::Log,
-            ]
+            vec![PluginPhase::Access, PluginPhase::Response, PluginPhase::Log]
         } else {
             self.manifest.phases.clone()
         }

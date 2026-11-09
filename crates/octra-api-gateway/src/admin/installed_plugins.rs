@@ -949,7 +949,7 @@ mod tests {
         std::fs::write(
             dir.join("plugin.json"),
             json!({
-                "api_version": "2",
+                "api_version": "3",
                 "name": name,
                 "version": version,
                 "kind": "api",

@@ -343,7 +343,7 @@ mod tests {
     fn manifest(migrations: &str) -> String {
         format!(
             r#"{{
-                "api_version": "2",
+                "api_version": "3",
                 "name": "demo-plugin",
                 "version": "1.0.0",
                 "kind": "api",
@@ -374,7 +374,7 @@ mod tests {
     fn accepts_llm_artifacts_only_for_the_llm_kind() {
         let dir = tempfile::tempdir().unwrap();
         let llm = r#"{
-            "api_version": "2",
+            "api_version": "3",
             "name": "llm-demo",
             "version": "1.0.0",
             "kind": "llm",
@@ -382,7 +382,7 @@ mod tests {
             "priority": 0,
             "description": "demo",
             "capabilities": [],
-            "phases": ["request"]
+            "phases": ["access"]
         }"#;
         artifact(dir.path(), llm, None);
         assert!(validate_artifact_dir_for_kind(dir.path(), PluginKind::Llm).is_ok());
@@ -393,7 +393,7 @@ mod tests {
     fn llm_artifacts_reject_api_store_features() {
         let dir = tempfile::tempdir().unwrap();
         let llm = r#"{
-            "api_version": "2",
+            "api_version": "3",
             "name": "llm-demo",
             "version": "1.0.0",
             "kind": "llm",
@@ -434,7 +434,7 @@ mod tests {
     fn capability_manifest(capabilities: &str) -> String {
         format!(
             r#"{{
-                "api_version": "2",
+                "api_version": "3",
                 "name": "demo-plugin",
                 "version": "1.0.0",
                 "kind": "api",
@@ -475,7 +475,7 @@ mod tests {
     fn admin_manifest(capabilities: &str, routes: &str) -> String {
         format!(
             r#"{{
-                "api_version": "2",
+                "api_version": "3",
                 "name": "demo-plugin",
                 "version": "1.0.0",
                 "kind": "api",

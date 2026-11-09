@@ -7,10 +7,9 @@ use axum::response::Response;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use octra_api_plugin_types::{
-    ApiGatewayPlugin, BodyContext, Capability, ConsumerInfo, CredentialInfo, ErrorContext,
-    GatewayEvent, GatewayState, JobInvocation, LogContext, PluginAction, PluginError, PluginHost,
-    PluginManifest, PluginResult, RequestBodyContext, RequestContext, ResponseBodyContext,
-    ResponseContext, UpstreamRequestContext,
+    ApiGatewayPlugin, BodyFilterContext, Capability, ConsumerInfo, CredentialInfo, GatewayState,
+    LogContext, PluginAction, PluginError, PluginHost, PluginManifest, PluginResult,
+    RequestContext, ResponseContext,
 };
 use parking_lot::Mutex;
 use tokio::task::spawn_blocking;
@@ -207,47 +206,14 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
         &self.inner.manifest
     }
 
-    fn needs_request_body(&self) -> bool {
-        self.inner
-            .manifest
-            .capabilities
-            .contains(&octra_api_plugin_types::Capability::RequestBody)
-    }
-
-    fn needs_response_body(&self) -> bool {
-        self.inner
-            .manifest
-            .capabilities
-            .contains(&octra_api_plugin_types::Capability::ResponseBody)
-    }
-
-    fn streams_response_body(&self) -> bool {
-        if !self
-            .inner
-            .manifest
-            .capabilities
-            .contains(&octra_api_plugin_types::Capability::ResponseBody)
-        {
-            return false;
-        }
-        serde_json::from_str::<serde_json::Value>(&self.inner.config_json)
-            .ok()
-            .and_then(|config| {
-                config
-                    .get("stream_response_body")
-                    .and_then(serde_json::Value::as_bool)
-            })
-            .unwrap_or(false)
-    }
-
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let started = Instant::now();
         let request = request_dto(cx);
         let auth = current_identity(cx.state);
         let authenticated = is_authenticated(cx.state);
         let inner = self.inner.clone();
         let result =
-            match spawn_blocking(move || inner.call_request(request, auth, authenticated)).await {
+            match spawn_blocking(move || inner.call_access(request, auth, authenticated)).await {
                 Ok(result) => result,
                 Err(error) => {
                     self.inner
@@ -286,7 +252,7 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
         }
     }
 
-    async fn on_response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
+    async fn response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
         let started = Instant::now();
         let response = response_dto(cx);
         let inner = self.inner.clone();
@@ -327,7 +293,7 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
         }
     }
 
-    async fn on_rewrite(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn rewrite(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let request = request_dto(cx);
         let action = self
             .dispatch(move |inner| {
@@ -340,114 +306,42 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
         apply_request_action(cx, action, self.inner.host.capabilities())
     }
 
-    async fn on_upstream_request(&self, cx: &mut UpstreamRequestContext<'_>) -> PluginResult {
-        let request = upstream_request_dto(cx);
-        let action = self
-            .dispatch(move |inner| {
-                inner.call_upstream_request(request).map(|action| {
-                    let outcome = classify_action(&action);
-                    (action, outcome)
-                })
-            })
-            .await?;
-        apply_upstream_action(cx, action, self.inner.host.capabilities())
-    }
-
-    async fn on_request_buffer(
-        &self,
-        cx: &mut RequestBodyContext<'_>,
-        body: Bytes,
-    ) -> Result<Bytes, PluginError> {
-        if !self
-            .inner
-            .host
-            .capabilities()
-            .contains(&Capability::RequestBody)
-        {
-            return Ok(body);
-        }
-        self.ensure_body_size(body.len())?;
-        let request = request_body_dto(cx);
-        let body = body.to_vec();
-        let action = self
-            .dispatch(move |inner| {
-                inner.call_request_body(request, body).map(|action| {
-                    let outcome = classify_request_body(&action);
-                    (action, outcome)
-                })
-            })
-            .await?;
-        apply_request_body_action(cx, action, self.inner.host.capabilities())
-    }
-
-    async fn on_response_buffer(
-        &self,
-        cx: &mut ResponseBodyContext<'_>,
-        body: Bytes,
-    ) -> Result<Bytes, PluginError> {
+    async fn body_filter(&self, cx: &mut BodyFilterContext<'_>) -> Result<(), PluginError> {
         if !self
             .inner
             .host
             .capabilities()
             .contains(&Capability::ResponseBody)
         {
-            return Ok(body);
+            return Ok(());
         }
-        self.ensure_body_size(body.len())?;
-        let response = response_body_dto(cx);
-        let body = body.to_vec();
-        let action = self
-            .dispatch(move |inner| {
-                inner.call_response_buffer(response, body).map(|action| {
-                    let outcome = classify_body(&action);
-                    (action, outcome)
-                })
-            })
-            .await?;
-        apply_body_action(action, self.inner.host.capabilities())
-    }
-
-    async fn on_response_body(
-        &self,
-        cx: &BodyContext<'_>,
-        chunk: Bytes,
-    ) -> Result<Bytes, PluginError> {
-        if !self
-            .inner
-            .host
-            .capabilities()
-            .contains(&Capability::ResponseBody)
-        {
-            return Ok(chunk);
+        let chunk = cx.chunk.take();
+        if let Some(chunk) = &chunk {
+            self.ensure_body_size(chunk.len())?;
         }
-        self.ensure_body_size(chunk.len())?;
-        let info = body_info(cx);
-        let chunk = chunk.to_vec();
-        let action = self
+        let info = wit::BodyInfo {
+            request_id: cx.request_id.to_string(),
+            status: cx.status.as_u16(),
+            headers: header_pairs(cx.headers),
+            consumer_id: cx.consumer_id.map(str::to_string),
+            route_id: cx.route.id.clone(),
+            service_id: cx.service.id.clone(),
+            target_url: cx.target_url.to_string(),
+        };
+        let chunk = chunk.map(|chunk| chunk.to_vec());
+        let eof = cx.eof;
+        let output = self
             .dispatch(move |inner| {
-                inner.call_response_chunk(info, chunk).map(|action| {
-                    let outcome = classify_body(&action);
-                    (action, outcome)
-                })
+                inner
+                    .call_body_filter(info, chunk, eof)
+                    .map(|chunk| (chunk, Outcome::Continue))
             })
             .await?;
-        apply_body_action(action, self.inner.host.capabilities())
+        cx.chunk = output.map(Bytes::from);
+        Ok(())
     }
 
-    async fn on_error(&self, cx: &mut ErrorContext<'_>) -> PluginResult {
-        let error = error_dto(cx);
-        let action = self
-            .dispatch(move |inner| {
-                inner.call_error(error).map(|action| {
-                    let outcome = classify_error(&action);
-                    (action, outcome)
-                })
-            })
-            .await?;
-        apply_error_action(action)
-    }
-
-    async fn on_log(&self, cx: &LogContext<'_>) {
+    async fn log(&self, cx: &LogContext<'_>) {
         let started = Instant::now();
         let entry = log_dto(cx);
         let inner = self.inner.clone();
@@ -470,29 +364,6 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
                 tracing::warn!(plugin = %self.inner.manifest.name, %error, "wasm log task failed");
             }
         }
-    }
-
-    async fn on_event(&self, event: &GatewayEvent) -> Result<(), PluginError> {
-        let event = wit::Event {
-            id: event.id.clone(),
-            topic: event.topic.clone(),
-            source: event.source.clone(),
-            timestamp: event.timestamp,
-            payload_json: event.payload.to_string(),
-        };
-        self.dispatch(move |inner| inner.call_event(event).map(|()| ((), Outcome::Continue)))
-            .await
-    }
-
-    async fn on_job(&self, job: &JobInvocation) -> Result<(), PluginError> {
-        let job = wit::Job {
-            id: job.id.clone(),
-            name: job.name.clone(),
-            scheduled_for: job.scheduled_for,
-            attempt: job.attempt,
-        };
-        self.dispatch(move |inner| inner.call_job(job).map(|()| ((), Outcome::Continue)))
-            .await
     }
 }
 
@@ -572,66 +443,6 @@ impl WasmPluginInner {
         })
     }
 
-    fn call_upstream_request(
-        &self,
-        request: wit::UpstreamRequest,
-    ) -> Result<wit::Action, WasmCallError> {
-        let request_id = request.request_id.clone();
-        self.invoke(&request_id, |store, bindings| {
-            bindings
-                .octra_api_plugin_plugin_api()
-                .call_on_upstream_request(store, &request)
-        })
-    }
-
-    fn call_request_body(
-        &self,
-        request: wit::Request,
-        body: Vec<u8>,
-    ) -> Result<wit::RequestBodyAction, WasmCallError> {
-        let request_id = request.request_id.clone();
-        self.invoke(&request_id, |store, bindings| {
-            bindings
-                .octra_api_plugin_plugin_api()
-                .call_on_request_body(store, &request, &body)
-        })
-    }
-
-    fn call_response_buffer(
-        &self,
-        response: wit::Response,
-        body: Vec<u8>,
-    ) -> Result<wit::BodyAction, WasmCallError> {
-        let request_id = response.request_id.clone();
-        self.invoke(&request_id, |store, bindings| {
-            bindings
-                .octra_api_plugin_plugin_api()
-                .call_on_response_buffer(store, &response, &body)
-        })
-    }
-
-    fn call_response_chunk(
-        &self,
-        info: wit::BodyInfo,
-        chunk: Vec<u8>,
-    ) -> Result<wit::BodyAction, WasmCallError> {
-        let request_id = info.request_id.clone();
-        self.invoke(&request_id, |store, bindings| {
-            bindings
-                .octra_api_plugin_plugin_api()
-                .call_on_response_chunk(store, &info, &chunk)
-        })
-    }
-
-    fn call_error(&self, error: wit::ErrorInfo) -> Result<wit::ErrorAction, WasmCallError> {
-        let request_id = error.request_id.clone();
-        self.invoke(&request_id, |store, bindings| {
-            bindings
-                .octra_api_plugin_plugin_api()
-                .call_on_error(store, &error)
-        })
-    }
-
     fn call_admin(&self, request: wit::AdminRequest) -> Result<wit::AdminResponse, WasmCallError> {
         let _permit = self.gate.acquire();
         let request_id = request.request_id.clone();
@@ -642,7 +453,7 @@ impl WasmPluginInner {
         })
     }
 
-    fn call_request(
+    fn call_access(
         &self,
         request: wit::Request,
         auth: Option<wit::AuthIdentity>,
@@ -663,7 +474,7 @@ impl WasmPluginInner {
             let result = instance
                 .bindings
                 .octra_api_plugin_plugin_api()
-                .call_on_request(&mut instance.store, &request);
+                .call_on_access(&mut instance.store, &request);
             let pending = instance.store.data_mut().take_pending_auth();
             (result, pending)
         };
@@ -701,6 +512,35 @@ impl WasmPluginInner {
         }
     }
 
+    fn call_body_filter(
+        &self,
+        info: wit::BodyInfo,
+        chunk: Option<Vec<u8>>,
+        eof: bool,
+    ) -> Result<Option<Vec<u8>>, WasmCallError> {
+        let _permit = self.gate.acquire();
+        let mut guard = self.instance.lock();
+        let result = {
+            let Some(instance) = guard.as_mut() else {
+                return Err(WasmCallError::Unavailable);
+            };
+            arm(&mut instance.store, &self.limits)?;
+            instance.store.data_mut().request_id = info.request_id.clone();
+            instance
+                .bindings
+                .octra_api_plugin_plugin_api()
+                .call_on_body_filter(&mut instance.store, &info, chunk.as_deref(), eof)
+        };
+        match result {
+            Ok(Ok(chunk)) => Ok(chunk),
+            Ok(Err(message)) => Err(WasmCallError::Plugin(message)),
+            Err(error) => {
+                *guard = None;
+                Err(WasmCallError::Trap(error.to_string()))
+            }
+        }
+    }
+
     fn call_log(&self, entry: wit::LogEntry) -> Result<(), WasmCallError> {
         let _permit = self.gate.acquire();
         let mut guard = self.instance.lock();
@@ -722,23 +562,6 @@ impl WasmPluginInner {
                 Err(WasmCallError::Trap(error.to_string()))
             }
         }
-    }
-    fn call_event(&self, event: wit::Event) -> Result<(), WasmCallError> {
-        let id = event.id.clone();
-        self.invoke(&id, |store, bindings| {
-            bindings
-                .octra_api_plugin_plugin_api()
-                .call_on_event(store, &event)
-        })
-    }
-
-    fn call_job(&self, job: wit::Job) -> Result<(), WasmCallError> {
-        let id = job.id.clone();
-        self.invoke(&id, |store, bindings| {
-            bindings
-                .octra_api_plugin_plugin_api()
-                .call_on_job(store, &job)
-        })
     }
 }
 
@@ -766,6 +589,7 @@ fn request_dto(cx: &RequestContext<'_>) -> wit::Request {
         consumer_id: cx.consumer_id.map(str::to_string),
         route_id: cx.route.id.clone(),
         service_id: cx.service.id.clone(),
+        body: cx.state.request_body.as_ref().map(|body| body.to_vec()),
     }
 }
 
@@ -805,94 +629,10 @@ fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
-fn upstream_request_dto(cx: &UpstreamRequestContext<'_>) -> wit::UpstreamRequest {
-    wit::UpstreamRequest {
-        request_id: cx.request_id.to_string(),
-        method: cx.method.as_str().to_string(),
-        path: cx.uri.path().to_string(),
-        query: cx.uri.query().unwrap_or("").to_string(),
-        headers: header_pairs(cx.headers),
-        consumer_id: cx.consumer_id.map(str::to_string),
-        route_id: cx.route.id.clone(),
-        service_id: cx.service.id.clone(),
-        target_url: cx.target_url.to_string(),
-    }
-}
-
-fn request_body_dto(cx: &RequestBodyContext<'_>) -> wit::Request {
-    wit::Request {
-        request_id: cx.request_id.to_string(),
-        method: cx.method.as_str().to_string(),
-        path: cx.uri.path().to_string(),
-        query: cx.uri.query().unwrap_or("").to_string(),
-        headers: header_pairs(cx.headers),
-        client_ip: None,
-        consumer_id: cx.consumer_id.map(str::to_string),
-        route_id: cx.route.id.clone(),
-        service_id: cx.service.id.clone(),
-    }
-}
-
-fn response_body_dto(cx: &ResponseBodyContext<'_>) -> wit::Response {
-    wit::Response {
-        request_id: cx.request_id.to_string(),
-        status: cx.status.as_u16(),
-        headers: header_pairs(cx.headers),
-        consumer_id: cx.consumer_id.map(str::to_string),
-        route_id: cx.route.id.clone(),
-        service_id: cx.service.id.clone(),
-    }
-}
-
-fn body_info(cx: &BodyContext<'_>) -> wit::BodyInfo {
-    wit::BodyInfo {
-        request_id: cx.request_id.to_string(),
-        route_id: cx.route.id.clone(),
-        service_id: cx.service.id.clone(),
-        target_url: cx.target_url.to_string(),
-    }
-}
-
-fn error_dto(cx: &ErrorContext<'_>) -> wit::ErrorInfo {
-    wit::ErrorInfo {
-        request_id: cx.request_id.to_string(),
-        method: cx.method.as_str().to_string(),
-        path: cx.uri.path().to_string(),
-        query: cx.uri.query().unwrap_or("").to_string(),
-        headers: header_pairs(cx.headers),
-        consumer_id: cx.consumer_id.map(str::to_string),
-        route_id: cx.route.id.clone(),
-        service_id: cx.service.id.clone(),
-        target_url: cx.target_url.to_string(),
-        message: cx.error.to_string(),
-    }
-}
-
 fn classify_action(action: &wit::Action) -> Outcome {
     match action {
         wit::Action::Reject(_) => Outcome::Reject,
         wit::Action::Continue(_) => Outcome::Continue,
-    }
-}
-
-fn classify_request_body(action: &wit::RequestBodyAction) -> Outcome {
-    match action {
-        wit::RequestBodyAction::Reject(_) => Outcome::Reject,
-        wit::RequestBodyAction::Continue(_) => Outcome::Continue,
-    }
-}
-
-fn classify_body(action: &wit::BodyAction) -> Outcome {
-    match action {
-        wit::BodyAction::Reject(_) => Outcome::Reject,
-        wit::BodyAction::Continue(_) => Outcome::Continue,
-    }
-}
-
-fn classify_error(action: &wit::ErrorAction) -> Outcome {
-    match action {
-        wit::ErrorAction::Respond(_) => Outcome::Reject,
-        wit::ErrorAction::Continue => Outcome::Continue,
     }
 }
 
@@ -996,129 +736,6 @@ fn identity_error(message: impl Into<String>) -> PluginError {
     PluginError::fail_closed(message.into())
 }
 
-fn apply_upstream_action(
-    cx: &mut UpstreamRequestContext<'_>,
-    action: wit::Action,
-    capabilities: &[Capability],
-) -> PluginResult {
-    match action {
-        wit::Action::Continue(mutation) => {
-            apply_upstream_mutation(cx, mutation, capabilities)?;
-            Ok(PluginAction::Continue)
-        }
-        wit::Action::Reject(reject) => Ok(PluginAction::ShortCircuit(build_reject(reject)?)),
-    }
-}
-
-fn apply_upstream_mutation(
-    cx: &mut UpstreamRequestContext<'_>,
-    mutation: wit::RequestMutation,
-    capabilities: &[Capability],
-) -> Result<(), PluginError> {
-    let mutates = mutation.path.is_some()
-        || mutation.query.is_some()
-        || !mutation.set_headers.is_empty()
-        || !mutation.remove_headers.is_empty();
-    if mutates && !capabilities.contains(&Capability::RequestHeaders) {
-        return Err(PluginError::fail_closed(
-            "plugin mutated the upstream request without the request_headers capability",
-        ));
-    }
-
-    if mutation.path.is_some() || mutation.query.is_some() {
-        let path = mutation.path.unwrap_or_else(|| cx.uri.path().to_string());
-        let query = mutation
-            .query
-            .unwrap_or_else(|| cx.uri.query().unwrap_or("").to_string());
-        let path_and_query = if query.is_empty() {
-            path
-        } else {
-            format!("{path}?{query}")
-        };
-        let uri: Uri = path_and_query.parse().map_err(|error| {
-            PluginError::fail_closed(format!("plugin returned an invalid URI: {error}"))
-        })?;
-        *cx.uri = uri;
-    }
-
-    apply_headers(cx.headers, mutation.set_headers, mutation.remove_headers)
-}
-
-fn apply_request_body_action(
-    cx: &mut RequestBodyContext<'_>,
-    action: wit::RequestBodyAction,
-    capabilities: &[Capability],
-) -> Result<Bytes, PluginError> {
-    match action {
-        wit::RequestBodyAction::Continue(result) => {
-            if !capabilities.contains(&Capability::RequestBody) {
-                return Err(PluginError::fail_closed(
-                    "plugin read the request body without the request_body capability",
-                ));
-            }
-            if (!result.set_headers.is_empty() || !result.remove_headers.is_empty())
-                && !capabilities.contains(&Capability::RequestHeaders)
-            {
-                return Err(PluginError::fail_closed(
-                    "plugin mutated request headers without the request_headers capability",
-                ));
-            }
-            apply_headers(cx.headers, result.set_headers, result.remove_headers)?;
-            Ok(Bytes::from(result.body))
-        }
-        wit::RequestBodyAction::Reject(reject) => Err(PluginError::fail_closed(format!(
-            "plugin rejected the request body with status {}",
-            reject.status
-        ))),
-    }
-}
-
-fn apply_body_action(
-    action: wit::BodyAction,
-    capabilities: &[Capability],
-) -> Result<Bytes, PluginError> {
-    match action {
-        wit::BodyAction::Continue(body) => {
-            if !capabilities.contains(&Capability::ResponseBody) {
-                return Err(PluginError::fail_closed(
-                    "plugin read the response body without the response_body capability",
-                ));
-            }
-            Ok(Bytes::from(body))
-        }
-        wit::BodyAction::Reject(reject) => Err(PluginError::fail_closed(format!(
-            "plugin rejected the response body with status {}",
-            reject.status
-        ))),
-    }
-}
-
-fn apply_error_action(action: wit::ErrorAction) -> PluginResult {
-    match action {
-        wit::ErrorAction::Continue => Ok(PluginAction::Continue),
-        wit::ErrorAction::Respond(reject) => Ok(PluginAction::ShortCircuit(build_reject(reject)?)),
-    }
-}
-
-fn apply_headers(
-    headers: &mut HeaderMap,
-    set: Vec<(String, String)>,
-    remove: Vec<String>,
-) -> Result<(), PluginError> {
-    for (name, value) in set {
-        let name = parse_header_name(&name)?;
-        let value = HeaderValue::from_str(&value).map_err(|error| {
-            PluginError::fail_closed(format!("plugin returned an invalid header value: {error}"))
-        })?;
-        headers.insert(name, value);
-    }
-    for name in remove {
-        let name = parse_header_name(&name)?;
-        headers.remove(&name);
-    }
-    Ok(())
-}
-
 fn apply_request_action(
     cx: &mut RequestContext<'_>,
     action: wit::Action,
@@ -1158,6 +775,7 @@ fn apply_request_mutation(
         || mutation.query.is_some()
         || !mutation.set_headers.is_empty()
         || !mutation.remove_headers.is_empty();
+    let next_body = mutation.body;
     if mutates && !capabilities.contains(&Capability::RequestHeaders) {
         return Err(PluginError::fail_closed(
             "plugin mutated the request without the request_headers capability",
@@ -1186,6 +804,14 @@ fn apply_request_mutation(
             PluginError::fail_closed(format!("plugin returned an invalid header value: {error}"))
         })?;
         cx.headers.insert(name, value);
+    }
+    if let Some(body) = next_body {
+        if !capabilities.contains(&Capability::RequestBody) {
+            return Err(PluginError::fail_closed(
+                "plugin replaced the request body without the request_body capability",
+            ));
+        }
+        cx.set_request_body(Bytes::from(body));
     }
     for name in mutation.remove_headers {
         let name = parse_header_name(&name)?;
@@ -1305,8 +931,6 @@ mod tests {
             headers: Default::default(),
             strip_path: false,
             preserve_host: false,
-            request_buffering: true,
-            response_buffering: true,
             regex_priority: 0,
             service_id: None,
             enabled: true,
@@ -1378,6 +1002,7 @@ mod tests {
             query: Some("y=2".to_string()),
             set_headers: vec![("x-new".to_string(), "yes".to_string())],
             remove_headers: vec!["x-old".to_string()],
+            body: None,
         };
         apply_request_mutation(&mut cx, mutation, &[Capability::RequestHeaders]).unwrap();
         assert_eq!(cx.uri.path(), "/new");
@@ -1412,6 +1037,7 @@ mod tests {
             query: None,
             set_headers: vec![("x-new".to_string(), "yes".to_string())],
             remove_headers: Vec::new(),
+            body: None,
         };
         assert!(apply_request_mutation(&mut cx, mutation, &[]).is_err());
     }
@@ -1648,68 +1274,6 @@ mod tests {
     }
 
     #[test]
-    fn applies_upstream_mutations_with_capability() {
-        let mut uri: Uri = "/old?x=1".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert("x-old", HeaderValue::from_static("1"));
-        let mut state = GatewayState::default();
-        let route = route();
-        let service = service();
-        let method = Method::GET;
-        let mut cx = UpstreamRequestContext {
-            request_id: "req",
-            state: &mut state,
-            method: &method,
-            uri: &mut uri,
-            headers: &mut headers,
-            consumer_id: None,
-            route: &route,
-            service: &service,
-            target_url: "http://up",
-        };
-        let mutation = wit::RequestMutation {
-            path: Some("/new".to_string()),
-            query: Some("y=2".to_string()),
-            set_headers: vec![("x-new".to_string(), "yes".to_string())],
-            remove_headers: vec!["x-old".to_string()],
-        };
-        apply_upstream_mutation(&mut cx, mutation, &[Capability::RequestHeaders]).unwrap();
-
-        assert_eq!(cx.uri.path(), "/new");
-        assert_eq!(cx.uri.query(), Some("y=2"));
-        assert_eq!(cx.headers.get("x-new").unwrap().to_str().unwrap(), "yes");
-        assert!(cx.headers.get("x-old").is_none());
-    }
-
-    #[test]
-    fn rejects_upstream_mutations_without_capability() {
-        let mut uri: Uri = "/old".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        let mut state = GatewayState::default();
-        let route = route();
-        let service = service();
-        let method = Method::GET;
-        let mut cx = UpstreamRequestContext {
-            request_id: "req",
-            state: &mut state,
-            method: &method,
-            uri: &mut uri,
-            headers: &mut headers,
-            consumer_id: None,
-            route: &route,
-            service: &service,
-            target_url: "http://up",
-        };
-        let mutation = wit::RequestMutation {
-            path: None,
-            query: None,
-            set_headers: vec![("x-new".to_string(), "yes".to_string())],
-            remove_headers: Vec::new(),
-        };
-        assert!(apply_upstream_mutation(&mut cx, mutation, &[]).is_err());
-    }
-
-    #[test]
     fn applies_response_mutations_with_capability() {
         let mut status = StatusCode::OK;
         let mut headers = HeaderMap::new();
@@ -1766,53 +1330,5 @@ mod tests {
             remove_headers: Vec::new(),
         };
         assert!(apply_response_mutation(&mut cx, mutation, &[]).is_err());
-    }
-
-    #[test]
-    fn requires_body_and_header_capabilities_for_body_actions() {
-        let mut uri: Uri = "/".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        let mut state = GatewayState::default();
-        let route = route();
-        let service = service();
-        let method = Method::POST;
-        let mut cx = RequestBodyContext {
-            request_id: "req",
-            state: &mut state,
-            method: &method,
-            uri: &mut uri,
-            headers: &mut headers,
-            consumer_id: None,
-            route: &route,
-            service: &service,
-        };
-
-        let action = wit::RequestBodyAction::Continue(wit::RequestBodyResult {
-            body: b"body".to_vec(),
-            set_headers: Vec::new(),
-            remove_headers: Vec::new(),
-        });
-        assert!(apply_request_body_action(&mut cx, action, &[]).is_err());
-
-        let action = wit::RequestBodyAction::Continue(wit::RequestBodyResult {
-            body: b"body".to_vec(),
-            set_headers: vec![("x-new".to_string(), "yes".to_string())],
-            remove_headers: Vec::new(),
-        });
-        assert!(apply_request_body_action(&mut cx, action, &[Capability::RequestBody]).is_err());
-
-        let action = wit::RequestBodyAction::Continue(wit::RequestBodyResult {
-            body: b"body".to_vec(),
-            set_headers: vec![("x-new".to_string(), "yes".to_string())],
-            remove_headers: Vec::new(),
-        });
-        let body = apply_request_body_action(
-            &mut cx,
-            action,
-            &[Capability::RequestBody, Capability::RequestHeaders],
-        )
-        .unwrap();
-        assert_eq!(body, Bytes::from_static(b"body"));
-        assert_eq!(cx.headers.get("x-new").unwrap().to_str().unwrap(), "yes");
     }
 }

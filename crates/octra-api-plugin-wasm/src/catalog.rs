@@ -75,7 +75,7 @@ mod tests {
                 "priority": priority,
                 "description": "",
                 "capabilities": [],
-                "api_version": "2"
+                "api_version": "3"
             })
             .to_string(),
         )

@@ -126,8 +126,6 @@ fn route() -> Route {
         headers: Default::default(),
         strip_path: false,
         preserve_host: false,
-        request_buffering: true,
-        response_buffering: true,
         regex_priority: 0,
         service_id: None,
         enabled: true,
@@ -207,7 +205,7 @@ async fn consumer_quota_enforces_the_limit_end_to_end() {
             route: &route,
             service: &service,
         };
-        match plugin.on_request(&mut cx).await.unwrap() {
+        match plugin.access(&mut cx).await.unwrap() {
             PluginAction::Continue => {}
             PluginAction::ShortCircuit(response) => panic!("unexpected rejection: {response:?}"),
         }
@@ -237,7 +235,7 @@ async fn consumer_quota_enforces_the_limit_end_to_end() {
         route: &route,
         service: &service,
     };
-    match plugin.on_request(&mut cx).await.unwrap() {
+    match plugin.access(&mut cx).await.unwrap() {
         PluginAction::ShortCircuit(response) => {
             assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
             let retry_after: u64 = response
