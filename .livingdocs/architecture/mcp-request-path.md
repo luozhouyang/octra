@@ -37,13 +37,15 @@ flowchart LR
 - `POST /mcp` accepts a JSON-RPC request, notification, or batch. A notification with no reply returns `202 Accepted`; a request returns a JSON or batch response.
 - `initialize` negotiates a protocol version from `2025-06-18`, `2025-03-26`, and `2024-11-05`, creates an Octra session row, and returns `Mcp-Session-Id`. The session is anchored to the first enabled server because `mcp_sessions.server_id` is non-null.
 - Every request other than `initialize` must carry the session header. `ping`, `tools/list`, and `tools/call` validate it.
-- `GET /mcp` holds an SSE channel with a 15-second keepalive. Octra does not push server-initiated notifications yet.
+- `GET /mcp` holds an SSE channel with a 15-second keepalive and forwards upstream `notifications/tools/list_changed` after refreshing the catalog. Notification delivery is per endpoint, not replayed.
+- Browser requests with an untrusted `Origin` are rejected; `mcp.allowed_origins` extends the loopback default. POST bodies must use `application/json`.
 - `DELETE /mcp` terminates the session; later requests with the same id fail.
 
 ## Authentication and ACL
 
-- MCP API keys are read from `Authorization: Bearer` or `X-API-Key`; only a display prefix and SHA-256 hash are stored. With no enabled keys, the loopback-local default is open.
+- MCP API keys are read from `Authorization: Bearer` or `X-API-Key`; only a display prefix and SHA-256 hash are stored. With no key ever configured, the loopback-local default is open; once a key exists, disabling or expiring the last key fails closed. `mcp.require_key` forces authentication even before the first key is created.
 - A key maps to an optional consumer. A tool with no ACL rows follows the open-local ACL default (allow); a tool with ACL rows is callable only by a consumer holding an allow rule. Anonymous callers are denied when ACL rows exist.
+- Aggregate `/mcp` and listener endpoints only expose servers whose effective auth strategy matches the endpoint's. A server pinned to a different OIDC strategy is addressable only through its own `/mcp/<server>` route.
 - Every denial is recorded as an invocation row with the denied status and the error message.
 
 ## Tool discovery and naming

@@ -16,6 +16,9 @@ max_body_bytes = 33554432
 [llm]
 request_timeout_secs = 120
 stream_idle_timeout_secs = 120
+# Require a live virtual key even before any key exists. Keep false only for a
+# loopback-only development installation.
+# require_key = false
 # Optional OpenAI-compatible embedding endpoint for semantic routing.
 # [llm.semantic_embedding]
 # base_url = "http://127.0.0.1:11434/v1"
@@ -26,6 +29,10 @@ stream_idle_timeout_secs = 120
 [mcp]
 request_timeout_secs = 60
 tool_call_timeout_secs = 120
+# Require an MCP API key or OIDC token even before any key exists.
+# require_key = false
+# Browser origins allowed in addition to loopback.
+# allowed_origins = []
 
 [storage]
 path = "octra.db"

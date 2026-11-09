@@ -162,8 +162,9 @@ shows a sandbox banner, and preview never writes anything.
 - Agent configuration backups keep the exact original file so a restore is lossless. Those files may contain credentials, so the database and its WAL sidecars are created with `0600` permissions and only the newest 20 backups per agent are kept. The control plane never returns backup content.
 - Applied agent configurations contain the virtual key by design; the control plane never returns it again.
 - The control plane enforces authentication and binds to loopback by default.
-- The data plane binds to loopback by default; API keys are optional per service, and LLM/MCP keys are enforced once configured.
-- Provider secrets resolve from `env:` or `file:` references at request time and are never logged.
+- The data plane binds to loopback by default; API keys are optional per service. Once an LLM/MCP key has been configured, disabling or expiring the last key fails closed; `llm.require_key` and `mcp.require_key` force authentication even before the first key exists.
+- API paths containing raw or encoded dot segments are rejected before route matching, and MCP browser requests with an untrusted `Origin` are rejected. The API gateway honours `preserve_host`.
+- Provider secrets resolve from `env:` or `file:` references at request time and are never logged. KeyAuth/JWT/BasicAuth list and get responses expose only redacted metadata; generated KeyAuth plaintext is returned once on create.
 - The daemon is not embedded in the Tauri main process, so it can run and be tested standalone.
 - This is still a development build; secrets, permissions, and packaging must be hardened before production use.
 
