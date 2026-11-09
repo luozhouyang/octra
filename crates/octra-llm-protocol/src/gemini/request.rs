@@ -356,10 +356,7 @@ pub fn encode_request(request: &ChatRequest) -> ProtocolResult<Value> {
                 for block in &message.assistant {
                     match block {
                         AssistantContent::Text { text } => parts.push(json!({"text": text})),
-                        AssistantContent::Reasoning {
-                            text,
-                            signature,
-                        } => {
+                        AssistantContent::Reasoning { text, signature } => {
                             let mut part = json!({"text": text, "thought": true});
                             if let Some(signature) = signature {
                                 part["thoughtSignature"] = json!(signature);

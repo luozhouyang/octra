@@ -139,7 +139,11 @@ async fn sets_sticky_cookie_and_honors_it_on_follow_up_requests() {
     );
     let cookies = set_cookies(&headers);
     assert_eq!(cookies.len(), 2);
-    assert!(cookies.iter().any(|cookie| cookie.ends_with("; Path=/api; HttpOnly; SameSite=Lax")));
+    assert!(
+        cookies
+            .iter()
+            .any(|cookie| cookie.ends_with("; Path=/api; HttpOnly; SameSite=Lax"))
+    );
     let (target, signature) = cookie_pair(&cookies, "session");
     assert_eq!(target, selected);
 
@@ -198,7 +202,9 @@ async fn resets_invalid_sticky_cookie_to_the_selected_target() {
     let mut tampered_request = get("/");
     tampered_request.headers_mut().insert(
         header::COOKIE,
-        header_default(&format!("session={selected}tampered; session.sig={signature}")),
+        header_default(&format!(
+            "session={selected}tampered; session.sig={signature}"
+        )),
     );
     let (status, headers, _) = gateway.send(tampered_request).await;
     assert_eq!(status, StatusCode::CREATED);
