@@ -94,6 +94,48 @@ async fn upstream_host_header_overrides_the_target_authority() {
 }
 
 #[tokio::test]
+async fn route_response_buffering_false_skips_body_plugins() {
+    let (addr, _calls) = spawn_mock("a").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-stream",
+        &format!("http://{addr}"),
+        false,
+        "/api",
+        true,
+    )
+    .await;
+    service_plugin(
+        &gateway.storage,
+        "svc-stream",
+        "response-transformer",
+        serde_json::json!({"add": {"json": ["injected:true"]}}),
+    )
+    .await;
+    gateway
+        .storage
+        .api
+        .update_route(
+            "svc-stream-route",
+            &octra_api_core::UpdateRoute {
+                response_buffering: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    gateway.reload().await;
+
+    let (status, _, json) = gateway.send(request("GET", "/api/buffering")).await;
+    assert_eq!(status, StatusCode::CREATED, "{json}");
+    assert!(
+        json.get("injected").is_none(),
+        "response-body plugin must not run when route buffering is disabled: {json}"
+    );
+}
+
+#[tokio::test]
 async fn round_robins_across_two_targets() {
     let (addr_a, _calls_a) = spawn_mock("a").await;
     let (addr_b, _calls_b) = spawn_mock("b").await;

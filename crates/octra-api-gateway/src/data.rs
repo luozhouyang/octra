@@ -456,7 +456,10 @@ pub async fn proxy(
     )
     .unwrap_or(usize::MAX);
     attempts.truncate(attempts.len().min(retry_limit));
-    if !is_idempotent(method.as_str()) {
+    // A non-idempotent method cannot be replayed. Without request buffering the
+    // body cannot be replayed for an idempotent method either, so both keep a
+    // single attempt.
+    if !is_idempotent(method.as_str()) || !dispatch.route.route.request_buffering {
         attempts.truncate(1);
     }
 
@@ -559,7 +562,16 @@ pub async fn proxy(
         .await;
     }
 
-    let request_body_plugins = pre_chain.needs_request_body() || post_chain.needs_request_body();
+    let request_body_plugins = dispatch.route.route.request_buffering
+        && (pre_chain.needs_request_body() || post_chain.needs_request_body());
+    if !dispatch.route.route.request_buffering
+        && (pre_chain.needs_request_body() || post_chain.needs_request_body())
+    {
+        tracing::warn!(
+            route = %dispatch.route.route.id,
+            "route disables request buffering; body-mutating plugins are skipped"
+        );
+    }
     let payload = if let Some(bytes) = early_body {
         RequestBody::Buffered(bytes)
     } else if attempts.len() > 1 || request_body_plugins {
@@ -705,8 +717,16 @@ pub async fn proxy(
                 }
             }
 
-            let response_body_plugins =
-                pre_chain.needs_response_body() || post_chain.needs_response_body();
+            let response_body_plugins = dispatch.route.route.response_buffering
+                && (pre_chain.needs_response_body() || post_chain.needs_response_body());
+            if !dispatch.route.route.response_buffering
+                && (pre_chain.needs_response_body() || post_chain.needs_response_body())
+            {
+                tracing::warn!(
+                    route = %dispatch.route.route.id,
+                    "route disables response buffering; response-body plugins are skipped"
+                );
+            }
             let response_body = if response_body_plugins {
                 match axum::body::to_bytes(response_body, max_body).await {
                     Ok(bytes) => {

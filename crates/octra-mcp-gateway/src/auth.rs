@@ -99,6 +99,10 @@ struct CachedJwks {
     fetched_at: Instant,
 }
 
+const MAX_JWKS_ENTRIES: usize = 256;
+const MAX_DISCOVERY_ENTRIES: usize = 256;
+const MAX_INTROSPECTION_ENTRIES: usize = 4_096;
+
 static JWKS_CACHE: OnceLock<Mutex<HashMap<String, CachedJwks>>> = OnceLock::new();
 
 fn jwks_cache() -> &'static Mutex<HashMap<String, CachedJwks>> {
@@ -610,6 +614,9 @@ async fn introspection_request(
         Some(client) => client.clone(),
         None => reqwest::Client::new(),
     };
+    crate::net_guard::ensure_safe_url(endpoint)
+        .await
+        .map_err(AuthError::Jwks)?;
     let mut request = client
         .post(endpoint)
         .form(&[("token", token), ("token_type_hint", "access_token")]);
@@ -689,6 +696,13 @@ fn insert_introspection(key: (String, String), outcome: IntrospectionOutcome, tt
         return;
     }
     if let Ok(mut cache) = introspection_cache().lock() {
+        if cache.len() >= MAX_INTROSPECTION_ENTRIES {
+            let now = Instant::now();
+            cache.retain(|_, entry| entry.expires_at > now);
+            if cache.len() >= MAX_INTROSPECTION_ENTRIES {
+                cache.clear();
+            }
+        }
         cache.insert(
             key,
             CachedIntrospection {
@@ -763,6 +777,9 @@ async fn fetch_discovery(
         }
     }
 
+    crate::net_guard::ensure_safe_url(&url)
+        .await
+        .map_err(AuthError::Jwks)?;
     let client = match http {
         Some(client) => client.clone(),
         None => reqwest::Client::new(),
@@ -804,6 +821,9 @@ async fn fetch_discovery(
     }
 
     if let Ok(mut cache) = discovery_cache().lock() {
+        if cache.len() >= MAX_DISCOVERY_ENTRIES {
+            cache.clear();
+        }
         cache.insert(
             url,
             CachedDiscovery {
@@ -855,6 +875,9 @@ async fn fetch_jwks(
         }
     }
 
+    crate::net_guard::ensure_safe_url(uri)
+        .await
+        .map_err(AuthError::Jwks)?;
     let client = match http {
         Some(client) => client.clone(),
         None => reqwest::Client::new(),
@@ -883,6 +906,9 @@ async fn fetch_jwks(
     let Ok(mut cache) = jwks_cache().lock() else {
         return Err(AuthError::Jwks("JWKS cache lock is poisoned".to_string()));
     };
+    if cache.len() >= MAX_JWKS_ENTRIES {
+        cache.clear();
+    }
     cache.insert(
         uri.to_string(),
         CachedJwks {
