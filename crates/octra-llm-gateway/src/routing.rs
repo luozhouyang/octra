@@ -324,6 +324,11 @@ impl RoundRobin {
 }
 
 impl RoutePlan {
+    /// All targets, including fallback entries, in routing order.
+    pub fn targets(&self) -> impl Iterator<Item = &Target> {
+        self.rounds.iter().flatten().chain(self.fallback.iter())
+    }
+
     pub fn compile(
         data: &LlmRuntimeData,
         route: &LlmRouteRecord,

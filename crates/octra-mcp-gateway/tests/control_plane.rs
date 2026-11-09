@@ -44,6 +44,15 @@ async fn server_crud_validates_and_reports_conflicts() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
+    let (status, body) = gateway
+        .control(
+            "POST",
+            "/api/v1/mcp/servers",
+            json!({"name": "metadata", "url": "http://169.254.169.254/latest"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
     // An unreachable server is still registered; discovery failures are only
     // logged, so the operator can fix the endpoint and refresh later.
     let (status, body) = gateway

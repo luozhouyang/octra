@@ -444,6 +444,32 @@ impl RuntimeSnapshot {
     }
 
     /// Parsed pricing document for a provider model, when one is configured.
+    /// Worst-case input/output price across a route's targets. Used to reserve
+    /// a pessimistic cost budget before the target is selected.
+    pub fn pricing_ceiling(&self, model: &str) -> (f64, f64) {
+        let Some(plan) = self.routes.get(model) else {
+            return (0.0, 0.0);
+        };
+        plan.targets()
+            .filter_map(|target| self.model_pricing(&target.provider_id, &target.model_id))
+            .fold((0.0, 0.0), |(input, output), pricing| {
+                (
+                    input.max(
+                        pricing
+                            .get("input_per_million")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0),
+                    ),
+                    output.max(
+                        pricing
+                            .get("output_per_million")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0),
+                    ),
+                )
+            })
+    }
+
     pub fn model_pricing(&self, provider_id: &str, model_id: &str) -> Option<serde_json::Value> {
         let model = self
             .data
@@ -636,6 +662,7 @@ pub struct LlmDataState {
     pub plugins: Option<Arc<crate::LlmPluginRuntime>>,
     pub oauth: Arc<crate::credentials::OAuthTokenCache>,
     pub semantic_embedding: Option<Arc<crate::embedding::EmbeddingRuntime>>,
+    pub(crate) vk_reservations: Arc<crate::vk_reservation::VkReservationLedger>,
 }
 
 impl LlmDataState {
@@ -657,6 +684,7 @@ impl LlmDataState {
             plugins: None,
             oauth: Arc::new(crate::credentials::OAuthTokenCache::new(storage)),
             semantic_embedding,
+            vk_reservations: crate::vk_reservation::VkReservationLedger::new(),
         }
     }
 

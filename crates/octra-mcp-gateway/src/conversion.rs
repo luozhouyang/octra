@@ -354,6 +354,7 @@ pub async fn load_document(
         .filter(|url| !url.is_empty())
         .ok_or_else(|| "config.openapi requires document or document_url".to_string())?;
 
+    crate::net_guard::ensure_safe_url(url).await?;
     let fetched = tokio::time::timeout(OPENAPI_FETCH_TIMEOUT, async {
         let mut response = http.get(url).send().await.map_err(fetch_error)?;
         let status = response.status();
@@ -717,6 +718,7 @@ impl<'a> ExternalRefResolver<'a> {
                          no HTTP client is available"
                     )
                 })?;
+                crate::net_guard::ensure_safe_url(url.as_str()).await?;
                 tokio::time::timeout(OPENAPI_FETCH_TIMEOUT, async {
                     let mut response = http.get(url.as_str()).send().await.map_err(|err| {
                         format!(

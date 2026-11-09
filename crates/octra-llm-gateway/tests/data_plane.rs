@@ -1921,11 +1921,13 @@ async fn virtual_key_model_allow_list_blocks_other_models() {
         .unwrap();
     harness.runtime.reload().await.unwrap();
 
+    let mut body = openai_body("octra-default", false);
+    body["max_tokens"] = json!(1);
     let (status, _, body) = post_json(
         harness.data_router(),
         COMPLETION_PATH,
         &[(KEY_HEADER, KEY_VALUE)],
-        openai_body("octra-default", false),
+        body,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -2098,7 +2100,7 @@ async fn virtual_key_token_limit_rejects_before_upstream() {
         .key_with_permissions(
             "limits",
             "octra-governance-key-0001",
-            json!({"limits": [{"window": "day", "tokens": 10}]}),
+            json!({"limits": [{"window": "day", "tokens": 100}]}),
         )
         .await;
     harness
@@ -2168,7 +2170,7 @@ async fn virtual_key_limit_allows_usage_below_the_limit() {
         .key_with_permissions(
             "limits",
             "octra-governance-key-0001",
-            json!({"limits": [{"window": "day", "tokens": 10}]}),
+            json!({"limits": [{"window": "day", "tokens": 100}]}),
         )
         .await;
     harness
@@ -2184,11 +2186,13 @@ async fn virtual_key_limit_allows_usage_below_the_limit() {
         .await
         .unwrap();
 
+    let mut body = openai_body("octra-default", false);
+    body["max_tokens"] = json!(1);
     let (status, _, body) = post_json(
         harness.data_router(),
         COMPLETION_PATH,
         &[(KEY_HEADER, KEY_VALUE)],
-        openai_body("octra-default", false),
+        body,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");

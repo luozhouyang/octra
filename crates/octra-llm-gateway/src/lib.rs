@@ -32,6 +32,7 @@ pub mod similarity;
 pub mod upstream;
 pub mod usage;
 pub mod vk_policy;
+pub mod vk_reservation;
 
 pub use runtime::{LlmControlState, LlmDataState, LlmRuntime, RuntimeSnapshot};
 pub use upstream::Upstream as LlmUpstream;

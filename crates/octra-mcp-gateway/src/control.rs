@@ -318,6 +318,13 @@ async fn validate_server_route(
     candidate: &NewMcpServer,
     exclude_id: Option<&str>,
 ) -> ApiResult<()> {
+    if candidate.transport == Transport::Http
+        && let Some(url) = candidate.url.as_deref()
+    {
+        crate::net_guard::ensure_safe_url_syntax(url)
+            .await
+            .map_err(ApiError::bad_request)?;
+    }
     if let Some(path) = candidate.route_path.as_deref() {
         validate_route_path(path)
             .map_err(|err| ApiError::bad_request(format!("route_path: {err}")))?;

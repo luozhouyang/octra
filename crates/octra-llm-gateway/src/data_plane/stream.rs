@@ -209,6 +209,8 @@ pub struct StreamMeta {
     pub client_ip: Option<std::net::IpAddr>,
     pub user_agent: Option<String>,
     pub intent: Option<String>,
+    /// Keeps the virtual-key budget reservation alive until the stream ends.
+    pub reservation: Option<Arc<crate::vk_reservation::VkReservation>>,
 }
 
 impl StreamMeta {

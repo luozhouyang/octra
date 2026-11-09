@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
-use octra_mcp_core::McpServer;
+use octra_mcp_core::{McpServer, Transport};
 use octra_storage::mcp::DiscoveredTool;
 use serde_json::{Map, Value};
 use tokio::sync::{Mutex, broadcast};
@@ -112,6 +112,13 @@ impl ServerConnections {
         timeout: Duration,
         http: &reqwest::Client,
     ) -> Result<Arc<dyn UpstreamClient>, McpError> {
+        if server.transport == Transport::Http
+            && let Some(url) = server.url.as_deref()
+        {
+            crate::net_guard::ensure_safe_url(url)
+                .await
+                .map_err(McpError::Config)?;
+        }
         {
             let guard = self.live.lock().await;
             if let Some(live) = guard.get(&server.id)
@@ -264,6 +271,13 @@ impl ServerConnections {
         timeout: Duration,
         http: &reqwest::Client,
     ) -> Result<Discovery, McpError> {
+        if server.transport == Transport::Http
+            && let Some(url) = server.url.as_deref()
+        {
+            crate::net_guard::ensure_safe_url(url)
+                .await
+                .map_err(McpError::Config)?;
+        }
         let client = connect(server, timeout, Some(http))?;
         let outcome = async {
             let init = initialize(client.as_ref(), timeout).await?;

@@ -4,7 +4,6 @@ pub mod remote;
 pub mod stream;
 pub mod translate;
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Router;
@@ -431,21 +430,31 @@ async fn enforce_virtual_key_limits(
     state: &LlmDataState,
     snapshot: &RuntimeSnapshot,
     key: &octra_storage::LlmVirtualKeyRecord,
-) -> Result<(), GatewayError> {
+    request: &ChatRequest,
+) -> Result<Option<Arc<crate::vk_reservation::VkReservation>>, GatewayError> {
     let Some(policy) = snapshot.virtual_key_policy(&key.id) else {
-        return Ok(());
+        return Ok(None);
     };
-    if policy.limits().is_empty() {
-        return Ok(());
+    let limits = policy.limits();
+    if limits.is_empty() {
+        return Ok(None);
     }
     let now = Utc::now();
-    let mut usage = BTreeMap::new();
     let family = if key.key_family.trim().is_empty() {
         key.id.as_str()
     } else {
         key.key_family.as_str()
     };
-    for limit in policy.limits() {
+    let input_tokens = estimate_tokens(request).max(1);
+    let max_output = request.max_tokens.map(u64::from).unwrap_or(1_024).max(1);
+    let (input_price, output_price) = snapshot.pricing_ceiling(&request.model);
+    let reserved_tokens = input_tokens.saturating_add(max_output);
+    let reserved_cost = ((input_tokens as f64 * input_price) + (max_output as f64 * output_price))
+        .round()
+        .clamp(0.0, u64::MAX as f64) as u64;
+
+    let mut reservations = Vec::with_capacity(limits.len());
+    for limit in limits {
         let since = vk_policy::window_start(limit.window, now);
         let totals = state
             .storage
@@ -465,27 +474,25 @@ async fn enforce_virtual_key_limits(
                 )
                 .with_code("virtual_key_usage_unavailable")
             })?;
-        usage.insert(limit.window, totals);
+        reservations.push(crate::vk_reservation::ReservationRequest {
+            key: format!("{family}:{}:{since}", limit.window.as_str()),
+            tokens: reserved_tokens,
+            cost_micros: reserved_cost,
+            usage_tokens: totals.tokens.max(0) as u64,
+            usage_cost_micros: totals.cost_micros.max(0) as u64,
+            limit_tokens: limit.tokens,
+            limit_cost_micros: limit.cost_micros,
+        });
     }
-    let Some(exceeded) = policy.exceeded(|window| usage.get(&window).cloned().unwrap_or_default())
-    else {
-        return Ok(());
+
+    let Some(reservation) = state.vk_reservations.try_reserve(reservations) else {
+        return Err(GatewayError::upstream(
+            429,
+            "virtual key limit would be exceeded by concurrent requests",
+        )
+        .with_code("virtual_key_limit_exceeded"));
     };
-    let message = match exceeded.limit.tokens {
-        Some(tokens) if exceeded.usage.tokens.max(0) as u64 >= tokens => format!(
-            "virtual key {} token limit exceeded (used {} of {})",
-            exceeded.window.as_str(),
-            exceeded.usage.tokens,
-            tokens
-        ),
-        _ => format!(
-            "virtual key {} cost limit exceeded (used {} of {} micros)",
-            exceeded.window.as_str(),
-            exceeded.usage.cost_micros,
-            exceeded.limit.cost_micros.unwrap_or_default()
-        ),
-    };
-    Err(GatewayError::upstream(429, message).with_code("virtual_key_limit_exceeded"))
+    Ok(Some(Arc::new(reservation)))
 }
 
 async fn handle(
@@ -532,15 +539,6 @@ async fn handle(
     tracker.record.api_key_id = key.as_ref().map(|key| key.id.clone());
     let consumer_id = key.as_ref().and_then(|key| key.consumer_id.as_deref());
     let virtual_key_id = key.as_ref().map(|key| key.id.clone());
-
-    if let Some(key) = &key
-        && let Err(error) = enforce_virtual_key_limits(&state, &snapshot, key).await
-    {
-        tracker.record.error = Some(error.message.clone());
-        tracker.finish_with_status(error.status);
-        usage::spawn_record(state.storage.clone(), tracker.record.clone());
-        return with_request_id(protocol_response(ingress, &error), &request_id);
-    }
 
     let consumer_group_ids = consumer_id
         .map(|id| snapshot.consumer_group_ids(id))
@@ -595,6 +593,20 @@ async fn handle(
     if let Some(stream) = stream_override {
         ir.stream = Some(stream);
     }
+
+    let reservation = if let Some(key) = &key {
+        match enforce_virtual_key_limits(&state, &snapshot, key, &ir).await {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                tracker.record.error = Some(error.message.clone());
+                tracker.finish_with_status(error.status);
+                usage::spawn_record(state.storage.clone(), tracker.record.clone());
+                return with_request_id(protocol_response(ingress, &error), &request_id);
+            }
+        }
+    } else {
+        None
+    };
 
     let session = header_str(&request, &state.config.llm.session_header).map(str::to_string);
     let user_agent = header_str(&request, "user-agent");
@@ -819,6 +831,7 @@ async fn handle(
         ingress,
         &mut request_state,
         &mut trace,
+        reservation.clone(),
     )
     .await;
     match response {
@@ -893,6 +906,7 @@ async fn execute(
     ingress: Protocol,
     request_state: &mut LlmRequestState,
     trace: &mut ExecTrace,
+    reservation: Option<Arc<crate::vk_reservation::VkReservation>>,
 ) -> LlmResult<Response> {
     let Some(plan) = snapshot.resolve(effective_model) else {
         let error = GatewayError::not_found(format!(
@@ -1179,6 +1193,7 @@ async fn execute(
                 meta,
                 &provider_info,
                 request_state,
+                reservation.clone(),
             )
             .await
             {
@@ -1446,6 +1461,7 @@ fn stream_meta(
     provider: &ProviderConfig,
     account: Option<&Arc<AccountRuntime>>,
     ingress: Protocol,
+    reservation: Option<Arc<crate::vk_reservation::VkReservation>>,
 ) -> stream::StreamMeta {
     stream::StreamMeta {
         request_id: meta.request_id.to_string(),
@@ -1464,6 +1480,7 @@ fn stream_meta(
         client_ip: meta.client_ip,
         user_agent: meta.user_agent.map(str::to_string),
         intent: meta.intent.map(str::to_string),
+        reservation,
     }
 }
 
@@ -1505,6 +1522,7 @@ async fn try_attempt(
     meta: &LlmRequestMeta<'_>,
     provider_info: &LlmProviderInfo<'_>,
     request_state: &mut LlmRequestState,
+    reservation: Option<Arc<crate::vk_reservation::VkReservation>>,
 ) -> LlmResult<AttemptOutcome> {
     let mut ir = ir.clone();
     if let Some(chain) = chain {
@@ -1533,7 +1551,15 @@ async fn try_attempt(
                 tracker.clone(),
                 account.cloned(),
                 chain.cloned(),
-                stream_meta(meta, requested_model, target, provider, account, ingress),
+                stream_meta(
+                    meta,
+                    requested_model,
+                    target,
+                    provider,
+                    account,
+                    ingress,
+                    reservation.clone(),
+                ),
                 std::mem::take(request_state),
             );
             return Ok(AttemptOutcome {
@@ -1618,7 +1644,15 @@ async fn try_attempt(
             tracker.clone(),
             account.cloned(),
             chain.cloned(),
-            stream_meta(meta, requested_model, target, provider, account, ingress),
+            stream_meta(
+                meta,
+                requested_model,
+                target,
+                provider,
+                account,
+                ingress,
+                reservation,
+            ),
             std::mem::take(request_state),
         );
         return Ok(AttemptOutcome {
