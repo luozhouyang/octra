@@ -103,4 +103,4 @@ The non-model tables were renamed in `migrations/0028_rename_non_model_llm_table
 
 ## Drift instrument
 
-Drift caught by: SQLx migrations are the only DDL source, and `cargo test -p octra-storage` applies every migration to a fresh database. Schema changes must update this view in the same change. The current migration set is `0001_init.sql` through `0035_mcp_session_protocol.sql`. `0034_ai_account_quota_reset.sql` adds `ai_provider_accounts.quota_reset_at`; `0035_mcp_session_protocol.sql` adds `mcp_sessions.protocol_version`.
+Drift caught by: SQLx migrations are the only DDL source, and `cargo test -p octra-storage` applies every migration to a fresh database. Schema changes must update this view in the same change. The current migration set is `0001_init.sql` through `0036_ai_account_quota_backfill.sql`. `0034_ai_account_quota_reset.sql` adds `ai_provider_accounts.quota_reset_at`; `0035_mcp_session_protocol.sql` adds `mcp_sessions.protocol_version`; `0036_ai_account_quota_backfill.sql` starts existing day/month accounts in a fresh period so stale counters do not survive the upgrade.

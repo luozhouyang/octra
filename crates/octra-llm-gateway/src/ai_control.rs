@@ -14,7 +14,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::Utc;
+use chrono::{Datelike, TimeZone, Utc};
 use octra_ai_config::{
     AiBalancer, AiControlPlaneData, AiModel, AiModelKind, AiModelTarget, AiPolicy,
     AiPolicyAttachment, AiPolicyScope, AiPolicyType, AiProvider, AiProviderAccount,
@@ -430,6 +430,8 @@ impl AccountInput {
         created_at: i64,
         updated_at: i64,
     ) -> AiProviderAccount {
+        let quota_period = self.quota_period.unwrap_or_else(|| "none".to_string());
+        let quota_reset_at = initial_quota_reset(&quota_period);
         AiProviderAccount {
             id,
             provider_id,
@@ -441,9 +443,9 @@ impl AccountInput {
             priority: self.priority.unwrap_or(0),
             quota_limit: self.quota_limit,
             quota_unit: self.quota_unit.unwrap_or_else(|| "requests".to_string()),
-            quota_period: self.quota_period.unwrap_or_else(|| "none".to_string()),
+            quota_period,
             quota_used: self.quota_used.unwrap_or(0),
-            quota_reset_at: None,
+            quota_reset_at,
             cooldown_until: self.cooldown_until,
             enabled: self.enabled.unwrap_or(true),
             // OAuth state is server-managed; account CRUD must not set it.
@@ -559,6 +561,27 @@ fn new_id() -> String {
 
 fn now() -> i64 {
     Utc::now().timestamp()
+}
+
+fn initial_quota_reset(period: &str) -> Option<String> {
+    let now = Utc::now();
+    let boundary = match period {
+        "day" => {
+            let today = now.date_naive();
+            let tomorrow = today.succ_opt().unwrap_or(today);
+            Utc.from_utc_datetime(&tomorrow.and_hms_opt(0, 0, 0)?)
+        }
+        "month" => {
+            let (year, month) = if now.month() == 12 {
+                (now.year() + 1, 1)
+            } else {
+                (now.year(), now.month() + 1)
+            };
+            Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single()?
+        }
+        _ => return None,
+    };
+    Some(boundary.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 // ---------------------------------------------------------------------------
