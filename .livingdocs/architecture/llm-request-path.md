@@ -138,7 +138,7 @@ The `semantic_cache` AI policy maps to the built-in `llm-semantic-cache` plugin 
 - stores final JSON responses and reconstructed streamed responses in a bounded TTL/LRU cache and persists the entry list in `plugin_state`,
 - returns `X-Octra-Cache: hit` or `X-Octra-Cache: miss`; streaming hits are replayed as protocol-native SSE.
 
-The default local vector is a lexical near-duplicate approximation, not a neural embedding; exact matching is the safe default (`similarity_threshold: 1.0`). Streamed responses are reconstructed from the events that reached the client, so failed or truncated streams are never cached. Responses whose `finish_reason` is not `stop` or `tool_calls` are not stored. A reversible PII response is marked by the redaction plugin and is not persisted; streaming PII and cache combinations remain a known limitation. No prompt text is persisted.
+The default local vector is a lexical near-duplicate approximation, not a neural embedding; exact matching is the safe default (`similarity_threshold: 1.0`). Streamed responses are reconstructed from the events that reached the client, so failed or truncated streams are never cached. Responses whose `finish_reason` is not `stop` or `tool_calls` are not stored. A reversible PII response is marked by the redaction plugin and is not persisted; when reversible PII redaction is present, the semantic-cache plugin is removed from that chain entirely, including streaming requests. No prompt text is persisted.
 
 ## Failure semantics
 

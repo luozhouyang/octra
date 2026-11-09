@@ -40,7 +40,7 @@ flowchart LR
 - Requests may carry `MCP-Protocol-Version`; a value outside the supported set is rejected with an invalid-request error.
 - `GET /mcp` holds an SSE channel with a 15-second keepalive and forwards upstream `notifications/tools/list_changed` after refreshing the catalog. Notification delivery is per endpoint, not replayed.
 - Browser requests with an untrusted `Origin` are rejected; `mcp.allowed_origins` extends the loopback default. POST bodies must use `application/json`.
-- Outbound MCP HTTP and OpenAPI document/`$ref` URLs are checked before use. Loopback and private addresses stay allowed for local-first operation; cloud metadata hosts, `169.254.0.0/16`, `fe80::/10`, unspecified/multicast/broadcast addresses, and the known metadata IPs `100.100.100.200`/`168.63.129.16` are rejected. Control-plane validation is syntax-only so offline servers can still be registered; DNS resolution is checked at connect/fetch time.
+- Outbound MCP HTTP and OpenAPI document/`$ref` URLs are checked before use. Loopback and private addresses stay allowed for local-first operation; cloud metadata hosts, `169.254.0.0/16`, `fe80::/10`, unspecified/multicast/broadcast addresses, and the known metadata IPs `100.100.100.200`/`168.63.129.16` are rejected. Control-plane validation is syntax-only so offline servers can still be registered; DNS resolution is checked at connect/fetch time. The shared HTTP client does not follow redirects, so an allow-listed host cannot redirect the request to a metadata endpoint.
 - `DELETE /mcp` terminates the session; later requests with the same id fail.
 
 ## Authentication and ACL
