@@ -233,6 +233,13 @@ async fn openai_streaming_to_openai() {
     assert!(text.contains("chat.completion.chunk"));
     assert!(text.contains("\"content\":\"Hello from OpenAI\""));
     assert!(text.contains("\"finish_reason\":\"stop\""));
+    // The upstream already sent a stop chunk; the gateway must not append a
+    // second synthetic finish.
+    assert_eq!(
+        text.matches("\"finish_reason\":\"stop\"").count(),
+        1,
+        "{text}"
+    );
     // Usage frames are only sent when the client asked for them.
     assert!(!text.contains("\"usage\""));
     assert!(text.trim_end().ends_with("data: [DONE]"));
@@ -270,6 +277,11 @@ async fn openai_streaming_usage_and_token_accounting() {
             .iter()
             .any(|row| row.input_tokens == 3 && row.output_tokens == 4),
         "usage rows: {usage:?}"
+    );
+    assert_eq!(
+        usage[0].finish_reason.as_deref(),
+        Some("stop"),
+        "streaming usage must record the canonical finish reason"
     );
 }
 
@@ -359,6 +371,8 @@ async fn anthropic_streaming_to_openai_with_tool_call() {
     assert_eq!(status, StatusCode::OK);
     assert!(text.contains("\"id\":\"toolu_s1\""));
     assert!(text.contains("\"finish_reason\":\"tool_calls\""));
+    // EOF must not overwrite tool_calls with a synthetic stop reason.
+    assert!(!text.contains("\"finish_reason\":\"stop\""), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"));
 }
 

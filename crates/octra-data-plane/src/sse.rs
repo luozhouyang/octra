@@ -11,9 +11,25 @@ pub struct SseEvent {
     pub retry: Option<u64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SseDecoder {
     buffer: Vec<u8>,
+    max_buffer_bytes: usize,
+    overflowed: bool,
+}
+
+/// Bound on an incomplete SSE event. A hostile or broken upstream must not be
+/// able to grow the decoder buffer without limit by never sending a blank line.
+const DEFAULT_MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
+impl Default for SseDecoder {
+    fn default() -> Self {
+        Self {
+            buffer: Vec::new(),
+            max_buffer_bytes: DEFAULT_MAX_BUFFER_BYTES,
+            overflowed: false,
+        }
+    }
 }
 
 impl SseDecoder {
@@ -21,8 +37,29 @@ impl SseDecoder {
         Self::default()
     }
 
+    pub fn with_max_buffer_bytes(max_buffer_bytes: usize) -> Self {
+        Self {
+            max_buffer_bytes: max_buffer_bytes.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// Whether the decoder dropped buffered bytes because one event exceeded
+    /// `max_buffer_bytes`. Callers must treat this as a stream failure.
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
     /// Appends a chunk and returns every event completed by this chunk.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
+        if self.overflowed {
+            return Vec::new();
+        }
+        if self.buffer.len().saturating_add(chunk.len()) > self.max_buffer_bytes {
+            self.overflowed = true;
+            self.buffer.clear();
+            return Vec::new();
+        }
         self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
 
@@ -39,7 +76,7 @@ impl SseDecoder {
 
     /// Flushes a trailing event that was not terminated by a blank line.
     pub fn finish(&mut self) -> Option<SseEvent> {
-        if self.buffer.is_empty() {
+        if self.overflowed || self.buffer.is_empty() {
             return None;
         }
         let block = std::mem::take(&mut self.buffer);
@@ -132,6 +169,15 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "real");
+    }
+
+    #[test]
+    fn caps_unbounded_event_buffers() {
+        let mut decoder = SseDecoder::with_max_buffer_bytes(16);
+        assert!(decoder.push(b"data: 0123456789").is_empty());
+        assert!(decoder.push(b"data: still-growing").is_empty());
+        assert!(decoder.overflowed());
+        assert!(decoder.finish().is_none());
     }
 
     #[test]

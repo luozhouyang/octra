@@ -320,7 +320,15 @@ async fn run_notification_stream(
                         tokio::select! {
                             chunk = response.chunk() => match chunk {
                                 Ok(Some(chunk)) => {
-                                    for event in decoder.push(&chunk) {
+                                    let events = decoder.push(&chunk);
+                                    if decoder.overflowed() {
+                                        tracing::warn!(
+                                            server = %server_id,
+                                            "upstream MCP notification event exceeded the SSE buffer limit"
+                                        );
+                                        break;
+                                    }
+                                    for event in events {
                                         forward_event(&event, &state, &server_id);
                                     }
                                 }
@@ -502,7 +510,13 @@ async fn read_sse_response(
             ));
         }
 
-        for (value, is_match) in decode_events(decoder.push(&chunk), request_id.as_ref()) {
+        let events = decoder.push(&chunk);
+        if decoder.overflowed() {
+            return Err(McpError::Transport(
+                "upstream SSE event exceeded the buffer limit".into(),
+            ));
+        }
+        for (value, is_match) in decode_events(events, request_id.as_ref()) {
             if is_match {
                 matched = Some(value);
             } else if fallback.is_none() {

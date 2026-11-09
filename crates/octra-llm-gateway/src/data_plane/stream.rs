@@ -105,6 +105,15 @@ pub fn start(
 
             let mut out = Vec::new();
             let mut failed = None;
+            if state.framing.overflowed() {
+                failed = Some(
+                    GatewayError::upstream(
+                        502,
+                        "upstream stream exceeded the SSE event buffer limit",
+                    )
+                    .with_code("upstream_stream_too_large"),
+                );
+            }
             for framed in state.framing.push(&bytes) {
                 let payload = match framed {
                     Ok(framed) => match framed.event {
@@ -547,6 +556,13 @@ impl Framing {
         }
     }
 
+    fn overflowed(&self) -> bool {
+        match self {
+            Framing::Sse(decoder) => decoder.overflowed(),
+            Framing::Bedrock(_) => false,
+        }
+    }
+
     fn push(&mut self, bytes: &[u8]) -> Vec<Result<FramedPayload, String>> {
         match self {
             Framing::Sse(decoder) => decoder
@@ -652,9 +668,13 @@ impl BridgeState {
     async fn flush_pending(&mut self) -> Result<Vec<u8>, GatewayError> {
         let mut out = Vec::new();
         let mut events = self.protocol_decoder.finish();
-        if !events
-            .iter()
-            .any(|event| matches!(event, StreamEvent::Finish { .. }))
+        // Only synthesize a finish when the upstream never produced one. A
+        // synthetic Finish after a real tool_calls/refusal finish would
+        // overwrite the client-visible reason and corrupt the cached response.
+        if !self.saw_finish
+            && !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Finish { .. }))
         {
             events.push(StreamEvent::Finish {
                 reason: octra_llm_core::FinishReason::Stop,
@@ -744,6 +764,10 @@ impl BridgeState {
     }
 
     async fn record(&mut self, error: Option<GatewayError>) {
+        if let Some(reason) = self.accumulator.finish_reason {
+            self.tracker.record.finish_reason =
+                Some(crate::usage::finish_reason_label(&reason).to_string());
+        }
         record_stream(
             &self.storage,
             &self.tracker,
@@ -1037,6 +1061,10 @@ impl EventBridgeState {
     }
 
     async fn record(&mut self, error: Option<GatewayError>) {
+        if let Some(reason) = self.accumulator.finish_reason {
+            self.tracker.record.finish_reason =
+                Some(crate::usage::finish_reason_label(&reason).to_string());
+        }
         record_stream(
             &self.storage,
             &self.tracker,

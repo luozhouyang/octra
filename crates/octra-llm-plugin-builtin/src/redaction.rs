@@ -1079,6 +1079,11 @@ impl LlmPlugin for Redaction {
         if let Some(reasoning) = &mut cx.response.reasoning {
             reasoning.text = Self::restore_text(&reasoning.text, &state.mapping);
         }
+        // Tell downstream observers (notably the semantic cache) that this
+        // response now contains restored PII and must not be persisted.
+        cx.response
+            .extra
+            .insert("octra_pii_restored".into(), Value::Bool(true));
         Ok(LlmAction::Continue)
     }
 

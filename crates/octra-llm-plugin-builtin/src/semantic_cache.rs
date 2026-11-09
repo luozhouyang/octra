@@ -22,7 +22,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use octra_api_plugin_types::{Capability, FailPolicy, PluginError, PluginManifest};
-use octra_llm_core::{AssistantContent, ChatRequest, ChatResponse, ContentPart};
+use octra_llm_core::{AssistantContent, ChatRequest, ChatResponse, ContentPart, FinishReason};
 use octra_llm_plugin_runtime::MemoryPluginStateStore;
 use octra_llm_plugin_types::{
     LlmAction, LlmFinalResponseContext, LlmPlugin, LlmPluginCreateContext, LlmPluginFactory,
@@ -45,7 +45,7 @@ const MAX_MAX_ENTRIES: usize = 4096;
 const DEFAULT_TTL_SECS: i64 = 3_600;
 const MIN_TTL_SECS: i64 = 1;
 const MAX_TTL_SECS: i64 = 604_800;
-const DEFAULT_SIMILARITY_THRESHOLD: f64 = 0.95;
+const DEFAULT_SIMILARITY_THRESHOLD: f64 = 1.0;
 const DEFAULT_MAX_PROMPT_CHARS: usize = 8_000;
 const MIN_MAX_PROMPT_CHARS: usize = 1;
 const MAX_MAX_PROMPT_CHARS: usize = 64_000;
@@ -638,6 +638,20 @@ impl LlmPlugin for SemanticCache {
             return;
         };
         if pending.key.is_empty() {
+            return;
+        }
+        // A truncated, filtered, or failed response is not a safe cache entry:
+        // replaying it would make the truncation look like a normal answer.
+        if !matches!(
+            cx.response.finish_reason,
+            FinishReason::Stop | FinishReason::ToolCalls
+        ) {
+            return;
+        }
+        // Reversible PII redaction restores values in the response stage. Such
+        // a response must never be persisted (and a cache hit would bypass the
+        // restore stage entirely).
+        if cx.response.extra.contains_key("octra_pii_restored") {
             return;
         }
         let Ok(serialized) = serde_json::to_vec(cx.response) else {

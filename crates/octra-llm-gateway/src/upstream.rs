@@ -217,7 +217,6 @@ impl Upstream {
         let mut builder = self
             .client
             .post(url)
-            .timeout(self.request_timeout)
             .header(header::CONTENT_TYPE, "application/json")
             .header(
                 header::USER_AGENT,
@@ -230,7 +229,12 @@ impl Upstream {
             .body(body_bytes.clone());
 
         if stream {
+            // A total timeout would also cap the response body and kill long
+            // SSE streams. Streaming relies on the connect timeout plus the
+            // gateway's per-chunk idle timeout instead.
             builder = builder.header(header::ACCEPT, "text/event-stream");
+        } else {
+            builder = builder.timeout(self.request_timeout);
         }
 
         let adapter = crate::adapter::for_protocol(provider.protocol);
