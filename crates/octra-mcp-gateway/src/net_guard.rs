@@ -48,7 +48,7 @@ async fn check_url(raw: &str, resolve: bool) -> Result<(), String> {
     if resolve {
         resolve_safe(raw).await.map(|_| ())
     } else {
-        validate_url(raw, false).await.map(|_| ())
+        validate_url(raw).await.map(|_| ())
     }
 }
 
@@ -57,7 +57,7 @@ struct SafeTarget {
 }
 
 async fn resolve_safe(raw: &str) -> Result<SafeTarget, String> {
-    let (url, host, host_lower) = validate_url(raw, true).await?;
+    let (url, host) = validate_url(raw).await?;
     if let Ok(ip) = host.parse::<IpAddr>() {
         if blocked_ip(ip) {
             return Err(format!(
@@ -99,13 +99,12 @@ async fn resolve_safe(raw: &str) -> Result<SafeTarget, String> {
         return Err(format!("URL host '{host}' did not resolve"));
     }
     let address = preferred.or(fallback).expect("resolved address exists");
-    let _ = host_lower;
     Ok(SafeTarget {
         pin: Some((host, address)),
     })
 }
 
-async fn validate_url(raw: &str, resolve: bool) -> Result<(Url, String, String), String> {
+async fn validate_url(raw: &str) -> Result<(Url, String), String> {
     let url = Url::parse(raw).map_err(|error| format!("invalid URL '{raw}': {error}"))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!("unsupported URL scheme '{}'", url.scheme()));
@@ -127,12 +126,9 @@ async fn validate_url(raw: &str, resolve: bool) -> Result<(Url, String, String),
                 "URL address '{ip}' is not an allowed egress target"
             ));
         }
-        return Ok((url, host, host_lower));
+        return Ok((url, host));
     }
-    if !resolve {
-        return Ok((url, host, host_lower));
-    }
-    Ok((url, host, host_lower))
+    Ok((url, host))
 }
 
 fn is_metadata_host(host: &str) -> bool {
