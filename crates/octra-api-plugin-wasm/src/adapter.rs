@@ -221,6 +221,25 @@ impl ApiGatewayPlugin for WasmApiGatewayPlugin {
             .contains(&octra_api_plugin_types::Capability::ResponseBody)
     }
 
+    fn streams_response_body(&self) -> bool {
+        if !self
+            .inner
+            .manifest
+            .capabilities
+            .contains(&octra_api_plugin_types::Capability::ResponseBody)
+        {
+            return false;
+        }
+        serde_json::from_str::<serde_json::Value>(&self.inner.config_json)
+            .ok()
+            .and_then(|config| {
+                config
+                    .get("stream_response_body")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false)
+    }
+
     async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let started = Instant::now();
         let request = request_dto(cx);

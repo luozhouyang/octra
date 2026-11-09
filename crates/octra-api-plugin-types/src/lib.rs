@@ -212,7 +212,7 @@ pub struct AuthJwt {
     pub rsa_public_key: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct GatewayState {
     pub consumer: Option<ConsumerInfo>,
     pub credential: Option<CredentialInfo>,
@@ -660,6 +660,13 @@ pub trait ApiGatewayPlugin: Send + Sync {
     /// Whether this instance needs the full response body buffered before the
     /// response-body stage. Header-only response plugins return false.
     fn needs_response_body(&self) -> bool {
+        false
+    }
+
+    /// Whether the plugin can consume `on_response_body` chunks and therefore
+    /// does not need the full body buffered. Plugins that opt in must preserve
+    /// chunk-boundary-independent semantics or maintain their own state.
+    fn streams_response_body(&self) -> bool {
         false
     }
 

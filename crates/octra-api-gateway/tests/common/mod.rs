@@ -29,6 +29,11 @@ use octra_api_gateway::{
 use octra_api_plugin_runtime::{
     CompositePluginFactoryResolver, PluginFactoryResolver, PluginRegistry, PluginRuntime,
 };
+use octra_api_plugin_types::{
+    ApiGatewayPlugin, ApiGatewayPluginFactory, BodyContext, Capability, FailPolicy, PluginAction,
+    PluginError, PluginKind, PluginManifest, PluginPhase, PluginResult, PluginRuntimeKind,
+    RequestContext,
+};
 use octra_api_plugin_wasm::{WasmEngine, WasmHostProvider, WasmLimits, WasmPluginCatalog};
 use octra_config::OctraConfig;
 use octra_plugin_storage::PluginStorageRoot;
@@ -125,6 +130,72 @@ pub async fn spawn_mock(name: &'static str) -> (SocketAddr, Arc<Mutex<Vec<String
     (addr, calls)
 }
 
+struct StreamingTestPlugin {
+    manifest: PluginManifest,
+}
+
+#[async_trait::async_trait]
+impl ApiGatewayPlugin for StreamingTestPlugin {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    fn streams_response_body(&self) -> bool {
+        true
+    }
+
+    async fn on_rewrite(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
+        Ok(PluginAction::Continue)
+    }
+
+    async fn on_response_body(
+        &self,
+        _cx: &BodyContext<'_>,
+        chunk: bytes::Bytes,
+    ) -> Result<bytes::Bytes, PluginError> {
+        let mut out = b"streamed(".to_vec();
+        out.extend_from_slice(&chunk);
+        out.extend_from_slice(b")");
+        Ok(bytes::Bytes::from(out))
+    }
+}
+
+struct StreamingTestFactory;
+
+impl ApiGatewayPluginFactory for StreamingTestFactory {
+    fn manifest(&self) -> PluginManifest {
+        PluginManifest {
+            name: "streaming-test".into(),
+            version: "1.0.0".into(),
+            kind: PluginKind::Api,
+            runtime: PluginRuntimeKind::Builtin,
+            priority: 0,
+            description: "Integration-test streaming response plugin".into(),
+            timeout_ms: 1000,
+            fail_policy: FailPolicy::Closed,
+            phases: vec![PluginPhase::ResponseBody],
+            capabilities: vec![Capability::ResponseBody],
+            config_schema: None,
+            api_version: "2".into(),
+            entities: Vec::new(),
+            migrations: Vec::new(),
+            admin_routes: Vec::new(),
+            subscriptions: Vec::new(),
+            jobs: Vec::new(),
+        }
+    }
+
+    fn create(&self, _id: &str, _config: Value) -> Result<Arc<dyn ApiGatewayPlugin>, PluginError> {
+        Ok(Arc::new(StreamingTestPlugin {
+            manifest: self.manifest(),
+        }))
+    }
+
+    fn phases(&self) -> Vec<PluginPhase> {
+        vec![PluginPhase::ResponseBody]
+    }
+}
+
 pub struct Gateway {
     pub router: Router,
     pub control: Router,
@@ -158,6 +229,7 @@ pub async fn gateway_with_wasm_and_llm(
     let runtime = Arc::new(GatewayRuntime::bootstrap(storage.clone()).await.unwrap());
     let mut registry = PluginRegistry::new();
     octra_api_plugin_builtin::register(&mut registry);
+    registry.register(StreamingTestFactory);
     let plugin_instances = storage.api.list_plugin_instances().await.unwrap();
     let plugins = match &wasm {
         Some(wasm) => {

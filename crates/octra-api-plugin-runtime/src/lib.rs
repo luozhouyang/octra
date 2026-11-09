@@ -324,7 +324,7 @@ impl PluginEntry {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PluginChain {
     entries: Vec<PluginEntry>,
 }
@@ -366,6 +366,25 @@ impl PluginChain {
         self.entries
             .iter()
             .any(|entry| entry.plugin.needs_response_body())
+    }
+
+    /// True when at least one response-body plugin cannot consume chunks and
+    /// therefore requires the buffered path.
+    pub fn needs_response_buffer(&self) -> bool {
+        self.entries
+            .iter()
+            .filter(|entry| entry.phases.contains(&PluginPhase::ResponseBody))
+            .any(|entry| {
+                entry.plugin.needs_response_body() && !entry.plugin.streams_response_body()
+            })
+    }
+
+    /// True when at least one response-body plugin consumes chunks directly.
+    pub fn streams_response_body(&self) -> bool {
+        self.entries
+            .iter()
+            .filter(|entry| entry.phases.contains(&PluginPhase::ResponseBody))
+            .any(|entry| entry.plugin.streams_response_body())
     }
 
     pub async fn on_rewrite(
@@ -1243,6 +1262,7 @@ mod tests {
         phases: Vec<PluginPhase>,
         capabilities: Vec<Capability>,
         rejects_config: bool,
+        streams_body: bool,
         outcome: Outcome,
     }
 
@@ -1254,6 +1274,7 @@ mod tests {
             phases: vec![PluginPhase::Request],
             capabilities: Vec::new(),
             rejects_config: false,
+            streams_body: false,
             outcome: Outcome::Continue,
         }
     }
@@ -1276,6 +1297,11 @@ mod tests {
 
         fn with_timeout(mut self, timeout_ms: u64) -> Self {
             self.timeout_ms = timeout_ms;
+            self
+        }
+
+        fn with_streamed_body(mut self) -> Self {
+            self.streams_body = true;
             self
         }
 
@@ -1323,6 +1349,7 @@ mod tests {
         manifest: PluginManifest,
         label: String,
         outcome: Outcome,
+        streams_body: bool,
         trace: Arc<Mutex<Vec<String>>>,
     }
 
@@ -1376,6 +1403,10 @@ mod tests {
     impl ApiGatewayPlugin for StubPlugin {
         fn manifest(&self) -> &PluginManifest {
             &self.manifest
+        }
+
+        fn streams_response_body(&self) -> bool {
+            self.streams_body
         }
 
         async fn on_rewrite(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
@@ -1461,6 +1492,7 @@ mod tests {
                 manifest: self.spec.manifest(),
                 label,
                 outcome: self.spec.outcome,
+                streams_body: self.spec.streams_body,
                 trace: self.trace.clone(),
             }))
         }
@@ -1841,6 +1873,21 @@ mod tests {
     // ---------------------------------------------------------------------
     // Ordering
     // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn streamed_response_plugins_do_not_force_buffering() {
+        let harness = Harness::new(
+            &[spec("streamed")
+                .with_phases(&[PluginPhase::ResponseBody])
+                .with_capability(Capability::ResponseBody)
+                .with_streamed_body()],
+            vec![instance("streamed")],
+        );
+        let chain = harness.runtime.pre_auth_chain(None, None, "http");
+        assert!(chain.streams_response_body());
+        assert!(!chain.needs_response_buffer());
+        assert!(!chain.needs_response_body());
+    }
 
     #[tokio::test]
     async fn orders_by_priority_then_name() {

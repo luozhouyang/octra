@@ -12,12 +12,14 @@ use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
+use bytes::Bytes;
+use futures_util::StreamExt;
 use http_body::Body as _;
 use octra_api_core::{Route, Service};
 use octra_api_plugin_runtime::PluginChain;
 use octra_api_plugin_types::{
-    AuthBasic, AuthJwt, AuthKey, ConsumerInfo, ErrorContext, GatewayState, LogContext, PluginError,
-    RequestBodyContext, RequestContext, ResponseBodyContext, ResponseContext,
+    AuthBasic, AuthJwt, AuthKey, BodyContext, ConsumerInfo, ErrorContext, GatewayState, LogContext,
+    PluginError, RequestBodyContext, RequestContext, ResponseBodyContext, ResponseContext,
     UpstreamRequestContext,
 };
 use octra_data_plane::{
@@ -718,9 +720,15 @@ pub async fn proxy(
             }
 
             let response_body_plugins = dispatch.route.route.response_buffering
-                && (pre_chain.needs_response_body() || post_chain.needs_response_body());
+                && (pre_chain.needs_response_buffer() || post_chain.needs_response_buffer());
+            let response_body_stream = dispatch.route.route.response_buffering
+                && !response_body_plugins
+                && (pre_chain.streams_response_body() || post_chain.streams_response_body());
             if !dispatch.route.route.response_buffering
-                && (pre_chain.needs_response_body() || post_chain.needs_response_body())
+                && (pre_chain.needs_response_body()
+                    || post_chain.needs_response_body()
+                    || pre_chain.streams_response_body()
+                    || post_chain.streams_response_body())
             {
                 tracing::warn!(
                     route = %dispatch.route.route.id,
@@ -773,6 +781,22 @@ pub async fn proxy(
                         );
                     }
                 }
+            } else if response_body_stream
+                && response_parts.status != StatusCode::NO_CONTENT
+                && response_parts.status != StatusCode::NOT_MODIFIED
+            {
+                response_parts.headers.remove(header::CONTENT_LENGTH);
+                streaming_response_body(
+                    response_body,
+                    auth_state.clone(),
+                    Arc::clone(&pre_chain),
+                    Arc::clone(&post_chain),
+                    route.clone(),
+                    service.clone(),
+                    request_id.clone(),
+                    target.clone(),
+                    max_body,
+                )
             } else {
                 response_body
             };
@@ -1032,6 +1056,103 @@ async fn apply_response_plugins(
         }
     }
     Ok(response)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn streaming_response_body(
+    body: Body,
+    state: GatewayState,
+    pre_chain: Arc<PluginChain>,
+    post_chain: Arc<PluginChain>,
+    route: Route,
+    service: Service,
+    request_id: String,
+    target_url: String,
+    max_body: usize,
+) -> Body {
+    let upstream = body.into_data_stream();
+    let stream = futures_util::stream::unfold(
+        (
+            upstream, state, pre_chain, post_chain, route, service, request_id, target_url, 0usize,
+        ),
+        move |(
+            mut upstream,
+            mut state,
+            pre_chain,
+            post_chain,
+            route,
+            service,
+            request_id,
+            target_url,
+            mut total,
+        )| async move {
+            match upstream.next().await {
+                Some(Ok(chunk)) => {
+                    total = total.saturating_add(chunk.len());
+                    if total > max_body {
+                        let error = std::io::Error::other(
+                            "response body exceeds gateway limit while streaming",
+                        );
+                        return Some((
+                            Err(error),
+                            (
+                                upstream, state, pre_chain, post_chain, route, service, request_id,
+                                target_url, total,
+                            ),
+                        ));
+                    }
+                    let mut cx = BodyContext {
+                        request_id: &request_id,
+                        state: &mut state,
+                        route: &route,
+                        service: &service,
+                        target_url: &target_url,
+                    };
+                    let chunk: Bytes = match pre_chain.on_response_body(&mut cx, chunk).await {
+                        Ok(chunk) => match post_chain.on_response_body(&mut cx, chunk).await {
+                            Ok(chunk) => chunk,
+                            Err(error) => {
+                                tracing::warn!(%request_id, %error, "response stream plugin failed");
+                                return Some((
+                                    Err(std::io::Error::other(error.to_string())),
+                                    (
+                                        upstream, state, pre_chain, post_chain, route, service,
+                                        request_id, target_url, total,
+                                    ),
+                                ));
+                            }
+                        },
+                        Err(error) => {
+                            tracing::warn!(%request_id, %error, "response stream plugin failed");
+                            return Some((
+                                Err(std::io::Error::other(error.to_string())),
+                                (
+                                    upstream, state, pre_chain, post_chain, route, service,
+                                    request_id, target_url, total,
+                                ),
+                            ));
+                        }
+                    };
+                    Some((
+                        Ok(chunk),
+                        (
+                            upstream, state, pre_chain, post_chain, route, service, request_id,
+                            target_url, total,
+                        ),
+                    ))
+                }
+                Some(Err(error)) => Some((
+                    Err(std::io::Error::other(error.to_string())),
+                    (
+                        upstream, state, pre_chain, post_chain, route, service, request_id,
+                        target_url, total,
+                    ),
+                )),
+                None => None,
+            }
+        },
+    );
+    Body::from_stream(stream)
 }
 
 async fn complete(

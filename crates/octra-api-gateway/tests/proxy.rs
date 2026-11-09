@@ -94,6 +94,44 @@ async fn upstream_host_header_overrides_the_target_authority() {
 }
 
 #[tokio::test]
+async fn streaming_response_plugins_are_applied_without_buffering() {
+    let (addr, _calls) = spawn_mock("stream").await;
+    let gateway = gateway().await;
+    seed_service(
+        &gateway.storage,
+        "svc-stream-plugin",
+        &format!("http://{addr}"),
+        false,
+        "/api",
+        true,
+    )
+    .await;
+    service_plugin(
+        &gateway.storage,
+        "svc-stream-plugin",
+        "streaming-test",
+        serde_json::json!({}),
+    )
+    .await;
+    gateway.reload().await;
+
+    let response = gateway.send_raw(request("GET", "/api/streaming")).await;
+    assert_eq!(response.status, StatusCode::CREATED);
+    let body = String::from_utf8(response.body).unwrap();
+    // The mock response is a single JSON chunk; the test plugin prefixes it
+    // with `streamed(` and appends `)`, proving that the chunk stage ran
+    // without a full-body buffer.
+    assert!(body.starts_with("streamed("), "{body}");
+    assert!(body.ends_with(')'), "{body}");
+    let inner = body
+        .strip_prefix("streamed(")
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(inner).unwrap();
+    assert!(json.is_object(), "{json}");
+}
+
+#[tokio::test]
 async fn route_response_buffering_false_skips_body_plugins() {
     let (addr, _calls) = spawn_mock("a").await;
     let gateway = gateway().await;
