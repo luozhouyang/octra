@@ -134,7 +134,7 @@ This table is the authoritative progress summary for v0.1. "Implemented" means t
 
 - `cargo fmt --all --check` passes.
 - `cargo clippy --workspace --exclude octra-desktop --all-targets -- -D warnings` passes.
-- `cargo test --workspace` passes: 1138 passed, 0 failed, 17 ignored (including octra-desktop).
+- `cargo test --workspace` passes: 1181 passed, 0 failed, 17 ignored (`cargo test --workspace --exclude octra-desktop`).
 - WASM integration tests are ignored by default and require `cargo-component`; `scripts/test-wasm.sh` runs them in CI.
 - `pnpm typecheck`, `pnpm test`, and `pnpm build` pass (5 frontend tests across the shared packages).
 

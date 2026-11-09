@@ -195,7 +195,7 @@ Phase 35 evidence:
 - `crates/octra-daemon/src/main.rs` compiles `ai_*` at startup and reloads it after activation endpoints.
 - `crates/octra-cli` exposes `ai` status/actions plus full CRUD, with `--body '<json>'`, `--body -`, and `--body @path`; legacy `accounts` and `ai import-legacy` commands are removed.
 - `apps/desktop/src/app/pages/ai-control.tsx` exposes live status, entity lists, typed forms for providers, accounts, models, targets, policies, and attachments, compile reports, apply, and revision rollback; LLM/Agents pages read AI providers/models.
-- `cargo test --workspace --exclude octra-desktop` reports 1178 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass. `cargo check -p octra-desktop`, `cargo clippy -p octra-desktop -- -D warnings`, and `tauri build --debug --no-bundle` pass on Linux with WebKitGTK/GTK/DBus installed.
+- `cargo test --workspace --exclude octra-desktop` reports 1181 passed, 0 failed, 17 ignored; `pnpm typecheck`, `pnpm test`, and `pnpm build` pass. `cargo check -p octra-desktop`, `cargo clippy -p octra-desktop -- -D warnings`, and `tauri build --debug --no-bundle` pass on Linux with WebKitGTK/GTK/DBus installed.
 
 ## Drift instrument
 

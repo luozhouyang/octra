@@ -100,3 +100,9 @@ We will model the MCP gateway as a Kong-style aggregator with Octra's local-firs
 [3] Kong, "AI Gateway 2.x concepts." https://developer.konghq.com/ai-gateway/ai-gateway-v2-concepts/
 [4] Model Context Protocol, "Specification 2025-06-18." https://modelcontextprotocol.io/specification/2025-06-18
 [5] Octra repository, `crates/octra-mcp-*`. https://github.com/luozhouyang/octra
+
+## Amendment
+
+## Amendment
+
+2026-11-09: The Context paragraph that says Octra does not convert arbitrary REST APIs into MCP tools is superseded by this record's Decision and the implementation. The gateway supports `conversion-listener` and `conversion-only` servers that generate HTTP tools from inline or fetched OpenAPI 3.x JSON/YAML, including local `document_base_dir` references confined to that root. The aggregator, session, ACL, OIDC, stdio, notification, and audit decisions in this record are unchanged.
