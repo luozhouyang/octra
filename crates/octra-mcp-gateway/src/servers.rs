@@ -112,12 +112,20 @@ impl ServerConnections {
         timeout: Duration,
         http: &reqwest::Client,
     ) -> Result<Arc<dyn UpstreamClient>, McpError> {
+        let pinned;
         if server.transport == Transport::Http
             && let Some(url) = server.url.as_deref()
         {
             crate::net_guard::ensure_safe_url(url)
                 .await
                 .map_err(McpError::Config)?;
+            pinned = Some(
+                crate::net_guard::pinned_client(url)
+                    .await
+                    .map_err(McpError::Config)?,
+            );
+        } else {
+            pinned = None;
         }
         {
             let guard = self.live.lock().await;
@@ -128,7 +136,7 @@ impl ServerConnections {
             }
         }
 
-        let client = connect(server, timeout, Some(http))?;
+        let client = connect(server, timeout, Some(pinned.as_ref().unwrap_or(http)))?;
         let notifications = client.subscribe_notifications();
         match tokio::time::timeout(timeout, initialize(client.as_ref(), timeout)).await {
             Ok(Ok(_)) => {}
@@ -271,14 +279,22 @@ impl ServerConnections {
         timeout: Duration,
         http: &reqwest::Client,
     ) -> Result<Discovery, McpError> {
+        let pinned;
         if server.transport == Transport::Http
             && let Some(url) = server.url.as_deref()
         {
             crate::net_guard::ensure_safe_url(url)
                 .await
                 .map_err(McpError::Config)?;
+            pinned = Some(
+                crate::net_guard::pinned_client(url)
+                    .await
+                    .map_err(McpError::Config)?,
+            );
+        } else {
+            pinned = None;
         }
-        let client = connect(server, timeout, Some(http))?;
+        let client = connect(server, timeout, Some(pinned.as_ref().unwrap_or(http)))?;
         let outcome = async {
             let init = initialize(client.as_ref(), timeout).await?;
             let tools = list_all_tools(client.as_ref(), timeout).await?;

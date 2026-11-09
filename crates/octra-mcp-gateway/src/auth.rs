@@ -603,18 +603,14 @@ async fn introspection_outcome_to_caller(
 
 /// POSTs an introspection request with either HTTP Basic or form credentials.
 async fn introspection_request(
-    http: Option<&reqwest::Client>,
+    _http: Option<&reqwest::Client>,
     endpoint: &str,
     token: &str,
     client_id: &str,
     client_secret: &str,
     basic: bool,
 ) -> Result<reqwest::Response, AuthError> {
-    let client = match http {
-        Some(client) => client.clone(),
-        None => reqwest::Client::new(),
-    };
-    crate::net_guard::ensure_safe_url(endpoint)
+    let client = crate::net_guard::pinned_client(endpoint)
         .await
         .map_err(AuthError::Jwks)?;
     let mut request = client
@@ -759,7 +755,7 @@ fn discovery_url(config: &McpOidcConfig) -> String {
 
 /// Fetches and caches an OpenID Connect discovery document.
 async fn fetch_discovery(
-    http: Option<&reqwest::Client>,
+    _http: Option<&reqwest::Client>,
     config: &McpOidcConfig,
     force: bool,
 ) -> Result<DiscoveryDocument, AuthError> {
@@ -777,13 +773,9 @@ async fn fetch_discovery(
         }
     }
 
-    crate::net_guard::ensure_safe_url(&url)
+    let client = crate::net_guard::pinned_client(&url)
         .await
         .map_err(AuthError::Jwks)?;
-    let client = match http {
-        Some(client) => client.clone(),
-        None => reqwest::Client::new(),
-    };
     let response = client.get(&url).send().await.map_err(|err| {
         AuthError::Jwks(format!("discovery request failed: {}", request_error(&err)))
     })?;
@@ -859,7 +851,7 @@ fn epoch_secs() -> u64 {
 
 /// Fetches a JWKS document, using the process-wide cache unless forced.
 async fn fetch_jwks(
-    http: Option<&reqwest::Client>,
+    _http: Option<&reqwest::Client>,
     uri: &str,
     cache_secs: u64,
     force: bool,
@@ -875,13 +867,9 @@ async fn fetch_jwks(
         }
     }
 
-    crate::net_guard::ensure_safe_url(uri)
+    let client = crate::net_guard::pinned_client(uri)
         .await
         .map_err(AuthError::Jwks)?;
-    let client = match http {
-        Some(client) => client.clone(),
-        None => reqwest::Client::new(),
-    };
     let response =
         client.get(uri).send().await.map_err(|err| {
             AuthError::Jwks(format!("JWKS request failed: {}", request_error(&err)))

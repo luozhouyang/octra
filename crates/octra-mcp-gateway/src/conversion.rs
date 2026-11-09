@@ -341,7 +341,7 @@ pub async fn build_tools_with_http(
 
 /// Loads the inline document or fetches `document_url` once.
 pub async fn load_document(
-    http: &reqwest::Client,
+    _http: &reqwest::Client,
     config: &OpenApiConfig,
 ) -> Result<String, String> {
     if let Some(document) = &config.document {
@@ -354,9 +354,9 @@ pub async fn load_document(
         .filter(|url| !url.is_empty())
         .ok_or_else(|| "config.openapi requires document or document_url".to_string())?;
 
-    crate::net_guard::ensure_safe_url(url).await?;
+    let client = crate::net_guard::pinned_client(url).await?;
     let fetched = tokio::time::timeout(OPENAPI_FETCH_TIMEOUT, async {
-        let mut response = http.get(url).send().await.map_err(fetch_error)?;
+        let mut response = client.get(url).send().await.map_err(fetch_error)?;
         let status = response.status();
         if !status.is_success() {
             return Err(format!(
@@ -474,7 +474,7 @@ impl DocumentSource {
 }
 
 struct ExternalRefResolver<'a> {
-    http: Option<&'a reqwest::Client>,
+    _http: Option<&'a reqwest::Client>,
     base: DocumentBase,
     /// Canonical directory that local external references may not escape.
     file_root: Option<PathBuf>,
@@ -516,7 +516,7 @@ impl<'a> ExternalRefResolver<'a> {
             _ => None,
         };
         Ok(Self {
-            http,
+            _http: http,
             base,
             file_root,
             cache: HashMap::new(),
@@ -737,15 +737,9 @@ impl<'a> ExternalRefResolver<'a> {
                 })?
             }
             DocumentSource::Url(url) => {
-                let http = self.http.ok_or_else(|| {
-                    format!(
-                        "cannot resolve external OpenAPI reference '{url}': \
-                         no HTTP client is available"
-                    )
-                })?;
-                crate::net_guard::ensure_safe_url(url.as_str()).await?;
+                let client = crate::net_guard::pinned_client(url.as_str()).await?;
                 tokio::time::timeout(OPENAPI_FETCH_TIMEOUT, async {
-                    let mut response = http.get(url.as_str()).send().await.map_err(|err| {
+                    let mut response = client.get(url.as_str()).send().await.map_err(|err| {
                         format!(
                             "cannot fetch external OpenAPI document '{url}': {}",
                             err.without_url()
