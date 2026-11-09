@@ -2,8 +2,8 @@
 //! balancing, and API-key authentication.
 //!
 //! * [`data_plane_router`] is the catch-all proxy mounted on the unified data
-//!   plane. It only sees requests not claimed by the LLM (`/v1/*`) or MCP
-//!   (`/mcp`) gateways.
+//!   plane. It serves API routes and, at `/v1` and `/v1beta`, the in-process
+//!   LLM upstream. MCP (`/mcp`) remains a sibling router.
 //! * [`control_router`] exposes CRUD endpoints for the gateway configuration on
 //!   the control plane. The daemon protects it with the shared bearer token.
 
@@ -12,6 +12,7 @@ pub mod audit;
 pub mod client_ip;
 pub mod data;
 pub mod http_client;
+pub mod internal;
 pub mod key;
 pub mod metrics;
 
@@ -29,6 +30,7 @@ use octra_storage::Storage;
 
 pub use audit::{AuditState, record_control_audit};
 pub use client_ip::ClientIpResolver;
+pub use internal::{InternalUpstream, InternalUpstreamContext};
 pub use key::{GeneratedApiKey, generate_api_key};
 pub use metrics::{ApiMetrics, MetricsSnapshot};
 
@@ -42,6 +44,10 @@ pub struct ApiDataState {
     pub client_ip: Arc<ClientIpResolver>,
     pub metrics: Arc<ApiMetrics>,
     pub events: Option<Arc<dyn EventPublisher>>,
+    /// Optional in-process upstream for services that are not reached over the
+    /// network. The LLM gateway uses this when it is mounted behind an API
+    /// gateway route.
+    pub internal_upstream: Option<Arc<dyn InternalUpstream>>,
     /// Process-local key for signing sticky-target cookies.
     pub(crate) sticky_secret: Arc<[u8; 32]>,
 }
@@ -76,6 +82,7 @@ impl ApiDataState {
             client_ip,
             metrics,
             events: None,
+            internal_upstream: None,
             sticky_secret: Arc::new(rand::random::<[u8; 32]>()),
         }
     }
@@ -91,6 +98,13 @@ impl ApiDataState {
     /// existing in-memory logging only.
     pub fn with_storage(mut self, storage: Arc<Storage>) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Serves services tagged as internal in-process instead of over the
+    /// network.
+    pub fn with_internal_upstream(mut self, upstream: Arc<dyn InternalUpstream>) -> Self {
+        self.internal_upstream = Some(upstream);
         self
     }
 
@@ -213,8 +227,8 @@ impl ApiControlState {
     }
 }
 
-/// Catch-all data plane router, mounted between the LLM and MCP routers and
-/// therefore the fallback for the unified listener.
+/// Catch-all data plane router. API routes, including the `/v1` and `/v1beta`
+/// routes to the in-process LLM upstream, are resolved here.
 pub fn data_plane_router(state: ApiDataState) -> Router {
     Router::new().fallback(data::proxy).with_state(state)
 }

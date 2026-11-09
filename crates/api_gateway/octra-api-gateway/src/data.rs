@@ -8,12 +8,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::internal::InternalUpstreamContext;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
 use bytes::Bytes;
 use futures_util::StreamExt;
+use octra_api_core::is_internal_llm_service;
 use octra_api_core::{Route, Service};
 use octra_api_plugin_runtime::PluginChain;
 use octra_api_plugin_types::{
@@ -186,11 +188,15 @@ pub async fn proxy(
         .map(|service| &service.service)
         .unwrap_or(&placeholder);
     let matched_path = dispatch.matched_path.clone();
+    let skip_global = is_internal_llm_service(service);
 
     let mut auth_state = build_gateway_state(snapshot.auth_snapshot());
-    let pre_chain = state
-        .plugins
-        .pre_auth_chain(Some(&route_id), service_id.as_deref(), scheme);
+    let pre_chain = state.plugins.pre_auth_chain_with_policy(
+        Some(&route_id),
+        service_id.as_deref(),
+        scheme,
+        skip_global,
+    );
 
     let subject = LogSubject {
         request_id: &request_id,
@@ -293,9 +299,12 @@ pub async fn proxy(
             return complete(
                 &state,
                 &pre_chain,
-                &state
-                    .plugins
-                    .pre_auth_chain(Some(&route_id), service_id.as_deref(), scheme),
+                &state.plugins.pre_auth_chain_with_policy(
+                    Some(&route_id),
+                    service_id.as_deref(),
+                    scheme,
+                    skip_global,
+                ),
                 &subject,
                 &mut auth_state,
                 Finish {
@@ -321,13 +330,14 @@ pub async fn proxy(
         .as_ref()
         .map(|consumer| (consumer.group_ids.as_slice(), consumer.groups.as_slice()))
         .unwrap_or_default();
-    let post_chain = state.plugins.post_auth_chain(
+    let post_chain = state.plugins.post_auth_chain_with_policy(
         Some(&route_id),
         service_id.as_deref(),
         consumer_id.as_deref(),
         group_ids,
         groups,
         scheme,
+        skip_global,
     );
 
     let credential_id = auth_state.credential.as_ref().map(|c| c.id.clone());
@@ -398,6 +408,54 @@ pub async fn proxy(
         consumer: consumer_id.clone(),
         ..subject
     };
+
+    if is_internal_llm_service(service) {
+        let request_headers = parts.headers.clone();
+        let request_body = auth_state.request_body.take().unwrap_or_default();
+        if let Ok(value) = HeaderValue::from_str(&request_body.len().to_string()) {
+            parts.headers.insert(header::CONTENT_LENGTH, value);
+        }
+        let mut request = Request::from_parts(parts, Body::from(request_body));
+        request
+            .extensions_mut()
+            .insert(octra_data_plane::ClientIp(Some(client_ip)));
+        request
+            .extensions_mut()
+            .insert(octra_data_plane::RequestId(request_id.clone()));
+
+        let response = match state.internal_upstream.clone() {
+            Some(upstream) => {
+                upstream
+                    .call(
+                        request,
+                        InternalUpstreamContext {
+                            client_ip: Some(client_ip),
+                            request_id: request_id.clone(),
+                        },
+                    )
+                    .await
+            }
+            None => bad_gateway("LLM internal upstream is not configured"),
+        };
+        state
+            .metrics
+            .record(response.status().as_u16(), started.elapsed(), 0);
+        return finish_internal_response(
+            &state,
+            &pre_chain,
+            &post_chain,
+            &subject,
+            &mut auth_state,
+            &request_id,
+            &request_headers,
+            consumer_id.as_deref(),
+            route,
+            service,
+            response,
+            started,
+        )
+        .await;
+    }
 
     let Some(service_id) = service_id.as_deref() else {
         let response = bad_gateway("route has no service");
@@ -1096,6 +1154,123 @@ fn filtered_response_body(
         },
     );
     Body::from_stream(stream)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_internal_response(
+    state: &ApiDataState,
+    pre_chain: &PluginChain,
+    post_chain: &PluginChain,
+    subject: &LogSubject<'_>,
+    auth_state: &mut GatewayState,
+    request_id: &str,
+    request_headers: &HeaderMap,
+    consumer_id: Option<&str>,
+    route: &Route,
+    service: &Service,
+    response: Response,
+    started: Instant,
+) -> Response {
+    let target = "internal://llm-gateway";
+    let (mut response_parts, response_body) = response.into_parts();
+
+    for chain in [pre_chain, post_chain] {
+        let mut response_cx = ResponseContext {
+            request_id,
+            state: auth_state,
+            request_headers,
+            status: &mut response_parts.status,
+            headers: &mut response_parts.headers,
+            consumer_id,
+            route,
+            service,
+            target_url: target,
+        };
+        match chain.response(&mut response_cx).await {
+            Ok(None) => {}
+            Ok(Some(replacement)) => {
+                let elapsed = started.elapsed();
+                state
+                    .metrics
+                    .record(replacement.status().as_u16(), elapsed, 0);
+                return complete(
+                    state,
+                    pre_chain,
+                    post_chain,
+                    subject,
+                    auth_state,
+                    Finish {
+                        latency: elapsed,
+                        target: Some(target.to_string()),
+                        error: None,
+                    },
+                    replacement,
+                )
+                .await;
+            }
+            Err(error) => return failed_plugin(state, subject, started, error),
+        }
+    }
+
+    for chain in [pre_chain, post_chain] {
+        let mut header_cx = HeaderFilterContext {
+            request_id,
+            state: auth_state,
+            request_headers,
+            status: &mut response_parts.status,
+            headers: &mut response_parts.headers,
+            consumer_id,
+            route,
+            service,
+            target_url: target,
+        };
+        if let Err(error) = chain.header_filter(&mut header_cx).await {
+            return failed_plugin(state, subject, started, error);
+        }
+    }
+
+    // LLM responses can be SSE streams. A body filter would have to buffer or
+    // rewrite the stream, so the internal upstream rejects that configuration
+    // instead of silently changing streaming semantics.
+    if pre_chain.has_phase(octra_api_plugin_types::PluginPhase::BodyFilter)
+        || post_chain.has_phase(octra_api_plugin_types::PluginPhase::BodyFilter)
+    {
+        let response = error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "plugin_error",
+            "body_filter plugins are not supported on the internal LLM upstream",
+        );
+        return complete(
+            state,
+            pre_chain,
+            post_chain,
+            subject,
+            auth_state,
+            Finish {
+                latency: started.elapsed(),
+                target: Some(target.to_string()),
+                error: Some("body_filter is not supported on the LLM upstream".to_string()),
+            },
+            response,
+        )
+        .await;
+    }
+
+    let response = Response::from_parts(response_parts, response_body);
+    complete(
+        state,
+        pre_chain,
+        post_chain,
+        subject,
+        auth_state,
+        Finish {
+            latency: started.elapsed(),
+            target: Some(target.to_string()),
+            error: None,
+        },
+        response,
+    )
+    .await
 }
 
 async fn complete(

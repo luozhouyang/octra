@@ -530,7 +530,10 @@ async fn handle(
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    let request_id = octra_data_plane::new_request_id();
+    let request_id = request
+        .request_id
+        .clone()
+        .unwrap_or_else(octra_data_plane::new_request_id);
     let mut tracker = UsageTracker::new(request_id.clone(), requested_model.clone());
     tracker.record.protocol = Some(ingress.to_string());
     tracker.record.api_key_id = key.as_ref().map(|key| key.id.clone());
@@ -1796,6 +1799,7 @@ mod tests {
             uri: "/v1/messages".parse().unwrap(),
             headers: header_map(&[("anthropic-version", "2023-06-01")]),
             client_ip: None,
+            request_id: None,
         };
         assert!(wants_anthropic(&request));
         let request = Incoming {
@@ -1803,6 +1807,7 @@ mod tests {
             uri: "/v1/messages".parse().unwrap(),
             headers: header_map(&[("user-agent", "Anthropic/JS 0.30")]),
             client_ip: None,
+            request_id: None,
         };
         assert!(wants_anthropic(&request));
         let request = Incoming {
@@ -1810,6 +1815,7 @@ mod tests {
             uri: "/v1/chat/completions".parse().unwrap(),
             headers: header_map(&[("user-agent", "openai-python/1.0")]),
             client_ip: None,
+            request_id: None,
         };
         assert!(!wants_anthropic(&request));
     }

@@ -306,7 +306,7 @@ fn compile_endpoints(
 
     let mut endpoints = HashMap::new();
     for service in services {
-        if !service.enabled {
+        if !service.enabled || octra_api_core::is_internal_llm_service(service) {
             continue;
         }
         let scheme = if service.protocol.eq_ignore_ascii_case("https") {

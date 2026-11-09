@@ -22,6 +22,7 @@ All records remain **Proposed** until the v0.1 acceptance gaps in the PRD are cl
 * [0017 — Compile runtime snapshots off the hot path](0017-compile-runtime-snapshots-off-the-hot-path.md) - Proposed
 * [0018 — Model the LLM control plane on AI-native entities](0018-model-the-llm-control-plane-on-ai-native-entities.md) - Proposed
 * [0019 — Use Kong plugin phases for the API gateway](0019-use-kong-plugin-phases-for-the-api-gateway.md) - Proposed
+* [0020 — Route LLM traffic through the API gateway as an in-process upstream](0020-route-llm-traffic-through-the-api-gateway.md) - Proposed
 
 ## Superseded
 

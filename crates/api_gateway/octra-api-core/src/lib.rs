@@ -13,6 +13,19 @@ use serde::{Deserialize, Serialize};
 pub const MIN_TARGET_WEIGHT: u32 = 0;
 pub const MAX_TARGET_WEIGHT: u32 = 1000;
 
+/// Marks a service whose upstream is served in-process rather than over the
+/// network. The API gateway skips endpoint selection and global plugins for
+/// services carrying this tag.
+pub const LLM_INTERNAL_TAG: &str = "llm:internal";
+
+/// Ownership tag for entities provisioned by the LLM route reconciler.
+pub const MANAGED_BY_LLM_TAG: &str = "managed_by:llm";
+
+/// Whether a service is the in-process LLM upstream.
+pub fn is_internal_llm_service(service: &Service) -> bool {
+    service.tags.iter().any(|tag| tag == LLM_INTERNAL_TAG)
+}
+
 pub const METHODS: [&str; 9] = [
     "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE",
 ];

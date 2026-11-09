@@ -3,4 +3,5 @@
 //! The binary owns wiring and lifecycle; pieces that integration tests need to
 //! drive directly live here.
 
+pub mod llm_upstream;
 pub mod wasm_lifecycle;

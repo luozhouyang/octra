@@ -65,7 +65,7 @@ The API gateway is the catch-all data-plane handler. It supports:
 
 ### R3 LLM gateway
 
-The LLM gateway accepts OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Gemini requests; converts them through the canonical IR; and returns the response in the ingress protocol. It supports:
+The LLM gateway accepts OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Gemini requests; converts them through the canonical IR; and returns the response in the ingress protocol. Its HTTP front door is the API gateway: the supported OpenAI, Anthropic, and Gemini endpoint paths are exact API routes to the in-process `llm-gateway` service, so CORS, IP restriction, and correlation ID run through the normal API plugin phases. There is no separate public LLM listener and no broad `/v1` catch-all. It supports:
 
 - Virtual models and routing groups with priority rounds, weighted targets, and fallback.
 - Strategies `priority`, `order`, `rotate`/`round_robin`, `smart`, `usage`, `quota`, `pace`, and `intent`.

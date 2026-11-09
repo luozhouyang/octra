@@ -36,6 +36,7 @@ flowchart TB
 - `body_filter` runs after response headers are committed. A late failure truncates or aborts the body and cannot return a structured `500`. WASM body filters receive the same chunk/EOF contract and use host `body-append` / `body-take` functions for request-scoped full-body buffering; host instances are serialized per plugin, so the buffer is keyed by request id.
 - Route-level `request_buffering` and `response_buffering` are removed.
 - Scope precedence: the 12 Kong combinations from consumer + route + service down to global. Consumer and consumer-group instances are deferred until after authentication.
+- Services tagged `llm:internal` skip globally scoped plugin instances. Attach CORS, IP restriction, correlation ID, and request-size limiting at service scope; the daemon only provisions the `llm-gateway` service and its explicit OpenAI, Anthropic, and Gemini endpoint routes.
 - Ordering: manifest priority descending, then plugin name ascending; `ordering.before` / `ordering.after` can override.
 - Fail policy: `fail_open` or `fail_closed` from the manifest; a closed failure returns a gateway error.
 - Capabilities: request/response headers, request/response bodies, log, KV, network, secret, storage entities, auth, admin API, events, jobs.

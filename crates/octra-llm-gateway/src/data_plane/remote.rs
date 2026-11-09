@@ -24,6 +24,8 @@ pub struct Incoming {
     pub uri: Uri,
     pub headers: HeaderMap,
     pub client_ip: Option<IpAddr>,
+    /// Identity forwarded by an in-process API gateway upstream.
+    pub request_id: Option<String>,
 }
 
 impl FromRequestParts<LlmDataState> for Incoming {
@@ -39,8 +41,18 @@ impl FromRequestParts<LlmDataState> for Incoming {
             headers: parts.headers.clone(),
             client_ip: parts
                 .extensions
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|info| info.0.ip()),
+                .get::<octra_data_plane::ClientIp>()
+                .and_then(|client| client.0)
+                .or_else(|| {
+                    parts
+                        .extensions
+                        .get::<ConnectInfo<SocketAddr>>()
+                        .map(|info| info.0.ip())
+                }),
+            request_id: parts
+                .extensions
+                .get::<octra_data_plane::RequestId>()
+                .map(|id| id.0.clone()),
         })
     }
 }

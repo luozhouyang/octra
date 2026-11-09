@@ -20,6 +20,7 @@ use octra_api_plugin_wasm::{
     WasmPluginCatalog,
 };
 use octra_config::{CounterBackend, Workspace};
+use octra_daemon::llm_upstream;
 use octra_daemon::wasm_lifecycle::LlmWasmRuntime;
 use octra_llm_gateway::{LlmControlState, LlmDataState, LlmPluginRuntime, LlmRuntime};
 use octra_llm_plugin_runtime::StorageCounterStore;
@@ -49,6 +50,12 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("cannot open sqlite storage")?,
     );
+
+    // The LLM gateway service and routes must exist before the API gateway
+    // snapshot is compiled; otherwise the first /v1 request has no route.
+    llm_upstream::ensure_llm_routes(&storage)
+        .await
+        .context("cannot provision the LLM gateway routes")?;
 
     let api_runtime = Arc::new(
         GatewayRuntime::bootstrap(storage.clone())
@@ -225,6 +232,15 @@ async fn main() -> anyhow::Result<()> {
         .context("cannot build the LLM plugin runtime")?,
     );
 
+    // The LLM router is no longer mounted on the public listener. It is called
+    // in-process by the explicit API gateway routes for the supported LLM
+    // endpoint paths.
+    let llm_data = LlmDataState::new(llm_runtime.clone(), storage.clone(), config.clone())
+        .with_plugins(llm_plugin_runtime.clone());
+    let llm_internal = Arc::new(llm_upstream::LlmInternalUpstream::new(
+        llm_data.into_router(),
+    ));
+
     // The control state reloads the LLM runtime and plugin chains after
     // apply/rollback/import, so it receives both runtimes before they move
     // into the data-plane state.
@@ -325,10 +341,6 @@ async fn main() -> anyhow::Result<()> {
         .layer(octra_types::cors_layer());
 
     let data_app = Router::new()
-        .merge(octra_llm_gateway::data_plane_router(
-            LlmDataState::new(llm_runtime, storage.clone(), config.clone())
-                .with_plugins(llm_plugin_runtime.clone()),
-        ))
         .merge(octra_mcp_gateway::data_plane_router(McpDataState::new(
             mcp_runtime,
             storage.clone(),
@@ -342,7 +354,8 @@ async fn main() -> anyhow::Result<()> {
                 plugin_runtime,
             )
             .with_storage(storage.clone())
-            .with_events(event_bus.clone()),
+            .with_events(event_bus.clone())
+            .with_internal_upstream(llm_internal),
         ));
 
     let control_listener = tokio::net::TcpListener::bind(&config.daemon.control_bind)

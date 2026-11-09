@@ -71,7 +71,7 @@ flowchart TB
 - `/api/v1/agents/*` (detection, preview/apply/restore, profiles, backups),
 - `/admin/events`, `/admin/jobs`.
 
-**Data plane (`:8080`).** One listener with path dispatch: LLM owns `/v1/*` and `/v1beta/*`, MCP owns `/mcp` and `/mcp/`, and the API gateway is the fallback. See [Data-Plane Dispatch](data-plane-dispatch.md).
+**Data plane (`:8080`).** One API-gateway-owned listener with path dispatch: MCP owns `/mcp` and `/mcp/`, and the supported OpenAI, Anthropic, and Gemini endpoint paths are exact API routes to the in-process LLM upstream. See [Data-Plane Dispatch](data-plane-dispatch.md) and [ADR 0020](../adr/0020-route-llm-traffic-through-the-api-gateway.md).
 
 **API runtime.** An immutable snapshot of services, routes, upstreams, targets, consumers, credentials, ACLs, and plugin chains. The matcher, target pools, health state, and auth maps are compiled once and swapped on reload (ADR 0017).
 

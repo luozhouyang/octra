@@ -260,6 +260,13 @@ impl PluginEntry {
         self.consumer_id.is_some() || self.consumer_group_id.is_some()
     }
 
+    fn is_global(&self) -> bool {
+        self.route_id.is_none()
+            && self.service_id.is_none()
+            && self.consumer_id.is_none()
+            && self.consumer_group_id.is_none()
+    }
+
     fn supports_protocol(&self, protocol: &str) -> bool {
         self.protocols
             .iter()
@@ -569,7 +576,7 @@ struct PluginChains {
     entries: Vec<PluginEntry>,
     subscribers: Vec<Arc<PluginSubscriber>>,
     jobs: Vec<Arc<PluginJob>>,
-    pre_cache: Mutex<HashMap<(String, String, String), Arc<PluginChain>>>,
+    pre_cache: Mutex<HashMap<(String, String, String, bool), Arc<PluginChain>>>,
     post_cache: Mutex<HashMap<String, Arc<PluginChain>>>,
     empty: Arc<PluginChain>,
     has_any: bool,
@@ -749,6 +756,7 @@ impl PluginChains {
         route_id: Option<&str>,
         service_id: Option<&str>,
         protocol: &str,
+        skip_global: bool,
     ) -> Arc<PluginChain> {
         if !self.has_any {
             return self.empty.clone();
@@ -757,12 +765,13 @@ impl PluginChains {
             route_id.unwrap_or_default().to_string(),
             service_id.unwrap_or_default().to_string(),
             protocol.to_ascii_lowercase(),
+            skip_global,
         );
         if let Some(chain) = self.pre_cache.lock().get(&key) {
             return chain.clone();
         }
         let chain = Arc::new(PluginChain {
-            entries: self.pre_auth_entries(route_id, service_id, protocol),
+            entries: self.pre_auth_entries(route_id, service_id, protocol, skip_global),
         });
         self.pre_cache.lock().insert(key, chain.clone());
         chain
@@ -773,6 +782,7 @@ impl PluginChains {
         route_id: Option<&str>,
         service_id: Option<&str>,
         protocol: &str,
+        skip_global: bool,
     ) -> Vec<PluginEntry> {
         let deferred = self.deferred_names(route_id, service_id, protocol);
         let mut selected = resolve(
@@ -783,6 +793,7 @@ impl PluginChains {
             &[],
             &HashSet::new(),
             protocol,
+            skip_global,
         );
         selected.retain(|entry| !deferred.contains(entry.name.as_str()));
         selected
@@ -817,6 +828,7 @@ impl PluginChains {
         group_ids: &[String],
         group_names: &[String],
         protocol: &str,
+        skip_global: bool,
     ) -> Arc<PluginChain> {
         if !self.has_any {
             return self.empty.clone();
@@ -829,13 +841,20 @@ impl PluginChains {
                 name: group_names.get(index).map(String::as_str).unwrap_or(id),
             })
             .collect();
-        let key = post_cache_key(route_id, service_id, consumer_id, &groups, protocol);
+        let key = post_cache_key(
+            route_id,
+            service_id,
+            consumer_id,
+            &groups,
+            protocol,
+            skip_global,
+        );
         if let Some(chain) = self.post_cache.lock().get(&key) {
             return chain.clone();
         }
 
         let mut seen = HashSet::new();
-        for entry in self.pre_auth_entries(route_id, service_id, protocol) {
+        for entry in self.pre_auth_entries(route_id, service_id, protocol, skip_global) {
             seen.insert((entry.name, entry.instance_name.unwrap_or_default()));
         }
 
@@ -847,6 +866,7 @@ impl PluginChains {
             &groups,
             &seen,
             protocol,
+            skip_global,
         )
         .into_iter()
         .filter(|entry| !entry.auth)
@@ -863,6 +883,7 @@ fn post_cache_key(
     consumer_id: Option<&str>,
     groups: &[ConsumerGroupRef<'_>],
     protocol: &str,
+    skip_global: bool,
 ) -> String {
     let mut groups: Vec<String> = groups
         .iter()
@@ -870,12 +891,13 @@ fn post_cache_key(
         .collect();
     groups.sort();
     format!(
-        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
         route_id.unwrap_or_default(),
         service_id.unwrap_or_default(),
         consumer_id.unwrap_or_default(),
         groups.join(","),
-        protocol.to_ascii_lowercase()
+        protocol.to_ascii_lowercase(),
+        skip_global
     )
 }
 
@@ -891,10 +913,14 @@ fn resolve(
     groups: &[ConsumerGroupRef<'_>],
     exclude: &HashSet<(String, String)>,
     protocol: &str,
+    skip_global: bool,
 ) -> Vec<PluginEntry> {
     let mut best: HashMap<(&str, &str), (i32, &PluginEntry)> = HashMap::new();
     for entry in entries {
         if !entry.supports_protocol(protocol) {
+            continue;
+        }
+        if skip_global && entry.is_global() {
             continue;
         }
         let key = (
@@ -1086,8 +1112,21 @@ impl PluginRuntime {
         service_id: Option<&str>,
         protocol: &str,
     ) -> Arc<PluginChain> {
+        self.pre_auth_chain_with_policy(route_id, service_id, protocol, false)
+    }
+
+    /// Pre-auth chain for a service that opts out of globally scoped plugins.
+    /// The LLM gateway uses this so API-wide auth/body/log plugins never run
+    /// on LLM traffic.
+    pub fn pre_auth_chain_with_policy(
+        &self,
+        route_id: Option<&str>,
+        service_id: Option<&str>,
+        protocol: &str,
+        skip_global: bool,
+    ) -> Arc<PluginChain> {
         let chains = self.chains.read().clone();
-        chains.pre_auth(route_id, service_id, protocol)
+        chains.pre_auth(route_id, service_id, protocol, skip_global)
     }
 
     pub fn post_auth_chain(
@@ -1099,6 +1138,28 @@ impl PluginRuntime {
         group_names: &[String],
         protocol: &str,
     ) -> Arc<PluginChain> {
+        self.post_auth_chain_with_policy(
+            route_id,
+            service_id,
+            consumer_id,
+            group_ids,
+            group_names,
+            protocol,
+            false,
+        )
+    }
+
+    /// Post-auth chain for a service that opts out of globally scoped plugins.
+    pub fn post_auth_chain_with_policy(
+        &self,
+        route_id: Option<&str>,
+        service_id: Option<&str>,
+        consumer_id: Option<&str>,
+        group_ids: &[String],
+        group_names: &[String],
+        protocol: &str,
+        skip_global: bool,
+    ) -> Arc<PluginChain> {
         let chains = self.chains.read().clone();
         chains.post_auth(
             route_id,
@@ -1107,6 +1168,7 @@ impl PluginRuntime {
             group_ids,
             group_names,
             protocol,
+            skip_global,
         )
     }
 
@@ -1785,6 +1847,34 @@ mod tests {
         let chain = harness.runtime.pre_auth_chain(None, None, "http");
         run_access(&chain).await.expect("request phase");
         assert_eq!(harness.trace(), ["access:global"]);
+    }
+
+    #[tokio::test]
+    async fn skip_global_keeps_service_and_route_scoped_plugins() {
+        let harness = Harness::new(
+            &[spec("stub")],
+            vec![
+                instance("stub").labeled("global"),
+                instance("stub").labeled("service").on_service("svc"),
+                instance("stub")
+                    .labeled("route")
+                    .on_route("rt")
+                    .on_service("svc"),
+            ],
+        );
+
+        let chain =
+            harness
+                .runtime
+                .pre_auth_chain_with_policy(Some("rt"), Some("svc"), "http", true);
+        assert_eq!(chain.names().collect::<Vec<_>>(), ["stub"]);
+        run_access(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["access:route"]);
+
+        let chain = harness
+            .runtime
+            .pre_auth_chain_with_policy(None, None, "http", true);
+        assert!(chain.names().next().is_none());
     }
 
     #[tokio::test]

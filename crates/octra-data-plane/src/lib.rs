@@ -4,7 +4,7 @@
 //! the common request hygiene, forwarding headers, error shape, body limits,
 //! and Server-Sent Events decoding in one place.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -53,6 +53,14 @@ pub fn http_client(config: &OctraConfig) -> Client {
 pub fn new_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
+
+/// Client address forwarded to an in-process upstream.
+#[derive(Debug, Clone)]
+pub struct ClientIp(pub Option<IpAddr>);
+
+/// Request identity forwarded to an in-process upstream.
+#[derive(Debug, Clone)]
+pub struct RequestId(pub String);
 
 /// Removes hop-by-hop headers, including headers named by `Connection`.
 pub fn sanitize_request_headers(headers: &mut HeaderMap) {

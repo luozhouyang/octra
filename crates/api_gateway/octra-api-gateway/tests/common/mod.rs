@@ -23,8 +23,8 @@ use octra_api_core::{
     CreatePluginInstance, CreateRoute, CreateService, CreateTarget, CreateUpstream,
 };
 use octra_api_gateway::{
-    ApiControlState, ApiDataState, ApiMetrics, AuditState, WasmControlState, control_router,
-    data_plane_router, record_control_audit,
+    ApiControlState, ApiDataState, ApiMetrics, AuditState, InternalUpstream, WasmControlState,
+    control_router, data_plane_router, record_control_audit,
 };
 use octra_api_plugin_runtime::{
     CompositePluginFactoryResolver, PluginFactoryResolver, PluginRegistry, PluginRuntime,
@@ -217,6 +217,20 @@ pub async fn gateway_with_wasm_and_llm(
     wasm: Option<Arc<WasmControlState>>,
     llm: Option<Arc<dyn octra_api_gateway::LlmWasmLifecycle>>,
 ) -> Gateway {
+    gateway_with_all(config, wasm, llm, None).await
+}
+
+/// Builds a gateway whose internal services are served by `upstream`.
+pub async fn gateway_with_internal(upstream: Arc<dyn InternalUpstream>) -> Gateway {
+    gateway_with_all(OctraConfig::default(), None, None, Some(upstream)).await
+}
+
+async fn gateway_with_all(
+    config: OctraConfig,
+    wasm: Option<Arc<WasmControlState>>,
+    llm: Option<Arc<dyn octra_api_gateway::LlmWasmLifecycle>>,
+    internal: Option<Arc<dyn InternalUpstream>>,
+) -> Gateway {
     let config = Arc::new(config);
     let storage = Arc::new(Storage::connect_in_memory().await.unwrap());
     let runtime = Arc::new(GatewayRuntime::bootstrap(storage.clone()).await.unwrap());
@@ -243,9 +257,12 @@ pub async fn gateway_with_wasm_and_llm(
         ),
     };
     let metrics = Arc::new(ApiMetrics::default());
-    let data =
+    let mut data =
         ApiDataState::with_plugins(runtime.clone(), config, metrics.clone(), plugins.clone())
             .with_storage(storage.clone());
+    if let Some(internal) = internal {
+        data = data.with_internal_upstream(internal);
+    }
     let mut control_state =
         ApiControlState::with_plugins(storage.clone(), runtime.clone(), metrics, plugins.clone());
     if let Some(wasm) = wasm {

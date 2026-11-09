@@ -6,7 +6,7 @@
 //! Anthropic compatible data plane, and the authenticated control plane.
 //!
 //! ```text
-//! client ──▶ data_plane_router ──▶ virtual key check ──▶ LlmRuntime snapshot
+//! API gateway route ──▶ data_plane_router (in-process) ──▶ virtual key check
 //!        ◀── streamed SSE / JSON ◀── protocol adapter ◀── upstream adapter ◀── provider
 //! ```
 

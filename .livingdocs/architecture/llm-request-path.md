@@ -12,7 +12,9 @@ An LLM request crosses authentication, protocol normalization, virtual-model res
 
 ```mermaid
 flowchart LR
-    Client[Client request] --> Auth[Virtual-key auth]
+    Client[Client request] --> APIRoute[API gateway /v1 or /v1beta route]
+    APIRoute --> LLMIn[LLM gateway in-process]
+    LLMIn --> Auth[Virtual-key auth]
     Auth -->|anonymous local or key| Policy[Consumer + virtual-key policy]
     Policy --> Decode[Ingress protocol adapter]
     Decode --> IR[Canonical IR]
@@ -35,7 +37,9 @@ flowchart LR
 
 ## Ingress
 
-The data listener routes these paths to the LLM gateway:
+The supported OpenAI, Anthropic, and Gemini endpoint paths are exact API gateway routes to the `llm-gateway` service, which is tagged `llm:internal`. The API gateway calls the LLM router in-process; there is no separate public LLM listener. Global API plugins are skipped for this service, so HTTP edge policies such as CORS and IP restriction must be attached at service scope. See [ADR 0020](../adr/0020-route-llm-traffic-through-the-api-gateway.md).
+
+The routes cover these paths:
 
 | Path | Protocol | Notes |
 |---|---|---|
