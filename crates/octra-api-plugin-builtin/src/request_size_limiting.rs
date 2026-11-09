@@ -49,7 +49,7 @@ impl ApiGatewayPluginFactory for RequestSizeLimitingFactory {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![PluginPhase::Request, PluginPhase::Log]
+        vec![PluginPhase::Access, PluginPhase::Log]
     }
 }
 
@@ -82,7 +82,7 @@ impl ApiGatewayPlugin for RequestSizeLimitingPlugin {
         &self.manifest
     }
 
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let limit = match self.config.size_unit.as_str() {
             "bytes" => self.config.allowed_payload_size,
             "kilobytes" => self.config.allowed_payload_size.saturating_mul(1024),
@@ -130,7 +130,7 @@ mod tests {
                 HeaderValue::from_str(content_length).expect("content length"),
             );
         }
-        plugin.on_request(&mut fixture.context()).await.unwrap()
+        plugin.access(&mut fixture.context()).await.unwrap()
     }
 
     async fn status(action: PluginAction) -> StatusCode {
@@ -177,7 +177,7 @@ mod tests {
     fn declares_request_and_log_phases() {
         assert_eq!(
             RequestSizeLimitingFactory.phases(),
-            vec![PluginPhase::Request, PluginPhase::Log]
+            vec![PluginPhase::Access, PluginPhase::Log]
         );
     }
 

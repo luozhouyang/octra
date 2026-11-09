@@ -75,11 +75,7 @@ impl ApiGatewayPluginFactory for CorrelationIdFactory {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![
-            PluginPhase::Request,
-            PluginPhase::Response,
-            PluginPhase::Log,
-        ]
+        vec![PluginPhase::Access, PluginPhase::Response, PluginPhase::Log]
     }
 }
 
@@ -154,7 +150,7 @@ impl ApiGatewayPlugin for CorrelationIdPlugin {
         &self.manifest
     }
 
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let correlation_id = match self.inbound(cx.headers) {
             Some(value) => value,
             None => {
@@ -172,7 +168,7 @@ impl ApiGatewayPlugin for CorrelationIdPlugin {
         Ok(PluginAction::Continue)
     }
 
-    async fn on_response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
+    async fn response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
         if !self.echo_downstream {
             return Ok(PluginAction::Continue);
         }

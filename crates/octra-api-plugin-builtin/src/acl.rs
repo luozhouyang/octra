@@ -49,7 +49,7 @@ impl ApiGatewayPluginFactory for AclFactory {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![PluginPhase::Request, PluginPhase::Log]
+        vec![PluginPhase::Access, PluginPhase::Log]
     }
 }
 
@@ -73,7 +73,7 @@ impl ApiGatewayPlugin for AclPlugin {
         &self.manifest
     }
 
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let Some(consumer) = cx.state.consumer.as_ref() else {
             return Ok(PluginAction::ShortCircuit(plugin_response(
                 StatusCode::UNAUTHORIZED,
@@ -181,7 +181,7 @@ mod tests {
     fn declares_request_and_log_phases() {
         assert_eq!(
             AclFactory.phases(),
-            vec![PluginPhase::Request, PluginPhase::Log]
+            vec![PluginPhase::Access, PluginPhase::Log]
         );
     }
 
@@ -189,7 +189,7 @@ mod tests {
     async fn unauthenticated_requests_are_unauthorized() {
         let plugin = plugin(json!({"allow": ["admins"]}));
         let mut fixture = RequestFixture::default();
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         let (status, body) = message(short_circuit(action)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["message"], "Unauthorized");
@@ -201,7 +201,7 @@ mod tests {
 
         let mut fixture = RequestFixture::default();
         fixture.state.consumer = Some(consumer(&["admins", "users", "admins"]));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert_eq!(
             fixture.headers.get("x-consumer-groups").unwrap(),
@@ -210,7 +210,7 @@ mod tests {
 
         let mut fixture = RequestFixture::default();
         fixture.state.consumer = Some(consumer(&["users"]));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         let (status, body) = message(short_circuit(action)).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["message"], "You cannot consume this service");
@@ -222,13 +222,13 @@ mod tests {
 
         let mut fixture = RequestFixture::default();
         fixture.state.consumer = Some(consumer(&["banned"]));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         let (status, _) = message(short_circuit(action)).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
         let mut fixture = RequestFixture::default();
         fixture.state.consumer = Some(consumer(&["users"]));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert!(!fixture.headers.contains_key("x-consumer-groups"));
     }
@@ -244,7 +244,7 @@ mod tests {
             groups: vec!["admins".into()],
             ..ConsumerInfo::default()
         });
-        let action = strict.on_request(&mut fixture.context()).await.unwrap();
+        let action = strict.access(&mut fixture.context()).await.unwrap();
         let (status, _) = message(short_circuit(action)).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
@@ -254,7 +254,7 @@ mod tests {
             groups: vec!["admins".into()],
             ..ConsumerInfo::default()
         });
-        let action = relaxed.on_request(&mut fixture.context()).await.unwrap();
+        let action = relaxed.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
     }
 }

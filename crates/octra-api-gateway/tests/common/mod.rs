@@ -30,9 +30,8 @@ use octra_api_plugin_runtime::{
     CompositePluginFactoryResolver, PluginFactoryResolver, PluginRegistry, PluginRuntime,
 };
 use octra_api_plugin_types::{
-    ApiGatewayPlugin, ApiGatewayPluginFactory, BodyContext, Capability, FailPolicy, PluginAction,
-    PluginError, PluginKind, PluginManifest, PluginPhase, PluginResult, PluginRuntimeKind,
-    RequestContext,
+    ApiGatewayPlugin, ApiGatewayPluginFactory, BodyFilterContext, Capability, FailPolicy,
+    PluginError, PluginKind, PluginManifest, PluginPhase, PluginRuntimeKind,
 };
 use octra_api_plugin_wasm::{WasmEngine, WasmHostProvider, WasmLimits, WasmPluginCatalog};
 use octra_config::OctraConfig;
@@ -140,23 +139,15 @@ impl ApiGatewayPlugin for StreamingTestPlugin {
         &self.manifest
     }
 
-    fn streams_response_body(&self) -> bool {
-        true
-    }
-
-    async fn on_rewrite(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
-        Ok(PluginAction::Continue)
-    }
-
-    async fn on_response_body(
-        &self,
-        _cx: &BodyContext<'_>,
-        chunk: bytes::Bytes,
-    ) -> Result<bytes::Bytes, PluginError> {
+    async fn body_filter(&self, cx: &mut BodyFilterContext<'_>) -> Result<(), PluginError> {
+        let Some(chunk) = cx.chunk.take() else {
+            return Ok(());
+        };
         let mut out = b"streamed(".to_vec();
         out.extend_from_slice(&chunk);
         out.extend_from_slice(b")");
-        Ok(bytes::Bytes::from(out))
+        cx.chunk = Some(bytes::Bytes::from(out));
+        Ok(())
     }
 }
 
@@ -173,10 +164,10 @@ impl ApiGatewayPluginFactory for StreamingTestFactory {
             description: "Integration-test streaming response plugin".into(),
             timeout_ms: 1000,
             fail_policy: FailPolicy::Closed,
-            phases: vec![PluginPhase::ResponseBody],
+            phases: vec![PluginPhase::BodyFilter],
             capabilities: vec![Capability::ResponseBody],
             config_schema: None,
-            api_version: "2".into(),
+            api_version: "3".into(),
             entities: Vec::new(),
             migrations: Vec::new(),
             admin_routes: Vec::new(),
@@ -192,7 +183,7 @@ impl ApiGatewayPluginFactory for StreamingTestFactory {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![PluginPhase::ResponseBody]
+        vec![PluginPhase::BodyFilter]
     }
 }
 

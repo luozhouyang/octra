@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::response::Response;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http::{HeaderMap, Method, StatusCode, Uri};
 use octra_api_core::{PluginInstance, Route, Service};
 use serde::{Deserialize, Serialize};
@@ -163,12 +163,16 @@ pub enum LogLevel {
 pub enum PluginPhase {
     Certificate,
     Rewrite,
+    Access,
+    Response,
+    HeaderFilter,
+    BodyFilter,
+    Log,
+    /// LLM-only lifecycle stages; the API gateway does not execute them.
     Request,
     UpstreamRequest,
-    Response,
     ResponseBody,
     Error,
-    Log,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -213,6 +217,14 @@ pub struct AuthJwt {
 }
 
 #[derive(Debug, Default, Clone)]
+pub struct PluginContext {
+    /// Data private to the current plugin instance.
+    pub plugin: std::collections::BTreeMap<String, Value>,
+    /// Typed body buffer private to the current plugin instance.
+    pub body: BytesMut,
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct GatewayState {
     pub consumer: Option<ConsumerInfo>,
     pub credential: Option<CredentialInfo>,
@@ -226,6 +238,8 @@ pub struct GatewayState {
     pub keyauth: std::collections::HashMap<String, AuthKey>,
     pub basicauth: std::collections::HashMap<String, AuthBasic>,
     pub jwt: std::collections::HashMap<String, AuthJwt>,
+    /// Request-scoped state keyed by plugin instance id.
+    pub plugin_contexts: std::collections::BTreeMap<String, PluginContext>,
 }
 
 impl GatewayState {
@@ -564,6 +578,22 @@ pub struct RequestContext<'a> {
     pub service: &'a Service,
 }
 
+pub type AccessContext<'a> = RequestContext<'a>;
+
+impl RequestContext<'_> {
+    /// Complete request body, already buffered by the host. This is the Kong
+    /// `kong.request.get_body()` equivalent.
+    pub fn request_body(&self) -> Option<&Bytes> {
+        self.state.request_body.as_ref()
+    }
+
+    /// Replaces the complete request body. This is the Kong
+    /// `kong.service.request.set_body()` equivalent.
+    pub fn set_request_body(&mut self, body: Bytes) {
+        self.state.request_body = Some(body);
+    }
+}
+
 pub struct UpstreamRequestContext<'a> {
     pub request_id: &'a str,
     pub state: &'a mut GatewayState,
@@ -645,88 +675,96 @@ pub struct ResponseBodyContext<'a> {
     pub target_url: &'a str,
 }
 
-/// API Gateway plugin stages.
+pub struct CertificateContext<'a> {
+    pub request_id: &'a str,
+    pub server_name: Option<&'a str>,
+    pub client_certificate: Option<&'a [u8]>,
+}
+
+pub struct HeaderFilterContext<'a> {
+    pub request_id: &'a str,
+    pub state: &'a mut GatewayState,
+    pub request_headers: &'a HeaderMap,
+    pub status: &'a mut StatusCode,
+    pub headers: &'a mut HeaderMap,
+    pub consumer_id: Option<&'a str>,
+    pub route: &'a Route,
+    pub service: &'a Service,
+    pub target_url: &'a str,
+}
+
+pub struct BodyFilterContext<'a> {
+    /// `ngx.arg[1]`: the current chunk; `None` means no data in this event.
+    pub chunk: Option<Bytes>,
+    /// `ngx.arg[2]`: true on the final body event.
+    pub eof: bool,
+    pub request_id: &'a str,
+    pub status: StatusCode,
+    pub headers: &'a HeaderMap,
+    pub consumer_id: Option<&'a str>,
+    pub route: &'a Route,
+    pub service: &'a Service,
+    pub target_url: &'a str,
+    /// Data shared by every plugin on this request, analogous to `ngx.ctx`.
+    pub shared: &'a mut std::collections::BTreeMap<String, Value>,
+    /// Request-scoped plugin state private to this plugin instance.
+    pub ctx: &'a mut PluginContext,
+}
+
+/// Out-of-band plugin work. Events and scheduled jobs are not Kong phases.
 #[async_trait]
-pub trait ApiGatewayPlugin: Send + Sync {
-    fn manifest(&self) -> &PluginManifest;
-
-    /// Whether this instance needs the full request body buffered before the
-    /// request stage. The default is false so header-only plugins (including
-    /// key-auth with `key_in_body = false`) do not defeat request streaming.
-    fn needs_request_body(&self) -> bool {
-        false
-    }
-
-    /// Whether this instance needs the full response body buffered before the
-    /// response-body stage. Header-only response plugins return false.
-    fn needs_response_body(&self) -> bool {
-        false
-    }
-
-    /// Whether the plugin can consume `on_response_body` chunks and therefore
-    /// does not need the full body buffered. Plugins that opt in must preserve
-    /// chunk-boundary-independent semantics or maintain their own state.
-    fn streams_response_body(&self) -> bool {
-        false
-    }
-
-    async fn on_rewrite(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
-        Ok(PluginAction::Continue)
-    }
-
-    async fn on_request_buffer(
-        &self,
-        _cx: &mut RequestBodyContext<'_>,
-        body: Bytes,
-    ) -> Result<Bytes, PluginError> {
-        Ok(body)
-    }
-
-    async fn on_response_buffer(
-        &self,
-        _cx: &mut ResponseBodyContext<'_>,
-        body: Bytes,
-    ) -> Result<Bytes, PluginError> {
-        Ok(body)
-    }
-
-    async fn on_request(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
-        Ok(PluginAction::Continue)
-    }
-
-    async fn on_upstream_request(&self, _cx: &mut UpstreamRequestContext<'_>) -> PluginResult {
-        Ok(PluginAction::Continue)
-    }
-
-    async fn on_response(&self, _cx: &mut ResponseContext<'_>) -> PluginResult {
-        Ok(PluginAction::Continue)
-    }
-
-    async fn on_response_body(
-        &self,
-        _cx: &BodyContext<'_>,
-        chunk: Bytes,
-    ) -> Result<Bytes, PluginError> {
-        Ok(chunk)
-    }
-
-    async fn on_error(&self, _cx: &mut ErrorContext<'_>) -> PluginResult {
-        Ok(PluginAction::Continue)
-    }
-
-    async fn on_log(&self, _cx: &LogContext<'_>) {}
-
-    /// Handles an event this plugin subscribed to. Errors are retried by the
-    /// event bus according to its retry policy.
+pub trait ApiGatewayBackgroundPlugin: Send + Sync {
     async fn on_event(&self, _event: &GatewayEvent) -> Result<(), PluginError> {
         Ok(())
     }
 
-    /// Runs one scheduled job. Errors are recorded on the job row; the next
-    /// cron occurrence still runs.
     async fn on_job(&self, _job: &JobInvocation) -> Result<(), PluginError> {
         Ok(())
     }
+}
+
+impl<T: ApiGatewayPlugin + ?Sized> ApiGatewayBackgroundPlugin for T {}
+
+/// Kong's API gateway plugin contracts.
+///
+/// The seven phases are `certificate`, `rewrite`, `access`, `response`,
+/// `header_filter`, `body_filter`, and `log`. There is no separate request-body
+/// filter and no error phase.
+#[async_trait]
+pub trait ApiGatewayPlugin: Send + Sync {
+    fn manifest(&self) -> &PluginManifest;
+
+    /// TLS handshake phase. Kept for Kong parity; the host does not invoke it
+    /// until the API listener terminates TLS.
+    async fn certificate(&self, _cx: &mut CertificateContext<'_>) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    async fn rewrite(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
+        Ok(PluginAction::Continue)
+    }
+
+    /// Kong access phase. Request bodies are read or replaced whole through
+    /// [`RequestContext::request_body`] / [`RequestContext::set_request_body`].
+    async fn access(&self, _cx: &mut AccessContext<'_>) -> PluginResult {
+        Ok(PluginAction::Continue)
+    }
+
+    async fn response(&self, _cx: &mut ResponseContext<'_>) -> PluginResult {
+        Ok(PluginAction::Continue)
+    }
+
+    async fn header_filter(&self, _cx: &mut HeaderFilterContext<'_>) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    /// Kong `body_filter`. The plugin mutates `cx.chunk` in place; `cx.eof`
+    /// mirrors `ngx.arg[2]`.
+    async fn body_filter(&self, _cx: &mut BodyFilterContext<'_>) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    async fn log(&self, _cx: &LogContext<'_>) {}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -817,7 +855,7 @@ pub trait ApiGatewayPluginFactory: Send + Sync {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![PluginPhase::Request, PluginPhase::Log]
+        vec![PluginPhase::Access, PluginPhase::Log]
     }
 
     fn validate(&self, config: &Value) -> Result<(), PluginError> {

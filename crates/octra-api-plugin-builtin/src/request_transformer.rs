@@ -8,7 +8,7 @@ use http::uri::PathAndQuery;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri, header};
 use octra_api_plugin_types::{
     ApiGatewayPlugin, ApiGatewayPluginFactory, Capability, PluginAction, PluginError,
-    PluginManifest, PluginResult, RequestBodyContext, RequestContext,
+    PluginManifest, PluginResult, RequestContext,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -226,11 +226,7 @@ impl ApiGatewayPlugin for RequestTransformerPlugin {
         &self.manifest
     }
 
-    fn needs_request_body(&self) -> bool {
-        true
-    }
-
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         if let Some(uri) = &self.config.replace.uri {
             replace_uri(cx.uri, uri);
         }
@@ -251,38 +247,29 @@ impl ApiGatewayPlugin for RequestTransformerPlugin {
             true,
         );
 
-        if !self.config.merges_body_into_query(cx.headers) {
+        let merge = self.config.merges_body_into_query(cx.headers);
+        if !merge {
             transform_query(cx.uri, &self.config);
+        }
+        if merge || self.config.has_body_ops() {
+            let headers = cx.headers.clone();
+            let mut body = cx.request_body().cloned().unwrap_or_default();
+            if merge {
+                merge_form_into_query(cx.uri, &body);
+                transform_query(cx.uri, &self.config);
+            }
+            if self.config.has_body_ops() {
+                if is_json_content_type(&headers) {
+                    body = transform_json(&self.config, &body);
+                } else if is_form_content_type(&headers) {
+                    body = transform_form(&self.config, &body);
+                } else if is_multipart_content_type(&headers) {
+                    body = transform_multipart(&self.config, &headers, &body);
+                }
+            }
+            cx.set_request_body(body);
         }
         Ok(PluginAction::Continue)
-    }
-
-    async fn on_request_buffer(
-        &self,
-        cx: &mut RequestBodyContext<'_>,
-        body: Bytes,
-    ) -> Result<Bytes, PluginError> {
-        let merge = self.config.merges_body_into_query(cx.headers);
-        if !self.config.has_body_ops() && !merge {
-            return Ok(body);
-        }
-
-        let mut body = body;
-        if merge {
-            merge_form_into_query(cx.uri, &body);
-            transform_query(cx.uri, &self.config);
-        }
-
-        if self.config.has_body_ops() {
-            if is_json_content_type(cx.headers) {
-                body = transform_json(&self.config, &body);
-            } else if is_form_content_type(cx.headers) {
-                body = transform_form(&self.config, &body);
-            } else if is_multipart_content_type(cx.headers) {
-                body = transform_multipart(&self.config, cx.headers, &body);
-            }
-        }
-        Ok(body)
     }
 }
 

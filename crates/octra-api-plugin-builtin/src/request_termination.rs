@@ -47,7 +47,7 @@ impl ApiGatewayPluginFactory for RequestTerminationFactory {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![PluginPhase::Request, PluginPhase::Log]
+        vec![PluginPhase::Access, PluginPhase::Log]
     }
 }
 
@@ -86,7 +86,7 @@ impl ApiGatewayPlugin for RequestTerminationPlugin {
         &self.manifest
     }
 
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         if let Some(trigger) = &self.config.trigger {
             let in_header = cx.headers.contains_key(trigger.as_str());
             let in_query = cx.uri.query().is_some_and(|query| {
@@ -145,7 +145,7 @@ mod tests {
     fn declares_request_and_log_phases() {
         assert_eq!(
             RequestTerminationFactory.phases(),
-            vec![PluginPhase::Request, PluginPhase::Log]
+            vec![PluginPhase::Access, PluginPhase::Log]
         );
     }
 
@@ -153,7 +153,7 @@ mod tests {
     async fn terminates_with_the_default_response() {
         let plugin = plugin(json!({}));
         let mut fixture = RequestFixture::default();
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         let (status, headers, body) = response_parts(short_circuit(action)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
@@ -172,7 +172,7 @@ mod tests {
     async fn supports_custom_status_and_message() {
         let plugin = plugin(json!({"status_code": 418, "message": "teapot"}));
         let mut fixture = RequestFixture::default();
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         let (status, _, body) = response_parts(short_circuit(action)).await;
         assert_eq!(status, StatusCode::IM_A_TEAPOT);
         let body: Value = serde_json::from_slice(&body).expect("json body");
@@ -187,7 +187,7 @@ mod tests {
             "content_type": "text/plain"
         }));
         let mut fixture = RequestFixture::default();
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         let (status, headers, body) = response_parts(short_circuit(action)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
@@ -210,7 +210,7 @@ mod tests {
             "echo": true
         }));
         let mut fixture = RequestFixture::default();
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         let (status, headers, body) = response_parts(short_circuit(action)).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(
@@ -228,7 +228,7 @@ mod tests {
     async fn triggers_on_the_configured_header_or_query_parameter() {
         let plugin = plugin(json!({"trigger": "x-kill"}));
         let mut fixture = RequestFixture::default();
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
 
         let mut fixture = RequestFixture::default();
@@ -236,7 +236,7 @@ mod tests {
             header::HeaderName::from_static("x-kill"),
             HeaderValue::from_static("1"),
         );
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         let (status, _, _) = response_parts(short_circuit(action)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
@@ -244,7 +244,7 @@ mod tests {
             uri: "/p?x-kill=1".parse().expect("uri"),
             ..RequestFixture::default()
         };
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         let (status, _, _) = response_parts(short_circuit(action)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -253,7 +253,7 @@ mod tests {
     async fn invalid_statuses_fall_back_to_service_unavailable() {
         let plugin = plugin(json!({"status_code": 0}));
         let mut fixture = RequestFixture::default();
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         let (status, _, _) = response_parts(short_circuit(action)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }

@@ -51,7 +51,7 @@ impl ApiGatewayPluginFactory for IpRestrictionFactory {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![PluginPhase::Request, PluginPhase::Log]
+        vec![PluginPhase::Access, PluginPhase::Log]
     }
 }
 
@@ -75,7 +75,7 @@ impl ApiGatewayPlugin for IpRestrictionPlugin {
         &self.manifest
     }
 
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let Some(ip) = cx.client_ip else {
             return Ok(PluginAction::Continue);
         };
@@ -134,7 +134,7 @@ mod tests {
             client_ip: client_ip.map(|ip| ip.parse().expect("ip address")),
             ..RequestFixture::default()
         };
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         (action, fixture)
     }
 
@@ -177,7 +177,7 @@ mod tests {
     fn declares_request_and_log_phases() {
         assert_eq!(
             IpRestrictionFactory.phases(),
-            vec![PluginPhase::Request, PluginPhase::Log]
+            vec![PluginPhase::Access, PluginPhase::Log]
         );
     }
 

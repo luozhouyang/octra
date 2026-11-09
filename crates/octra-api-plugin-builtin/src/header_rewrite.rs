@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use octra_api_plugin_types::{
     ApiGatewayPlugin, ApiGatewayPluginFactory, Capability, PluginAction, PluginError,
-    PluginManifest, PluginResult, ResponseContext, UpstreamRequestContext,
+    PluginManifest, PluginResult, RequestContext, ResponseContext,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -45,7 +45,7 @@ impl ApiGatewayPluginFactory for HeaderRewriteFactory {
 
     fn phases(&self) -> Vec<octra_api_plugin_types::PluginPhase> {
         vec![
-            octra_api_plugin_types::PluginPhase::UpstreamRequest,
+            octra_api_plugin_types::PluginPhase::Access,
             octra_api_plugin_types::PluginPhase::Response,
             octra_api_plugin_types::PluginPhase::Log,
         ]
@@ -124,12 +124,12 @@ impl ApiGatewayPlugin for HeaderRewritePlugin {
         &self.manifest
     }
 
-    async fn on_upstream_request(&self, cx: &mut UpstreamRequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         apply(&self.config.request, cx.headers);
         Ok(PluginAction::Continue)
     }
 
-    async fn on_response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
+    async fn response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
         apply(&self.config.response, cx.headers);
         Ok(PluginAction::Continue)
     }

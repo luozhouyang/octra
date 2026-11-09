@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use http::{HeaderName, HeaderValue, header};
 use octra_api_plugin_types::{
-    ApiGatewayPlugin, ApiGatewayPluginFactory, Capability, PluginAction, PluginError,
-    PluginManifest, PluginPhase, PluginResult, ResponseBodyContext, ResponseContext,
+    ApiGatewayPlugin, ApiGatewayPluginFactory, BodyFilterContext, Capability, PluginAction,
+    PluginError, PluginManifest, PluginPhase, PluginResult, ResponseContext,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -71,7 +71,7 @@ impl ApiGatewayPluginFactory for ResponseTransformerFactory {
     fn phases(&self) -> Vec<PluginPhase> {
         vec![
             PluginPhase::Response,
-            PluginPhase::ResponseBody,
+            PluginPhase::BodyFilter,
             PluginPhase::Log,
         ]
     }
@@ -214,11 +214,7 @@ impl ApiGatewayPlugin for ResponseTransformerPlugin {
         &self.manifest
     }
 
-    fn needs_response_body(&self) -> bool {
-        self.config.has_body_ops()
-    }
-
-    async fn on_response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
+    async fn response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
         apply_header_ops(
             cx.headers,
             &self.config.remove.headers,
@@ -234,39 +230,48 @@ impl ApiGatewayPlugin for ResponseTransformerPlugin {
         Ok(PluginAction::Continue)
     }
 
-    async fn on_response_buffer(
-        &self,
-        cx: &mut ResponseBodyContext<'_>,
-        body: Bytes,
-    ) -> Result<Bytes, PluginError> {
+    async fn body_filter(&self, cx: &mut BodyFilterContext<'_>) -> Result<(), PluginError> {
         if !self.config.has_body_ops() || !is_json_content_type(cx.headers) {
-            return Ok(body);
+            return Ok(());
         }
-        let mut object = match serde_json::from_slice::<Value>(&body) {
-            Ok(Value::Object(object)) => object,
-            _ => return Ok(body),
-        };
-
-        for entry in &self.config.remove.json {
-            object.remove(split_pair(entry).0);
+        if let Some(chunk) = cx.chunk.take() {
+            cx.ctx.body.extend_from_slice(&chunk);
         }
-        for entry in &self.config.rename.json {
-            if let (old, Some(new)) = split_pair(entry)
-                && let Some(value) = object.remove(old)
-            {
-                object.insert(new.to_string(), value);
-            }
+        if !cx.eof {
+            cx.chunk = None;
+            return Ok(());
         }
-        apply_typed(&mut object, &self.config.replace, Mode::Replace);
-        apply_typed(&mut object, &self.config.add, Mode::Add);
-        apply_typed(&mut object, &self.config.append, Mode::Append);
-
-        serde_json::to_vec(&Value::Object(object))
-            .map(Bytes::from)
-            .map_err(|error| {
-                PluginError::fail_closed(format!("cannot encode transformed response: {error}"))
-            })
+        let body = std::mem::take(&mut cx.ctx.body);
+        cx.chunk = Some(transform_response_body(&self.config, body.freeze())?);
+        Ok(())
     }
+}
+
+fn transform_response_body(config: &Config, body: Bytes) -> Result<Bytes, PluginError> {
+    let mut object = match serde_json::from_slice::<Value>(&body) {
+        Ok(Value::Object(object)) => object,
+        _ => return Ok(body),
+    };
+
+    for entry in &config.remove.json {
+        object.remove(split_pair(entry).0);
+    }
+    for entry in &config.rename.json {
+        if let (old, Some(new)) = split_pair(entry)
+            && let Some(value) = object.remove(old)
+        {
+            object.insert(new.to_string(), value);
+        }
+    }
+    apply_typed(&mut object, &config.replace, Mode::Replace);
+    apply_typed(&mut object, &config.add, Mode::Add);
+    apply_typed(&mut object, &config.append, Mode::Append);
+
+    serde_json::to_vec(&Value::Object(object))
+        .map(Bytes::from)
+        .map_err(|error| {
+            PluginError::fail_closed(format!("cannot encode transformed response: {error}"))
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -343,19 +348,6 @@ mod tests {
                 .create("test", json!({"rename": {"headers": ["x:bad header"]}}))
                 .is_err()
         );
-    }
-
-    #[test]
-    fn body_buffering_follows_body_operations() {
-        let header_only = ResponseTransformerFactory
-            .create("test", json!({"add": {"headers": ["x-added:value"]}}))
-            .unwrap();
-        assert!(!header_only.needs_response_body());
-
-        let body = ResponseTransformerFactory
-            .create("test", json!({"add": {"json": ["added:true"]}}))
-            .unwrap();
-        assert!(body.needs_response_body());
     }
 
     #[test]

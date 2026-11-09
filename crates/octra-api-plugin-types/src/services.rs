@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::PluginError;
 
 /// Current third-party plugin contract version.
-pub const API_PLUGIN_API_VERSION: &str = "2";
+pub const API_PLUGIN_API_VERSION: &str = "3";
 
 /// Maximum number of event subscriptions a plugin may declare.
 pub const MAX_SUBSCRIPTIONS: usize = 32;

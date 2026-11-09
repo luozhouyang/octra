@@ -96,11 +96,7 @@ impl ApiGatewayPluginFactory for CorsFactory {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![
-            PluginPhase::Request,
-            PluginPhase::Response,
-            PluginPhase::Log,
-        ]
+        vec![PluginPhase::Access, PluginPhase::Response, PluginPhase::Log]
     }
 }
 
@@ -252,7 +248,7 @@ impl ApiGatewayPlugin for CorsPlugin {
         &self.manifest
     }
 
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         if *cx.method != Method::OPTIONS {
             return Ok(PluginAction::Continue);
         }
@@ -314,7 +310,7 @@ impl ApiGatewayPlugin for CorsPlugin {
         Ok(PluginAction::ShortCircuit(response))
     }
 
-    async fn on_response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
+    async fn response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
         if cx
             .state
             .values

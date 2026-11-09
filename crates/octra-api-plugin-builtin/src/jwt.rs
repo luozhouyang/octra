@@ -56,7 +56,7 @@ impl ApiGatewayPluginFactory for JwtFactory {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![PluginPhase::Request, PluginPhase::Log]
+        vec![PluginPhase::Access, PluginPhase::Log]
     }
 }
 
@@ -125,7 +125,7 @@ impl ApiGatewayPlugin for JwtPlugin {
         &self.manifest
     }
 
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         if cx.method == http::Method::OPTIONS && !self.config.run_on_preflight {
             return Ok(PluginAction::Continue);
         }
@@ -416,7 +416,7 @@ mod tests {
     fn declares_request_and_log_phases() {
         assert_eq!(
             JwtFactory.phases(),
-            vec![PluginPhase::Request, PluginPhase::Log]
+            vec![PluginPhase::Access, PluginPhase::Log]
         );
     }
 
@@ -436,7 +436,7 @@ mod tests {
             .headers
             .insert(header::AUTHORIZATION, bearer(&token));
 
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert_eq!(
             fixture
@@ -469,7 +469,7 @@ mod tests {
             Algorithm::HS256,
         );
         fixture.headers.insert(header::AUTHORIZATION, bearer(&bad));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
 
         let mut fixture = RequestFixture::default();
@@ -482,7 +482,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer(&expired));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
 
         let mut fixture = RequestFixture::default();
@@ -491,7 +491,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer(&no_exp));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
 
         let mut fixture = RequestFixture::default();
@@ -504,7 +504,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer(&unknown));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
 
         let mut fixture = RequestFixture::default();
@@ -517,14 +517,14 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer(&mismatch));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
 
         let mut fixture = RequestFixture::default();
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer("not-a-token"));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
     }
 
@@ -542,10 +542,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer(&future));
-        let action = required_nbf
-            .on_request(&mut fixture.context())
-            .await
-            .unwrap();
+        let action = required_nbf.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
 
         let past = token(
@@ -556,10 +553,7 @@ mod tests {
         let mut fixture = RequestFixture::default();
         store_jwt(&mut fixture, "key-1", "secret", "HS256");
         fixture.headers.insert(header::AUTHORIZATION, bearer(&past));
-        let action = required_nbf
-            .on_request(&mut fixture.context())
-            .await
-            .unwrap();
+        let action = required_nbf.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
 
         let short = plugin(json!({"claims_to_verify": ["exp"], "maximum_expiration": 60}));
@@ -573,7 +567,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer(&long_lived));
-        let action = short.on_request(&mut fixture.context()).await.unwrap();
+        let action = short.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
 
         let short_lived = token(
@@ -586,7 +580,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer(&short_lived));
-        let action = short.on_request(&mut fixture.context()).await.unwrap();
+        let action = short.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
     }
 
@@ -602,10 +596,7 @@ mod tests {
         let mut fixture = RequestFixture::default();
         store_jwt(&mut fixture, "key-1", "secret", "HS256");
         fixture.uri = format!("/p?jwt={query_token}").parse().expect("uri");
-        let action = query_plugin
-            .on_request(&mut fixture.context())
-            .await
-            .unwrap();
+        let action = query_plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
 
         let cookie_token = token(
@@ -620,7 +611,7 @@ mod tests {
             header::COOKIE,
             HeaderValue::from_str(&format!("a=1; session={cookie_token}")).expect("cookie"),
         );
-        let action = cookies.on_request(&mut fixture.context()).await.unwrap();
+        let action = cookies.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
 
         let header_token = token(
@@ -635,7 +626,7 @@ mod tests {
             header::HeaderName::from_static("x-jwt"),
             HeaderValue::from_str(&header_token).expect("token"),
         );
-        let action = custom.on_request(&mut fixture.context()).await.unwrap();
+        let action = custom.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
     }
 
@@ -655,10 +646,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer(&signed));
-        let action = base64_plugin
-            .on_request(&mut fixture.context())
-            .await
-            .unwrap();
+        let action = base64_plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
 
         let invalid = plugin(json!({"secret_is_base64": true}));
@@ -667,7 +655,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer(&signed));
-        let action = invalid.on_request(&mut fixture.context()).await.unwrap();
+        let action = invalid.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
 
         let custom = plugin(json!({"key_claim_name": "sub"}));
@@ -681,7 +669,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer(&custom_token));
-        let action = custom.on_request(&mut fixture.context()).await.unwrap();
+        let action = custom.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
     }
 
@@ -700,7 +688,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, bearer(&token));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
     }
 
@@ -711,7 +699,7 @@ mod tests {
             method: Method::OPTIONS,
             ..RequestFixture::default()
         };
-        let action = required.on_request(&mut fixture.context()).await.unwrap();
+        let action = required.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
 
         let skipped = plugin(json!({"run_on_preflight": false}));
@@ -719,7 +707,7 @@ mod tests {
             method: Method::OPTIONS,
             ..RequestFixture::default()
         };
-        let action = skipped.on_request(&mut fixture.context()).await.unwrap();
+        let action = skipped.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert!(fixture.state.consumer.is_none());
 
@@ -733,13 +721,13 @@ mod tests {
                 ..ConsumerInfo::default()
             },
         );
-        let action = anonymous.on_request(&mut fixture.context()).await.unwrap();
+        let action = anonymous.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert!(fixture.state.anonymous);
 
         let unknown = plugin(json!({"anonymous": "ghost"}));
         let mut fixture = RequestFixture::default();
-        let action = unknown.on_request(&mut fixture.context()).await.unwrap();
+        let action = unknown.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer").await;
     }
 
@@ -747,7 +735,7 @@ mod tests {
     async fn uses_the_configured_realm() {
         let plugin = plugin(json!({"realm": "internal"}));
         let mut fixture = RequestFixture::default();
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Bearer realm=\"internal\"").await;
     }
 }

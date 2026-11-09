@@ -45,7 +45,7 @@ impl ApiGatewayPluginFactory for BasicAuthFactory {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![PluginPhase::Request, PluginPhase::Log]
+        vec![PluginPhase::Access, PluginPhase::Log]
     }
 }
 
@@ -78,7 +78,7 @@ impl ApiGatewayPlugin for BasicAuthPlugin {
         &self.manifest
     }
 
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let credentials = cx
             .headers
             .get(header::AUTHORIZATION)
@@ -224,7 +224,7 @@ mod tests {
     fn declares_request_and_log_phases() {
         assert_eq!(
             BasicAuthFactory.phases(),
-            vec![PluginPhase::Request, PluginPhase::Log]
+            vec![PluginPhase::Access, PluginPhase::Log]
         );
     }
 
@@ -233,7 +233,7 @@ mod tests {
         let plugin = plugin(json!({}));
 
         let mut fixture = RequestFixture::default();
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_eq!(
             challenge(short_circuit(action)).await,
             "Basic realm=\"service\""
@@ -243,7 +243,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, HeaderValue::from_static("Basic !!!"));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_eq!(
             challenge(short_circuit(action)).await,
             "Basic realm=\"service\""
@@ -254,7 +254,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, credentials("unknown", "secret"));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_eq!(
             challenge(short_circuit(action)).await,
             "Basic realm=\"service\""
@@ -265,7 +265,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, credentials("alice", "wrong"));
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_eq!(
             challenge(short_circuit(action)).await,
             "Basic realm=\"service\""
@@ -280,7 +280,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, credentials("alice", "secret"));
-        let action = visible.on_request(&mut fixture.context()).await.unwrap();
+        let action = visible.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert_eq!(
             fixture
@@ -306,7 +306,7 @@ mod tests {
         fixture
             .headers
             .insert(header::AUTHORIZATION, credentials("alice", "secret"));
-        let action = hidden.on_request(&mut fixture.context()).await.unwrap();
+        let action = hidden.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert!(!fixture.headers.contains_key(header::AUTHORIZATION));
     }
@@ -315,7 +315,7 @@ mod tests {
     async fn uses_the_configured_realm() {
         let plugin = plugin(json!({"realm": "internal"}));
         let mut fixture = RequestFixture::default();
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_eq!(
             challenge(short_circuit(action)).await,
             "Basic realm=\"internal\""
@@ -334,7 +334,7 @@ mod tests {
                 ..ConsumerInfo::default()
             },
         );
-        let action = known.on_request(&mut fixture.context()).await.unwrap();
+        let action = known.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert!(fixture.state.anonymous);
         assert_eq!(
@@ -348,7 +348,7 @@ mod tests {
 
         let unknown = plugin(json!({"anonymous": "ghost"}));
         let mut fixture = RequestFixture::default();
-        let action = unknown.on_request(&mut fixture.context()).await.unwrap();
+        let action = unknown.access(&mut fixture.context()).await.unwrap();
         assert_eq!(
             challenge(short_circuit(action)).await,
             "Basic realm=\"service\""
@@ -356,7 +356,7 @@ mod tests {
 
         let empty = plugin(json!({"anonymous": " "}));
         let mut fixture = RequestFixture::default();
-        let action = empty.on_request(&mut fixture.context()).await.unwrap();
+        let action = empty.access(&mut fixture.context()).await.unwrap();
         assert_eq!(
             challenge(short_circuit(action)).await,
             "Basic realm=\"service\""

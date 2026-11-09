@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::response::Response;
 use http::{HeaderValue, StatusCode, header};
 use octra_api_plugin_types::{
-    ApiGatewayPlugin, ApiGatewayPluginFactory, Capability, ErrorContext, PluginAction, PluginError,
+    ApiGatewayPlugin, ApiGatewayPluginFactory, Capability, PluginAction, PluginError,
     PluginManifest, PluginResult, RequestContext, ResponseContext,
 };
 use parking_lot::Mutex;
@@ -42,9 +42,8 @@ impl ApiGatewayPluginFactory for CircuitBreakerFactory {
 
     fn phases(&self) -> Vec<octra_api_plugin_types::PluginPhase> {
         vec![
-            octra_api_plugin_types::PluginPhase::Request,
+            octra_api_plugin_types::PluginPhase::Access,
             octra_api_plugin_types::PluginPhase::Response,
-            octra_api_plugin_types::PluginPhase::Error,
             octra_api_plugin_types::PluginPhase::Log,
         ]
     }
@@ -106,7 +105,7 @@ impl ApiGatewayPlugin for CircuitBreakerPlugin {
         &self.manifest
     }
 
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let key = cx.service.id.as_str();
         let open_for = {
             let mut breakers = self.breakers.lock();
@@ -121,7 +120,7 @@ impl ApiGatewayPlugin for CircuitBreakerPlugin {
         }
     }
 
-    async fn on_response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
+    async fn response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
         let key = cx.service.id.as_str();
         let mut breakers = self.breakers.lock();
         let breaker = breakers.entry(key.to_string()).or_default();
@@ -130,16 +129,6 @@ impl ApiGatewayPlugin for CircuitBreakerPlugin {
         } else {
             breaker.record_success();
         }
-        Ok(PluginAction::Continue)
-    }
-
-    async fn on_error(&self, cx: &mut ErrorContext<'_>) -> PluginResult {
-        let key = cx.service.id.as_str();
-        self.breakers
-            .lock()
-            .entry(key.to_string())
-            .or_default()
-            .record_failure(&self.config, Instant::now());
         Ok(PluginAction::Continue)
     }
 }
@@ -236,8 +225,6 @@ mod tests {
             headers: Default::default(),
             strip_path: false,
             preserve_host: false,
-            request_buffering: true,
-            response_buffering: true,
             regex_priority: 0,
             service_id: Some("svc".into()),
             enabled: true,
@@ -267,29 +254,7 @@ mod tests {
             route: &route,
             service: &service,
         };
-        plugin.on_request(&mut cx).await.unwrap()
-    }
-
-    async fn fail(plugin: &dyn ApiGatewayPlugin) {
-        let service = service();
-        let route = route();
-        let method = Method::GET;
-        let uri: Uri = "/".parse().unwrap();
-        let headers = HeaderMap::new();
-        let mut state = GatewayState::default();
-        let mut cx = ErrorContext {
-            request_id: "req",
-            state: &mut state,
-            method: &method,
-            uri: &uri,
-            headers: &headers,
-            consumer_id: None,
-            route: &route,
-            service: &service,
-            target_url: "http://up.test",
-            error: "connect",
-        };
-        plugin.on_error(&mut cx).await.unwrap();
+        plugin.access(&mut cx).await.unwrap()
     }
 
     async fn respond(plugin: &dyn ApiGatewayPlugin, status: StatusCode) {
@@ -310,7 +275,7 @@ mod tests {
             service: &service,
             target_url: "http://up.test",
         };
-        plugin.on_response(&mut cx).await.unwrap();
+        plugin.response(&mut cx).await.unwrap();
     }
 
     #[tokio::test]
@@ -322,12 +287,12 @@ mod tests {
             request(plugin.as_ref()).await,
             PluginAction::Continue
         ));
-        fail(plugin.as_ref()).await;
+        respond(plugin.as_ref(), StatusCode::BAD_GATEWAY).await;
         assert!(matches!(
             request(plugin.as_ref()).await,
             PluginAction::Continue
         ));
-        fail(plugin.as_ref()).await;
+        respond(plugin.as_ref(), StatusCode::BAD_GATEWAY).await;
 
         match request(plugin.as_ref()).await {
             PluginAction::ShortCircuit(response) => {
@@ -343,9 +308,9 @@ mod tests {
         let plugin = CircuitBreakerFactory
             .create("test", json!({"failure_threshold": 2, "open_seconds": 30}))
             .unwrap();
-        fail(plugin.as_ref()).await;
+        respond(plugin.as_ref(), StatusCode::BAD_GATEWAY).await;
         respond(plugin.as_ref(), StatusCode::OK).await;
-        fail(plugin.as_ref()).await;
+        respond(plugin.as_ref(), StatusCode::BAD_GATEWAY).await;
         assert!(matches!(
             request(plugin.as_ref()).await,
             PluginAction::Continue

@@ -92,11 +92,7 @@ impl ApiGatewayPluginFactory for RateLimitingFactory {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![
-            PluginPhase::Request,
-            PluginPhase::Response,
-            PluginPhase::Log,
-        ]
+        vec![PluginPhase::Access, PluginPhase::Response, PluginPhase::Log]
     }
 }
 
@@ -407,7 +403,7 @@ impl ApiGatewayPlugin for RateLimitingPlugin {
         &self.manifest
     }
 
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         let check = self.check(cx);
         let headers = client_headers(&check);
         store_state(cx, &headers, check.exceeded.then(|| worst_reset(&check)));
@@ -427,7 +423,7 @@ impl ApiGatewayPlugin for RateLimitingPlugin {
         Ok(PluginAction::ShortCircuit(response))
     }
 
-    async fn on_response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
+    async fn response(&self, cx: &mut ResponseContext<'_>) -> PluginResult {
         if self.config.hide_client_headers {
             return Ok(PluginAction::Continue);
         }

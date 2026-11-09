@@ -7,7 +7,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use octra_api_plugin_types::{
     ApiGatewayPlugin, ApiGatewayPluginFactory, Capability, PluginAction, PluginError,
-    PluginManifest, PluginPhase, PluginResult, RequestBodyContext, RequestContext,
+    PluginManifest, PluginPhase, PluginResult, RequestContext,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -60,7 +60,7 @@ impl ApiGatewayPluginFactory for KeyAuthFactory {
     }
 
     fn phases(&self) -> Vec<PluginPhase> {
-        vec![PluginPhase::Request, PluginPhase::Log]
+        vec![PluginPhase::Access, PluginPhase::Log]
     }
 }
 
@@ -103,11 +103,7 @@ impl ApiGatewayPlugin for KeyAuthPlugin {
         &self.manifest
     }
 
-    fn needs_request_body(&self) -> bool {
-        self.config.key_in_body
-    }
-
-    async fn on_request(&self, cx: &mut RequestContext<'_>) -> PluginResult {
+    async fn access(&self, cx: &mut RequestContext<'_>) -> PluginResult {
         if cx.method == http::Method::OPTIONS && !self.config.run_on_preflight {
             return Ok(PluginAction::Continue);
         }
@@ -160,7 +156,13 @@ impl ApiGatewayPlugin for KeyAuthPlugin {
                     *cx.uri = uri;
                 }
                 if let Some(name) = body_name {
-                    cx.state.values.insert(BODY_KEY.into(), Value::String(name));
+                    cx.state
+                        .values
+                        .insert(BODY_KEY.into(), Value::String(name.clone()));
+                    let headers = cx.headers.clone();
+                    if let Some(body) = cx.state.request_body.clone() {
+                        cx.set_request_body(strip_body_key(&headers, body, &name));
+                    }
                 }
             }
             return Ok(PluginAction::Continue);
@@ -187,26 +189,6 @@ impl ApiGatewayPlugin for KeyAuthPlugin {
             "No API key found in request"
         };
         Ok(PluginAction::ShortCircuit(self.unauthorized(message)))
-    }
-
-    async fn on_request_buffer(
-        &self,
-        cx: &mut RequestBodyContext<'_>,
-        body: Bytes,
-    ) -> Result<Bytes, PluginError> {
-        if !self.config.hide_credentials {
-            return Ok(body);
-        }
-        let Some(name) = cx
-            .state
-            .values
-            .get(BODY_KEY)
-            .and_then(Value::as_str)
-            .map(str::to_string)
-        else {
-            return Ok(body);
-        };
-        Ok(strip_body_key(cx.headers, body, &name))
     }
 }
 
@@ -309,13 +291,6 @@ mod tests {
             .expect("key-auth config")
     }
 
-    #[test]
-    fn body_buffering_follows_key_in_body() {
-        assert!(!plugin(json!({})).needs_request_body());
-        assert!(!plugin(json!({"key_in_body": false})).needs_request_body());
-        assert!(plugin(json!({"key_in_body": true})).needs_request_body());
-    }
-
     fn headers(content_type: Option<&str>) -> HeaderMap {
         let mut headers = HeaderMap::new();
         if let Some(content_type) = content_type {
@@ -394,7 +369,7 @@ mod tests {
     fn declares_request_and_log_phases() {
         assert_eq!(
             KeyAuthFactory.phases(),
-            vec![PluginPhase::Request, PluginPhase::Log]
+            vec![PluginPhase::Access, PluginPhase::Log]
         );
     }
 
@@ -408,7 +383,7 @@ mod tests {
             HeaderValue::from_static("secret"),
         );
 
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert!(!fixture.state.anonymous);
         assert_eq!(
@@ -434,7 +409,7 @@ mod tests {
         let required = plugin(json!({}));
 
         let mut fixture = RequestFixture::default();
-        let action = required.on_request(&mut fixture.context()).await.unwrap();
+        let action = required.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "No API key found in request", "Key").await;
 
         let mut fixture = RequestFixture::default();
@@ -442,12 +417,12 @@ mod tests {
             header::HeaderName::from_static("apikey"),
             HeaderValue::from_static("wrong"),
         );
-        let action = required.on_request(&mut fixture.context()).await.unwrap();
+        let action = required.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "Invalid authentication credentials", "Key").await;
 
         let custom = plugin(json!({"realm": "internal"}));
         let mut fixture = RequestFixture::default();
-        let action = custom.on_request(&mut fixture.context()).await.unwrap();
+        let action = custom.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(
             action,
             "No API key found in request",
@@ -465,7 +440,7 @@ mod tests {
             header::HeaderName::from_static("x-api-key"),
             HeaderValue::from_static("secret"),
         );
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
 
         let mut fixture = RequestFixture::default();
@@ -474,7 +449,7 @@ mod tests {
             header::HeaderName::from_static("apikey"),
             HeaderValue::from_static("secret"),
         );
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::ShortCircuit(_)));
     }
 
@@ -484,14 +459,14 @@ mod tests {
         let mut fixture = RequestFixture::default();
         store_key(&mut fixture, "secret");
         fixture.uri = "/p?apikey=secret".parse().expect("uri");
-        let action = enabled.on_request(&mut fixture.context()).await.unwrap();
+        let action = enabled.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
 
         let disabled = plugin(json!({"key_in_query": false}));
         let mut fixture = RequestFixture::default();
         store_key(&mut fixture, "secret");
         fixture.uri = "/p?apikey=secret".parse().expect("uri");
-        let action = disabled.on_request(&mut fixture.context()).await.unwrap();
+        let action = disabled.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "No API key found in request", "Key").await;
     }
 
@@ -503,19 +478,16 @@ mod tests {
         fixture.headers = headers(Some("application/json"));
         fixture.state.request_body = Some(Bytes::from_static(br#"{"apikey":"secret","x":1}"#));
 
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert_eq!(
             fixture.state.values.get(BODY_KEY).and_then(Value::as_str),
             Some("apikey")
         );
 
-        let body = Bytes::from_static(br#"{"apikey":"secret","x":1}"#);
-        let stripped = plugin
-            .on_request_buffer(&mut fixture.body_context(), body)
-            .await
-            .unwrap();
-        let stripped: Value = serde_json::from_slice(&stripped).expect("json body");
+        let stripped: Value =
+            serde_json::from_slice(fixture.state.request_body.as_deref().expect("json body"))
+                .expect("json body");
         assert!(stripped.get("apikey").is_none());
         assert_eq!(stripped["x"], 1);
     }
@@ -528,17 +500,13 @@ mod tests {
         fixture.headers = headers(Some("application/x-www-form-urlencoded"));
         fixture.state.request_body = Some(Bytes::from_static(b"x=1&apikey=secret"));
 
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
 
-        let stripped = plugin
-            .on_request_buffer(
-                &mut fixture.body_context(),
-                Bytes::from_static(b"x=1&apikey=secret"),
-            )
-            .await
-            .unwrap();
-        assert_eq!(stripped, Bytes::from_static(b"x=1"));
+        assert_eq!(
+            fixture.state.request_body.as_deref(),
+            Some(b"x=1".as_slice())
+        );
     }
 
     #[tokio::test]
@@ -549,17 +517,15 @@ mod tests {
         fixture.headers = headers(Some(MULTIPART_TYPE));
         fixture.state.request_body = Some(Bytes::from_static(MULTIPART_BODY.as_bytes()));
 
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
 
-        let stripped = plugin
-            .on_request_buffer(
-                &mut fixture.body_context(),
-                Bytes::from_static(MULTIPART_BODY.as_bytes()),
-            )
-            .await
-            .unwrap();
-        let multipart = MultipartBody::parse(MULTIPART_TYPE, &stripped).expect("multipart");
+        let stripped = fixture
+            .state
+            .request_body
+            .as_deref()
+            .expect("multipart body");
+        let multipart = MultipartBody::parse(MULTIPART_TYPE, stripped).expect("multipart");
         assert_eq!(multipart.value("apikey"), None);
         assert_eq!(multipart.value("x").as_deref(), Some("1"));
     }
@@ -572,7 +538,7 @@ mod tests {
         fixture.headers = headers(Some("application/json"));
         fixture.state.request_body = Some(Bytes::from_static(br#"{"apikey":"secret"}"#));
 
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "No API key found in request", "Key").await;
     }
 
@@ -586,14 +552,14 @@ mod tests {
             header::HeaderName::from_static("apikey"),
             HeaderValue::from_static("secret"),
         );
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert!(!fixture.headers.contains_key("apikey"));
 
         let mut fixture = RequestFixture::default();
         store_key(&mut fixture, "secret");
         fixture.uri = "/p?apikey=secret&x=1".parse().expect("uri");
-        let action = plugin.on_request(&mut fixture.context()).await.unwrap();
+        let action = plugin.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert_eq!(fixture.uri.query(), Some("x=1"));
     }
@@ -605,7 +571,7 @@ mod tests {
             method: Method::OPTIONS,
             ..RequestFixture::default()
         };
-        let action = default.on_request(&mut fixture.context()).await.unwrap();
+        let action = default.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "No API key found in request", "Key").await;
 
         let skipped = plugin(json!({"run_on_preflight": false}));
@@ -613,7 +579,7 @@ mod tests {
             method: Method::OPTIONS,
             ..RequestFixture::default()
         };
-        let action = skipped.on_request(&mut fixture.context()).await.unwrap();
+        let action = skipped.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert!(fixture.state.consumer.is_none());
     }
@@ -630,7 +596,7 @@ mod tests {
                 ..ConsumerInfo::default()
             },
         );
-        let action = known.on_request(&mut fixture.context()).await.unwrap();
+        let action = known.access(&mut fixture.context()).await.unwrap();
         assert!(matches!(action, PluginAction::Continue));
         assert!(fixture.state.anonymous);
         assert_eq!(
@@ -644,7 +610,7 @@ mod tests {
 
         let unknown = plugin(json!({"anonymous": "ghost"}));
         let mut fixture = RequestFixture::default();
-        let action = unknown.on_request(&mut fixture.context()).await.unwrap();
+        let action = unknown.access(&mut fixture.context()).await.unwrap();
         assert_unauthorized(action, "No API key found in request", "Key").await;
     }
 

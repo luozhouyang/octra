@@ -372,7 +372,7 @@ fn artifact(dir: &std::path::Path, kind: &str, version: &str) -> std::path::Path
     std::fs::write(
         dir.join("plugin.json"),
         json!({
-            "api_version": "2",
+            "api_version": "3",
             "name": "llm-demo",
             "version": version,
             "kind": kind,
@@ -380,7 +380,7 @@ fn artifact(dir: &std::path::Path, kind: &str, version: &str) -> std::path::Path
             "priority": 0,
             "description": "demo",
             "capabilities": [],
-            "phases": ["request"]
+            "phases": ["access"]
         })
         .to_string(),
     )

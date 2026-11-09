@@ -8,15 +8,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use bytes::Bytes;
 use octra_api_core::PluginInstance;
+use octra_api_core::{Route, Service};
 use octra_api_plugin_types::{
-    ApiGatewayPlugin, ApiGatewayPluginFactory, BodyContext, Capability, EntityQuery, ErrorContext,
-    EventSubscriber, FailPolicy, GatewayEvent, JobInvocation, LogContext, LogLevel, PluginAction,
+    AccessContext, ApiGatewayBackgroundPlugin, ApiGatewayPlugin, ApiGatewayPluginFactory,
+    BodyFilterContext, Capability, EntityQuery, EventSubscriber, FailPolicy, GatewayEvent,
+    GatewayState, HeaderFilterContext, JobInvocation, LogContext, LogLevel, PluginAction,
     PluginError, PluginHost, PluginManifest, PluginPhase, PluginServiceSource, PluginStorage,
-    RequestBodyContext, RequestContext, ResponseBodyContext, ResponseContext, ScheduledJob,
-    StorageError, UpstreamRequestContext,
+    RequestContext, ResponseContext, ScheduledJob, StorageError,
 };
 use octra_core::Result;
 use parking_lot::{Mutex, RwLock};
@@ -354,40 +356,8 @@ impl PluginChain {
         self.entries.iter().any(|entry| entry.auth)
     }
 
-    /// Whether any instance in this chain needs the full request body.
-    pub fn needs_request_body(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|entry| entry.plugin.needs_request_body())
-    }
-
-    /// Whether any instance in this chain needs the full response body.
-    pub fn needs_response_body(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|entry| entry.plugin.needs_response_body())
-    }
-
-    /// True when at least one response-body plugin cannot consume chunks and
-    /// therefore requires the buffered path.
-    pub fn needs_response_buffer(&self) -> bool {
-        self.entries
-            .iter()
-            .filter(|entry| entry.phases.contains(&PluginPhase::ResponseBody))
-            .any(|entry| {
-                entry.plugin.needs_response_body() && !entry.plugin.streams_response_body()
-            })
-    }
-
-    /// True when at least one response-body plugin consumes chunks directly.
-    pub fn streams_response_body(&self) -> bool {
-        self.entries
-            .iter()
-            .filter(|entry| entry.phases.contains(&PluginPhase::ResponseBody))
-            .any(|entry| entry.plugin.streams_response_body())
-    }
-
-    pub async fn on_rewrite(
+    /// Kong `rewrite` phase.
+    pub async fn rewrite(
         &self,
         cx: &mut RequestContext<'_>,
     ) -> std::result::Result<Option<Response>, PluginError> {
@@ -395,8 +365,7 @@ impl PluginChain {
             if !entry.phases.contains(&PluginPhase::Rewrite) {
                 continue;
             }
-            let action =
-                run_stage(entry, PluginPhase::Rewrite, entry.plugin.on_rewrite(cx)).await?;
+            let action = run_stage(entry, PluginPhase::Rewrite, entry.plugin.rewrite(cx)).await?;
             if let PluginAction::ShortCircuit(response) = action {
                 return Ok(Some(response));
             }
@@ -404,18 +373,19 @@ impl PluginChain {
         Ok(None)
     }
 
-    pub async fn on_request(
+    /// Kong `access` phase. Authentication plugins always fail closed.
+    pub async fn access(
         &self,
-        cx: &mut RequestContext<'_>,
+        cx: &mut AccessContext<'_>,
     ) -> std::result::Result<Option<Response>, PluginError> {
         for entry in &self.entries {
-            if !entry.phases.contains(&PluginPhase::Request) {
+            if !entry.phases.contains(&PluginPhase::Access) {
                 continue;
             }
             let action = if entry.auth {
-                run_auth_stage(entry, entry.plugin.on_request(cx)).await?
+                run_auth_stage(entry, entry.plugin.access(cx)).await?
             } else {
-                run_stage(entry, PluginPhase::Request, entry.plugin.on_request(cx)).await?
+                run_stage(entry, PluginPhase::Access, entry.plugin.access(cx)).await?
             };
             if let PluginAction::ShortCircuit(response) = action {
                 return Ok(Some(response));
@@ -424,28 +394,8 @@ impl PluginChain {
         Ok(None)
     }
 
-    pub async fn on_upstream_request(
-        &self,
-        cx: &mut UpstreamRequestContext<'_>,
-    ) -> std::result::Result<Option<Response>, PluginError> {
-        for entry in &self.entries {
-            if !entry.phases.contains(&PluginPhase::UpstreamRequest) {
-                continue;
-            }
-            let action = run_stage(
-                entry,
-                PluginPhase::UpstreamRequest,
-                entry.plugin.on_upstream_request(cx),
-            )
-            .await?;
-            if let PluginAction::ShortCircuit(response) = action {
-                return Ok(Some(response));
-            }
-        }
-        Ok(None)
-    }
-
-    pub async fn on_response(
+    /// Kong `response` phase.
+    pub async fn response(
         &self,
         cx: &mut ResponseContext<'_>,
     ) -> std::result::Result<Option<Response>, PluginError> {
@@ -453,8 +403,7 @@ impl PluginChain {
             if !entry.phases.contains(&PluginPhase::Response) {
                 continue;
             }
-            let action =
-                run_stage(entry, PluginPhase::Response, entry.plugin.on_response(cx)).await?;
+            let action = run_stage(entry, PluginPhase::Response, entry.plugin.response(cx)).await?;
             if let PluginAction::ShortCircuit(response) = action {
                 return Ok(Some(response));
             }
@@ -462,90 +411,98 @@ impl PluginChain {
         Ok(None)
     }
 
-    pub async fn on_response_body(
+    /// Kong `header_filter` phase.
+    pub async fn header_filter(
         &self,
-        cx: &mut BodyContext<'_>,
-        mut chunk: Bytes,
-    ) -> std::result::Result<Bytes, PluginError> {
+        cx: &mut HeaderFilterContext<'_>,
+    ) -> std::result::Result<(), PluginError> {
         for entry in &self.entries {
-            if !entry.phases.contains(&PluginPhase::ResponseBody) {
+            if !entry.phases.contains(&PluginPhase::HeaderFilter) {
                 continue;
             }
-            let result = tokio::time::timeout(
-                entry.timeout,
-                entry.plugin.on_response_body(cx, chunk.clone()),
-            )
-            .await;
+            let result = tokio::time::timeout(entry.timeout, entry.plugin.header_filter(cx)).await;
             match result {
-                Ok(Ok(next)) => chunk = next,
+                Ok(Ok(())) => {}
                 Ok(Err(error)) => match error.fail_policy {
                     FailPolicy::Open => {
-                        tracing::warn!(plugin = %entry.name, error = %error, "plugin body filter failed")
+                        tracing::warn!(plugin = %entry.name, error = %error, "plugin header filter failed")
+                    }
+                    FailPolicy::Closed => return Err(error),
+                },
+                Err(_) => {
+                    tracing::warn!(plugin = %entry.name, "plugin header filter timed out");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Kong `body_filter` phase.
+    ///
+    /// `chunk` is `ngx.arg[1]` and `eof` is `ngx.arg[2]`. Each plugin may
+    /// replace or drop the chunk; all plugins receive the same EOF flag.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn body_filter(
+        &self,
+        mut chunk: Option<Bytes>,
+        eof: bool,
+        request_id: &str,
+        status: StatusCode,
+        headers: &HeaderMap,
+        consumer_id: Option<&str>,
+        route: &Route,
+        service: &Service,
+        target_url: &str,
+        state: &mut GatewayState,
+    ) -> std::result::Result<Option<Bytes>, PluginError> {
+        for entry in &self.entries {
+            if !entry.phases.contains(&PluginPhase::BodyFilter) {
+                continue;
+            }
+            let fallback = chunk.clone();
+            let (shared, contexts) = (&mut state.values, &mut state.plugin_contexts);
+            let plugin_ctx = contexts.entry(entry.id.clone()).or_default();
+            let mut cx = BodyFilterContext {
+                chunk,
+                eof,
+                request_id,
+                status,
+                headers,
+                consumer_id,
+                route,
+                service,
+                target_url,
+                shared,
+                ctx: plugin_ctx,
+            };
+            let result =
+                tokio::time::timeout(entry.timeout, entry.plugin.body_filter(&mut cx)).await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => match error.fail_policy {
+                    FailPolicy::Open => {
+                        tracing::warn!(plugin = %entry.name, error = %error, "plugin body filter failed");
+                        cx.chunk = fallback;
                     }
                     FailPolicy::Closed => return Err(error),
                 },
                 Err(_) => {
                     tracing::warn!(plugin = %entry.name, "plugin body filter timed out");
+                    cx.chunk = fallback;
                 }
             }
+            chunk = cx.chunk;
         }
         Ok(chunk)
     }
 
-    pub async fn on_request_buffer(
-        &self,
-        cx: &mut RequestBodyContext<'_>,
-        mut body: Bytes,
-    ) -> std::result::Result<Bytes, PluginError> {
-        for entry in &self.entries {
-            if !entry.phases.contains(&PluginPhase::Request) {
-                continue;
-            }
-            let fallback = body.clone();
-            body =
-                run_bytes_stage(entry, entry.plugin.on_request_buffer(cx, body), fallback).await?;
-        }
-        Ok(body)
-    }
-
-    pub async fn on_response_buffer(
-        &self,
-        cx: &mut ResponseBodyContext<'_>,
-        mut body: Bytes,
-    ) -> std::result::Result<Bytes, PluginError> {
-        for entry in &self.entries {
-            if !entry.phases.contains(&PluginPhase::ResponseBody) {
-                continue;
-            }
-            let fallback = body.clone();
-            body =
-                run_bytes_stage(entry, entry.plugin.on_response_buffer(cx, body), fallback).await?;
-        }
-        Ok(body)
-    }
-
-    pub async fn on_error(
-        &self,
-        cx: &mut ErrorContext<'_>,
-    ) -> std::result::Result<Option<Response>, PluginError> {
-        for entry in &self.entries {
-            if !entry.phases.contains(&PluginPhase::Error) {
-                continue;
-            }
-            let action = run_stage(entry, PluginPhase::Error, entry.plugin.on_error(cx)).await?;
-            if let PluginAction::ShortCircuit(response) = action {
-                return Ok(Some(response));
-            }
-        }
-        Ok(None)
-    }
-
-    pub async fn on_log(&self, cx: &mut LogContext<'_>) {
+    /// Kong `log` phase.
+    pub async fn log(&self, cx: &mut LogContext<'_>) {
         for entry in &self.entries {
             if !entry.phases.contains(&PluginPhase::Log) {
                 continue;
             }
-            if tokio::time::timeout(entry.timeout, entry.plugin.on_log(cx))
+            if tokio::time::timeout(entry.timeout, entry.plugin.log(cx))
                 .await
                 .is_err()
             {
@@ -603,32 +560,6 @@ where
                 "plugin '{}' timed out",
                 entry.name
             )))
-        }
-    }
-}
-
-async fn run_bytes_stage<F>(
-    entry: &PluginEntry,
-    future: F,
-    fallback: Bytes,
-) -> std::result::Result<Bytes, PluginError>
-where
-    F: std::future::Future<Output = std::result::Result<Bytes, PluginError>>,
-{
-    let result = tokio::time::timeout(entry.timeout, future).await;
-    match result {
-        Ok(Ok(body)) => Ok(body),
-        Ok(Err(error)) => match error.fail_policy {
-            FailPolicy::Open => {
-                tracing::warn!(plugin = %entry.name, error = %error, "plugin body stage failed");
-                Ok(fallback)
-            }
-            FailPolicy::Closed => Err(error),
-        },
-        Err(_) => {
-            let error = PluginError::fail_closed(format!("plugin '{}' timed out", entry.name));
-            tracing::warn!(plugin = %entry.name, "plugin body stage timed out");
-            Err(error)
         }
     }
 }
@@ -1228,10 +1159,10 @@ mod tests {
     use http::{HeaderMap, Method, StatusCode, Uri};
     use octra_api_core::{PluginInstance, Route, Service};
     use octra_api_plugin_types::{
-        ApiGatewayPlugin, ApiGatewayPluginFactory, BodyContext, Capability, ErrorContext,
+        AccessContext, ApiGatewayPlugin, ApiGatewayPluginFactory, BodyFilterContext, Capability,
         FailPolicy, GatewayState, LogContext, PluginAction, PluginError, PluginKind,
-        PluginManifest, PluginPhase, PluginResult, PluginRuntimeKind, RequestBodyContext,
-        RequestContext, ResponseBodyContext, ResponseContext, UpstreamRequestContext,
+        PluginManifest, PluginPhase, PluginResult, PluginRuntimeKind, RequestContext,
+        ResponseContext,
     };
     use serde_json::{Value, json};
 
@@ -1262,7 +1193,6 @@ mod tests {
         phases: Vec<PluginPhase>,
         capabilities: Vec<Capability>,
         rejects_config: bool,
-        streams_body: bool,
         outcome: Outcome,
     }
 
@@ -1271,10 +1201,9 @@ mod tests {
             name,
             priority: 0,
             timeout_ms: 100,
-            phases: vec![PluginPhase::Request],
+            phases: vec![PluginPhase::Access],
             capabilities: Vec::new(),
             rejects_config: false,
-            streams_body: false,
             outcome: Outcome::Continue,
         }
     }
@@ -1297,11 +1226,6 @@ mod tests {
 
         fn with_timeout(mut self, timeout_ms: u64) -> Self {
             self.timeout_ms = timeout_ms;
-            self
-        }
-
-        fn with_streamed_body(mut self) -> Self {
-            self.streams_body = true;
             self
         }
 
@@ -1328,7 +1252,7 @@ mod tests {
                 phases: self.phases.clone(),
                 capabilities: self.capabilities.clone(),
                 config_schema: None,
-                api_version: "2".to_string(),
+                api_version: "3".to_string(),
                 entities: Vec::new(),
                 migrations: Vec::new(),
                 admin_routes: Vec::new(),
@@ -1349,7 +1273,6 @@ mod tests {
         manifest: PluginManifest,
         label: String,
         outcome: Outcome,
-        streams_body: bool,
         trace: Arc<Mutex<Vec<String>>>,
     }
 
@@ -1405,59 +1328,25 @@ mod tests {
             &self.manifest
         }
 
-        fn streams_response_body(&self) -> bool {
-            self.streams_body
-        }
-
-        async fn on_rewrite(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
+        async fn rewrite(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
             self.act("rewrite").await
         }
 
-        async fn on_request(&self, _cx: &mut RequestContext<'_>) -> PluginResult {
-            self.act("request").await
+        async fn access(&self, _cx: &mut AccessContext<'_>) -> PluginResult {
+            self.act("access").await
         }
 
-        async fn on_upstream_request(&self, _cx: &mut UpstreamRequestContext<'_>) -> PluginResult {
-            self.act("upstream_request").await
-        }
-
-        async fn on_response(&self, _cx: &mut ResponseContext<'_>) -> PluginResult {
+        async fn response(&self, _cx: &mut ResponseContext<'_>) -> PluginResult {
             self.act("response").await
         }
 
-        async fn on_error(&self, cx: &mut ErrorContext<'_>) -> PluginResult {
-            self.trace
-                .lock()
-                .expect("trace lock")
-                .push(format!("error:{}:{}", self.label, cx.error));
-            self.decide().await
+        async fn body_filter(&self, cx: &mut BodyFilterContext<'_>) -> Result<(), PluginError> {
+            let chunk = cx.chunk.take().unwrap_or_default();
+            cx.chunk = Some(self.transform("body_filter", chunk).await?);
+            Ok(())
         }
 
-        async fn on_request_buffer(
-            &self,
-            _cx: &mut RequestBodyContext<'_>,
-            body: Bytes,
-        ) -> Result<Bytes, PluginError> {
-            self.transform("request_buffer", body).await
-        }
-
-        async fn on_response_buffer(
-            &self,
-            _cx: &mut ResponseBodyContext<'_>,
-            body: Bytes,
-        ) -> Result<Bytes, PluginError> {
-            self.transform("response_buffer", body).await
-        }
-
-        async fn on_response_body(
-            &self,
-            _cx: &BodyContext<'_>,
-            chunk: Bytes,
-        ) -> Result<Bytes, PluginError> {
-            self.transform("response_body", chunk).await
-        }
-
-        async fn on_log(&self, _cx: &LogContext<'_>) {
+        async fn log(&self, _cx: &LogContext<'_>) {
             if matches!(self.outcome, Outcome::Hang) {
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
@@ -1492,7 +1381,6 @@ mod tests {
                 manifest: self.spec.manifest(),
                 label,
                 outcome: self.spec.outcome,
-                streams_body: self.spec.streams_body,
                 trace: self.trace.clone(),
             }))
         }
@@ -1633,8 +1521,6 @@ mod tests {
             headers: Default::default(),
             strip_path: false,
             preserve_host: false,
-            request_buffering: true,
-            response_buffering: true,
             regex_priority: 0,
             service_id: None,
             enabled: true,
@@ -1704,10 +1590,10 @@ mod tests {
             &route,
             &service,
         );
-        chain.on_rewrite(&mut cx).await
+        chain.rewrite(&mut cx).await
     }
 
-    async fn run_request(
+    async fn run_access(
         chain: &PluginChain,
     ) -> Result<Option<axum::response::Response>, PluginError> {
         let route = route();
@@ -1724,30 +1610,7 @@ mod tests {
             &route,
             &service,
         );
-        chain.on_request(&mut cx).await
-    }
-
-    async fn run_upstream(
-        chain: &PluginChain,
-    ) -> Result<Option<axum::response::Response>, PluginError> {
-        let route = route();
-        let service = service();
-        let method = Method::GET;
-        let mut uri: Uri = "/".parse().expect("uri");
-        let mut headers = HeaderMap::new();
-        let mut state = GatewayState::default();
-        let mut cx = UpstreamRequestContext {
-            request_id: "req",
-            state: &mut state,
-            method: &method,
-            uri: &mut uri,
-            headers: &mut headers,
-            consumer_id: None,
-            route: &route,
-            service: &service,
-            target_url: "http://localhost/",
-        };
-        chain.on_upstream_request(&mut cx).await
+        chain.access(&mut cx).await
     }
 
     async fn run_response(
@@ -1770,83 +1633,7 @@ mod tests {
             service: &service,
             target_url: "http://localhost/",
         };
-        chain.on_response(&mut cx).await
-    }
-
-    async fn run_error(
-        chain: &PluginChain,
-    ) -> Result<Option<axum::response::Response>, PluginError> {
-        let route = route();
-        let service = service();
-        let method = Method::GET;
-        let uri: Uri = "/".parse().expect("uri");
-        let headers = HeaderMap::new();
-        let mut state = GatewayState::default();
-        let mut cx = ErrorContext {
-            request_id: "req",
-            state: &mut state,
-            method: &method,
-            uri: &uri,
-            headers: &headers,
-            consumer_id: None,
-            route: &route,
-            service: &service,
-            target_url: "http://localhost/",
-            error: "upstream exploded",
-        };
-        chain.on_error(&mut cx).await
-    }
-
-    async fn run_request_buffer(chain: &PluginChain, body: Bytes) -> Result<Bytes, PluginError> {
-        let route = route();
-        let service = service();
-        let method = Method::GET;
-        let mut uri: Uri = "/".parse().expect("uri");
-        let mut headers = HeaderMap::new();
-        let mut state = GatewayState::default();
-        let mut cx = RequestBodyContext {
-            request_id: "req",
-            state: &mut state,
-            method: &method,
-            uri: &mut uri,
-            headers: &mut headers,
-            consumer_id: None,
-            route: &route,
-            service: &service,
-        };
-        chain.on_request_buffer(&mut cx, body).await
-    }
-
-    async fn run_response_buffer(chain: &PluginChain, body: Bytes) -> Result<Bytes, PluginError> {
-        let route = route();
-        let service = service();
-        let headers = HeaderMap::new();
-        let mut state = GatewayState::default();
-        let mut cx = ResponseBodyContext {
-            request_id: "req",
-            state: &mut state,
-            status: StatusCode::OK,
-            headers: &headers,
-            consumer_id: None,
-            route: &route,
-            service: &service,
-            target_url: "http://localhost/",
-        };
-        chain.on_response_buffer(&mut cx, body).await
-    }
-
-    async fn run_response_body(chain: &PluginChain, chunk: Bytes) -> Result<Bytes, PluginError> {
-        let route = route();
-        let service = service();
-        let mut state = GatewayState::default();
-        let mut cx = BodyContext {
-            request_id: "req",
-            state: &mut state,
-            route: &route,
-            service: &service,
-            target_url: "http://localhost/",
-        };
-        chain.on_response_body(&mut cx, chunk).await
+        chain.response(&mut cx).await
     }
 
     async fn run_log(chain: &PluginChain) {
@@ -1867,27 +1654,12 @@ mod tests {
             target_url: Some("http://localhost/"),
             error: None,
         };
-        chain.on_log(&mut cx).await;
+        chain.log(&mut cx).await;
     }
 
     // ---------------------------------------------------------------------
     // Ordering
     // ---------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn streamed_response_plugins_do_not_force_buffering() {
-        let harness = Harness::new(
-            &[spec("streamed")
-                .with_phases(&[PluginPhase::ResponseBody])
-                .with_capability(Capability::ResponseBody)
-                .with_streamed_body()],
-            vec![instance("streamed")],
-        );
-        let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        assert!(chain.streams_response_body());
-        assert!(!chain.needs_response_buffer());
-        assert!(!chain.needs_response_body());
-    }
 
     #[tokio::test]
     async fn orders_by_priority_then_name() {
@@ -1905,10 +1677,10 @@ mod tests {
             chain.names().collect::<Vec<_>>(),
             ["beta", "gamma", "alpha"]
         );
-        run_request(&chain).await.expect("request phase");
+        run_access(&chain).await.expect("request phase");
         assert_eq!(
             harness.trace(),
-            ["request:beta", "request:gamma", "request:alpha"]
+            ["access:beta", "access:gamma", "access:alpha"]
         );
     }
 
@@ -1997,20 +1769,20 @@ mod tests {
             .runtime
             .pre_auth_chain(Some("rt"), Some("svc"), "http");
         assert_eq!(chain.names().collect::<Vec<_>>(), ["stub"]);
-        run_request(&chain).await.expect("request phase");
-        assert_eq!(harness.trace(), ["request:route"]);
+        run_access(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["access:route"]);
 
         harness.clear_trace();
         let chain = harness
             .runtime
             .pre_auth_chain(Some("other"), Some("svc"), "http");
-        run_request(&chain).await.expect("request phase");
-        assert_eq!(harness.trace(), ["request:service"]);
+        run_access(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["access:service"]);
 
         harness.clear_trace();
         let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        run_request(&chain).await.expect("request phase");
-        assert_eq!(harness.trace(), ["request:global"]);
+        run_access(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["access:global"]);
     }
 
     #[tokio::test]
@@ -2023,10 +1795,10 @@ mod tests {
             ],
         );
         let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        run_request(&chain).await.expect("request phase");
+        run_access(&chain).await.expect("request phase");
         let mut trace = harness.trace();
         trace.sort();
-        assert_eq!(trace, ["request:a", "request:b"]);
+        assert_eq!(trace, ["access:a", "access:b"]);
 
         let harness = Harness::new(
             &[spec("stub")],
@@ -2037,8 +1809,8 @@ mod tests {
         );
         let chain = harness.runtime.pre_auth_chain(None, None, "http");
         assert_eq!(chain.names().count(), 1);
-        run_request(&chain).await.expect("request phase");
-        assert_eq!(harness.trace(), ["request:a"]);
+        run_access(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["access:a"]);
     }
 
     #[tokio::test]
@@ -2058,15 +1830,15 @@ mod tests {
         let chain = harness
             .runtime
             .post_auth_chain(None, None, Some("c1"), &[], &[], "http");
-        run_request(&chain).await.expect("request phase");
-        assert_eq!(harness.trace(), ["request:consumer"]);
+        run_access(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["access:consumer"]);
 
         harness.clear_trace();
         let chain = harness
             .runtime
             .post_auth_chain(None, None, Some("c2"), &[], &[], "http");
-        run_request(&chain).await.expect("request phase");
-        assert_eq!(harness.trace(), ["request:global"]);
+        run_access(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["access:global"]);
 
         harness.clear_trace();
         let chain = harness.runtime.post_auth_chain(
@@ -2077,8 +1849,8 @@ mod tests {
             &["gold".to_string()],
             "http",
         );
-        run_request(&chain).await.expect("request phase");
-        assert_eq!(harness.trace(), ["request:group"]);
+        run_access(&chain).await.expect("request phase");
+        assert_eq!(harness.trace(), ["access:group"]);
     }
 
     #[tokio::test]
@@ -2106,8 +1878,8 @@ mod tests {
             .post_auth_chain(None, None, Some("c1"), &[], &[], "http");
         assert!(!post.has_auth());
         assert_eq!(post.names().collect::<Vec<_>>(), ["quota"]);
-        run_request(&post).await.expect("request phase");
-        assert_eq!(harness.trace(), ["request:consumer"]);
+        run_access(&post).await.expect("request phase");
+        assert_eq!(harness.trace(), ["access:consumer"]);
     }
 
     #[tokio::test]
@@ -2156,14 +1928,14 @@ mod tests {
             vec![instance("stub")],
         );
         let chain = open.runtime.pre_auth_chain(None, None, "http");
-        assert!(run_request(&chain).await.expect("fail-open").is_none());
+        assert!(run_access(&chain).await.expect("fail-open").is_none());
 
         let closed = Harness::new(
             &[spec("stub").with_outcome(Outcome::FailClosed)],
             vec![instance("stub")],
         );
         let chain = closed.runtime.pre_auth_chain(None, None, "http");
-        let error = run_request(&chain).await.expect_err("fail-closed");
+        let error = run_access(&chain).await.expect_err("fail-closed");
         assert_eq!(error.fail_policy, FailPolicy::Closed);
     }
 
@@ -2174,7 +1946,7 @@ mod tests {
             vec![instance("stub")],
         );
         let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        let error = run_request(&chain).await.expect_err("timeout");
+        let error = run_access(&chain).await.expect_err("timeout");
         assert_eq!(error.fail_policy, FailPolicy::Closed);
         assert!(error.message.contains("timed out"));
     }
@@ -2188,7 +1960,7 @@ mod tests {
             vec![instance("auth")],
         );
         let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        let error = run_request(&chain).await.expect_err("auth failure");
+        let error = run_access(&chain).await.expect_err("auth failure");
         assert_eq!(error.fail_policy, FailPolicy::Closed);
 
         let harness = Harness::new(
@@ -2199,7 +1971,7 @@ mod tests {
             vec![instance("auth")],
         );
         let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        let error = run_request(&chain).await.expect_err("auth timeout");
+        let error = run_access(&chain).await.expect_err("auth timeout");
         assert_eq!(error.fail_policy, FailPolicy::Closed);
     }
 
@@ -2234,120 +2006,15 @@ mod tests {
         assert_short_circuit(run_rewrite(&chain).await).await;
         assert_eq!(harness.trace(), ["rewrite:a"]);
 
-        let harness = short_circuit_harness(PluginPhase::Request);
+        let harness = short_circuit_harness(PluginPhase::Access);
         let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        assert_short_circuit(run_request(&chain).await).await;
-        assert_eq!(harness.trace(), ["request:a"]);
-
-        let harness = short_circuit_harness(PluginPhase::UpstreamRequest);
-        let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        assert_short_circuit(run_upstream(&chain).await).await;
-        assert_eq!(harness.trace(), ["upstream_request:a"]);
+        assert_short_circuit(run_access(&chain).await).await;
+        assert_eq!(harness.trace(), ["access:a"]);
 
         let harness = short_circuit_harness(PluginPhase::Response);
         let chain = harness.runtime.pre_auth_chain(None, None, "http");
         assert_short_circuit(run_response(&chain).await).await;
         assert_eq!(harness.trace(), ["response:a"]);
-
-        let harness = short_circuit_harness(PluginPhase::Error);
-        let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        assert_short_circuit(run_error(&chain).await).await;
-        assert_eq!(harness.trace(), ["error:a:upstream exploded"]);
-    }
-
-    // ---------------------------------------------------------------------
-    // Bytes stages
-    // ---------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn bytes_stages_fail_open_preserve_the_body() {
-        let harness = Harness::new(
-            &[spec("stub").with_outcome(Outcome::FailOpen)],
-            vec![instance("stub")],
-        );
-        let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        assert_eq!(
-            run_request_buffer(&chain, Bytes::from_static(b"body"))
-                .await
-                .expect("request buffer fail-open"),
-            Bytes::from_static(b"body")
-        );
-
-        let harness = Harness::new(
-            &[spec("stub")
-                .with_phases(&[PluginPhase::ResponseBody])
-                .with_outcome(Outcome::FailOpen)],
-            vec![instance("stub")],
-        );
-        let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        assert_eq!(
-            run_response_buffer(&chain, Bytes::from_static(b"body"))
-                .await
-                .expect("response buffer fail-open"),
-            Bytes::from_static(b"body")
-        );
-        assert_eq!(
-            run_response_body(&chain, Bytes::from_static(b"chunk"))
-                .await
-                .expect("response body fail-open"),
-            Bytes::from_static(b"chunk")
-        );
-
-        let harness = Harness::new(
-            &[spec("stub")
-                .with_phases(&[PluginPhase::ResponseBody])
-                .with_outcome(Outcome::FailClosed)],
-            vec![instance("stub")],
-        );
-        let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        assert!(
-            run_response_buffer(&chain, Bytes::from_static(b"body"))
-                .await
-                .is_err()
-        );
-        assert!(
-            run_response_body(&chain, Bytes::from_static(b"chunk"))
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn bytes_stages_chain_in_priority_order() {
-        let harness = Harness::new(
-            &[spec("a").with_priority(10), spec("b")],
-            vec![instance("a"), instance("b")],
-        );
-        let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        assert_eq!(
-            run_request_buffer(&chain, Bytes::from_static(b"x"))
-                .await
-                .expect("request buffer"),
-            Bytes::from_static(b"xab")
-        );
-
-        let harness = Harness::new(
-            &[
-                spec("a")
-                    .with_priority(10)
-                    .with_phases(&[PluginPhase::ResponseBody]),
-                spec("b").with_phases(&[PluginPhase::ResponseBody]),
-            ],
-            vec![instance("a"), instance("b")],
-        );
-        let chain = harness.runtime.pre_auth_chain(None, None, "http");
-        assert_eq!(
-            run_response_buffer(&chain, Bytes::from_static(b"x"))
-                .await
-                .expect("response buffer"),
-            Bytes::from_static(b"xab")
-        );
-        assert_eq!(
-            run_response_body(&chain, Bytes::from_static(b"x"))
-                .await
-                .expect("response body"),
-            Bytes::from_static(b"xab")
-        );
     }
 
     // ---------------------------------------------------------------------

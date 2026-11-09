@@ -158,7 +158,7 @@ pub(crate) fn manifest(
         phases: Vec::new(),
         capabilities,
         config_schema: Some(config_schema),
-        api_version: "2".to_string(),
+        api_version: "3".to_string(),
         entities: Vec::new(),
         migrations: Vec::new(),
         admin_routes: Vec::new(),
@@ -172,7 +172,7 @@ pub(crate) mod test_support {
     use bytes::Bytes;
     use http::{HeaderMap, Method, StatusCode, Uri};
     use octra_api_core::{Route, Service};
-    use octra_api_plugin_types::{GatewayState, PluginAction, RequestBodyContext, RequestContext};
+    use octra_api_plugin_types::{GatewayState, PluginAction, RequestContext};
 
     pub(crate) fn route() -> Route {
         Route {
@@ -185,8 +185,6 @@ pub(crate) mod test_support {
             headers: Default::default(),
             strip_path: false,
             preserve_host: false,
-            request_buffering: true,
-            response_buffering: true,
             regex_priority: 0,
             service_id: Some("svc".into()),
             enabled: true,
@@ -252,19 +250,6 @@ pub(crate) mod test_support {
                 client_ip: self.client_ip,
                 consumer_id: None,
                 credential_id: None,
-                route: &self.route,
-                service: &self.service,
-            }
-        }
-
-        pub(crate) fn body_context(&mut self) -> RequestBodyContext<'_> {
-            RequestBodyContext {
-                request_id: "req",
-                state: &mut self.state,
-                method: &self.method,
-                uri: &mut self.uri,
-                headers: &mut self.headers,
-                consumer_id: None,
                 route: &self.route,
                 service: &self.service,
             }
