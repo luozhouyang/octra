@@ -59,7 +59,7 @@ The API gateway is the catch-all data-plane handler. It supports:
 - Round-robin, weighted round-robin, and consistent hashing; passive and active health checks.
 - Retries for idempotent methods, bounded by service retries and the attempt budget.
 - API-key, basic-auth, JWT, and ACL plugins; consumer groups; trusted-proxy client IP resolution.
-- Kong-style plugin phases (request, upstream request, response, response body, error, log; certificate and rewrite are reserved) and the 12-level scope precedence matrix.
+- Kong's seven plugin phases (certificate, rewrite, access, response, header filter, body filter, log; certificate dormant until TLS) and the 12-level scope precedence matrix. Request bodies are read whole in access; response bodies use chunk/EOF body filtering.
 - Request/response transformation, CORS, rate limiting, circuit breaking, IP restriction, request-size limiting, and request termination.
 - Access logs, JSON metrics, Prometheus metrics, and an `api.request.completed` event.
 
@@ -93,7 +93,7 @@ Claude Code, Codex, and OpenCode adapters detect installations, render a preview
 
 ### R6 Plugins
 
-Built-in plugins use the API and LLM gateway traits. Third-party plugins use the WASM component ABI with a manifest, approved capabilities, signature policy, and a host-owned per-plugin SQLite database. Durable events and scheduled jobs are delivered by the daemon. API plugin contract version is 2; LLM plugin contract version is 5.
+Built-in plugins use the API and LLM gateway traits. Third-party plugins use the WASM component ABI with a manifest, approved capabilities, signature policy, and a host-owned per-plugin SQLite database. Durable events and scheduled jobs are delivered by the daemon. API plugin contract version is 3; LLM plugin contract version is 6.
 
 ### R7 Persistence
 

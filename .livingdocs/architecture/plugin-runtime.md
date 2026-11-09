@@ -17,7 +17,7 @@ flowchart TB
     Registry --> Compile
     Compile --> APICHAIN[API pre-auth / post-auth chain]
     Compile --> LLMCHAIN[LLM request / provider chain]
-    APICHAIN --> APIPhases["Request -> UpstreamRequest -> Response -> ResponseBody -> Error -> Log (certificate, rewrite reserved)"]
+    APICHAIN --> APIPhases["Certificate -> Rewrite -> Access -> Response -> HeaderFilter -> BodyFilter -> Log (certificate dormant until TLS)"]
     LLMCHAIN --> LLMStages["on_request -> on_provider_request -> on_response / on_stream_event -> on_error -> on_log"]
     APIPhases --> Host[Host capabilities]
     LLMStages --> Host
@@ -30,8 +30,11 @@ flowchart TB
 
 ## API plugins
 
-- Phases: the contract declares `certificate`, `rewrite`, `request`, `upstream_request`, `response`, `response_body`, `error`, and `log`. The HTTP data plane currently executes `request`, `upstream_request`, `response`, `response_body`, `error`, and `log`; `certificate` and `rewrite` are reserved and not invoked yet.
-- Response-body plugins are buffered by default. A plugin that returns true from `streams_response_body` receives `on_response_body` chunks without a full-body buffer; a WASM API plugin opts in with `{"stream_response_body": true}` in its instance config. Full-document transformers such as `response-transformer` keep the buffered path.
+- Phases: the contract uses Kong's seven phases exactly: `certificate`, `rewrite`, `access`, `response`, `header_filter`, `body_filter`, and `log`. `certificate` remains dormant until the API listener terminates TLS. There is no `request`, `upstream_request`, `response_body`, or `error` phase.
+- Request bodies are not filtered as chunks. A plugin reads or replaces the complete request body in `access` through `request_body()` / `set_request_body()`, matching `kong.request.get_body()` and `kong.service.request.set_body()`.
+- Response bodies use `body_filter`: every body plugin receives the current `chunk` and `eof` on every body event, in priority order. A plugin mutates `chunk` directly (including setting it to `None`). A full-body plugin buffers chunks in its request-scoped plugin context and writes the complete result back at EOF; the host does not pre-buffer and provides no shared full-body cache. Multiple full-body plugins buffer independently.
+- `body_filter` runs after response headers are committed. A late failure truncates or aborts the body and cannot return a structured `500`.
+- Route-level `request_buffering` and `response_buffering` are removed.
 - Scope precedence: the 12 Kong combinations from consumer + route + service down to global. Consumer and consumer-group instances are deferred until after authentication.
 - Ordering: manifest priority descending, then plugin name ascending; `ordering.before` / `ordering.after` can override.
 - Fail policy: `fail_open` or `fail_closed` from the manifest; a closed failure returns a gateway error.
@@ -48,7 +51,7 @@ flowchart TB
 ## Runtime tiers
 
 - **Native:** first-party Rust factories registered in the daemon. They have full host access and no WASM overhead.
-- **WASM:** third-party components with a WIT ABI, a manifest, approved capabilities, fuel/memory/timeout/body limits, and a host-owned per-plugin SQLite database. The API plugin contract version is 2 (events and jobs); the LLM plugin contract version is 6.
+- **WASM:** third-party components with a WIT ABI, a manifest, approved capabilities, fuel/memory/timeout/body limits, and a host-owned per-plugin SQLite database. The API plugin contract version is 3 (Kong seven phases and chunk/EOF body filtering); the LLM plugin contract version is 6.
 - **Install/upgrade:** artifacts are stored with a hash, optional Ed25519 signature, manifest, and approved capabilities. A plugin instance is compiled only after the artifact passes layout and signature policy. Uninstall keeps plugin data unless `purge=true`; destructive migrations need explicit approval.
 
 ## Storage
@@ -56,6 +59,8 @@ flowchart TB
 Each plugin name gets its own SQLite database under the plugin root. The host owns DDL and applies ordered migrations; plugins use a capability-gated entity/KV API, never raw SQL. The database is bounded by `plugins.max_plugin_db_bytes`.
 
 ## Events and jobs
+
+Event and job hooks are a separate background plugin interface; they are not phases of `ApiGatewayPlugin`.
 
 - `api.request.completed` is published by the API gateway when a subscriber matches the topic.
 - Subscribed events are persisted in `events`; one `event_deliveries` row is created per matching subscriber. Delivery is at-least-once with exponential backoff and bounded attempts.

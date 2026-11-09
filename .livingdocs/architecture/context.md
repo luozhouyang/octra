@@ -29,7 +29,7 @@ flowchart LR
 
 Octra is a local-first composite of three external models. The detailed adopt/not-adopt matrix and implementation status live in [Reference Models](reference-models.md).
 
-- **API gateway:** Kong Gateway's service/route/upstream/target model, route priority, plugin phases/scopes, load balancing, health checks, and Admin API shape (ADR 0011, ADR 0012).
+- **API gateway:** Kong Gateway's service/route/upstream/target model, route priority, plugin phases/scopes, load balancing, health checks, and Admin API shape (ADR 0011, ADR 0019).
 - **LLM gateway:** yetone/magpie's local multi-protocol gateway, routing groups, provider-account failover, privacy masking, and usage/cost model (ADR 0013).
 - **MCP gateway:** Kong's AI MCP Proxy fronting and aggregation model, narrowed to passthrough/listener behavior with stdio and HTTP upstreams (ADR 0014).
 

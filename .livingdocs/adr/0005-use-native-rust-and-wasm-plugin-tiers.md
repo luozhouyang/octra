@@ -51,3 +51,8 @@ Rejected alternatives:
 # References
 
 [1] Octra repository. Available at: https://github.com/luozhouyang/octra. Accessed on: 2026-11-06.
+
+## Follow-ups
+
+- Keep the plugin SDK aligned with the WIT contract as new phases are added.
+- Document the API plugin contract version (currently 3, Kong seven phases with chunk/EOF body filtering) and the LLM plugin contract version (currently 6) as compatibility boundaries, alongside the WIT version.

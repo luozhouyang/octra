@@ -3,9 +3,12 @@ type: ADR
 title: Use Kong-style plugin phases and scopes
 description: Run API plugins through Kong-style phases and 12-level scope precedence, and run LLM plugins through a typed lifecycle with provider, model, key, and consumer scopes.
 owner: luozhouyang
-status: Proposed
+status: Superseded
+superseded_by: 0019
 timestamp: 2026-11-07T12:40:00Z
 ---
+
+> **SUPERSEDED — do not act on this record.** Replaced by [0019](0019-use-kong-plugin-phases-for-the-api-gateway.md). Run `living-docs read` for what is in force.
 
 # 0012. Use Kong-style plugin phases and scopes
 
