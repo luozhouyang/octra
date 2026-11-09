@@ -21,8 +21,8 @@ pub mod balancer;
 pub mod matcher;
 
 pub use balancer::{
-    Endpoint, HashConfig, HashInput, HealthConfig, HealthStore, RequestGuard, TargetPool,
-    algorithm_from_str,
+    Endpoint, HashConfig, HashInput, HealthConfig, HealthStore, RequestGuard, StickyCookie,
+    TargetPool, algorithm_from_str,
 };
 pub use matcher::{
     CompiledRoute, CompiledService, MatchInput, RouteMatch, RouteMatcher, ServiceLimits,
@@ -98,6 +98,15 @@ impl ServiceEndpoint {
         match self {
             Self::Pool(pool) => pool.has_eligible(),
             Self::Direct(endpoint) => endpoint.eligible,
+        }
+    }
+
+    /// Sticky cookie metadata for pooled endpoints; direct endpoints never
+    /// participate in cookie hashing.
+    pub fn sticky_cookie(&self) -> Option<StickyCookie> {
+        match self {
+            Self::Pool(pool) => pool.sticky_cookie(),
+            Self::Direct(_) => None,
         }
     }
 }
@@ -558,6 +567,81 @@ mod tests {
             snapshot.endpoint_for_service("svc-pool"),
             Some(ServiceEndpoint::Pool(_))
         ));
+    }
+
+    #[test]
+    fn service_endpoint_exposes_sticky_cookie_for_pools_only() {
+        let direct = Service {
+            id: "svc-direct".into(),
+            name: "direct".into(),
+            protocol: "http".into(),
+            host: "127.0.0.1".into(),
+            port: 9000,
+            path: None,
+            retries: 0,
+            connect_timeout: 1000,
+            write_timeout: 1000,
+            read_timeout: 1000,
+            enabled: true,
+            description: String::new(),
+            tags: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let pooled = Service {
+            id: "svc-pool".into(),
+            host: "up".into(),
+            ..direct.clone()
+        };
+        let data = ApiRuntimeData {
+            services: vec![direct, pooled],
+            upstreams: vec![Upstream {
+                id: "u".into(),
+                name: "up".into(),
+                algorithm: octra_api_core::LoadBalanceAlgorithm::ConsistentHashing,
+                hash_on: "cookie".into(),
+                hash_fallback: "none".into(),
+                hash_on_header: "X-Consumer-ID".into(),
+                hash_fallback_header: "X-Consumer-ID".into(),
+                hash_on_cookie: "session".into(),
+                hash_on_cookie_path: "/api".into(),
+                hash_on_query_arg: String::new(),
+                hash_fallback_query_arg: String::new(),
+                hash_on_uri_capture: String::new(),
+                hash_fallback_uri_capture: String::new(),
+                slots: 10000,
+                healthchecks: serde_json::json!({}),
+                host_header: None,
+                tags: Vec::new(),
+                created_at: 0,
+                updated_at: 0,
+            }],
+            targets: vec![Target {
+                id: "t".into(),
+                upstream_id: "u".into(),
+                target: "127.0.0.2:9001".into(),
+                weight: 100,
+                tags: Vec::new(),
+                created_at: 0,
+                updated_at: 0,
+            }],
+            ..Default::default()
+        };
+        let snapshot = RuntimeSnapshot::compile(data);
+        let direct = snapshot
+            .endpoint_for_service("svc-direct")
+            .expect("direct endpoint");
+        assert!(direct.sticky_cookie().is_none());
+        let pooled = snapshot
+            .endpoint_for_service("svc-pool")
+            .expect("pooled endpoint");
+        assert_eq!(
+            pooled.sticky_cookie(),
+            Some(StickyCookie {
+                name: "session".into(),
+                path: "/api".into(),
+            })
+        );
     }
 
     #[test]

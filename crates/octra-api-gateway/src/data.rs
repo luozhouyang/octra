@@ -384,6 +384,12 @@ pub async fn proxy(
         uri_captures: &dispatch.uri_captures,
     };
     let mut attempts = endpoint.attempts(Some(&hash_input));
+    // Set (or reset) the sticky cookie when the request has no cookie or the
+    // presented value does not name an eligible target.
+    let sticky_cookie = endpoint.sticky_cookie().filter(|cookie| {
+        request_cookie(&parts.headers, &cookie.name)
+            .is_none_or(|value| !attempts.iter().any(|endpoint| endpoint.id == value))
+    });
     let retry_limit = 1 + usize::try_from(
         dispatch
             .service
@@ -620,6 +626,16 @@ pub async fn proxy(
                         return failed_plugin(&state, &subject, started, error);
                     }
                 }
+            }
+
+            if let Some(cookie) = &sticky_cookie
+                && let Some(target) = response_parts.extensions.get::<UpstreamTarget>()
+                && let Ok(value) = HeaderValue::from_str(&format!(
+                    "{}={}; Path={}; HttpOnly; SameSite=Lax",
+                    cookie.name, target.id, cookie.path
+                ))
+            {
+                response_parts.headers.append(header::SET_COOKIE, value);
             }
 
             let response_body_plugins = pre_chain.has_capability(Capability::ResponseBody)
@@ -1141,12 +1157,29 @@ fn response_target(parts: &axum::http::response::Parts) -> String {
     parts
         .extensions
         .get::<UpstreamTarget>()
-        .map(|target| target.0.clone())
+        .map(|target| target.url.clone())
         .unwrap_or_default()
 }
 
+/// Reads one cookie value from the request `Cookie` header(s).
+fn request_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|header| {
+            header.split(';').find_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                (key.trim() == name).then(|| value.trim())
+            })
+        })
+}
+
 #[derive(Clone)]
-struct UpstreamTarget(String);
+struct UpstreamTarget {
+    id: String,
+    url: String,
+}
 
 type Chunk = Result<bytes::Bytes, axum::Error>;
 
@@ -1270,8 +1303,10 @@ async fn forward(
                 let mut out = Response::new(Body::from_stream(response.bytes_stream()));
                 *out.status_mut() = status;
                 *out.headers_mut() = response_headers;
-                out.extensions_mut()
-                    .insert(UpstreamTarget(endpoint.url.clone()));
+                out.extensions_mut().insert(UpstreamTarget {
+                    id: endpoint.id.clone(),
+                    url: endpoint.url.clone(),
+                });
                 return Ok(out);
             }
             Err(err) => {

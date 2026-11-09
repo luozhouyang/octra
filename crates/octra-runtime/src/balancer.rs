@@ -402,6 +402,13 @@ fn statuses(value: Option<&Value>, default: &[u16]) -> Vec<u16> {
         .collect()
 }
 
+/// Sticky-session cookie metadata for an upstream using cookie hashing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StickyCookie {
+    pub name: String,
+    pub path: String,
+}
+
 /// Hash configuration copied from the upstream entity.
 #[derive(Debug, Clone)]
 pub struct HashConfig {
@@ -636,6 +643,22 @@ impl TargetPool {
         self.algorithm
     }
 
+    /// Cookie metadata for cookie-based consistent hashing. Returns `None`
+    /// unless the upstream hashes on a non-empty cookie name.
+    pub fn sticky_cookie(&self) -> Option<StickyCookie> {
+        if self.hash.hash_on != "cookie" || self.hash.hash_on_cookie.is_empty() {
+            return None;
+        }
+        Some(StickyCookie {
+            name: self.hash.hash_on_cookie.clone(),
+            path: if self.hash.hash_on_cookie_path.is_empty() {
+                "/".into()
+            } else {
+                self.hash.hash_on_cookie_path.clone()
+            },
+        })
+    }
+
     pub fn reset_cursor(&self) {
         self.cursor.store(0, Ordering::Relaxed);
     }
@@ -715,7 +738,16 @@ impl TargetPool {
         if self.algorithm != LoadBalanceAlgorithm::ConsistentHashing {
             return None;
         }
-        let key = self.hash.key(input?)?;
+        let input = input?;
+        // A sticky cookie carries the target id itself, so honor it directly
+        // instead of hashing it onto the wheel again.
+        if self.hash.hash_on == "cookie"
+            && let Some(cookie) = cookie_value(input.headers, &self.hash.hash_on_cookie)
+            && let Some(index) = eligible.iter().position(|endpoint| endpoint.id == cookie)
+        {
+            return Some(index);
+        }
+        let key = self.hash.key(input)?;
         let total: u64 = eligible
             .iter()
             .map(|endpoint| u64::from(endpoint.slot_weight))
@@ -1194,5 +1226,148 @@ mod tests {
             uri_captures: &captures,
         };
         assert_eq!(hash.key(&input).as_deref(), Some("blue"));
+    }
+
+    fn cookie_pool(targets: &[Target], name: &str, path: &str) -> TargetPool {
+        let hash = HashConfig {
+            hash_on: "cookie".into(),
+            hash_on_cookie: name.into(),
+            hash_on_cookie_path: path.into(),
+            ..Default::default()
+        };
+        TargetPool::with_config(
+            LoadBalanceAlgorithm::ConsistentHashing,
+            targets,
+            "http",
+            0,
+            hash,
+            HealthConfig::default(),
+            &HealthStore::default(),
+        )
+    }
+
+    fn wheel_expected(pool: &TargetPool, eligible: &[Arc<Endpoint>], key: &str) -> String {
+        let total: u64 = eligible
+            .iter()
+            .map(|endpoint| u64::from(endpoint.slot_weight))
+            .sum();
+        let slots = pool.hash.slots.max(1);
+        let point = fnv1a(key) % slots;
+        let mut covered: u128 = 0;
+        for endpoint in eligible {
+            covered += u128::from(endpoint.slot_weight) * u128::from(slots);
+            let boundary = covered / u128::from(total);
+            if u128::from(point) < boundary {
+                return endpoint.id.clone();
+            }
+        }
+        eligible.last().expect("eligible target").id.clone()
+    }
+
+    #[test]
+    fn sticky_cookie_metadata_requires_cookie_hashing() {
+        let targets = vec![target("a", 1)];
+        let pool = cookie_pool(&targets, "kong", "/");
+        assert_eq!(
+            pool.sticky_cookie(),
+            Some(StickyCookie {
+                name: "kong".into(),
+                path: "/".into(),
+            })
+        );
+
+        let custom = cookie_pool(&targets, "session", "/api");
+        assert_eq!(
+            custom.sticky_cookie(),
+            Some(StickyCookie {
+                name: "session".into(),
+                path: "/api".into(),
+            })
+        );
+
+        let default_path = cookie_pool(&targets, "kong", "");
+        assert_eq!(
+            default_path.sticky_cookie(),
+            Some(StickyCookie {
+                name: "kong".into(),
+                path: "/".into(),
+            })
+        );
+
+        let header_hash = HashConfig {
+            hash_on: "header".into(),
+            ..Default::default()
+        };
+        let header_pool = TargetPool::with_config(
+            LoadBalanceAlgorithm::ConsistentHashing,
+            &targets,
+            "http",
+            0,
+            header_hash,
+            HealthConfig::default(),
+            &HealthStore::default(),
+        );
+        assert!(header_pool.sticky_cookie().is_none());
+
+        let empty_cookie = cookie_pool(&targets, "", "/");
+        assert!(empty_cookie.sticky_cookie().is_none());
+    }
+
+    #[test]
+    fn cookie_value_matching_target_id_pins_to_that_target() {
+        let targets = vec![target("alpha", 1), target("beta", 1), target("gamma", 1)];
+        let pool = cookie_pool(&targets, "kong", "/");
+        let eligible = pool.eligible();
+
+        let (target_id, wheel_id) = eligible
+            .iter()
+            .map(|endpoint| {
+                (
+                    endpoint.id.clone(),
+                    wheel_expected(&pool, &eligible, &endpoint.id),
+                )
+            })
+            .find(|(target_id, wheel_id)| target_id != wheel_id)
+            .expect("at least one target differs from its wheel slot");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            format!("kong={target_id}").parse().unwrap(),
+        );
+        let input = HashInput {
+            headers: &headers,
+            path: "/",
+            client_ip: None,
+            consumer_id: None,
+            uri_captures: &[],
+        };
+        let selected = pool.select_with(Some(&input)).expect("selected target");
+        assert_eq!(selected.id, target_id);
+        assert_eq!(
+            wheel_expected(&pool, &eligible, &target_id),
+            wheel_id,
+            "the wheel alone would have picked {wheel_id}"
+        );
+    }
+
+    #[test]
+    fn unknown_cookie_falls_back_to_the_hash_wheel() {
+        let targets = vec![target("alpha", 1), target("beta", 1), target("gamma", 1)];
+        let pool = cookie_pool(&targets, "kong", "/");
+        let eligible = pool.eligible();
+        let expected = wheel_expected(&pool, &eligible, "unknown-target");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::COOKIE, "kong=unknown-target".parse().unwrap());
+        let input = HashInput {
+            headers: &headers,
+            path: "/",
+            client_ip: None,
+            consumer_id: None,
+            uri_captures: &[],
+        };
+        let selected = pool.select_with(Some(&input)).expect("selected target");
+        assert_eq!(selected.id, expected);
     }
 }
