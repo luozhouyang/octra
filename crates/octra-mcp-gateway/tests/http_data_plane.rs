@@ -550,6 +550,39 @@ async fn rejects_unsupported_protocol_version_headers() {
 }
 
 #[tokio::test]
+async fn rejects_mismatched_negotiated_protocol_versions() {
+    let upstream = start_upstream(UpstreamMode::Json).await;
+    let gateway = Gateway::new().await;
+    gateway.add_http_server("first", &upstream).await;
+    let session = gateway.open_session(None).await;
+
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("mcp-session-id", &session)
+        .header("mcp-protocol-version", "2025-03-26")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = tower::ServiceExt::oneshot(gateway.data_router(), request)
+        .await
+        .unwrap();
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["error"]["code"], -32600);
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not match the negotiated version")
+    );
+}
+
+#[tokio::test]
 async fn key_auth_gates_the_endpoint_and_resolves_consumers() {
     let upstream = start_upstream(UpstreamMode::Json).await;
     let gateway = Gateway::new().await;

@@ -351,7 +351,7 @@ async fn initialize(
     }
 
     let version = octra_mcp_core::protocol::negotiate_protocol_version(requested.as_deref(), None);
-    let session_id = create_session(state, scope).await?;
+    let session_id = create_session(state, scope, &version).await?;
     *session = Some(session_id);
 
     let result = InitializeResult {
@@ -396,6 +396,17 @@ async fn require_session(
     {
         return Err(session_not_found(&session_id));
     }
+    if let Some(presented) = header_str(headers, &PROTOCOL_VERSION_HEADER)
+        && let Some(negotiated) = session.protocol_version.as_deref()
+        && presented != negotiated
+    {
+        return Err(JsonRpcError::new(
+            codes::INVALID_REQUEST,
+            format!(
+                "MCP-Protocol-Version '{presented}' does not match the negotiated version '{negotiated}'"
+            ),
+        ));
+    }
     Ok(session.id)
 }
 
@@ -427,6 +438,7 @@ fn session_expired(session: &octra_mcp_core::domain::McpSession, ttl_secs: u64) 
 async fn create_session(
     state: &McpDataState,
     scope: Option<&RouteScope>,
+    protocol_version: &str,
 ) -> Result<String, JsonRpcError> {
     let anchor_id = match scope {
         Some(scope) => scope.server.id.clone(),
@@ -466,7 +478,7 @@ async fn create_session(
     state
         .storage
         .mcp
-        .insert_session(&id, &anchor_id)
+        .insert_session(&id, &anchor_id, protocol_version)
         .await
         .map_err(storage_error)?;
     Ok(id)

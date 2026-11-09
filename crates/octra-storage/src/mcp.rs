@@ -22,7 +22,7 @@ const AUTH_STRATEGY_COLUMNS: &str =
 const TOOL_COLUMNS: &str = "id, server_id, name, description, schema, kind, http_method, \
      http_path, http_config_json, enabled, created_at";
 
-const SESSION_COLUMNS: &str = "id, server_id, status, created_at, updated_at";
+const SESSION_COLUMNS: &str = "id, server_id, status, protocol_version, created_at, updated_at";
 
 const INVOCATION_COLUMNS: &str = "id, server_id, tool_id, consumer_id, request_id, status, \
      duration_ms, started_at, finished_at, error";
@@ -973,10 +973,18 @@ impl McpStore {
 
     // ----- sessions ------------------------------------------------------
 
-    pub async fn insert_session(&self, id: &str, server_id: &str) -> Result<McpSession> {
-        sqlx::query("INSERT INTO mcp_sessions (id, server_id) VALUES (?1, ?2)")
-            .bind(id)
-            .bind(server_id)
+    pub async fn insert_session(
+        &self,
+        id: &str,
+        server_id: &str,
+        protocol_version: &str,
+    ) -> Result<McpSession> {
+        sqlx::query(
+            "INSERT INTO mcp_sessions (id, server_id, protocol_version) VALUES (?1, ?2, ?3)",
+        )
+        .bind(id)
+        .bind(server_id)
+        .bind(protocol_version)
             .execute(self.mcp_pool())
             .await
             .map_err(|err| storage_error("cannot insert mcp session", err))?;
@@ -1227,6 +1235,7 @@ fn decode_session(row: &SqliteRow) -> McpSession {
         id: row.get("id"),
         server_id: row.get("server_id"),
         status: row.get("status"),
+        protocol_version: row.get("protocol_version"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
@@ -2009,7 +2018,7 @@ mod tests {
 
         let session = storage
             .mcp
-            .insert_session("sess-1", &server.id)
+            .insert_session("sess-1", &server.id, "2025-06-18")
             .await
             .unwrap();
         assert_eq!(session.status, octra_mcp_core::domain::session_status::OPEN);

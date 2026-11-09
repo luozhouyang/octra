@@ -659,6 +659,8 @@ pub struct McpSession {
     pub id: String,
     pub server_id: String,
     pub status: String,
+    /// Protocol revision negotiated at initialize time.
+    pub protocol_version: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
