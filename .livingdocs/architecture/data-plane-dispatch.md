@@ -54,4 +54,4 @@ A new endpoint belongs to the gateway that owns the protocol, not to the daemon.
 
 ## Drift instrument
 
-Drift caught by: inspection of the router merge order in `crates/octra-daemon/src/main.rs` and the route tables in `crates/octra-llm-gateway/src/data_plane/mod.rs`, `crates/octra-mcp-gateway/src/data.rs`, and `crates/octra-api-gateway/src/admin/mod.rs`. A future integration test should assert that every documented path prefix resolves to the expected owner.
+Drift caught by: inspection of the router merge order in `crates/octra-daemon/src/main.rs` and the route tables in `crates/octra-llm-gateway/src/data_plane/mod.rs`, `crates/octra-mcp-gateway/src/data.rs`, and `crates/api_gateway/octra-api-gateway/src/admin/mod.rs`. A future integration test should assert that every documented path prefix resolves to the expected owner.

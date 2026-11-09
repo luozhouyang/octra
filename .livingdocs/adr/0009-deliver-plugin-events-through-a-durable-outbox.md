@@ -39,14 +39,14 @@ Rejected alternatives:
 
 ## Verification
 
-**Implementation impact:** `crates/octra-plugin-events/`, `crates/octra-storage/src/events.rs`, `migrations/0021_events.sql`, `migrations/0022_event_retention_index.sql`, `crates/octra-api-plugin-types/src/services.rs`.
+**Implementation impact:** `crates/api_gateway/octra-api-plugin-events/`, `crates/octra-storage/src/events.rs`, `migrations/0021_events.sql`, `migrations/0022_event_retention_index.sql`, `crates/api_gateway/octra-api-plugin-types/src/services.rs`.
 
 **Verification criteria:**
 - An event published with a matching subscriber survives a dispatcher restart and is delivered after retry.
 - A failing subscriber records attempts, backoff, and a terminal failure without blocking other deliveries.
 - Events with no matching subscriber do not create rows.
 - Retention deletes only completed or failed events and leaves pending events untouched.
-- `crates/octra-plugin-events/src/lib.rs` unit tests cover matching delivery, retry/backoff and max attempts, the no-subscriber skip path, and scheduled-job success/error/timeout.
+- `crates/api_gateway/octra-api-plugin-events/src/lib.rs` unit tests cover matching delivery, retry/backoff and max attempts, the no-subscriber skip path, and scheduled-job success/error/timeout.
 - `/admin/events/stats` and the desktop Plugins card expose pending/failed/retrying deliveries and the oldest pending age.
 
 # References

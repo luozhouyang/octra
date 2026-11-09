@@ -10,7 +10,7 @@
 #[allow(warnings)]
 mod bindings;
 
-use octra_plugin_sdk::{
+use octra_api_plugin_sdk::{
     AdminRequest, ApiPlugin, Decision, Error, LogEntry, RequestContext, Response,
 };
 use serde::Deserialize;
@@ -138,7 +138,7 @@ impl ApiPlugin for ConsumerQuota {
 
     fn on_log(&self, entry: &LogEntry) {
         if entry.status == self.config.reject_status {
-            octra_plugin_sdk::log::warn(&format!(
+            octra_api_plugin_sdk::log::warn(&format!(
                 "quota rejected request {} for consumer {:?}",
                 entry.request_id, entry.consumer_id
             ));
@@ -154,4 +154,4 @@ fn json_response(status: u16, body: serde_json::Value) -> Response {
     }
 }
 
-octra_plugin_sdk::export_plugin!(ConsumerQuota, bindings);
+octra_api_plugin_sdk::export_plugin!(ConsumerQuota, bindings);

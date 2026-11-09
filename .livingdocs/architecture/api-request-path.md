@@ -54,4 +54,4 @@ flowchart LR
 
 ## Drift instrument
 
-Drift caught by: the integration tests in `crates/octra-api-gateway/tests/proxy.rs` (including streaming and full-body plugin fixtures), the matcher and balancer unit tests in `crates/octra-runtime`, and inspection of `crates/octra-api-gateway/src/data.rs`. A future fixture should assert the full Kong phase order for a request that passes through auth, a request transformer, and a response transformer.
+Drift caught by: the integration tests in `crates/api_gateway/octra-api-gateway/tests/proxy.rs` (including streaming and full-body plugin fixtures), the matcher and balancer unit tests in `crates/octra-runtime`, and inspection of `crates/api_gateway/octra-api-gateway/src/data.rs`. A future fixture should assert the full Kong phase order for a request that passes through auth, a request transformer, and a response transformer.

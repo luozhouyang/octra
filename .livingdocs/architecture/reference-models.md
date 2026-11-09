@@ -47,8 +47,8 @@ flowchart LR
 | Route matching and priority | Implemented | `crates/octra-runtime/src/matcher.rs` |
 | Round-robin, weighted, consistent hashing, least-connections, latency | Implemented | `crates/octra-runtime/src/balancer.rs` |
 | Active/passive health checks | Implemented | `balancer.rs`, `check_health` loop |
-| Plugin phases and 12-level scopes | Implemented | `crates/octra-api-plugin-runtime/src/lib.rs` |
-| Kong-shaped Admin API | Implemented | `crates/octra-api-gateway/src/admin/` |
+| Plugin phases and 12-level scopes | Implemented | `crates/api_gateway/octra-api-plugin-runtime/src/lib.rs` |
+| Kong-shaped Admin API | Implemented | `crates/api_gateway/octra-api-gateway/src/admin/` |
 | UI/CLI CRUD for API entities | Implemented | Desktop typed forms and `octra services/routes/upstreams/targets` |
 
 ## LLM gateway — yetone/magpie

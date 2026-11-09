@@ -65,4 +65,4 @@ A window of `0` keeps rows forever. `llm_usage_days` must be `0` or at least 32 
 
 ## Drift instrument
 
-Drift caught by: `crates/octra-storage/src/maintenance.rs` tests, `crates/octra-storage/src/events.rs`, `crates/octra-api-gateway/src/metrics.rs`, and inspection of the control operations handlers. A future test should assert every append-only table is covered by the retention policy.
+Drift caught by: `crates/octra-storage/src/maintenance.rs` tests, `crates/octra-storage/src/events.rs`, `crates/api_gateway/octra-api-gateway/src/metrics.rs`, and inspection of the control operations handlers. A future test should assert every append-only table is covered by the retention policy.

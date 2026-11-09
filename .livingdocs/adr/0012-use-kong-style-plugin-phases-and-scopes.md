@@ -72,7 +72,7 @@ We will use Kong-style phases and scope precedence for API plugins, and a separa
 
 ## Verification
 
-**Implementation impact:** `crates/octra-api-plugin-types/src/lib.rs`, `crates/octra-api-plugin-runtime/src/lib.rs`, `crates/octra-api-plugin-builtin/src/`, `crates/octra-api-plugin-wasm/`, `crates/octra-llm-plugin-types/src/lib.rs`, `crates/octra-llm-plugin-runtime/src/`, `crates/octra-llm-plugin-builtin/src/`, `crates/octra-llm-plugin-wasm/`.
+**Implementation impact:** `crates/api_gateway/octra-api-plugin-types/src/lib.rs`, `crates/api_gateway/octra-api-plugin-runtime/src/lib.rs`, `crates/api_gateway/octra-api-plugin-builtin/src/`, `crates/api_gateway/octra-api-plugin-wasm/`, `crates/octra-llm-plugin-types/src/lib.rs`, `crates/octra-llm-plugin-runtime/src/`, `crates/octra-llm-plugin-builtin/src/`, `crates/octra-llm-plugin-wasm/`.
 
 **Verification criteria:**
 
@@ -89,4 +89,4 @@ We will use Kong-style phases and scope precedence for API plugins, and a separa
 [2] Kong Gateway, "Plugin precedence." https://developer.konghq.com/gateway/entities/plugin/#plugin-precedence
 [3] Octra ADR 0005, "Use native Rust and WASM plugin tiers." `0005-use-native-rust-and-wasm-plugin-tiers.md`
 [4] Octra ADR 0006, "Give each plugin host-owned isolated storage." `0006-give-each-plugin-host-owned-isolated-storage.md`
-[5] Octra repository, `crates/octra-api-plugin-*` and `crates/octra-llm-plugin-*`. https://github.com/luozhouyang/octra
+[5] Octra repository, `crates/api_gateway/octra-api-plugin-*` and `crates/octra-llm-plugin-*`. https://github.com/luozhouyang/octra

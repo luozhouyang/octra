@@ -41,6 +41,10 @@ Octra is a local-first composite of three external models. The detailed adopt/no
 - Provider secrets are references, not values. OAuth tokens, KeyAuth keys, BasicAuth passwords, and JWT secrets are sealed with AES-256-GCM under an OS-keychain-backed master key (ADR 0007).
 - Third-party plugins run as WASM components with approved capabilities; native plugins are first-party and compiled in (ADR 0005, ADR 0006).
 
+## API gateway crate layout
+
+API gateway crates live under `crates/api_gateway/`: `octra-api-core`, `octra-api-gateway`, `octra-api-plugin-types`, `octra-api-plugin-runtime`, `octra-api-plugin-builtin`, `octra-api-plugin-wasm`, `octra-api-plugin-sdk`, and `octra-api-plugin-events`. Shared storage, runtime, and daemon crates remain under `crates/`.
+
 ## Drift instrument
 
 Drift caught by: inspection of the listener and router wiring in `crates/octra-daemon/src/main.rs`, the Tauri bridge in `apps/desktop/src-tauri/src/lib.rs`, and the reference matrix in `reference-models.md`. This view has no generated conformance check yet.

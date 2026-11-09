@@ -40,7 +40,7 @@ Rejected alternatives:
 
 ## Verification
 
-**Implementation impact:** `crates/octra-plugin-storage/`, `crates/octra-api-plugin-wasm/src/`, `crates/octra-api-plugin-wasm/wit/plugin.wit`, plugin manifests with `entities` and `migrations`.
+**Implementation impact:** `crates/octra-plugin-storage/`, `crates/api_gateway/octra-api-plugin-wasm/src/`, `crates/api_gateway/octra-api-plugin-wasm/wit/plugin.wit`, plugin manifests with `entities` and `migrations`.
 
 **Verification criteria:**
 - A plugin cannot open the host database or issue DDL; only host functions are exposed.

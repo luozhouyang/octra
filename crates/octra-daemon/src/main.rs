@@ -16,8 +16,8 @@ use octra_api_plugin_runtime::{
 };
 use octra_api_plugin_types::PluginManifest;
 use octra_api_plugin_wasm::{
-    InstalledWasmPlugin, WasmEngine, WasmHostProvider, WasmLimits, WasmPluginCatalog,
-    WasmPluginFactory,
+    APIGatewayWasmPluginFactory, InstalledWasmPlugin, WasmEngine, WasmHostProvider, WasmLimits,
+    WasmPluginCatalog,
 };
 use octra_config::{CounterBackend, Workspace};
 use octra_daemon::wasm_lifecycle::LlmWasmRuntime;
@@ -118,20 +118,22 @@ async fn main() -> anyhow::Result<()> {
                 tracing::warn!(plugin = %record.name, "installed plugin has no artifact path");
                 continue;
             };
-            let factory =
-                match WasmPluginFactory::from_artifact(&engine, std::path::Path::new(path)) {
-                    Ok(factory) => factory,
-                    Err(error) => {
-                        if config.plugins.strict_boot {
-                            return Err(anyhow::anyhow!(
-                                "cannot load plugin '{}': {error}",
-                                record.name
-                            ));
-                        }
-                        tracing::warn!(plugin = %record.name, %error, "skipping wasm plugin");
-                        continue;
+            let factory = match APIGatewayWasmPluginFactory::from_artifact(
+                &engine,
+                std::path::Path::new(path),
+            ) {
+                Ok(factory) => factory,
+                Err(error) => {
+                    if config.plugins.strict_boot {
+                        return Err(anyhow::anyhow!(
+                            "cannot load plugin '{}': {error}",
+                            record.name
+                        ));
                     }
-                };
+                    tracing::warn!(plugin = %record.name, %error, "skipping wasm plugin");
+                    continue;
+                }
+            };
             catalog.insert(Arc::new(factory));
             installed.push(InstalledWasmPlugin::new(
                 manifest,
@@ -249,7 +251,7 @@ async fn main() -> anyhow::Result<()> {
         token::load_or_create(&workspace.token_file()).context("cannot prepare control token")?;
     let token = Arc::new(token);
 
-    let event_bus = Arc::new(octra_plugin_events::EventBus::new(
+    let event_bus = Arc::new(octra_api_plugin_events::EventBus::new(
         storage.clone(),
         plugin_runtime.clone(),
     ));
@@ -306,8 +308,8 @@ async fn main() -> anyhow::Result<()> {
             storage.clone(),
             config.clone(),
         )))
-        .merge(octra_plugin_events::control_router(
-            octra_plugin_events::EventControlState::new(event_bus.clone()),
+        .merge(octra_api_plugin_events::control_router(
+            octra_api_plugin_events::EventControlState::new(event_bus.clone()),
         ))
         .merge(octra_llm_gateway::ai_control::router(ai_control))
         .layer(axum::middleware::from_fn_with_state(

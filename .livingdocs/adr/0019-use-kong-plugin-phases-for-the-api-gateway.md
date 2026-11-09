@@ -50,7 +50,7 @@ Because `body_filter` runs after response headers are committed, a body-filter f
 
 Every request gets a request-scoped plugin context with a shared namespace and a per-plugin namespace. The context persists from `rewrite`/`access` through `body_filter` and `log`. It is never stored on the shared plugin instance; concurrent requests cannot observe each other's buffers.
 
-`on_event` and `on_job` are not request lifecycle phases. They move to a separate background plugin interface; `ApiGatewayPlugin` only exposes the seven phases.
+`on_event` and `on_job` are not request lifecycle phases. They move to a separate background plugin interface; `APIGatewayPlugin` only exposes the seven phases.
 
 ### Removed configuration
 

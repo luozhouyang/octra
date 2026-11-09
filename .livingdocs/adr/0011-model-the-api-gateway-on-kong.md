@@ -70,7 +70,7 @@ We will model the API gateway on Kong's concepts and keep the implementation in 
 
 ## Verification
 
-**Implementation impact:** `crates/octra-api-core/src/lib.rs`, `crates/octra-runtime/src/matcher.rs`, `crates/octra-runtime/src/balancer.rs`, `crates/octra-api-gateway/src/data.rs`, `crates/octra-api-gateway/src/admin/`, `migrations/0009_gateway_entities.sql`, `migrations/0011_consumer_groups.sql`, `migrations/0012_service_tags.sql`, `migrations/0013_upstream_hash_fields.sql`.
+**Implementation impact:** `crates/api_gateway/octra-api-core/src/lib.rs`, `crates/octra-runtime/src/matcher.rs`, `crates/octra-runtime/src/balancer.rs`, `crates/api_gateway/octra-api-gateway/src/data.rs`, `crates/api_gateway/octra-api-gateway/src/admin/`, `migrations/0009_gateway_entities.sql`, `migrations/0011_consumer_groups.sql`, `migrations/0012_service_tags.sql`, `migrations/0013_upstream_hash_fields.sql`.
 
 **Verification criteria:**
 
@@ -91,4 +91,4 @@ We will model the API gateway on Kong's concepts and keep the implementation in 
 [5] Kong Gateway, "Targets." https://developer.konghq.com/gateway/entities/target/
 [6] Kong Gateway, "Load balancing reference." https://developer.konghq.com/gateway/traffic-control/load-balancing-reference/
 [7] Kong Gateway, "Health checks and circuit breakers." https://developer.konghq.com/gateway/traffic-control/health-checks-circuit-breakers/
-[8] Octra repository, `crates/octra-api-gateway`, `crates/octra-runtime`, and `migrations/`. https://github.com/luozhouyang/octra
+[8] Octra repository, `crates/api_gateway/octra-api-gateway`, `crates/octra-runtime`, and `migrations/`. https://github.com/luozhouyang/octra

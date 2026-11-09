@@ -39,7 +39,7 @@ Rejected alternatives:
 
 ## Verification
 
-**Implementation impact:** `crates/octra-api-gateway/src/lib.rs`, `crates/octra-data-plane/src/`, `crates/octra-daemon/src/main.rs`.
+**Implementation impact:** `crates/api_gateway/octra-api-gateway/src/lib.rs`, `crates/octra-data-plane/src/`, `crates/octra-daemon/src/main.rs`.
 
 **Verification criteria:**
 - The daemon starts and serves both listeners with no Pingora dependency.

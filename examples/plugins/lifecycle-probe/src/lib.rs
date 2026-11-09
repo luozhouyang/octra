@@ -3,7 +3,7 @@
 #[allow(warnings)]
 mod bindings;
 
-use octra_plugin_sdk::{
+use octra_api_plugin_sdk::{
     ApiPlugin, Decision, Error, Event, Job, ResponseBodyContext, ResponseContext,
     ResponseDecision,
 };
@@ -55,9 +55,9 @@ impl ApiPlugin for LifecycleProbe {
         Ok(())
     }
 
-    fn on_access(&self, _cx: &mut octra_plugin_sdk::RequestContext) -> Result<Decision, Error> {
+    fn on_access(&self, _cx: &mut octra_api_plugin_sdk::RequestContext) -> Result<Decision, Error> {
         Ok(Decision::Continue)
     }
 }
 
-octra_plugin_sdk::export_plugin!(LifecycleProbe, bindings);
+octra_api_plugin_sdk::export_plugin!(LifecycleProbe, bindings);

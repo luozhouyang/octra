@@ -4014,6 +4014,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "octra-api-plugin-events"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "http-body-util",
+ "octra-api-plugin-types",
+ "octra-core",
+ "octra-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "octra-api-plugin-runtime"
 version = "0.1.0"
 dependencies = [
@@ -4029,6 +4050,13 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "octra-api-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -4115,6 +4143,7 @@ dependencies = [
  "octra-agent-core",
  "octra-api-gateway",
  "octra-api-plugin-builtin",
+ "octra-api-plugin-events",
  "octra-api-plugin-runtime",
  "octra-api-plugin-types",
  "octra-api-plugin-wasm",
@@ -4128,7 +4157,6 @@ dependencies = [
  "octra-llm-plugin-wasm",
  "octra-mcp-gateway",
  "octra-observability",
- "octra-plugin-events",
  "octra-plugin-storage",
  "octra-runtime",
  "octra-storage",
@@ -4391,34 +4419,6 @@ name = "octra-pii-types"
 version = "0.1.0"
 dependencies = [
  "async-trait",
-]
-
-[[package]]
-name = "octra-plugin-events"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "chrono",
- "http-body-util",
- "octra-api-plugin-types",
- "octra-core",
- "octra-storage",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "octra-plugin-sdk"
-version = "0.1.0"
-dependencies = [
- "serde_json",
 ]
 
 [[package]]

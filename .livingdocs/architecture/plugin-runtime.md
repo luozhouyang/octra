@@ -60,7 +60,7 @@ Each plugin name gets its own SQLite database under the plugin root. The host ow
 
 ## Events and jobs
 
-Event and job hooks are a separate background plugin interface; they are not phases of `ApiGatewayPlugin`.
+Event and job hooks are a separate background plugin interface; they are not phases of `APIGatewayPlugin`.
 
 - `api.request.completed` is published by the API gateway when a subscriber matches the topic.
 - Subscribed events are persisted in `events`; one `event_deliveries` row is created per matching subscriber. Delivery is at-least-once with exponential backoff and bounded attempts.
@@ -69,4 +69,4 @@ Event and job hooks are a separate background plugin interface; they are not pha
 
 ## Drift instrument
 
-Drift caught by: `crates/octra-api-plugin-runtime` unit tests, `crates/octra-api-plugin-wasm/tests/`, `crates/octra-api-gateway/tests/plugins/`, `crates/octra-llm-plugin-runtime` tests, `crates/octra-llm-plugin-wasm/tests/wasm_e2e.rs`, and the `octra-plugin-events` delivery/retry/job tests.
+Drift caught by: `crates/api_gateway/octra-api-plugin-runtime` unit tests, `crates/api_gateway/octra-api-plugin-wasm/tests/`, `crates/api_gateway/octra-api-gateway/tests/plugins/`, `crates/octra-llm-plugin-runtime` tests, `crates/octra-llm-plugin-wasm/tests/wasm_e2e.rs`, and the `octra-api-plugin-events` delivery/retry/job tests.
