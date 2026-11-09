@@ -496,11 +496,8 @@ async fn enforce_virtual_key_limits(
     }
 
     let Some(reservation) = state.vk_reservations.try_reserve(reservations) else {
-        return Err(GatewayError::upstream(
-            429,
-            "virtual key limit exceeded",
-        )
-        .with_code("virtual_key_limit_exceeded"));
+        return Err(GatewayError::upstream(429, "virtual key limit exceeded")
+            .with_code("virtual_key_limit_exceeded"));
     };
     Ok(Some(Arc::new(reservation)))
 }
