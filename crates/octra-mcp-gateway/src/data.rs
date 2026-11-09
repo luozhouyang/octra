@@ -449,6 +449,20 @@ async fn create_session(
     };
 
     let id = new_request_id();
+    if state.config.mcp.session_ttl_secs > 0 {
+        let cutoff = chrono::Utc::now()
+            - chrono::Duration::seconds(state.config.mcp.session_ttl_secs as i64);
+        if let Err(err) = state
+            .storage
+            .mcp
+            .delete_sessions_created_before(
+                &cutoff.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            )
+            .await
+        {
+            tracing::warn!(%err, "cannot prune expired MCP sessions");
+        }
+    }
     state
         .storage
         .mcp

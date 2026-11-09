@@ -22,6 +22,10 @@ use serde_json::{Value, json};
 use crate::manifest;
 
 const STATE_KEY: &str = "rate-limiting";
+/// Hard bound on per-identifier buckets in one limiter. Expired windows are
+/// removed first; if the cardinality is still too high, the oldest arbitrary
+/// entries are evicted rather than growing without bound.
+const MAX_BUCKETS: usize = 100_000;
 
 pub struct RateLimitingFactory;
 
@@ -354,10 +358,17 @@ impl RateLimitingPlugin {
             });
         }
 
-        if limiter.buckets.len() > 10_000 {
+        if limiter.buckets.len() > MAX_BUCKETS {
             limiter
                 .buckets
                 .retain(|(_, _, start), _| now - start < 366 * 86_400);
+        }
+        if limiter.buckets.len() > MAX_BUCKETS {
+            let excess = limiter.buckets.len() - MAX_BUCKETS;
+            let victims: Vec<_> = limiter.buckets.keys().take(excess).cloned().collect();
+            for key in victims {
+                limiter.buckets.remove(&key);
+            }
         }
 
         if !exceeded {
@@ -367,6 +378,14 @@ impl RateLimitingPlugin {
         }
 
         Check { windows, exceeded }
+    }
+}
+
+impl Drop for RateLimitingPlugin {
+    fn drop(&mut self) {
+        if let Some(limiters) = LIMITERS.get() {
+            limiters.lock().remove(&self.id);
+        }
     }
 }
 

@@ -1006,6 +1006,17 @@ impl McpStore {
         Ok(rows.iter().map(decode_session).collect())
     }
 
+    /// Deletes sessions older than an RFC3339 cutoff. Called opportunistically
+    /// when a new session is created so expired rows do not accumulate.
+    pub async fn delete_sessions_created_before(&self, cutoff: &str) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM mcp_sessions WHERE created_at < ?1")
+            .bind(cutoff)
+            .execute(self.mcp_pool())
+            .await
+            .map_err(|err| storage_error("cannot prune mcp sessions", err))?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn terminate_session(&self, id: &str) -> Result<Option<McpSession>> {
         let result = sqlx::query(
             "UPDATE mcp_sessions

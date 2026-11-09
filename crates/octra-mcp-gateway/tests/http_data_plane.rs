@@ -480,6 +480,18 @@ async fn expired_sessions_must_reinitialize() {
             .unwrap()
             .contains("session not found")
     );
+
+    // Creating the next session opportunistically prunes the expired row.
+    let _fresh = gateway.open_session(None).await;
+    assert!(
+        gateway
+            .storage
+            .mcp
+            .get_session(&session)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
